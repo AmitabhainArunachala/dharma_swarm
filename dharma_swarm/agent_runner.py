@@ -61,9 +61,28 @@ def _state_from_config(config: AgentConfig) -> AgentState:
     )
 
 
+def _build_system_prompt(config: AgentConfig) -> str:
+    """Build the system prompt from config, v7 rules, and role briefings."""
+    if config.system_prompt:
+        return config.system_prompt
+
+    from dharma_swarm.daemon_config import V7_BASE_RULES, ROLE_BRIEFINGS
+
+    parts = [V7_BASE_RULES]
+
+    # Add role-specific briefing if available
+    role_briefing = ROLE_BRIEFINGS.get(config.role.value)
+    if role_briefing:
+        parts.append(role_briefing)
+    else:
+        parts.append(f"You are a {config.role.value} agent in the DHARMA SWARM.")
+
+    return "\n\n".join(parts)
+
+
 def _build_prompt(task: Task, config: AgentConfig) -> LLMRequest:
     """Build an LLMRequest from a task and agent config."""
-    system = config.system_prompt or f"You are a {config.role.value} agent."
+    system = _build_system_prompt(config)
     user_content = f"## Task: {task.title}\n\n{task.description}"
     return LLMRequest(
         model=config.model,
@@ -245,6 +264,37 @@ class AgentPool:
                 for runner in self._agents.values()
                 if runner.state.status == AgentStatus.IDLE
             ]
+
+    async def get_idle_agents(self) -> list[AgentState]:
+        """Return AgentState for all idle agents (orchestrator interface)."""
+        runners = await self.get_idle()
+        return [r.state for r in runners]
+
+    async def assign(self, agent_id: str, task_id: str) -> None:
+        """Mark an agent as assigned to a task (orchestrator interface)."""
+        runner = await self.get(agent_id)
+        if runner:
+            async with runner._lock:
+                runner._state.current_task = task_id
+
+    async def release(self, agent_id: str) -> None:
+        """Release an agent back to idle (orchestrator interface)."""
+        runner = await self.get(agent_id)
+        if runner:
+            async with runner._lock:
+                runner._state.current_task = None
+                runner._state.status = AgentStatus.IDLE
+
+    async def get_result(self, agent_id: str) -> str | None:
+        """Get the last result from an agent, if it completed (orchestrator interface).
+
+        For now returns None — results are collected via the dispatch tracking
+        in the orchestrator. This satisfies the duck-type contract.
+        """
+        runner = await self.get(agent_id)
+        if runner and runner.state.status == AgentStatus.IDLE and runner.state.current_task is None:
+            return "[completed]"
+        return None
 
     async def shutdown_all(self) -> None:
         """Stop every agent in the pool."""

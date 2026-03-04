@@ -47,6 +47,12 @@ class AgentRole(str, Enum):
     TESTER = "tester"
     ORCHESTRATOR = "orchestrator"
     GENERAL = "general"
+    # PSMV cognitive roles (from 5-role agent briefings)
+    CARTOGRAPHER = "cartographer"
+    ARCHEOLOGIST = "archeologist"
+    SURGEON = "surgeon"
+    ARCHITECT = "architect"
+    VALIDATOR = "validator"
 
 
 class MessagePriority(str, Enum):
@@ -98,6 +104,7 @@ class MemoryLayer(str, Enum):
 class ProviderType(str, Enum):
     ANTHROPIC = "anthropic"
     OPENAI = "openai"
+    OPENROUTER = "openrouter"
     LOCAL = "local"
 
 

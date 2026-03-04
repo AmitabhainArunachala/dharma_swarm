@@ -191,6 +191,38 @@ class TaskBoard:
             )
             return await self._load_rows(db, await cur.fetchall())
 
+    async def update_task(self, task_id: str, **fields: Any) -> None:
+        """Generic update (orchestrator interface).
+
+        Routes to the appropriate specific method based on the ``status``
+        field, or does a raw column update for non-status fields.
+        """
+        status = fields.pop("status", None)
+        if status is not None:
+            if status == TaskStatus.ASSIGNED:
+                await self.assign(task_id, fields.get("assigned_to", ""))
+            elif status == TaskStatus.RUNNING:
+                await self.start(task_id)
+            elif status == TaskStatus.COMPLETED:
+                await self.complete(task_id, fields.get("result", ""))
+            elif status == TaskStatus.FAILED:
+                await self.fail(task_id, fields.get("result", ""))
+            elif status == TaskStatus.CANCELLED:
+                await self.cancel(task_id)
+        elif fields:
+            # Raw column update (no status change)
+            async with aiosqlite.connect(self._db_path) as db:
+                sets = []
+                params: list[Any] = []
+                for col, val in fields.items():
+                    sets.append(f"{col} = ?")
+                    params.append(val)
+                params.append(task_id)
+                await db.execute(
+                    f"UPDATE tasks SET {', '.join(sets)} WHERE id = ?", params,
+                )
+                await db.commit()
+
     # -- status transitions -------------------------------------------------
 
     async def assign(self, task_id: str, agent_id: str) -> Task:

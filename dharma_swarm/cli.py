@@ -52,7 +52,7 @@ def init(
 def spawn(
     name: str = typer.Option(..., help="Agent name"),
     role: str = typer.Option("general", help="Agent role"),
-    model: str = typer.Option("claude-sonnet-4-20250514", help="Model ID"),
+    model: str = typer.Option("anthropic/claude-sonnet-4", help="Model ID (OpenRouter format)"),
     state_dir: str = typer.Option(".dharma", help="State directory"),
 ):
     """Spawn a new agent."""

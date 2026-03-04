@@ -153,6 +153,65 @@ class OpenAIProvider(LLMProvider):
                 yield delta.content
 
 
+class OpenRouterProvider(LLMProvider):
+    """Provider backed by OpenRouter (OpenAI-compatible API with custom base_url)."""
+
+    def __init__(self, api_key: str | None = None) -> None:
+        self._api_key = api_key or os.environ.get("OPENROUTER_API_KEY")
+        self._client: Any = None
+
+    def _client_or_raise(self) -> Any:
+        if self._client is not None:
+            return self._client
+        if not self._api_key:
+            raise RuntimeError("OPENROUTER_API_KEY not set")
+        try:
+            from openai import AsyncOpenAI
+        except ImportError as exc:
+            raise ImportError("pip install openai") from exc
+        self._client = AsyncOpenAI(
+            api_key=self._api_key,
+            base_url="https://openrouter.ai/api/v1",
+        )
+        return self._client
+
+    async def complete(self, request: LLMRequest) -> LLMResponse:
+        client = self._client_or_raise()
+        messages: list[dict[str, str]] = []
+        if request.system:
+            messages.append({"role": "system", "content": request.system})
+        messages.extend(request.messages)
+        kwargs: dict[str, Any] = dict(
+            model=request.model, messages=messages,
+            max_tokens=request.max_tokens, temperature=request.temperature,
+        )
+        resp = await client.chat.completions.create(**kwargs)
+        choice = resp.choices[0]
+        msg = choice.message
+        return LLMResponse(
+            content=msg.content or "", model=resp.model or request.model,
+            usage={"prompt_tokens": resp.usage.prompt_tokens,
+                   "completion_tokens": resp.usage.completion_tokens,
+                   "total_tokens": resp.usage.total_tokens} if resp.usage else {},
+            tool_calls=[], stop_reason=choice.finish_reason,
+        )
+
+    async def stream(self, request: LLMRequest) -> AsyncIterator[str]:
+        client = self._client_or_raise()
+        messages: list[dict[str, str]] = []
+        if request.system:
+            messages.append({"role": "system", "content": request.system})
+        messages.extend(request.messages)
+        resp = await client.chat.completions.create(
+            model=request.model, stream=True, messages=messages,
+            max_tokens=request.max_tokens, temperature=request.temperature,
+        )
+        async for chunk in resp:
+            delta = chunk.choices[0].delta if chunk.choices else None
+            if delta and delta.content:
+                yield delta.content
+
+
 class ModelRouter:
     """Routes LLM requests to the appropriate provider."""
 
@@ -185,4 +244,5 @@ def create_default_router() -> ModelRouter:
     return ModelRouter({
         ProviderType.ANTHROPIC: AnthropicProvider(),
         ProviderType.OPENAI: OpenAIProvider(),
+        ProviderType.OPENROUTER: OpenRouterProvider(),
     })

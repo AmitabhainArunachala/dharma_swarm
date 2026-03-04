@@ -106,6 +106,10 @@ class StrangeLoopMemory:
             await self._db.close()
             self._db = None
 
+    # Garden Daemon quality thresholds
+    FITNESS_THRESHOLD = 0.6
+    CROWN_JEWEL_THRESHOLD = 0.85
+
     async def remember(
         self,
         content: str,
@@ -113,12 +117,27 @@ class StrangeLoopMemory:
         source: str = "agent",
         tags: list[str] | None = None,
         development_marker: bool = False,
+        bypass_fitness: bool = False,
     ) -> MemoryEntry:
-        """Store a memory. L1 stays in-memory; L2-L5 go to SQLite."""
+        """Store a memory. L1 stays in-memory; L2-L5 go to SQLite.
+
+        Quality gate: memories below FITNESS_THRESHOLD (0.6) are tagged
+        as low-quality. Above CROWN_JEWEL_THRESHOLD (0.85) are tagged
+        as crown jewels. Set bypass_fitness=True for system messages.
+        """
+        quality = _assess_quality(content)
+        actual_tags = list(tags or [])
+
+        if not bypass_fitness:
+            if quality >= self.CROWN_JEWEL_THRESHOLD:
+                actual_tags.append("crown_jewel")
+            elif quality < self.FITNESS_THRESHOLD:
+                actual_tags.append("low_quality")
+
         entry = MemoryEntry(
             layer=layer, content=content, source=source,
-            tags=tags or [], development_marker=development_marker,
-            witness_quality=_assess_quality(content),
+            tags=actual_tags, development_marker=development_marker,
+            witness_quality=quality,
         )
         if layer == MemoryLayer.IMMEDIATE:
             self._immediate.append(entry)

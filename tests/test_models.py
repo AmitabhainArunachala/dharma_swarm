@@ -118,6 +118,6 @@ def test_llm_response():
 
 def test_all_enums():
     assert len(TaskStatus) == 6
-    assert len(AgentRole) == 6
+    assert len(AgentRole) == 11  # 6 base + 5 PSMV cognitive roles
     assert len(MemoryLayer) == 5
     assert len(TopologyType) == 4
