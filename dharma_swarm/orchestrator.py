@@ -59,6 +59,8 @@ class Orchestrator:
         self._bus = message_bus
         self._running = False
         self._active_dispatches: dict[str, TaskDispatch] = {}
+        # Track running asyncio tasks for actual LLM execution
+        self._running_tasks: dict[str, asyncio.Task] = {}
 
     async def dispatch(
         self,
@@ -120,6 +122,9 @@ class Orchestrator:
         if not ready or not idle:
             return []
 
+        # Skip tasks already being executed
+        ready = [t for t in ready if t.id not in self._running_tasks]
+
         dispatches: list[TaskDispatch] = []
         for task, agent in zip(ready, idle):
             td = TaskDispatch(task_id=task.id, agent_id=agent.id)
@@ -151,7 +156,7 @@ class Orchestrator:
     # -- internals ---------------------------------------------------------
 
     async def _assign_dispatch(self, td: TaskDispatch) -> None:
-        """Record dispatch, update board + pool, optionally notify via bus."""
+        """Record dispatch, update board + pool, kick off execution, notify via bus."""
         self._active_dispatches[td.task_id] = td
 
         if self._pool is not None:
@@ -167,23 +172,60 @@ class Orchestrator:
                 subject=f"Task assigned: {td.task_id}",
                 body=f"You have been assigned task {td.task_id}.",
             ))
-        logger.debug("Dispatched task %s -> agent %s", td.task_id, td.agent_id)
+
+        # Actually execute the task via the agent runner
+        pool_get = getattr(self._pool, "get", None)
+        board_get = getattr(self._board, "get", None)
+        if pool_get and board_get:
+            runner = await pool_get(td.agent_id)
+            task = await board_get(td.task_id)
+            if runner and task:
+                await self._board.update_task(td.task_id, status=TaskStatus.RUNNING)
+                bg = asyncio.create_task(
+                    self._execute_task(runner, task, td),
+                    name=f"exec-{td.task_id[:8]}",
+                )
+                self._running_tasks[td.task_id] = bg
+
+        logger.info("Dispatched task %s -> agent %s", td.task_id, td.agent_id)
+
+    async def _execute_task(self, runner: Any, task: Task, td: TaskDispatch) -> None:
+        """Run agent.run_task() in background, update board on completion/failure."""
+        try:
+            result = await runner.run_task(task)
+            if self._board is not None:
+                await self._board.update_task(
+                    td.task_id, status=TaskStatus.COMPLETED, result=result
+                )
+            if self._pool is not None:
+                await self._pool.release(td.agent_id)
+            self._active_dispatches.pop(td.task_id, None)
+            logger.info("Task %s completed by agent %s", td.task_id, td.agent_id)
+        except Exception as exc:
+            logger.exception("Task %s failed: %s", td.task_id, exc)
+            if self._board is not None:
+                await self._board.update_task(
+                    td.task_id, status=TaskStatus.FAILED, result=str(exc)
+                )
+            if self._pool is not None:
+                await self._pool.release(td.agent_id)
+            self._active_dispatches.pop(td.task_id, None)
+        finally:
+            self._running_tasks.pop(td.task_id, None)
 
     async def _collect_completed(self) -> None:
-        """Poll active dispatches for results and finalize completed ones."""
-        if self._pool is None or self._board is None:
-            return
-
-        done: list[str] = []
-        for task_id, td in self._active_dispatches.items():
-            result = await self._pool.get_result(td.agent_id)
-            if result is not None:
-                await self._board.update_task(
-                    task_id, status=TaskStatus.COMPLETED, result=result
-                )
-                await self._pool.release(td.agent_id)
-                done.append(task_id)
-                logger.debug("Collected result for task %s", task_id)
-
-        for task_id in done:
+        """Clean up finished background tasks and stale dispatches."""
+        # Clean up any asyncio tasks that finished (with exceptions we missed)
+        done_tasks: list[str] = []
+        for task_id, atask in self._running_tasks.items():
+            if atask.done():
+                done_tasks.append(task_id)
+                # Surface any unhandled exceptions
+                if atask.exception() is not None:
+                    logger.error(
+                        "Background task %s had unhandled exception: %s",
+                        task_id, atask.exception(),
+                    )
+        for task_id in done_tasks:
+            self._running_tasks.pop(task_id, None)
             self._active_dispatches.pop(task_id, None)

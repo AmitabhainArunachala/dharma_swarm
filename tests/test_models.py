@@ -121,3 +121,9 @@ def test_all_enums():
     assert len(AgentRole) == 11  # 6 base + 5 PSMV cognitive roles
     assert len(MemoryLayer) == 5
     assert len(TopologyType) == 4
+
+
+def test_provider_type_has_claude_code():
+    from dharma_swarm.models import ProviderType
+    assert ProviderType.CLAUDE_CODE == "claude_code"
+    assert len(ProviderType) == 7

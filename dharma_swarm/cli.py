@@ -128,8 +128,14 @@ def task_create(
             p = TaskPriority(priority)
         except ValueError:
             console.print(f"[red]Invalid priority: {priority}[/red]")
+            await swarm.shutdown()
             raise typer.Exit(1)
-        task = await swarm.create_task(title=title, description=description, priority=p)
+        try:
+            task = await swarm.create_task(title=title, description=description, priority=p)
+        except ValueError as exc:
+            console.print(f"[red]{exc}[/red]")
+            await swarm.shutdown()
+            raise typer.Exit(1)
         console.print(f"[green]Created task: {task.title} — ID: {task.id}[/green]")
         await swarm.shutdown()
 
@@ -196,6 +202,38 @@ def memory_recall(
         await swarm.shutdown()
 
     _run(_recall())
+
+
+# --- Context ---
+
+@app.command()
+def context(
+    role: str = typer.Option("general", help="Agent role"),
+    thread: str = typer.Option(None, help="Research thread"),
+):
+    """Show what context an agent would receive."""
+    from dharma_swarm.context import build_agent_context
+
+    ctx = build_agent_context(role=role, thread=thread)
+    console.print(f"[cyan]Context for role={role}, thread={thread}[/cyan]")
+    console.print(f"[dim]{len(ctx):,} chars[/dim]\n")
+    # Show section headers
+    for line in ctx.split("\n"):
+        if line.startswith("# ") or line.startswith("## "):
+            console.print(f"[green]{line}[/green]")
+    console.print(f"\n[dim]Full context: {len(ctx):,} chars ({len(ctx.split(chr(10)))} lines)[/dim]")
+
+
+@app.command()
+def context_full(
+    role: str = typer.Option("general", help="Agent role"),
+    thread: str = typer.Option(None, help="Research thread"),
+):
+    """Dump full context for an agent (for inspection)."""
+    from dharma_swarm.context import build_agent_context
+
+    ctx = build_agent_context(role=role, thread=thread)
+    console.print(ctx)
 
 
 # --- Swarm Run ---

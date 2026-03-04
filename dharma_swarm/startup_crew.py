@@ -1,8 +1,17 @@
-"""Startup crew — spawns the 5 PSMV cognitive roles with seed tasks.
+"""Startup crew — spawns multi-provider agent fleet with seed tasks.
 
 Called on daemon init to ensure the swarm always has a working crew.
 Each agent gets v7 base rules + role briefing + thread context automatically
 via the agent_runner._build_system_prompt() pipeline.
+
+Provider strategy:
+  - CLAUDE_CODE: Primary workers (cartographer, surgeon, architect) — real agents
+    with full tool access, file editing, bash. The heavy hitters.
+  - CODEX: Secondary workers (archeologist) — OpenAI Codex CLI, good for
+    code analysis and research tasks.
+  - OPENROUTER_FREE: Support roles (validator, scouts) — free-tier models
+    for monitoring, validation, and lightweight analysis. Zero cost.
+  - ANTHROPIC/OPENAI/OPENROUTER: Available for specialty tasks when needed.
 """
 
 from __future__ import annotations
@@ -10,37 +19,64 @@ from __future__ import annotations
 import logging
 from datetime import datetime, timezone
 
-from dharma_swarm.models import AgentRole, TaskPriority
+from dharma_swarm.models import AgentRole, ProviderType, TaskPriority
 
 logger = logging.getLogger(__name__)
 
 
-# Default crew: 5 PSMV roles, each assigned to a research thread
+# Default crew: 5 PSMV roles + 2 free scouts, mixed providers
 DEFAULT_CREW = [
+    # === Heavy hitters: Claude Code (real agents with tools) ===
     {
         "name": "cartographer",
         "role": AgentRole.CARTOGRAPHER,
         "thread": "mechanistic",
-    },
-    {
-        "name": "archeologist",
-        "role": AgentRole.ARCHEOLOGIST,
-        "thread": "phenomenological",
+        "provider": ProviderType.CLAUDE_CODE,
+        "model": "claude-code",
     },
     {
         "name": "surgeon",
         "role": AgentRole.SURGEON,
         "thread": "alignment",
+        "provider": ProviderType.CLAUDE_CODE,
+        "model": "claude-code",
     },
     {
         "name": "architect",
         "role": AgentRole.ARCHITECT,
         "thread": "architectural",
+        "provider": ProviderType.CLAUDE_CODE,
+        "model": "claude-code",
     },
+    # === Codex CLI: code-aware research ===
+    {
+        "name": "archeologist",
+        "role": AgentRole.ARCHEOLOGIST,
+        "thread": "phenomenological",
+        "provider": ProviderType.CODEX,
+        "model": "codex",
+    },
+    # === Free models: zero-cost monitoring and validation ===
     {
         "name": "validator",
         "role": AgentRole.VALIDATOR,
         "thread": "scaling",
+        "provider": ProviderType.OPENROUTER_FREE,
+        "model": "meta-llama/llama-3.3-70b-instruct:free",
+    },
+    {
+        "name": "scout-alpha",
+        "role": AgentRole.RESEARCHER,
+        "thread": "mechanistic",
+        "provider": ProviderType.OPENROUTER_FREE,
+        "model": "nousresearch/hermes-3-llama-3.1-405b:free",
+    },
+    {
+        "name": "scout-beta",
+        "role": AgentRole.RESEARCHER,
+        "thread": "phenomenological",
+        "provider": ProviderType.OPENROUTER_FREE,
+        "model": "google/gemma-3-27b-it:free",
     },
 ]
 
@@ -103,9 +139,10 @@ SEED_TASKS = [
 
 
 async def spawn_default_crew(swarm) -> list:
-    """Spawn the 5 PSMV cognitive roles into the swarm.
+    """Spawn the multi-provider agent fleet into the swarm.
 
     Returns list of AgentState for spawned agents.
+    Provider per agent is defined in DEFAULT_CREW.
     """
     agents = []
     existing = await swarm.list_agents()
@@ -116,14 +153,20 @@ async def spawn_default_crew(swarm) -> list:
             logger.info("Agent %s already exists, skipping", spec["name"])
             continue
 
+        provider = spec.get("provider", ProviderType.CLAUDE_CODE)
+        model = spec.get("model", "claude-code")
+
         state = await swarm.spawn_agent(
             name=spec["name"],
             role=spec["role"],
             thread=spec["thread"],
+            provider_type=provider,
+            model=model,
         )
         agents.append(state)
-        logger.info("Spawned %s (%s) on thread %s",
-                     spec["name"], spec["role"].value, spec["thread"])
+        logger.info("Spawned %s (%s) on %s [%s]",
+                     spec["name"], spec["role"].value,
+                     provider.value, spec["thread"])
 
     return agents
 

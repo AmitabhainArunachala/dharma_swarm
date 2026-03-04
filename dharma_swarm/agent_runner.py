@@ -23,6 +23,14 @@ from dharma_swarm.models import (
 logger = logging.getLogger(__name__)
 
 _HEARTBEAT_THRESHOLD = timedelta(seconds=60)
+_ERROR_PREFIXES = (
+    "error",
+    "api error:",
+    "timeout: exceeded limit",
+    "not logged in · please run /login",
+    "openrouter error:",
+    "no openrouter_api_key set",
+)
 
 
 # ---------------------------------------------------------------------------
@@ -62,20 +70,35 @@ def _state_from_config(config: AgentConfig) -> AgentState:
 
 
 def _build_system_prompt(config: AgentConfig) -> str:
-    """Build the system prompt from config, v7 rules, and role briefings."""
-    if config.system_prompt:
+    """Build the system prompt from config, v7 rules, role briefings, and live context."""
+    from dharma_swarm.models import ProviderType
+
+    # For non-CLAUDE_CODE providers, explicit system_prompt is final
+    if config.system_prompt and config.provider != ProviderType.CLAUDE_CODE:
         return config.system_prompt
 
     from dharma_swarm.daemon_config import V7_BASE_RULES, ROLE_BRIEFINGS
 
-    parts = [V7_BASE_RULES]
-
-    # Add role-specific briefing if available
-    role_briefing = ROLE_BRIEFINGS.get(config.role.value)
-    if role_briefing:
-        parts.append(role_briefing)
+    if config.system_prompt:
+        # CLAUDE_CODE with explicit prompt: use it as base, append context
+        parts = [config.system_prompt]
     else:
-        parts.append(f"You are a {config.role.value} agent in the DHARMA SWARM.")
+        parts = [V7_BASE_RULES]
+        role_briefing = ROLE_BRIEFINGS.get(config.role.value)
+        if role_briefing:
+            parts.append(role_briefing)
+        else:
+            parts.append(f"You are a {config.role.value} agent in the DHARMA SWARM.")
+
+    # Inject multi-layer context for real Claude Code agents
+    if config.provider == ProviderType.CLAUDE_CODE:
+        from dharma_swarm.context import build_agent_context
+        ctx = build_agent_context(
+            role=config.role.value,
+            thread=config.thread,
+        )
+        if ctx:
+            parts.append(ctx)
 
     return "\n\n".join(parts)
 
@@ -89,6 +112,14 @@ def _build_prompt(task: Task, config: AgentConfig) -> LLMRequest:
         messages=[{"role": "user", "content": user_content}],
         system=system,
     )
+
+
+def _looks_like_provider_failure(content: str) -> bool:
+    """Heuristic guard against error strings being marked as completed work."""
+    normalized = (content or "").strip().lower()
+    if not normalized:
+        return True
+    return any(normalized.startswith(prefix) for prefix in _ERROR_PREFIXES)
 
 
 # ---------------------------------------------------------------------------
@@ -158,6 +189,8 @@ class AgentRunner:
             if self._provider is not None:
                 response = await self._provider.complete(request)
                 result = response.content
+                if _looks_like_provider_failure(result):
+                    raise RuntimeError(result or "Provider returned empty response")
             else:
                 result = (
                     f"[mock] Agent {self._config.name} completed: {task.title}"
@@ -286,14 +319,11 @@ class AgentPool:
                 runner._state.status = AgentStatus.IDLE
 
     async def get_result(self, agent_id: str) -> str | None:
-        """Get the last result from an agent, if it completed (orchestrator interface).
+        """Get the last result from an agent (orchestrator interface).
 
-        For now returns None — results are collected via the dispatch tracking
+        Returns None — actual results are collected via _execute_task
         in the orchestrator. This satisfies the duck-type contract.
         """
-        runner = await self.get(agent_id)
-        if runner and runner.state.status == AgentStatus.IDLE and runner.state.current_task is None:
-            return "[completed]"
         return None
 
     async def shutdown_all(self) -> None:

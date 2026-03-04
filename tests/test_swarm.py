@@ -6,8 +6,8 @@ from dharma_swarm.models import AgentRole, TaskPriority, TaskStatus
 from dharma_swarm.swarm import SwarmManager
 
 
-# startup_crew auto-spawns 5 agents and 5 seed tasks on init
-_AUTO_AGENTS = 5
+# startup_crew auto-spawns 7 agents (3 claude_code + 1 codex + 3 free) and 5 seed tasks on init
+_AUTO_AGENTS = 7
 _AUTO_TASKS = 5
 
 

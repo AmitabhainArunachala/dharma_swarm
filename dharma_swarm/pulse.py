@@ -28,6 +28,12 @@ import time
 from datetime import datetime, timezone
 from pathlib import Path
 
+from dharma_swarm.context import (
+    read_agni_state,
+    read_manifest,
+    read_memory_context,
+    read_trishula_inbox,
+)
 from dharma_swarm.daemon_config import DaemonConfig, THREAD_PROMPTS, V7_BASE_RULES
 from dharma_swarm.thread_manager import ThreadManager
 from dharma_swarm.telos_gates import DEFAULT_GATEKEEPER
@@ -36,75 +42,7 @@ logger = logging.getLogger(__name__)
 
 HOME = Path.home()
 DGC = HOME / "dgc-core"
-AGNI_WORKSPACE = HOME / "agni-workspace"
-TRISHULA_INBOX = HOME / "trishula" / "inbox"
 STATE_DIR = HOME / ".dharma"
-
-
-def _read_agni_state() -> dict:
-    """Read AGNI VPS state from synced workspace."""
-    state: dict = {}
-    for name, max_chars in [("WORKING.md", 500), ("HEARTBEAT.md", 300), ("PRIORITIES.md", 300)]:
-        path = AGNI_WORKSPACE / name
-        if path.exists():
-            content = path.read_text()
-            state[name.split(".")[0].lower()] = content[:max_chars]
-            if name == "PRIORITIES.md":
-                age_h = (time.time() - path.stat().st_mtime) / 3600
-                state["priorities_age_hours"] = round(age_h, 1)
-                if age_h > 48:
-                    state["priorities_stale"] = True
-    return state
-
-
-def _read_trishula_inbox() -> str:
-    """Check for unread trishula messages."""
-    if not TRISHULA_INBOX.exists():
-        return "No trishula inbox found."
-    files = sorted(TRISHULA_INBOX.glob("*.md"), key=lambda f: f.stat().st_mtime, reverse=True)
-    if not files:
-        return "Inbox empty."
-    recent = files[:3]
-    summaries = []
-    for f in recent:
-        age_h = (time.time() - f.stat().st_mtime) / 3600
-        summaries.append(f"  {f.name} ({age_h:.0f}h ago, {f.stat().st_size} bytes)")
-    return f"{len(files)} messages, most recent:\n" + "\n".join(summaries)
-
-
-def _read_memory_context() -> str:
-    """Get recent memory from dharma_swarm's strange loop."""
-    try:
-        db_path = STATE_DIR / "db" / "memory.db"
-        if not db_path.exists():
-            return "No memory database yet."
-        # Quick sync read of last 5 entries
-        import sqlite3
-        conn = sqlite3.connect(str(db_path))
-        conn.row_factory = sqlite3.Row
-        rows = conn.execute(
-            "SELECT content, layer, timestamp FROM memories ORDER BY timestamp DESC LIMIT 5"
-        ).fetchall()
-        conn.close()
-        if not rows:
-            return "No memories stored yet."
-        return "\n".join(f"  [{r['layer']}] {r['content'][:100]}" for r in rows)
-    except Exception as e:
-        return f"Memory unavailable: {e}"
-
-
-def _read_manifest() -> str:
-    """Read ecosystem manifest summary."""
-    manifest_path = HOME / ".dharma_manifest.json"
-    if not manifest_path.exists():
-        return "No ecosystem manifest."
-    try:
-        data = json.loads(manifest_path.read_text())
-        eco = data.get("ecosystem", {})
-        alive = sum(1 for v in eco.values() if v.get("exists"))
-        return f"Ecosystem: {alive}/{len(eco)} paths exist. Last scan: {data.get('last_scan', 'unknown')}"
-    except Exception:
-        return "Manifest unreadable."
 
 
 def build_prompt(
@@ -234,10 +172,10 @@ def pulse(config: DaemonConfig | None = None) -> str:
     # Gather context
     thread = tm.current_thread
     thread_prompt = THREAD_PROMPTS.get(thread, "")
-    agni_state = _read_agni_state()
-    memory_ctx = _read_memory_context()
-    trishula_ctx = _read_trishula_inbox()
-    manifest_ctx = _read_manifest()
+    agni_state = read_agni_state()
+    memory_ctx = read_memory_context()
+    trishula_ctx = read_trishula_inbox()
+    manifest_ctx = read_manifest()
 
     # Build prompt
     prompt = build_prompt(

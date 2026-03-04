@@ -124,7 +124,11 @@ def read_system_state() -> dict:
 
 
 def spawn_agent(spec: AgentSpec) -> subprocess.Popen:
-    """Spawn a single Claude Code instance as a background process."""
+    """Spawn a single Claude Code instance as a background process.
+
+    Injects multi-layer context from the context engine so agents are
+    ecosystem-aware, not generic LLM calls.
+    """
     AGENT_DIR.mkdir(parents=True, exist_ok=True)
 
     # Write the agent's output to a dedicated file
@@ -134,9 +138,19 @@ def spawn_agent(spec: AgentSpec) -> subprocess.Popen:
     # Remove CLAUDECODE env var so nested sessions work
     env.pop("CLAUDECODE", None)
 
+    # Build context-aware prompt using the 5-layer engine
+    context_block = ""
+    try:
+        from dharma_swarm.context import build_agent_context
+        context_block = build_agent_context(role=spec.role.lower())
+    except Exception:
+        pass  # Graceful degradation — still spawn without context
+
     full_prompt = f"""You are agent {spec.name} in DHARMA SWARM.
 
 {spec.prompt}
+
+{context_block}
 
 ## Communication
 - Write findings to ~/.dharma/shared/{spec.name}_notes.md (APPEND, don't overwrite)

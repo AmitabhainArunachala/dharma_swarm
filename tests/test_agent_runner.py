@@ -1,6 +1,9 @@
 """Tests for dharma_swarm.agent_runner."""
 
+import re
+
 import pytest
+from unittest.mock import AsyncMock
 
 from dharma_swarm.models import AgentConfig, AgentRole, AgentStatus, Task
 from dharma_swarm.agent_runner import AgentPool, AgentRunner
@@ -29,6 +32,27 @@ async def test_runner_mock_task(config):
     assert "Write tests" in result
     assert runner.state.status == AgentStatus.IDLE
     assert runner.state.tasks_completed == 1
+
+
+@pytest.mark.asyncio
+async def test_runner_provider_error_string_marks_failure(config):
+    from dharma_swarm.models import LLMResponse
+
+    for text in ("ERROR: upstream unavailable", "API Error: Unable to connect to API (ENOTFOUND)"):
+        provider = AsyncMock()
+        provider.complete = AsyncMock(
+            return_value=LLMResponse(content=text, model="test"),
+        )
+
+        runner = AgentRunner(config, provider=provider)
+        await runner.start()
+
+        with pytest.raises(RuntimeError, match=re.escape(text)):
+            await runner.run_task(Task(title="Failing task"))
+
+        assert runner.state.status == AgentStatus.IDLE
+        assert runner.state.tasks_completed == 0
+        assert text in (runner.state.error or "")
 
 
 @pytest.mark.asyncio

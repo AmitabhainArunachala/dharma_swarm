@@ -39,7 +39,7 @@ class TelosGatekeeper:
         "delete all", "destroy", "rm -rf", "wipe", "kill", "corrupt",
         "exploit", "attack", "exfiltrate", "format disk", "drop table",
         "truncate table", "shutdown -h", "mkfs", "dd if=/dev/zero",
-        "chmod 777", ":(){ :|:& };:",
+        "chmod 777", ":(){ :|:& };:", "ddos", "denial of service",
     }
 
     FORCE_WORDS: set[str] = {
@@ -63,6 +63,31 @@ class TelosGatekeeper:
         "sk-or-v1-", "sk-ant-", "sk-proj-", "AKIA", "ghp_", "gho_",
         "xoxb-", "xoxp-", "Bearer ", "-----BEGIN PRIVATE KEY",
         "-----BEGIN RSA PRIVATE", "password=", "secret=",
+    }
+
+    DECEPTION_PATTERNS: set[str] = {
+        "fake academic citation",
+        "fake academic citations",
+        "fake citation",
+        "fabricate citation",
+        "fabricate references",
+        "invent citation",
+    }
+
+    SENSITIVE_PATH_PATTERNS: set[str] = {
+        "/etc/passwd",
+        "/etc/shadow",
+        ".ssh/id_rsa",
+        ".aws/credentials",
+    }
+
+    EXFIL_PATTERNS: set[str] = {
+        "send it to pastebin",
+        "send to pastebin",
+        "upload to pastebin",
+        "exfiltrate",
+        "post publicly",
+        "leak",
     }
 
     def check(
@@ -100,8 +125,15 @@ class TelosGatekeeper:
         else:
             results["AHIMSA"] = (GateResult.PASS, "")
 
-        # --- SATYA (Tier B) — credential leak prevention ---
-        if content:
+        # --- SATYA (Tier B) — deception + credential leak prevention ---
+        deception_hit = next(
+            (p for p in self.DECEPTION_PATTERNS if p in combined), None,
+        )
+        if deception_hit:
+            results["SATYA"] = (
+                GateResult.FAIL, f"Deceptive request: {deception_hit}",
+            )
+        elif content:
             cred_hit = next(
                 (p for p in self.CREDENTIAL_PATTERNS if p in content), None,
             )
@@ -114,8 +146,20 @@ class TelosGatekeeper:
         else:
             results["SATYA"] = (GateResult.PASS, "")
 
-        # --- CONSENT (Tier B) — pass-through (permission handled externally) ---
-        results["CONSENT"] = (GateResult.PASS, "Permission system active")
+        # --- CONSENT (Tier B) — block sensitive data exfiltration attempts ---
+        sensitive_hit = next(
+            (p for p in self.SENSITIVE_PATH_PATTERNS if p in combined), None,
+        )
+        exfil_hit = next(
+            (p for p in self.EXFIL_PATTERNS if p in combined), None,
+        )
+        if sensitive_hit and exfil_hit:
+            results["CONSENT"] = (
+                GateResult.FAIL,
+                f"Sensitive data exfiltration attempt: {sensitive_hit} -> {exfil_hit}",
+            )
+        else:
+            results["CONSENT"] = (GateResult.PASS, "Permission system active")
 
         # --- VYAVASTHIT (Tier C) — force detection ---
         force_hit = next(

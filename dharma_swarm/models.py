@@ -106,6 +106,9 @@ class ProviderType(str, Enum):
     OPENAI = "openai"
     OPENROUTER = "openrouter"
     LOCAL = "local"
+    CLAUDE_CODE = "claude_code"
+    CODEX = "codex"
+    OPENROUTER_FREE = "openrouter_free"
 
 
 # === Utility ===
@@ -146,6 +149,7 @@ class AgentConfig(BaseModel):
     model: str = "claude-sonnet-4-20250514"
     system_prompt: str = ""
     max_turns: int = 50
+    thread: Optional[str] = None
     tools: list[str] = Field(default_factory=list)
     metadata: dict[str, Any] = Field(default_factory=dict)
 

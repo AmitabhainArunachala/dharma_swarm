@@ -128,8 +128,8 @@ class SwarmManager:
         self,
         name: str,
         role: AgentRole = AgentRole.GENERAL,
-        model: str = "anthropic/claude-sonnet-4",
-        provider_type: ProviderType = ProviderType.OPENROUTER,
+        model: str = "claude-code",
+        provider_type: ProviderType = ProviderType.CLAUDE_CODE,
         system_prompt: str = "",
         thread: str | None = None,
     ) -> AgentState:
@@ -149,6 +149,7 @@ class SwarmManager:
             model=model,
             provider=provider_type,
             system_prompt=system_prompt + extra_prompt if system_prompt else extra_prompt,
+            thread=thread,
         )
         provider = self._router.get_provider(provider_type)
         runner = await self._agent_pool.spawn(config, provider=provider)
