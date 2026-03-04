@@ -6,6 +6,11 @@ from dharma_swarm.models import AgentRole, TaskPriority, TaskStatus
 from dharma_swarm.swarm import SwarmManager
 
 
+# startup_crew auto-spawns 5 agents and 5 seed tasks on init
+_AUTO_AGENTS = 5
+_AUTO_TASKS = 5
+
+
 @pytest.fixture
 async def swarm(tmp_path):
     s = SwarmManager(state_dir=tmp_path / ".dharma")
@@ -17,8 +22,8 @@ async def swarm(tmp_path):
 @pytest.mark.asyncio
 async def test_init(swarm):
     state = await swarm.status()
-    assert state.tasks_pending == 0
-    assert len(state.agents) == 0
+    assert state.tasks_pending == _AUTO_TASKS
+    assert len(state.agents) == _AUTO_AGENTS
 
 
 @pytest.mark.asyncio
@@ -28,7 +33,7 @@ async def test_spawn_agent(swarm):
     assert agent.role == AgentRole.CODER
 
     agents = await swarm.list_agents()
-    assert len(agents) == 1
+    assert len(agents) == _AUTO_AGENTS + 1
 
 
 @pytest.mark.asyncio
@@ -49,7 +54,7 @@ async def test_list_tasks(swarm):
     await swarm.create_task("Task 1")
     await swarm.create_task("Task 2")
     tasks = await swarm.list_tasks()
-    assert len(tasks) == 2
+    assert len(tasks) == _AUTO_TASKS + 2
 
 
 @pytest.mark.asyncio
@@ -72,6 +77,6 @@ async def test_status(swarm):
     await swarm.spawn_agent("a1")
     await swarm.create_task("t1")
     state = await swarm.status()
-    assert len(state.agents) == 1
-    assert state.tasks_pending == 1
+    assert len(state.agents) == _AUTO_AGENTS + 1
+    assert state.tasks_pending == _AUTO_TASKS + 1
     assert state.uptime_seconds > 0

@@ -107,8 +107,19 @@ class SwarmManager:
         from dharma_swarm.ecosystem_bridge import update_manifest
         self._manifest = update_manifest()
 
+        # Spawn default crew and seed tasks if this is a fresh start
+        from dharma_swarm.startup_crew import spawn_default_crew, create_seed_tasks
+        crew = await spawn_default_crew(self)
+        seeds = await create_seed_tasks(self)
+        if crew:
+            logger.info("Spawned %d agents from default crew", len(crew))
+        if seeds:
+            logger.info("Created %d seed tasks", len(seeds))
+
         await self._memory.remember(
-            "Swarm initialized", layer=MemoryLayer.SESSION, source="swarm"
+            f"Swarm initialized — {len(crew)} agents, {len(seeds)} seed tasks",
+            layer=MemoryLayer.SESSION,
+            source="swarm",
         )
 
     # --- Agent Operations ---
