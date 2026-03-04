@@ -1,0 +1,267 @@
+"""Async agent lifecycle manager.
+
+Spawns agents, runs their work loop, handles heartbeats and shutdown.
+Each AgentRunner manages a single agent; AgentPool manages the fleet.
+"""
+
+from __future__ import annotations
+
+import asyncio
+import logging
+from datetime import datetime, timedelta, timezone
+from typing import Any, Protocol, runtime_checkable
+
+from dharma_swarm.models import (
+    AgentConfig,
+    AgentState,
+    AgentStatus,
+    LLMRequest,
+    LLMResponse,
+    Task,
+)
+
+logger = logging.getLogger(__name__)
+
+_HEARTBEAT_THRESHOLD = timedelta(seconds=60)
+
+
+# ---------------------------------------------------------------------------
+# Duck-typed protocols for provider and sandbox (no direct imports)
+# ---------------------------------------------------------------------------
+
+@runtime_checkable
+class CompletionProvider(Protocol):
+    """Anything with an async ``complete`` method returning an LLMResponse."""
+
+    async def complete(self, request: LLMRequest) -> LLMResponse: ...
+
+
+@runtime_checkable
+class CodeSandbox(Protocol):
+    """Anything with an async ``execute`` method."""
+
+    async def execute(self, command: str, timeout: float = 30.0) -> Any: ...
+
+
+# ---------------------------------------------------------------------------
+# Helpers
+# ---------------------------------------------------------------------------
+
+def _utc_now() -> datetime:
+    return datetime.now(timezone.utc)
+
+
+def _state_from_config(config: AgentConfig) -> AgentState:
+    """Derive initial runtime state from a static config."""
+    return AgentState(
+        id=config.id,
+        name=config.name,
+        role=config.role,
+        status=AgentStatus.STARTING,
+    )
+
+
+def _build_prompt(task: Task, config: AgentConfig) -> LLMRequest:
+    """Build an LLMRequest from a task and agent config."""
+    system = config.system_prompt or f"You are a {config.role.value} agent."
+    user_content = f"## Task: {task.title}\n\n{task.description}"
+    return LLMRequest(
+        model=config.model,
+        messages=[{"role": "user", "content": user_content}],
+        system=system,
+    )
+
+
+# ---------------------------------------------------------------------------
+# AgentRunner
+# ---------------------------------------------------------------------------
+
+class AgentRunner:
+    """Manages the full lifecycle of a single agent.
+
+    Args:
+        config: Static configuration for the agent.
+        provider: Optional LLM provider (duck-typed with ``complete``).
+        sandbox: Optional code sandbox (duck-typed with ``execute``).
+    """
+
+    def __init__(
+        self,
+        config: AgentConfig,
+        provider: CompletionProvider | None = None,
+        sandbox: CodeSandbox | None = None,
+    ) -> None:
+        self._config = config
+        self._provider = provider
+        self._sandbox = sandbox
+        self._state = _state_from_config(config)
+        self._lock = asyncio.Lock()
+
+    # -- properties ---------------------------------------------------------
+
+    @property
+    def state(self) -> AgentState:
+        return self._state
+
+    @property
+    def agent_id(self) -> str:
+        return self._config.id
+
+    # -- lifecycle ----------------------------------------------------------
+
+    async def start(self) -> None:
+        """Initialize the agent and mark it IDLE."""
+        async with self._lock:
+            self._state.status = AgentStatus.IDLE
+            self._state.started_at = _utc_now()
+            self._state.last_heartbeat = _utc_now()
+            logger.info("Agent %s (%s) started", self._config.name, self.agent_id)
+
+    async def run_task(self, task: Task) -> str:
+        """Execute a task and return the result string.
+
+        Sets status to BUSY during execution, then back to IDLE.
+        If no provider is attached, returns a mock result.
+
+        Args:
+            task: The task to execute.
+
+        Returns:
+            The LLM completion content, or a mock placeholder.
+        """
+        async with self._lock:
+            self._state.status = AgentStatus.BUSY
+            self._state.current_task = task.id
+
+        try:
+            request = _build_prompt(task, self._config)
+
+            if self._provider is not None:
+                response = await self._provider.complete(request)
+                result = response.content
+            else:
+                result = (
+                    f"[mock] Agent {self._config.name} completed: {task.title}"
+                )
+
+            async with self._lock:
+                self._state.turns_used += 1
+                self._state.tasks_completed += 1
+                self._state.current_task = None
+                self._state.status = AgentStatus.IDLE
+                self._state.last_heartbeat = _utc_now()
+
+            logger.info(
+                "Agent %s finished task %s", self._config.name, task.id
+            )
+            return result
+
+        except Exception as exc:
+            async with self._lock:
+                self._state.status = AgentStatus.IDLE
+                self._state.current_task = None
+                self._state.error = str(exc)
+            logger.exception(
+                "Agent %s failed task %s", self._config.name, task.id
+            )
+            raise
+
+    async def heartbeat(self) -> None:
+        """Update the last_heartbeat timestamp."""
+        async with self._lock:
+            self._state.last_heartbeat = _utc_now()
+
+    async def stop(self) -> None:
+        """Gracefully shut down the agent."""
+        async with self._lock:
+            self._state.status = AgentStatus.STOPPING
+        logger.info("Agent %s stopping", self._config.name)
+        async with self._lock:
+            self._state.status = AgentStatus.DEAD
+        logger.info("Agent %s stopped", self._config.name)
+
+    async def health_check(self) -> bool:
+        """Return True if the agent is alive and its heartbeat is fresh."""
+        async with self._lock:
+            if self._state.status == AgentStatus.DEAD:
+                return False
+            if self._state.last_heartbeat is None:
+                return False
+            return (_utc_now() - self._state.last_heartbeat) < _HEARTBEAT_THRESHOLD
+
+
+# ---------------------------------------------------------------------------
+# AgentPool
+# ---------------------------------------------------------------------------
+
+class AgentPool:
+    """Manages a fleet of AgentRunner instances.
+
+    Thread-safe via an asyncio lock. All mutating operations are serialised.
+    """
+
+    def __init__(self) -> None:
+        self._agents: dict[str, AgentRunner] = {}
+        self._lock = asyncio.Lock()
+
+    async def spawn(
+        self,
+        config: AgentConfig,
+        provider: CompletionProvider | None = None,
+        sandbox: CodeSandbox | None = None,
+    ) -> AgentRunner:
+        """Create, start, and register an agent.
+
+        Args:
+            config: Agent configuration.
+            provider: Optional LLM provider.
+            sandbox: Optional code sandbox.
+
+        Returns:
+            The started AgentRunner.
+        """
+        runner = AgentRunner(config, provider=provider, sandbox=sandbox)
+        await runner.start()
+        async with self._lock:
+            self._agents[config.id] = runner
+        logger.info("Pool spawned agent %s (%s)", config.name, config.id)
+        return runner
+
+    async def get(self, agent_id: str) -> AgentRunner | None:
+        """Look up an agent by ID, or None if not found."""
+        async with self._lock:
+            return self._agents.get(agent_id)
+
+    async def list_agents(self) -> list[AgentState]:
+        """Return a snapshot of every agent's current state."""
+        async with self._lock:
+            return [runner.state for runner in self._agents.values()]
+
+    async def get_idle(self) -> list[AgentRunner]:
+        """Return all agents whose status is IDLE."""
+        async with self._lock:
+            return [
+                runner
+                for runner in self._agents.values()
+                if runner.state.status == AgentStatus.IDLE
+            ]
+
+    async def shutdown_all(self) -> None:
+        """Stop every agent in the pool."""
+        async with self._lock:
+            runners = list(self._agents.values())
+        await asyncio.gather(*(r.stop() for r in runners))
+        logger.info("Pool shut down %d agents", len(runners))
+
+    async def remove_dead(self) -> None:
+        """Remove all DEAD agents from the pool."""
+        async with self._lock:
+            dead_ids = [
+                aid
+                for aid, runner in self._agents.items()
+                if runner.state.status == AgentStatus.DEAD
+            ]
+            for aid in dead_ids:
+                del self._agents[aid]
+        if dead_ids:
+            logger.info("Pool removed %d dead agents", len(dead_ids))
