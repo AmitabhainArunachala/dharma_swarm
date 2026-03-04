@@ -359,6 +359,11 @@ if __name__ == "__main__":
         daemon_loop()
     elif "--status" in sys.argv:
         show_status()
+    elif "--swarm" in sys.argv:
+        # Spawn a full swarm instead of a single pulse
+        from dharma_swarm.orchestrate import run
+        plan = sys.argv[sys.argv.index("--swarm") + 1] if len(sys.argv) > sys.argv.index("--swarm") + 1 else None
+        run(plan)
     else:
         result = pulse()
         print(result)
