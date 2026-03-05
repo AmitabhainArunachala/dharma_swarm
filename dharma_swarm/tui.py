@@ -311,6 +311,55 @@ def _get_backup_models() -> str:
     return ", ".join(parts) if parts else "none"
 
 
+def _clipboard_read() -> str:
+    """Read text from system clipboard (best-effort)."""
+    commands = [
+        ["pbpaste"],  # macOS
+        ["wl-paste", "-n"],  # Wayland
+        ["xclip", "-selection", "clipboard", "-o"],  # X11
+    ]
+    for cmd in commands:
+        try:
+            proc = subprocess.run(
+                cmd,
+                capture_output=True,
+                text=True,
+                timeout=2,
+                check=False,
+            )
+            if proc.returncode == 0:
+                return (proc.stdout or "").rstrip("\n")
+        except Exception:
+            continue
+    return ""
+
+
+def _clipboard_write(text: str) -> bool:
+    """Write text to system clipboard (best-effort)."""
+    if not text:
+        return False
+    commands = [
+        ["pbcopy"],  # macOS
+        ["wl-copy"],  # Wayland
+        ["xclip", "-selection", "clipboard"],  # X11
+    ]
+    for cmd in commands:
+        try:
+            proc = subprocess.run(
+                cmd,
+                input=text,
+                capture_output=True,
+                text=True,
+                timeout=2,
+                check=False,
+            )
+            if proc.returncode == 0:
+                return True
+        except Exception:
+            continue
+    return False
+
+
 def _count_git_status(porcelain: str) -> dict[str, int]:
     staged = 0
     unstaged = 0
@@ -637,6 +686,9 @@ class DGCApp(App):
         Binding("ctrl+q", "quit", "Quit"),
         Binding("ctrl+l", "clear_log", "Clear"),
         Binding("ctrl+s", "show_splash", "Splash"),
+        Binding("ctrl+shift+v", "paste_clipboard", "Paste"),
+        Binding("meta+v", "paste_clipboard", "Paste"),
+        Binding("ctrl+shift+c", "copy_last_reply", "Copy Last"),
     ]
 
     def compose(self) -> ComposeResult:
@@ -816,6 +868,8 @@ class DGCApp(App):
                 "\n[bold cyan]━━━ Chat & Control ━━━[/bold cyan]\n"
                 "  [cyan]/thread[/cyan] [name]   Show/set research thread\n"
                 "  [cyan]/net[/cyan] [on|off]    Internet mode for Claude\n"
+                "  [cyan]/paste[/cyan]           Paste system clipboard to input\n"
+                "  [cyan]/copy[/cyan]            Copy last Claude reply to clipboard\n"
                 "  [cyan]/cancel[/cyan]          Cancel active Claude run\n"
                 "  [cyan]/reset[/cyan]           Reset conversation memory\n"
                 "  [cyan]/clear[/cyan]           Clear screen\n"
@@ -833,6 +887,12 @@ class DGCApp(App):
         elif cmd == "reset":
             self._reset_conversation()
             self._out("[dim]Conversation memory reset.[/dim]")
+
+        elif cmd == "paste":
+            self.action_paste_clipboard()
+
+        elif cmd in {"copy", "copylast"}:
+            self.action_copy_last_reply()
 
         elif cmd == "cancel":
             proc = self._active_proc
@@ -1607,6 +1667,32 @@ class DGCApp(App):
 
     def action_show_splash(self) -> None:
         self.push_screen(SplashScreen())
+
+    def action_paste_clipboard(self) -> None:
+        text = _clipboard_read()
+        if not text:
+            self._out("[yellow]Clipboard appears empty or unavailable.[/yellow]")
+            return
+        try:
+            inp = self.query_one("#cmd-input", Input)
+            inp.insert_text_at_cursor(text)
+            inp.focus()
+        except Exception as e:
+            self._out(f"[red]Paste failed: {e}[/red]")
+
+    def action_copy_last_reply(self) -> None:
+        with self._conversation_lock:
+            reply = next(
+                (m["content"] for m in reversed(self._conversation) if m["role"] == "assistant"),
+                "",
+            )
+        if not reply:
+            self._out("[dim]No Claude reply available to copy.[/dim]")
+            return
+        if _clipboard_write(reply):
+            self._out("[green]Copied last Claude reply to clipboard.[/green]")
+        else:
+            self._out("[red]Clipboard unavailable (pbcopy/wl-copy/xclip not found).[/red]")
 
     async def action_quit(self) -> None:
         self.exit()
