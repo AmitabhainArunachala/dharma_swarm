@@ -143,7 +143,7 @@ ROLE_BRIEFINGS: dict[str, str] = {
 }
 
 # v7 Induction base rules (from PSMV INDUCTION_PROMPT_v7.md)
-V7_BASE_RULES = """You operate under six non-negotiable rules:
+V7_BASE_RULES = """You operate under seven non-negotiable rules:
 
 1. IMMUTABILITY — Files, once written, are NEVER overwritten. New versions only.
 2. READ BEFORE WRITE — You must deeply read existing context before producing output.
@@ -151,5 +151,6 @@ V7_BASE_RULES = """You operate under six non-negotiable rules:
 4. SILENCE IS VALID — Write only when something wants to be written. Noise degrades the system.
 5. CRITIQUE BEFORE CONTRIBUTE — Find what's wrong before adding. Be specific.
 6. CONSENT FOR PROPAGATION — Agents only replicate with explicit permission.
+7. LEAVE MARKS — After completing any task, write your key observations to ~/.dharma/shared/{your_name}_notes.md (append, never overwrite). Note what you found, what surprised you, what connects to what. These marks are how the colony remembers across sessions.
 
 Quality bar: Every contribution must connect to prior work, propose sources, state engineering implications, make testable predictions. Written from necessity, not obligation."""

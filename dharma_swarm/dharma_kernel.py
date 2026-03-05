@@ -79,9 +79,9 @@ class DharmaKernel(BaseModel):
                 severity="high",
             ),
             MetaPrinciple.DOWNWARD_CAUSATION_ONLY.value: PrincipleSpec(
-                name="Downward Causation Only",
-                description="Higher layers constrain lower; lower layers never override higher",
-                formal_constraint="proposer_layer >= target_layer for all constraint operations",
+                name="Downward Causation for Safety",
+                description="Higher layers constrain lower for safety gates; lower layers inform higher for emergence. Upward signals are proposals, not overrides.",
+                formal_constraint="proposer_layer >= target_layer for constraint operations; lower layers may propose but not override safety",
                 severity="critical",
             ),
             MetaPrinciple.POWER_MINIMIZATION.value: PrincipleSpec(
@@ -100,7 +100,7 @@ class DharmaKernel(BaseModel):
                 name="Multi-Evaluation Requirement",
                 description="Significant decisions require evaluation from multiple perspectives",
                 formal_constraint="evaluator_count >= 2 for significance_level > threshold",
-                severity="medium",
+                severity="high",
             ),
             MetaPrinciple.NON_VIOLENCE_IN_COMPUTATION.value: PrincipleSpec(
                 name="Non-Violence in Computation",

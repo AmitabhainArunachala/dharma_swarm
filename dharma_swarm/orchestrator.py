@@ -201,6 +201,12 @@ class Orchestrator:
                 await self._pool.release(td.agent_id)
             self._active_dispatches.pop(td.task_id, None)
             logger.info("Task %s completed by agent %s", td.task_id, td.agent_id)
+
+            # Persist result to shared notes and stigmergy
+            agent_name = getattr(runner, '_config', None)
+            agent_name = agent_name.name if agent_name else td.agent_id[:8]
+            await self._persist_result(agent_name, task, result)
+
         except Exception as exc:
             logger.exception("Task %s failed: %s", td.task_id, exc)
             if self._board is not None:
@@ -212,6 +218,58 @@ class Orchestrator:
             self._active_dispatches.pop(td.task_id, None)
         finally:
             self._running_tasks.pop(td.task_id, None)
+
+    async def _persist_result(
+        self, agent_name: str, task: Task, result: str
+    ) -> None:
+        """Write agent result to shared notes and stigmergy marks.
+
+        This is the critical persistence step that makes agent output
+        visible to future sessions. Without it, the colony has no memory.
+        """
+        from pathlib import Path
+        from datetime import datetime, timezone
+
+        shared_dir = Path.home() / ".dharma" / "shared"
+        shared_dir.mkdir(parents=True, exist_ok=True)
+
+        # Write shared notes (append, not overwrite)
+        notes_file = shared_dir / f"{agent_name}_notes.md"
+        timestamp = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M UTC")
+        # Truncate very long results for notes (full result is in task board)
+        summary = result[:2000] if len(result) > 2000 else result
+        entry = (
+            f"\n---\n## {task.title}\n"
+            f"*{timestamp} | task: {task.id[:8]}*\n\n"
+            f"{summary}\n"
+        )
+        try:
+            with open(notes_file, "a") as f:
+                f.write(entry)
+            logger.info("Wrote notes for %s -> %s", agent_name, notes_file.name)
+        except Exception as exc:
+            logger.warning("Failed to write notes for %s: %s", agent_name, exc)
+
+        # Leave stigmergic mark
+        try:
+            from dharma_swarm.stigmergy import StigmergyStore, StigmergicMark
+
+            store = StigmergyStore()
+            # Extract first meaningful line as observation
+            lines = [l.strip() for l in result.split("\n") if l.strip()]
+            observation = lines[0][:200] if lines else f"Completed: {task.title}"
+            mark = StigmergicMark(
+                agent=agent_name,
+                file_path=f"task:{task.id[:8]}",
+                action="write",
+                observation=observation,
+                salience=0.6,
+                connections=[],
+            )
+            await store.leave_mark(mark)
+            logger.info("Stigmergy mark left by %s", agent_name)
+        except Exception as exc:
+            logger.debug("Stigmergy mark failed (non-critical): %s", exc)
 
     async def _collect_completed(self) -> None:
         """Clean up finished background tasks and stale dispatches."""

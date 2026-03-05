@@ -798,9 +798,13 @@ def cmd_run(interval: float) -> None:
 
 def cmd_tui() -> None:
     """Launch the interactive TUI dashboard."""
-    from dharma_swarm.tui import run_tui
-
-    run_tui()
+    try:
+        from dharma_swarm.tui import run
+        run()
+    except Exception:
+        # Fallback to legacy TUI
+        from dharma_swarm.tui_legacy import run_tui
+        run_tui()
 
 
 def _build_chat_context_snapshot() -> str:

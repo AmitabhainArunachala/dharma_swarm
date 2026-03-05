@@ -79,7 +79,8 @@ def test_v7_base_rules():
     assert "IMMUTABILITY" in V7_BASE_RULES
     assert "AHIMSA" in V7_BASE_RULES
     assert "SILENCE IS VALID" in V7_BASE_RULES
-    assert "six non-negotiable rules" in V7_BASE_RULES
+    assert "seven non-negotiable rules" in V7_BASE_RULES
+    assert "LEAVE MARKS" in V7_BASE_RULES
 
 
 # --- ThreadManager ---

@@ -38,15 +38,15 @@ def test_splash_has_architecture():
 
 def test_tui_imports():
     """Verify TUI classes can be imported."""
-    from dharma_swarm.tui import DGCApp, SplashScreen, run_tui
+    from dharma_swarm.tui import DGCApp
+    from dharma_swarm.tui.screens import SplashScreen
     assert DGCApp is not None
     assert SplashScreen is not None
-    assert callable(run_tui)
 
 
 def test_tui_helpers():
     """Test TUI helper functions."""
-    from dharma_swarm.tui import _file_age_str, _read_json
+    from dharma_swarm.tui_legacy import _file_age_str, _read_json
     from pathlib import Path
 
     assert _read_json(Path("/nonexistent/file.json")) == {}
@@ -55,7 +55,7 @@ def test_tui_helpers():
 
 def test_build_status_text():
     """Status text builder should not crash and contain key sections."""
-    from dharma_swarm.tui import _build_status_text
+    from dharma_swarm.tui_legacy import _build_status_text
     text = _build_status_text()
     assert isinstance(text, str)
     lower = text.lower()
@@ -65,7 +65,7 @@ def test_build_status_text():
 
 def test_count_git_status_parser():
     """Parse git porcelain counts deterministically."""
-    from dharma_swarm.tui import _count_git_status
+    from dharma_swarm.tui_legacy import _count_git_status
 
     porcelain = "\n".join(
         [
@@ -85,7 +85,7 @@ def test_count_git_status_parser():
 
 def test_runtime_git_truth_builders():
     """Runtime/git/truth builders should render without crashing."""
-    from dharma_swarm.tui import _build_runtime_text, _build_git_text, _build_truth_report
+    from dharma_swarm.tui_legacy import _build_runtime_text, _build_git_text, _build_truth_report
 
     runtime = _build_runtime_text()
     git_text = _build_git_text()

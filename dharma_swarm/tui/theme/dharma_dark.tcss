@@ -1,0 +1,154 @@
+/* DGC Warm Dark Theme — dharma_dark.tcss */
+
+/* === App-level === */
+Screen {
+    background: #111008;
+    color: #f0e8d8;
+}
+
+/* === Status Bar === */
+StatusBar {
+    dock: top;
+    height: 1;
+    background: #252018;
+    color: #a89880;
+}
+
+/* === Sidebar === */
+#sidebar {
+    width: 28;
+    background: #1c1810;
+    border-right: tall #8A6A1A;
+}
+
+#sidebar.hidden {
+    display: none;
+}
+
+/* === Stream Output === */
+StreamOutput {
+    background: #111008;
+    padding: 0 1;
+    scrollbar-background: #252018;
+    scrollbar-color: #5a5040;
+    scrollbar-color-hover: #a89880;
+    scrollbar-color-active: #8A6A1A;
+}
+
+/* === Prompt Input === */
+PromptInput {
+    dock: bottom;
+    height: auto;
+    min-height: 3;
+    max-height: 12;
+    margin: 0 1;
+    border: tall #8A6A1A;
+    background: #252018;
+}
+
+PromptInput:focus {
+    border: tall #D4A017;
+}
+
+/* === Bottom Drawer === */
+#drawer {
+    height: 16;
+    border-top: tall #8A6A1A;
+    background: #1c1810;
+}
+
+#drawer.hidden {
+    display: none;
+}
+
+/* === Tool Call Card === */
+ToolCallCard {
+    margin: 1 0;
+    padding: 0 1;
+}
+
+ToolCallCard.-running {
+    border-left: thick #D4A017;
+}
+
+ToolCallCard.-success {
+    border-left: thick #4CAF72;
+}
+
+ToolCallCard.-error {
+    border-left: thick #E05050;
+}
+
+/* === Thinking Panel === */
+ThinkingPanel {
+    color: #7B68EE;
+    margin: 0 4 0 0;
+    padding: 0 1;
+}
+
+/* === Mode-specific prompt border === */
+.mode-normal PromptInput {
+    border: tall #4CAF72;
+}
+
+.mode-auto PromptInput {
+    border: tall #D4A017;
+}
+
+.mode-plan PromptInput {
+    border: tall #5090D8;
+}
+
+.mode-sage PromptInput {
+    border: tall #7B68EE;
+}
+
+/* === Footer === */
+Footer {
+    background: #252018;
+}
+
+/* === Scrollbars global === */
+* {
+    scrollbar-size-vertical: 1;
+}
+
+/* === Modal Screens === */
+ModalScreen {
+    background: #111008 80%;
+}
+
+ModalScreen > * {
+    background: #252018;
+    border: thick #D4A017;
+    margin: 4 8;
+}
+
+/* === Header === */
+Header {
+    background: #1c1810;
+    color: #D4A017;
+}
+
+/* === Splash Screen === */
+#splash-container {
+    align: center middle;
+    background: #111008;
+}
+
+#splash-art {
+    width: 100%;
+    content-align: center middle;
+    text-align: center;
+    padding: 1;
+    color: #D4A017;
+}
+
+#splash-prompt {
+    dock: bottom;
+    height: 3;
+    content-align: center middle;
+    text-align: center;
+    background: #1c1810;
+    color: #a89880;
+}
