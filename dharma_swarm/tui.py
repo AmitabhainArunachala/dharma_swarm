@@ -22,7 +22,7 @@ from typing import Any
 
 from rich.text import Text
 from textual import work
-from textual.app import App, ComposeResult
+from textual.app import App, ComposeResult, SuspendNotSupported
 from textual.binding import Binding
 from textual.screen import Screen
 from textual.widgets import (
@@ -868,6 +868,7 @@ class DGCApp(App):
                 "\n[bold cyan]━━━ Chat & Control ━━━[/bold cyan]\n"
                 "  [cyan]/thread[/cyan] [name]   Show/set research thread\n"
                 "  [cyan]/net[/cyan] [on|off]    Internet mode for Claude\n"
+                "  [cyan]/chat[/cyan] [continue] Launch full Claude Code UI\n"
                 "  [cyan]/paste[/cyan]           Paste system clipboard to input\n"
                 "  [cyan]/copy[/cyan]            Copy last Claude reply to clipboard\n"
                 "  [cyan]/cancel[/cyan]          Cancel active Claude run\n"
@@ -893,6 +894,15 @@ class DGCApp(App):
 
         elif cmd in {"copy", "copylast"}:
             self.action_copy_last_reply()
+
+        elif cmd == "chat":
+            mode = arg.strip().lower()
+            if mode in {"", "new"}:
+                self._launch_chat_shell(continue_last=False)
+            elif mode in {"continue", "cont", "resume", "c", "r"}:
+                self._launch_chat_shell(continue_last=True)
+            else:
+                self._out("[red]Usage: /chat [continue][/red]")
 
         elif cmd == "cancel":
             proc = self._active_proc
@@ -1093,6 +1103,62 @@ class DGCApp(App):
 
         else:
             self._out(f"[red]Unknown command: /{cmd}[/red]  (try /help)")
+
+    def _launch_chat_shell(self, continue_last: bool = False) -> None:
+        proc = self._active_proc
+        if proc is not None and proc.poll() is None:
+            self._out("[yellow]A Claude run is active. Use /cancel first.[/yellow]")
+            return
+
+        env = dict(os.environ)
+        env.pop("CLAUDECODE", None)
+        env.pop("CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC", None)
+
+        cmd = ["claude"]
+        if continue_last:
+            cmd.append("--continue")
+        if self._internet_enabled:
+            cmd.extend(
+                [
+                    "--permission-mode",
+                    "bypassPermissions",
+                    "--allow-dangerously-skip-permissions",
+                    "--dangerously-skip-permissions",
+                ]
+            )
+        else:
+            env["CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC"] = "1"
+
+        state_ctx = self._get_state_context()
+        if state_ctx:
+            # Keep startup payload bounded for fast interactive launch.
+            state_ctx = state_ctx[:6000]
+            cmd.extend(
+                [
+                    "--append-system-prompt",
+                    "DGC mission-control context snapshot. Treat as hints and verify.\n\n"
+                    + state_ctx,
+                ]
+            )
+
+        self._out(
+            "[dim]Launching native Claude Code UI. Exit Claude to return to DGC.[/dim]"
+        )
+        launched = False
+        try:
+            with self.suspend():
+                launched = True
+                subprocess.run(cmd, cwd=str(DHARMA_SWARM), env=env, check=False)
+        except SuspendNotSupported:
+            self._out("[red]/chat is not supported in this terminal environment.[/red]")
+        except FileNotFoundError:
+            self._out("[red]claude CLI not found.[/red]")
+        except Exception as e:
+            self._out(f"[red]/chat failed: {e}[/red]")
+        finally:
+            self.set_timer(0.05, self._focus_input)
+            if launched:
+                self._out("[dim]Returned from native Claude Code UI.[/dim]")
 
     # ─── Claude conversation ───
 
