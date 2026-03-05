@@ -99,7 +99,7 @@ Active thread: {thread}
     return prompt
 
 
-def run_claude_headless(prompt: str, timeout: int = 120) -> str:
+def run_claude_headless(prompt: str, timeout: int = 600) -> str:
     """Run Claude Code in headless mode — the REAL agent."""
     try:
         result = subprocess.run(

@@ -649,6 +649,7 @@ class DGCApp(App):
         self._conversation_lock = threading.Lock()
         self._conversation: list[dict[str, str]] = []
         self._conversation_max_pairs = 12
+        self._active_proc: subprocess.Popen[str] | None = None
         self._state_cache: str = ""
         self._state_cache_time: float = 0.0
         self._internet_enabled: bool = True
@@ -815,6 +816,7 @@ class DGCApp(App):
                 "\n[bold cyan]━━━ Chat & Control ━━━[/bold cyan]\n"
                 "  [cyan]/thread[/cyan] [name]   Show/set research thread\n"
                 "  [cyan]/net[/cyan] [on|off]    Internet mode for Claude\n"
+                "  [cyan]/cancel[/cyan]          Cancel active Claude run\n"
                 "  [cyan]/reset[/cyan]           Reset conversation memory\n"
                 "  [cyan]/clear[/cyan]           Clear screen\n"
                 "  [cyan]/help[/cyan]            This help\n\n"
@@ -831,6 +833,19 @@ class DGCApp(App):
         elif cmd == "reset":
             self._reset_conversation()
             self._out("[dim]Conversation memory reset.[/dim]")
+
+        elif cmd == "cancel":
+            proc = self._active_proc
+            if proc is None:
+                self._out("[dim]No active Claude run.[/dim]")
+            elif proc.poll() is None:
+                try:
+                    proc.terminate()
+                    self._out("[yellow]Cancel signal sent to active Claude run.[/yellow]")
+                except Exception as e:
+                    self._out(f"[red]Cancel failed: {e}[/red]")
+            else:
+                self._out("[dim]Active Claude run already completed.[/dim]")
 
         elif cmd == "status":
             self._out(_build_status_text())
@@ -1045,28 +1060,36 @@ class DGCApp(App):
             else:
                 env["CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC"] = "1"
 
-            proc = subprocess.run(
+            # Stream output line-by-line instead of blocking with timeout
+            proc = subprocess.Popen(
                 cmd,
-                capture_output=True, text=True, timeout=180,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
                 cwd=str(DHARMA_SWARM),
                 env=env,
             )
-            output = proc.stdout.strip()
-            if output:
+            self._active_proc = proc
+            self._out_thread(f"\n[bold cyan]claude:[/bold cyan]")
+            lines: list[str] = []
+            for line in proc.stdout:  # type: ignore[union-attr]
+                text = line.rstrip("\n")
+                lines.append(text)
+                self._out_thread(f"  {text}")
+            proc.wait()
+            self._active_proc = None
+            output = "\n".join(lines)
+            if output.strip():
                 self._append_conversation("user", question)
                 self._append_conversation("assistant", output)
-                self._out_thread(f"\n[bold cyan]claude:[/bold cyan]")
-                for line in output.split("\n"):
-                    self._out_thread(f"  {line}")
                 self._out_thread("")
             else:
-                err = proc.stderr.strip()[:300] if proc.stderr else "empty response"
+                err = (proc.stderr.read() if proc.stderr else "")[:300]
                 self._out_thread(f"[red]No response. {err}[/red]")
-        except subprocess.TimeoutExpired:
-            self._out_thread("[red]Timed out (180s).[/red]")
         except FileNotFoundError:
             self._out_thread("[red]claude CLI not found.[/red]")
         except Exception as e:
+            self._active_proc = None
             self._out_thread(f"[red]Error: {e}[/red]")
 
     # ─── System commands (threaded) ───
