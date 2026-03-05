@@ -126,32 +126,44 @@ class ProviderRunner(Widget):
                         await self._adapter.cancel()
                         break
 
-                    filtered = governance.process(event)
-                    if filtered is None:
-                        continue
+                    try:
+                        filtered = governance.process(event)
+                        if filtered is None:
+                            continue
 
-                    if filtered.type == "session_start":
-                        provider_session_id = getattr(
-                            filtered, "provider_session_id", None
-                        )
-                        if provider_session_id:
-                            stats["provider_session_id"] = provider_session_id
-                            self._store.set_provider_session_id(
-                                session_id, provider_session_id
+                        if filtered.type == "session_start":
+                            provider_session_id = getattr(
+                                filtered, "provider_session_id", None
                             )
-                    elif filtered.type == "text_complete":
-                        if getattr(filtered, "role", "assistant") == "assistant":
-                            stats["turns"] += 1
-                    elif filtered.type == "usage":
-                        stats["cost"] = getattr(filtered, "total_cost_usd", 0.0) or 0.0
-                        stats["in_tokens"] = getattr(filtered, "input_tokens", 0) or 0
-                        stats["out_tokens"] = getattr(filtered, "output_tokens", 0) or 0
-                    elif filtered.type == "session_end":
-                        stats["success"] = getattr(filtered, "success", True)
-                        stats["error_code"] = getattr(filtered, "error_code", None)
+                            if provider_session_id:
+                                stats["provider_session_id"] = provider_session_id
+                                self._store.set_provider_session_id(
+                                    session_id, provider_session_id
+                                )
+                        elif filtered.type == "text_complete":
+                            if getattr(filtered, "role", "assistant") == "assistant":
+                                stats["turns"] += 1
+                        elif filtered.type == "usage":
+                            stats["cost"] = getattr(filtered, "total_cost_usd", 0.0) or 0.0
+                            stats["in_tokens"] = getattr(filtered, "input_tokens", 0) or 0
+                            stats["out_tokens"] = getattr(filtered, "output_tokens", 0) or 0
+                        elif filtered.type == "session_end":
+                            stats["success"] = getattr(filtered, "success", True)
+                            stats["error_code"] = getattr(filtered, "error_code", None)
 
-                    self._store.append_event(session_id, filtered)
-                    self.post_message(self.AgentEvent(filtered))
+                        self._store.append_event(session_id, filtered)
+                        self.post_message(self.AgentEvent(filtered))
+                    except Exception as event_exc:
+                        # Keep the stream alive even if one event fails processing.
+                        err = ErrorEvent(
+                            provider_id=provider_id,
+                            session_id=session_id,
+                            code="event_pipeline_error",
+                            message=f"{type(event_exc).__name__}: {event_exc}",
+                        )
+                        with contextlib.suppress(Exception):
+                            self._store.append_event(session_id, err)
+                        self.post_message(self.AgentEvent(err))
 
             asyncio.run(_run())
 

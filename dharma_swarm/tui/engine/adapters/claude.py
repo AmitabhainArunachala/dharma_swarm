@@ -128,7 +128,18 @@ class ClaudeAdapter(ProviderAdapter):
         try:
             assert proc.stdout is not None
             while True:
-                line = await proc.stdout.readline()
+                try:
+                    line = await proc.stdout.readline()
+                except Exception as exc:
+                    # Avoid hard-crashing provider runner on oversized/invalid stream lines.
+                    yield ErrorEvent(
+                        provider_id=self.provider_id,
+                        session_id=session_id,
+                        code="stream_read_error",
+                        message=str(exc),
+                        retryable=True,
+                    )
+                    break
                 if not line:
                     break
                 raw_line = line.decode("utf-8", errors="replace").strip()
@@ -194,12 +205,16 @@ class ClaudeAdapter(ProviderAdapter):
         cmd: list[str],
         env: dict[str, str],
     ) -> asyncio.subprocess.Process:
+        # Increase StreamReader line limit to tolerate large NDJSON tool-result
+        # events (default is 64 KiB and can fail on large file reads).
+        stream_limit = int(self._config.extra.get("stream_reader_limit", 2_000_000))
         return await asyncio.create_subprocess_exec(
             *cmd,
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.PIPE,
             cwd=str(self._workdir),
             env=env,
+            limit=stream_limit,
         )
 
     def _build_env(self, request: CompletionRequest) -> dict[str, str]:

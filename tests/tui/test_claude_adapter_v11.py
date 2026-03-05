@@ -212,6 +212,11 @@ class _FakeStdout:
         return self._lines.pop(0)
 
 
+class _BrokenStdout:
+    async def readline(self) -> bytes:
+        raise RuntimeError("Separator is found, but chunk is longer than limit")
+
+
 class _FakeStderr:
     async def read(self) -> bytes:
         return b""
@@ -233,6 +238,12 @@ class _FakeProc:
 
     def kill(self) -> None:
         self.returncode = -9
+
+
+class _BrokenProc(_FakeProc):
+    def __init__(self, exit_code: int = 0) -> None:
+        super().__init__(lines=[], exit_code=exit_code)
+        self.stdout = _BrokenStdout()
 
 
 @pytest.mark.asyncio
@@ -280,3 +291,45 @@ async def test_stream_uses_subprocess_and_yields_events(monkeypatch: pytest.Monk
 async def test_cancel_without_active_process_is_safe() -> None:
     a = _adapter()
     await a.cancel()
+
+
+@pytest.mark.asyncio
+async def test_stream_handles_stdout_read_exception(monkeypatch: pytest.MonkeyPatch) -> None:
+    a = _adapter()
+
+    async def _fake_spawn(cmd: list[str], env: dict[str, str]) -> _BrokenProc:
+        return _BrokenProc(exit_code=0)
+
+    monkeypatch.setattr(a, "_spawn_process", _fake_spawn)
+
+    req = CompletionRequest(messages=[{"role": "user", "content": "hello"}])
+    events = [e async for e in a.stream(req, session_id="dgc-test-broken-stdout")]
+    assert any(isinstance(e, ErrorEvent) and e.code == "stream_read_error" for e in events)
+    assert any(isinstance(e, SessionEnd) for e in events)
+
+
+@pytest.mark.asyncio
+async def test_spawn_process_sets_large_stream_reader_limit(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    a = ClaudeAdapter(
+        config=ProviderConfig(
+            provider_id="claude",
+            default_model="claude-sonnet-4-5",
+            extra={"stream_reader_limit": 1_500_000},
+        )
+    )
+    captured: dict[str, object] = {}
+
+    async def _fake_create(*args: object, **kwargs: object) -> _FakeProc:
+        captured.update(kwargs)
+        return _FakeProc(lines=[], exit_code=0)
+
+    monkeypatch.setattr(
+        "dharma_swarm.tui.engine.adapters.claude.asyncio.create_subprocess_exec",
+        _fake_create,
+    )
+
+    proc = await a._spawn_process(["claude", "-p", "x"], {})
+    assert isinstance(proc, _FakeProc)
+    assert captured["limit"] == 1_500_000
