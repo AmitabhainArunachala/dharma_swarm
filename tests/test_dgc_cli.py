@@ -27,6 +27,38 @@ def test_dgc_cli_main_no_args_tries_tui():
     from dharma_swarm.dgc_cli import main
 
     with patch("sys.argv", ["dgc"]):
+        with patch.dict("os.environ", {}, clear=False):
+            with patch("dharma_swarm.dgc_cli.cmd_tui") as mock_tui:
+                main()
+                mock_tui.assert_called_once()
+
+
+def test_dgc_cli_main_no_args_respects_default_chat_mode():
+    """main() with no args and DGC_DEFAULT_MODE=chat launches native chat."""
+    from dharma_swarm.dgc_cli import main
+
+    with patch("sys.argv", ["dgc"]):
+        with patch.dict("os.environ", {"DGC_DEFAULT_MODE": "chat"}, clear=False):
+            with patch("dharma_swarm.dgc_cli.cmd_chat") as mock_chat:
+                main()
+                mock_chat.assert_called_once()
+
+
+def test_dgc_cli_chat_command_dispatch():
+    """main() dispatches explicit `chat` command to cmd_chat()."""
+    from dharma_swarm.dgc_cli import main
+
+    with patch("sys.argv", ["dgc", "chat", "--continue", "--offline"]):
+        with patch("dharma_swarm.dgc_cli.cmd_chat") as mock_chat:
+            main()
+            mock_chat.assert_called_once()
+
+
+def test_dgc_cli_dashboard_command_dispatch():
+    """main() dispatches explicit `dashboard` command to cmd_tui()."""
+    from dharma_swarm.dgc_cli import main
+
+    with patch("sys.argv", ["dgc", "dashboard"]):
         with patch("dharma_swarm.dgc_cli.cmd_tui") as mock_tui:
             main()
             mock_tui.assert_called_once()

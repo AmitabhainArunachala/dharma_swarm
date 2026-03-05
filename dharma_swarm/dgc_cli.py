@@ -6,7 +6,9 @@ evolve, run, health-check).  No sys.path hacks — all imports are proper
 ``from dharma_swarm.*`` paths.
 
 Usage:
-  dgc                           Launch interactive TUI
+  dgc                           Launch interactive TUI (or Claude Code if DGC_DEFAULT_MODE=chat)
+  dgc chat                      Launch native Claude Code interactive UI
+  dgc dashboard                 Launch interactive DGC dashboard (TUI)
   dgc status                    System status overview
   dgc up [--background]         Start the daemon
   dgc down                      Stop the daemon
@@ -801,6 +803,87 @@ def cmd_tui() -> None:
     run_tui()
 
 
+def _build_chat_context_snapshot() -> str:
+    """Build a compact DGC context snapshot for Claude chat sessions."""
+    parts: list[str] = []
+
+    try:
+        thread_file = DHARMA_STATE / "thread_state.json"
+        if thread_file.exists():
+            ts = json.loads(thread_file.read_text())
+            parts.append(f"Active thread: {ts.get('current_thread', 'unknown')}")
+    except Exception:
+        pass
+
+    try:
+        from dharma_swarm.context import read_memory_context
+
+        mem = read_memory_context()
+        if mem and "No memory" not in mem:
+            parts.append("Recent memory:")
+            parts.append(mem)
+    except Exception:
+        pass
+
+    try:
+        manifest = HOME / ".dharma_manifest.json"
+        if manifest.exists():
+            data = json.loads(manifest.read_text())
+            eco = data.get("ecosystem", {})
+            alive = sum(1 for v in eco.values() if v.get("exists"))
+            parts.append(f"Ecosystem: {alive}/{len(eco)} alive")
+    except Exception:
+        pass
+
+    snapshot = "\n".join(parts).strip()
+    if not snapshot:
+        return ""
+    return snapshot[:6000]
+
+
+def cmd_chat(
+    continue_last: bool = False,
+    offline: bool = False,
+    model: str | None = None,
+    effort: str | None = None,
+    include_context: bool = True,
+) -> None:
+    """Launch native Claude Code interactive UI (full experience)."""
+    env = os.environ.copy()
+    env.pop("CLAUDECODE", None)
+    env.pop("CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC", None)
+    if offline:
+        env["CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC"] = "1"
+
+    cmd = ["claude"]
+    if continue_last:
+        cmd.append("--continue")
+    if model:
+        cmd.extend(["--model", model])
+    if effort:
+        cmd.extend(["--effort", effort])
+
+    if include_context:
+        snapshot = _build_chat_context_snapshot()
+        if snapshot:
+            cmd.extend(
+                [
+                    "--append-system-prompt",
+                    "DGC mission-control context snapshot. Treat as hints and verify.\n\n"
+                    + snapshot,
+                ]
+            )
+
+    try:
+        os.execvpe("claude", cmd, env)
+    except FileNotFoundError:
+        print("claude CLI not found. Install Claude Code first.")
+        sys.exit(1)
+    except Exception as e:
+        print(f"Failed to launch Claude Code: {e}")
+        sys.exit(1)
+
+
 # ---------------------------------------------------------------------------
 # Argument parser
 # ---------------------------------------------------------------------------
@@ -816,6 +899,36 @@ def _build_parser() -> argparse.ArgumentParser:
 
     # -- status --
     sub.add_parser("status", help="System status overview")
+
+    # -- chat --
+    p_chat = sub.add_parser("chat", help="Launch native Claude Code interactive UI")
+    p_chat.add_argument(
+        "-c",
+        "--continue",
+        dest="continue_last",
+        action="store_true",
+        help="Continue the most recent Claude session in this directory",
+    )
+    p_chat.add_argument(
+        "--offline",
+        action="store_true",
+        help="Disable nonessential network traffic for Claude session",
+    )
+    p_chat.add_argument("--model", default=None, help="Claude model alias/name")
+    p_chat.add_argument(
+        "--effort",
+        choices=["low", "medium", "high"],
+        default=None,
+        help="Reasoning effort level",
+    )
+    p_chat.add_argument(
+        "--no-context",
+        action="store_true",
+        help="Do not append DGC state snapshot to Claude system prompt",
+    )
+
+    # -- dashboard --
+    sub.add_parser("dashboard", help="Launch DGC dashboard (TUI)")
 
     # -- up --
     p_up = sub.add_parser("up", help="Start the daemon")
@@ -949,8 +1062,33 @@ def main() -> None:
     if len(sys.argv) >= 2 and sys.argv[1].lower() == "tui":
         sys.argv = [sys.argv[0], "--tui", *sys.argv[2:]]
 
-    # No args or --tui -> launch TUI
-    if len(sys.argv) < 2 or sys.argv[1] == "--tui":
+    # Optional default mode toggle: `DGC_DEFAULT_MODE=chat dgc`
+    if len(sys.argv) < 2:
+        default_mode = os.getenv("DGC_DEFAULT_MODE", "tui").strip().lower()
+        if default_mode in {"chat", "claude", "cc"}:
+            cmd_chat(
+                continue_last=False,
+                offline=os.getenv("DGC_CHAT_OFFLINE", "").strip() in {"1", "true", "yes", "on"},
+                model=os.getenv("DGC_CHAT_MODEL") or None,
+                effort=os.getenv("DGC_CHAT_EFFORT") or None,
+                include_context=os.getenv("DGC_CHAT_NO_CONTEXT", "").strip().lower()
+                not in {"1", "true", "yes", "on"},
+            )
+            return
+        try:
+            cmd_tui()
+        except ImportError as e:
+            print(f"TUI not available ({e}). Install: pip3 install textual")
+            print("Falling back to status...\n")
+            cmd_status()
+        except Exception as e:
+            print(f"TUI error: {e}")
+            print("Falling back to status...\n")
+            cmd_status()
+        return
+
+    # Explicit --tui -> launch TUI
+    if sys.argv[1] == "--tui":
         try:
             cmd_tui()
         except ImportError as e:
@@ -967,6 +1105,16 @@ def main() -> None:
     args = parser.parse_args()
 
     match args.command:
+        case "chat":
+            cmd_chat(
+                continue_last=args.continue_last,
+                offline=args.offline,
+                model=args.model,
+                effort=args.effort,
+                include_context=not args.no_context,
+            )
+        case "dashboard":
+            cmd_tui()
         case "status":
             cmd_status()
         case "up":
