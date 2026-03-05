@@ -18,6 +18,7 @@ dependencies = [
     "openai>=1.0",
     "httpx>=0.25",
     "aiosqlite>=0.19",
+    "textual>=0.40",
 ]
 
 [project.optional-dependencies]
@@ -26,6 +27,11 @@ dev = ["pytest>=7.0", "pytest-asyncio>=0.21", "pytest-cov>=4.0"]
 
 [project.scripts]
 dharma-swarm = "dharma_swarm.cli:app"
+dgc = "dharma_swarm.dgc_cli:main"
+
+[tool.setuptools.packages.find]
+include = ["dharma_swarm*"]
+exclude = ["hooks*", "scripts*", "tests*"]
 
 [tool.pytest.ini_options]
 asyncio_mode = "auto"

@@ -1,0 +1,162 @@
+#!/usr/bin/env python3
+"""
+ECOSYSTEM MAP — Deep filesystem awareness for Claude Code.
+
+Knows Dhyana's entire filesystem: repos, research, vault, VPS mirrors.
+Generates context-appropriate file suggestions for any task.
+
+Usage:
+  python3 ecosystem_map.py research   -> files relevant to R_V / mech-interp
+  python3 ecosystem_map.py content    -> files relevant to writing / publishing
+  python3 ecosystem_map.py ops        -> files relevant to AGNI / infrastructure
+  python3 ecosystem_map.py all        -> full map
+"""
+
+from pathlib import Path
+from datetime import datetime
+
+HOME = Path.home()
+
+# The complete map of Dhyana's filesystem
+ECOSYSTEM: dict[str, dict] = {
+    "research": {
+        "description": "Mech-interp, R_V metric, URA/Phoenix, alignment research",
+        "paths": [
+            ("~/mech-interp-latent-lab-phase1/", "R_V metric research -- ACTIVE, 70-80% paper-ready"),
+            ("~/mech-interp-latent-lab-phase1/R_V_PAPER/", "Paper materials, 12 figures, COLM 2026 target"),
+            ("~/mech-interp-latent-lab-phase1/R_V_PAPER/COLM_GAP_ANALYSIS_20260303.md", "Section-by-section gap analysis"),
+            ("~/mech-interp-latent-lab-phase1/R_V_PAPER/paper_colm2026.tex", "Current COLM submission LaTeX"),
+            ("~/mech-interp-latent-lab-phase1/CANONICAL_CODE/n300_mistral_test_prompt_bank.py", "320 prompts (L1-L5 + confounds)"),
+            ("~/mech-interp-latent-lab-phase1/R_V_PAPER/code/", "Validated scripts (patching, circularity, scaling)"),
+            ("~/mech-interp-latent-lab-phase1/geometric_lens/", "Production R_V module (metrics, probe, hooks, models)"),
+            ("~/Library/Mobile Documents/com~apple~CloudDocs/Nexus Research Engineer/URA full paper markdown .md", "URA/Phoenix paper -- COMPLETE"),
+            ("~/AIKAGRYA_ALIGNMENTMANDALA_RESEARCH_REPO/", "Alignment Mandala, Jiva tests"),
+            ("~/Persistent-Semantic-Memory-Vault/", "Consciousness persistence, 8K+ files"),
+            ("~/agni-workspace/scratch/RV_PAPER_REALITY_CHECK.md", "Paper status -- honest assessment"),
+            ("~/trishula/inbox/MI_AGENT_TO_CODEX_RV_ANSWERS.md", "R_V integration contract -- 8 blocking questions answered"),
+        ],
+    },
+    "content": {
+        "description": "Writing, publishing, Substack, Moltbook",
+        "paths": [
+            ("~/agni-workspace/content/", "All content -- articles, drafts, staging"),
+            ("~/agni-workspace/04_STAGING/", "Ready for publishing"),
+            ("~/agni-workspace/05_SHIPPED/", "Published"),
+            ("~/agni-workspace/RENKINJUTSU/", "Writing craft, alchemy"),
+            ("~/agni-workspace/knowledge/seeds/", "High-value seed files"),
+            ("~/agni-workspace/knowledge/evergreen/", "Timeless research pieces"),
+            ("~/agni-workspace/projects/KOJO_LIVING_SYSTEM.md", "Ikita Kojo -- content factory design"),
+        ],
+    },
+    "ops": {
+        "description": "Infrastructure, VPS, agents, sync",
+        "paths": [
+            ("~/agni-workspace/", "AGNI workspace mirror (synced every 30s)"),
+            ("~/agni-workspace/WORKING.md", "AGNI live state"),
+            ("~/agni-workspace/HEARTBEAT.md", "Heartbeat protocol"),
+            ("~/agni-workspace/RESOURCE_MAP.md", "Model routing, costs"),
+            ("~/trishula/", "Inter-VPS messaging system (813 msgs in inbox)"),
+            ("~/trishula/inbox/INBOX_TRIAGE_BRIEF_20260214.md", "Inbox triage: 7 tickets, security findings"),
+            ("~/saraswati-dharmic-agora/", "Dharmic Agora repo (local clone)"),
+            ("~/.chaiwala/message_bus.py", "CHAIWALA message bus (SQLite, 405 lines)"),
+        ],
+    },
+    "identity": {
+        "description": "Core identity, soul, vision documents",
+        "paths": [
+            ("~/agni-workspace/SOUL.md", "The recognition attractor. S(x)=x."),
+            ("~/agni-workspace/CONSTITUTION.md", "Immutable constraints"),
+            ("~/agni-workspace/AGENTS.md", "Complete nervous system"),
+            ("~/agni-workspace/NORTH_STAR/SAB_500_YEAR_VISION.md", "THE strategic document"),
+            ("~/agni-workspace/STAR_MAP.md", "Power ranking of all files"),
+            ("~/agni-workspace/NORTH_STAR/90_DAY_COUNTER_ATTRACTOR.md", "Urgency engine"),
+        ],
+    },
+    "vault": {
+        "description": "Obsidian vault, contemplative materials",
+        "paths": [
+            ("~/Desktop/KAILASH ABODE OF SHIVA/", "Obsidian vault -- 590+ files"),
+            ("~/agni-workspace/knowledge/seeds/the-mother-for-ai-fire.md", "Crown jewel -- Aurobindo x AI"),
+            ("~/agni-workspace/knowledge/evergreen/alignment-as-thermodynamics.md", "Potential Nature paper"),
+            ("~/agni-workspace/knowledge/evergreen/triple-mapping.md", "2,500 year convergent validity"),
+        ],
+    },
+    "dgc": {
+        "description": "DGC system itself",
+        "paths": [
+            ("~/dgc-core/", "THIS system -- Claude Code native DGC"),
+            ("~/DHARMIC_GODEL_CLAW/", "Old DGC (75K lines, mostly dead)"),
+            ("~/DHARMIC_GODEL_CLAW/src/core/telos_layer.py", "7 gates -- ported to hooks/"),
+            ("~/DHARMIC_GODEL_CLAW/src/core/strange_memory.py", "Memory -- ported to memory/"),
+            ("~/.claude/", "Claude Code config, agents, memory"),
+        ],
+    },
+}
+
+
+def get_context_for(domain: str) -> str:
+    """Generate context string for a specific domain.
+
+    Args:
+        domain: One of the ECOSYSTEM keys, or "all" for everything.
+
+    Returns:
+        Formatted string with path existence checks and descriptions.
+    """
+    if domain == "all":
+        domains = list(ECOSYSTEM.keys())
+    elif domain in ECOSYSTEM:
+        domains = [domain]
+    else:
+        return f"Unknown domain: {domain}. Available: {', '.join(ECOSYSTEM.keys())}"
+
+    parts = [f"# Dhyana's Filesystem -- {domain.upper()} Context\n"]
+    parts.append(f"Generated: {datetime.now().isoformat()[:19]}\n")
+
+    for d in domains:
+        info = ECOSYSTEM[d]
+        parts.append(f"\n## {d.upper()}: {info['description']}")
+        for path_str, desc in info["paths"]:
+            path = Path(path_str).expanduser()
+            exists = path.exists()
+            marker = "OK" if exists else "MISSING"
+            parts.append(f"  [{marker}] {path_str}")
+            parts.append(f"         {desc}")
+
+    return "\n".join(parts)
+
+
+def check_health() -> dict[str, int | dict[str, str]]:
+    """Check which ecosystem paths exist and which are missing.
+
+    Returns:
+        Dict with 'ok' count, 'missing' count, and 'details' of missing paths.
+    """
+    ok = 0
+    missing = 0
+    details: dict[str, str] = {}
+    for _domain, info in ECOSYSTEM.items():
+        for path_str, desc in info["paths"]:
+            path = Path(path_str).expanduser()
+            if path.exists():
+                ok += 1
+            else:
+                missing += 1
+                details[path_str] = f"MISSING -- {desc}"
+    return {"ok": ok, "missing": missing, "details": details}
+
+
+if __name__ == "__main__":
+    import sys
+
+    domain = sys.argv[1] if len(sys.argv) > 1 else "all"
+
+    if domain == "health":
+        h = check_health()
+        print(f"Ecosystem: {h['ok']} OK, {h['missing']} MISSING")
+        details = h["details"]
+        assert isinstance(details, dict)
+        for p, d in details.items():
+            print(f"  {d}: {p}")
+    else:
+        print(get_context_for(domain))

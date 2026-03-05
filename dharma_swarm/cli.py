@@ -258,5 +258,95 @@ def run(
     _run(_run_loop())
 
 
+# --- Evolution ---
+
+evolve_app = typer.Typer(help="Evolution engine commands")
+app.add_typer(evolve_app, name="evolve")
+
+
+@evolve_app.command("propose")
+def evolve_propose(
+    component: str = typer.Argument(..., help="Module or file being changed"),
+    description: str = typer.Argument(..., help="Description of the change"),
+    change_type: str = typer.Option("mutation", help="mutation, crossover, or ablation"),
+    diff: str = typer.Option("", help="Code diff (patch text)"),
+    state_dir: str = typer.Option(".dharma", help="State directory"),
+):
+    """Propose an evolution and run it through the full pipeline."""
+    async def _propose():
+        swarm = await _get_swarm(state_dir)
+        result = await swarm.evolve(
+            component=component,
+            change_type=change_type,
+            description=description,
+            diff=diff,
+        )
+        if result["status"] == "rejected":
+            console.print(f"[red]REJECTED: {result['reason']}[/red]")
+        else:
+            console.print(
+                f"[green]ARCHIVED: {result['entry_id']} "
+                f"(fitness: {result['weighted_fitness']:.3f})[/green]"
+            )
+        await swarm.shutdown()
+
+    _run(_propose())
+
+
+@evolve_app.command("trend")
+def evolve_trend(
+    component: Optional[str] = typer.Option(None, help="Filter by component"),
+    state_dir: str = typer.Option(".dharma", help="State directory"),
+):
+    """Show fitness trend over time."""
+    async def _trend():
+        swarm = await _get_swarm(state_dir)
+        trend = await swarm.fitness_trend(component=component)
+        if not trend:
+            console.print("[dim]No fitness data yet.[/dim]")
+        else:
+            table = Table(title="Fitness Trend")
+            table.add_column("Timestamp", style="dim")
+            table.add_column("Fitness", style="green")
+            for ts, fitness in trend:
+                console.print(f"  {ts[:19]}  {fitness:.3f}")
+        await swarm.shutdown()
+
+    _run(_trend())
+
+
+# --- Health ---
+
+@app.command()
+def health(
+    state_dir: str = typer.Option(".dharma", help="State directory"),
+):
+    """Run system health check."""
+    async def _health():
+        swarm = await _get_swarm(state_dir)
+        report = await swarm.health_check()
+
+        status = report.get("overall_status", "unknown")
+        color = {"healthy": "green", "degraded": "yellow", "critical": "red"}.get(status, "white")
+        console.print(f"[{color}]Overall: {status}[/{color}]")
+        console.print(f"  Total traces: {report.get('total_traces', 0)}")
+        console.print(f"  Traces last hour: {report.get('traces_last_hour', 0)}")
+        console.print(f"  Failure rate: {report.get('failure_rate', 0):.1%}")
+
+        mean_f = report.get("mean_fitness")
+        if mean_f is not None:
+            console.print(f"  Mean fitness: {mean_f:.3f}")
+
+        anomalies = report.get("anomalies", [])
+        if anomalies:
+            console.print(f"\n[yellow]Anomalies ({len(anomalies)}):[/yellow]")
+            for a in anomalies:
+                console.print(f"  [{a.get('severity', '?')}] {a.get('description', '')}")
+
+        await swarm.shutdown()
+
+    _run(_health())
+
+
 if __name__ == "__main__":
     app()

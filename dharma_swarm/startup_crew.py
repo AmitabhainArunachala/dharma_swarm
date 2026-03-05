@@ -9,8 +9,8 @@ Provider strategy:
     with full tool access, file editing, bash. The heavy hitters.
   - CODEX: Secondary workers (archeologist) — OpenAI Codex CLI, good for
     code analysis and research tasks.
-  - OPENROUTER_FREE: Support roles (validator, scouts) — free-tier models
-    for monitoring, validation, and lightweight analysis. Zero cost.
+  - CODEX: Support roles (validator, scouts) — avoids free-tier OpenRouter
+    throttling when running sustained overnight loops.
   - ANTHROPIC/OPENAI/OPENROUTER: Available for specialty tasks when needed.
 """
 
@@ -56,27 +56,27 @@ DEFAULT_CREW = [
         "provider": ProviderType.CODEX,
         "model": "codex",
     },
-    # === Free models: zero-cost monitoring and validation ===
+    # === Support roles on Codex to avoid OpenRouter free-tier throttling ===
     {
         "name": "validator",
         "role": AgentRole.VALIDATOR,
         "thread": "scaling",
-        "provider": ProviderType.OPENROUTER_FREE,
-        "model": "meta-llama/llama-3.3-70b-instruct:free",
+        "provider": ProviderType.CODEX,
+        "model": "codex",
     },
     {
         "name": "scout-alpha",
         "role": AgentRole.RESEARCHER,
         "thread": "mechanistic",
-        "provider": ProviderType.OPENROUTER_FREE,
-        "model": "nousresearch/hermes-3-llama-3.1-405b:free",
+        "provider": ProviderType.CODEX,
+        "model": "codex",
     },
     {
         "name": "scout-beta",
         "role": AgentRole.RESEARCHER,
         "thread": "phenomenological",
-        "provider": ProviderType.OPENROUTER_FREE,
-        "model": "google/gemma-3-27b-it:free",
+        "provider": ProviderType.CODEX,
+        "model": "codex",
     },
 ]
 

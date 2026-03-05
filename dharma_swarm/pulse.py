@@ -92,7 +92,7 @@ Active thread: {thread}
 ## Rules
 - Do NOT create files unless necessary
 - Do NOT push to VPS — sync daemons handle it
-- Log observations to ~/dgc-core/memory/witness/
+- Log observations to ~/.dharma/witness/
 - Be brief. Be real. No theater.
 - SILENCE IS VALID — if nothing needs doing, say so in one sentence.
 """

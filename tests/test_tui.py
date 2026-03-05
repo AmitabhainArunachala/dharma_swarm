@@ -54,8 +54,43 @@ def test_tui_helpers():
 
 
 def test_build_status_text():
-    """Status text builder should not crash."""
+    """Status text builder should not crash and contain key sections."""
     from dharma_swarm.tui import _build_status_text
     text = _build_status_text()
     assert isinstance(text, str)
-    assert "PULSE" in text or "MEMORY" in text or "GATES" in text
+    lower = text.lower()
+    assert "pulse" in lower or "memory" in lower or "gates" in lower
+    assert "DGC STATUS" in text
+
+
+def test_count_git_status_parser():
+    """Parse git porcelain counts deterministically."""
+    from dharma_swarm.tui import _count_git_status
+
+    porcelain = "\n".join(
+        [
+            " M unstaged_only.py",
+            "M  staged_only.py",
+            "MM both_changed.py",
+            "A  added.py",
+            " D deleted_worktree.py",
+            "?? new_file.py",
+        ]
+    )
+    counts = _count_git_status(porcelain)
+    assert counts["staged"] == 3
+    assert counts["unstaged"] == 3
+    assert counts["untracked"] == 1
+
+
+def test_runtime_git_truth_builders():
+    """Runtime/git/truth builders should render without crashing."""
+    from dharma_swarm.tui import _build_runtime_text, _build_git_text, _build_truth_report
+
+    runtime = _build_runtime_text()
+    git_text = _build_git_text()
+    truth = _build_truth_report()
+
+    assert "Runtime Control Plane" in runtime
+    assert "Git Reality" in git_text
+    assert "Truth Report" in truth

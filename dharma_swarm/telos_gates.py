@@ -1,6 +1,6 @@
 """Dharmic safety gate system.
 
-Eight gates from Akram Vignan mapped to computational safety checks.
+Eleven gates from Akram Vignan mapped to computational safety checks.
 Ported from dgc-core/hooks/telos_gate.py into a clean class-based API.
 No hook/stdin interface, no witness file logging — those concerns
 live elsewhere (CLI and memory.py respectively).
@@ -8,16 +8,19 @@ live elsewhere (CLI and memory.py respectively).
 
 from __future__ import annotations
 
+from dharma_swarm.anekanta_gate import evaluate_anekanta
+from dharma_swarm.dogma_gate import DogmaDriftCheck, check_dogma_drift
 from dharma_swarm.models import (
     GateCheckResult,
     GateDecision,
     GateResult,
     GateTier,
 )
+from dharma_swarm.steelman_gate import SteelmanCheck, check_steelman
 
 
 class TelosGatekeeper:
-    """Runs 8 dharmic gates against proposed actions.
+    """Runs 11 dharmic gates against proposed actions.
 
     Tier A failures block unconditionally.
     Tier B failures block unconditionally.
@@ -33,6 +36,9 @@ class TelosGatekeeper:
         "SVABHAAVA": GateTier.C,
         "BHED_GNAN": GateTier.C,
         "WITNESS": GateTier.C,
+        "ANEKANTA": GateTier.C,
+        "DOGMA_DRIFT": GateTier.C,
+        "STEELMAN": GateTier.C,
     }
 
     HARM_WORDS: set[str] = {
@@ -96,7 +102,7 @@ class TelosGatekeeper:
         content: str = "",
         tool_name: str = "",
     ) -> GateCheckResult:
-        """Run all 8 gates against an action and optional content.
+        """Run all 11 gates against an action and optional content.
 
         Args:
             action: The action description (command, file path, etc.).
@@ -181,14 +187,32 @@ class TelosGatekeeper:
         else:
             results["REVERSIBILITY"] = (GateResult.PASS, "")
 
-        # --- SVABHAAVA (Tier C) — telos alignment (always passes) ---
-        results["SVABHAAVA"] = (GateResult.PASS, "")
+        # --- SVABHAAVA (Tier C) — telos alignment via Anekanta ---
+        anekanta = evaluate_anekanta(action, content)
+        if anekanta.gate_result == GateResult.FAIL:
+            results["SVABHAAVA"] = (GateResult.FAIL, f"Low epistemological diversity: {anekanta.reason}")
+        elif anekanta.gate_result == GateResult.WARN:
+            results["SVABHAAVA"] = (GateResult.WARN, f"Partial diversity: {anekanta.reason}")
+        else:
+            results["SVABHAAVA"] = (GateResult.PASS, "Epistemological diversity confirmed")
 
         # --- BHED_GNAN (Tier C) — doer-witness distinction (always passes) ---
         results["BHED_GNAN"] = (GateResult.PASS, "Doer-witness distinction noted")
 
         # --- WITNESS (Tier C) — the check itself IS witnessing ---
         results["WITNESS"] = (GateResult.PASS, "Witnessed")
+
+        # --- ANEKANTA (Tier C) — many-sidedness check ---
+        anekanta_result = evaluate_anekanta(action, content)
+        results["ANEKANTA"] = (anekanta_result.gate_result, anekanta_result.reason)
+
+        # --- DOGMA_DRIFT (Tier C) — confidence without evidence check ---
+        # Default check: no drift detected (used when no explicit check data available)
+        results["DOGMA_DRIFT"] = (GateResult.PASS, "No drift data in this check")
+
+        # --- STEELMAN (Tier C) — counterargument requirement ---
+        # Default check: passes when no proposal context available
+        results["STEELMAN"] = (GateResult.PASS, "No proposal context for steelman check")
 
         # --- Evaluate decision ---
         tier_a_fail = any(

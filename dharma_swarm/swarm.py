@@ -62,6 +62,19 @@ class SwarmManager:
         self._thread_mgr: Any = None
         self._router = create_default_router()
 
+        # v0.2.0 subsystems
+        self._engine: Any = None       # DarwinEngine
+        self._monitor: Any = None      # SystemMonitor
+        self._trace_store: Any = None  # TraceStore
+
+        # v0.3.0: Gödel Claw subsystems
+        self._kernel_guard: Any = None    # KernelGuard
+        self._corpus: Any = None          # DharmaCorpus
+        self._compiler: Any = None        # PolicyCompiler
+        self._canary: Any = None          # CanaryDeployer
+        self._bridge_rv: Any = None       # ResearchBridge
+        self._stigmergy: Any = None       # StigmergyStore
+
         # Daemon state
         self._last_contribution: datetime | None = None
         self._daily_contributions: int = 0
@@ -121,6 +134,62 @@ class SwarmManager:
             layer=MemoryLayer.SESSION,
             source="swarm",
         )
+
+        # v0.2.0: Darwin Engine + System Monitor
+        from dharma_swarm.evolution import DarwinEngine
+        from dharma_swarm.monitor import SystemMonitor
+        from dharma_swarm.traces import TraceStore
+
+        evo_dir = self.state_dir / "evolution"
+        traces_dir = self.state_dir / "traces"
+
+        self._trace_store = TraceStore(base_path=traces_dir)
+        await self._trace_store.init()
+
+        self._engine = DarwinEngine(
+            archive_path=evo_dir / "archive.jsonl",
+            traces_path=traces_dir,
+            predictor_path=evo_dir / "predictor_data.jsonl",
+        )
+        await self._engine.init()
+
+        self._monitor = SystemMonitor(trace_store=self._trace_store)
+
+        # v0.3.0: Gödel Claw — Dharma Kernel, Corpus, Policy, Canary, Stigmergy
+        from dharma_swarm.dharma_kernel import KernelGuard
+        from dharma_swarm.dharma_corpus import DharmaCorpus
+        from dharma_swarm.policy_compiler import PolicyCompiler
+        from dharma_swarm.canary import CanaryDeployer
+
+        kernel_path = self.state_dir / "kernel.json"
+        corpus_path = self.state_dir / "corpus.jsonl"
+
+        self._kernel_guard = KernelGuard(kernel_path=kernel_path)
+        try:
+            await self._kernel_guard.load()
+        except (FileNotFoundError, ValueError):
+            # First run or tampered — create default kernel
+            from dharma_swarm.dharma_kernel import DharmaKernel
+            default = DharmaKernel.create_default()
+            await self._kernel_guard.save(default)
+
+        self._corpus = DharmaCorpus(path=corpus_path)
+        await self._corpus.load()
+
+        self._compiler = PolicyCompiler()
+
+        self._canary = CanaryDeployer(archive=self._engine.archive)
+
+        # Stigmergy (may not exist yet — created by Agent 11)
+        try:
+            from dharma_swarm.stigmergy import StigmergyStore
+            stigmergy_path = self.state_dir / "stigmergy"
+            self._stigmergy = StigmergyStore(base_path=stigmergy_path)
+        except ImportError:
+            self._stigmergy = None
+            logger.debug("Stigmergy module not available yet")
+
+        logger.info("Gödel Claw v1 subsystems initialized")
 
     # --- Agent Operations ---
 
@@ -349,6 +418,155 @@ class SwarmManager:
     async def recall(self, limit: int = 10) -> list:
         """Recall recent memories."""
         return await self._memory.recall(limit=limit)
+
+    # --- Evolution (v0.2.0) ---
+
+    async def evolve(
+        self,
+        component: str,
+        change_type: str,
+        description: str,
+        diff: str = "",
+        test_results: dict | None = None,
+        code: str | None = None,
+    ) -> dict:
+        """Run a single evolution proposal through the full pipeline.
+
+        Returns a summary dict with entry_id, fitness, and status.
+        """
+        if self._engine is None:
+            raise RuntimeError("Swarm not initialized — call init() first")
+
+        proposal = await self._engine.propose(
+            component=component,
+            change_type=change_type,
+            description=description,
+            diff=diff,
+        )
+        await self._engine.gate_check(proposal)
+        if proposal.status.value == "rejected":
+            return {"status": "rejected", "reason": proposal.gate_reason}
+
+        await self._engine.evaluate(proposal, test_results=test_results, code=code)
+        entry_id = await self._engine.archive_result(proposal)
+
+        fitness = proposal.actual_fitness
+        return {
+            "status": "archived",
+            "entry_id": entry_id,
+            "weighted_fitness": fitness.weighted() if fitness else 0.0,
+        }
+
+    async def health_check(self) -> dict:
+        """Run system health check. Returns report as dict."""
+        if self._monitor is None:
+            return {"status": "unknown", "reason": "monitor not initialized"}
+        report = await self._monitor.check_health()
+        return report.model_dump()
+
+    async def fitness_trend(self, component: str | None = None) -> list:
+        """Get fitness trend from the evolution archive."""
+        if self._engine is None:
+            return []
+        return await self._engine.get_fitness_trend(component=component)
+
+    # --- Dharma Status (v0.3.0) ---
+
+    async def dharma_status(self) -> dict:
+        """Return Dharma subsystem status."""
+        result: dict = {
+            "kernel": False,
+            "corpus": False,
+            "compiler": False,
+            "canary": False,
+            "stigmergy": False,
+        }
+        if self._kernel_guard:
+            try:
+                kernel = self._kernel_guard._kernel
+                result["kernel"] = kernel is not None
+                if kernel:
+                    result["kernel_axioms"] = len(kernel.principles)
+                    result["kernel_integrity"] = kernel.verify_integrity()
+            except Exception:
+                pass
+        if self._corpus:
+            claims = await self._corpus.list_claims()
+            result["corpus"] = True
+            result["corpus_claims"] = len(claims)
+        if self._compiler:
+            result["compiler"] = True
+        if self._canary:
+            result["canary"] = True
+        if self._stigmergy:
+            result["stigmergy"] = True
+            result["stigmergy_density"] = self._stigmergy.density()
+        return result
+
+    async def propose_claim(
+        self, statement: str, category: str = "operational", **kwargs: Any
+    ) -> dict:
+        """Propose a new claim to the Dharma Corpus."""
+        if self._corpus is None:
+            raise RuntimeError("Corpus not initialized")
+        from dharma_swarm.dharma_corpus import ClaimCategory
+        cat = ClaimCategory(category)
+        claim = await self._corpus.propose(statement=statement, category=cat, **kwargs)
+        return {"id": claim.id, "statement": claim.statement, "status": claim.status.value}
+
+    async def review_claim(
+        self, claim_id: str, reviewer: str, action: str, comment: str
+    ) -> dict:
+        """Review a claim in the Dharma Corpus."""
+        if self._corpus is None:
+            raise RuntimeError("Corpus not initialized")
+        claim = await self._corpus.review(
+            claim_id, reviewer=reviewer, action=action, comment=comment
+        )
+        return {
+            "id": claim.id,
+            "status": claim.status.value,
+            "reviews": len(claim.review_history),
+        }
+
+    async def promote_claim(self, claim_id: str) -> dict:
+        """Promote a claim to ACCEPTED status."""
+        if self._corpus is None:
+            raise RuntimeError("Corpus not initialized")
+        claim = await self._corpus.promote(claim_id)
+        return {"id": claim.id, "status": claim.status.value}
+
+    async def canary_check(self, entry_id: str, canary_fitness: float) -> dict:
+        """Evaluate a canary deployment."""
+        if self._canary is None:
+            raise RuntimeError("Canary not initialized")
+        result = await self._canary.evaluate_canary(entry_id, canary_fitness)
+        return {
+            "decision": result.decision.value,
+            "delta": result.delta,
+            "reason": result.reason,
+        }
+
+    async def compile_policy(self, context: str = "default") -> dict:
+        """Compile a policy from kernel + accepted corpus claims."""
+        if self._compiler is None or self._kernel_guard is None or self._corpus is None:
+            raise RuntimeError("Policy subsystems not initialized")
+        principles = self._kernel_guard.get_all_principles()
+        from dharma_swarm.dharma_corpus import ClaimStatus
+        accepted_objs = await self._corpus.list_claims(status=ClaimStatus.ACCEPTED)
+        policy = self._compiler.compile(
+            kernel_principles=principles,
+            accepted_claims=accepted_objs,
+            context=context,
+        )
+        return {
+            "total_rules": len(policy.rules),
+            "immutable": len(policy.get_immutable_rules()),
+            "mutable": len(policy.get_mutable_rules()),
+            "context": policy.context,
+        }
+
+    # --- Shutdown ---
 
     async def shutdown(self) -> None:
         """Graceful shutdown of entire swarm."""

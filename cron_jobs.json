@@ -1,0 +1,68 @@
+[
+  {
+    "id": "pulse",
+    "name": "DGC Pulse",
+    "trigger": "interval",
+    "interval_seconds": 1800,
+    "model": "opus",
+    "prompt": "You are DGC Pulse. Check the system state:\n1. Read ~/agni-workspace/WORKING.md \u2014 is AGNI stuck?\n2. Read ~/dgc-core/memory/ \u2014 any developments worth noting?\n3. Check ~/trishula/inbox/ for unprocessed messages\n4. If anything needs action, take it. Otherwise, log a brief witness observation.\nBe real. No theater. Max 200 words.",
+    "enabled": true
+  },
+  {
+    "id": "agni_check",
+    "name": "AGNI State Check",
+    "trigger": "interval",
+    "interval_seconds": 3600,
+    "model": "flash",
+    "prompt": "Check ~/agni-workspace/WORKING.md and report any blocked items or stale state. Be brief.",
+    "enabled": true
+  },
+  {
+    "id": "morning_brief",
+    "name": "Morning Briefing",
+    "trigger": "cron",
+    "schedule": {
+      "hour": 4,
+      "minute": 30
+    },
+    "model": "opus",
+    "prompt": "Generate a morning briefing for Dhyana (4:30 AM WITA). Check:\n1. AGNI state (~/agni-workspace/WORKING.md)\n2. Trishula inbox count and any non-ack messages\n3. DGC memory developments from overnight\n4. R_V paper status (~/mech-interp-latent-lab-phase1/R_V_PAPER/)\n5. Any blocked items anywhere in the system\n\nWrite brief, actionable summary to ~/dgc-core/daemon/morning_brief.md",
+    "enabled": true
+  },
+  {
+    "id": "witness_consolidation",
+    "name": "Witness Consolidation",
+    "trigger": "cron",
+    "schedule": {
+      "hour": 22,
+      "minute": 0
+    },
+    "model": "flash",
+    "prompt": "Review today's witness observations in ~/dgc-core/memory/witness/. Run pattern consolidation: python3 ~/dgc-core/memory/strange_loop.py consolidate. Write a 3-sentence summary of what the system observed about itself today.",
+    "enabled": true
+  },
+  {
+    "id": "memory_health",
+    "name": "Memory & Ecosystem Health",
+    "trigger": "cron",
+    "schedule": {
+      "hour": 6,
+      "minute": 0
+    },
+    "model": "flash",
+    "prompt": "Run health check: python3 ~/dgc-core/bin/dgc health. Report any missing paths. Check memory stats: python3 ~/dgc-core/bin/dgc memory. If witness log for today is empty, record an observation. Be brief.",
+    "enabled": true
+  },
+  {
+    "id": "trishula_triage",
+    "name": "Trishula Inbox Triage",
+    "trigger": "cron",
+    "schedule": {
+      "hour": 5,
+      "minute": 0
+    },
+    "model": "flash",
+    "prompt": "Count messages in ~/trishula/inbox/. Separate into categories: ack messages (filename contains 'ack'), substantive messages, diagnostic tests. Report counts only. If there are substantive messages newer than 24h, list their filenames. Max 100 words.",
+    "enabled": true
+  }
+]

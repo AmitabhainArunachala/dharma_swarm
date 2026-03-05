@@ -145,6 +145,15 @@ def read_research(thread: str | None = None, max_per_file: int = 2000) -> str:
     return "\n".join(sections) if len(sections) > 1 else ""
 
 
+def read_ecosystem_domains(domain: str = "all") -> str:
+    """Read ecosystem domain context using the absorbed ecosystem_map."""
+    try:
+        from dharma_swarm.ecosystem_map import get_context_for
+        return get_context_for(domain)
+    except ImportError:
+        return ""
+
+
 # ── L3: ENGINEERING — Code reality ──────────────────────────────────
 
 def read_engineering() -> str:
