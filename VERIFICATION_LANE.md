@@ -21,6 +21,12 @@ Optional faster loop:
 VERIFY_INTERVAL=120 bash scripts/start_verification_lane.sh 8
 ```
 
+Override `dgc` binary explicitly (if needed):
+
+```bash
+DGC_BIN=/opt/homebrew/bin/dgc VERIFY_INTERVAL=120 bash scripts/start_verification_lane.sh 8
+```
+
 ## Stop
 
 ```bash
@@ -41,3 +47,18 @@ Per-run files:
 - `snapshots.jsonl`
 - `verify.log`
 
+## Split-Brain Guard
+
+Check for legacy `DHARMIC_GODEL_CLAW` / `dgc-core` processes:
+
+```bash
+cd /Users/dhyana/dharma_swarm
+scripts/split_brain_guard.sh
+```
+
+Attempt cleanup:
+
+```bash
+cd /Users/dhyana/dharma_swarm
+scripts/split_brain_guard.sh --fix
+```

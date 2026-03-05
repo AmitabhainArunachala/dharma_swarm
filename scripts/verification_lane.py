@@ -16,6 +16,7 @@ import sqlite3
 import subprocess
 import sys
 import time
+from shutil import which
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
@@ -24,13 +25,37 @@ from typing import Any
 
 HOME = Path.home()
 ROOT = HOME / "dharma_swarm"
-DGC_BIN = HOME / "dgc-core" / "bin" / "dgc"
 STATE_DIR = HOME / ".dharma"
 VERIFY_ROOT = STATE_DIR / "logs" / "verification"
 
 PID_FILE = STATE_DIR / "verification_lane.pid"
 RUN_FILE = STATE_DIR / "verification_lane_run_dir.txt"
 STOP_FILE = STATE_DIR / "STOP_VERIFICATION_LANE"
+
+
+def resolve_dgc_bin() -> Path:
+    """Resolve canonical dgc binary path, preferring dharma_swarm entrypoint."""
+    env_bin = os.getenv("DGC_BIN")
+    if env_bin:
+        return Path(env_bin)
+
+    for candidate in [
+        Path("/opt/homebrew/bin/dgc"),
+        HOME / "bin" / "dgc",
+        HOME / "dgc-core" / "bin" / "dgc",
+    ]:
+        if candidate.exists():
+            return candidate
+
+    found = which("dgc")
+    if found:
+        return Path(found)
+
+    # Return canonical target even if missing so command diagnostics remain clear.
+    return Path("/opt/homebrew/bin/dgc")
+
+
+DGC_BIN = resolve_dgc_bin()
 
 
 @dataclass
@@ -300,6 +325,7 @@ def build_snapshot(ctx: Ctx, loop_idx: int) -> dict[str, Any]:
         "timestamp": ts(),
         "loop": loop_idx,
         "run_dir": str(ctx.run_dir),
+        "runtime": {"dgc_bin": str(DGC_BIN)},
         "process": process,
         "commands": commands,
         "tasks": tasks_snapshot(),
