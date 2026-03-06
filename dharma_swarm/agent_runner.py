@@ -18,6 +18,7 @@ from dharma_swarm.models import (
     LLMRequest,
     LLMResponse,
     Task,
+    TaskPriority,
 )
 
 logger = logging.getLogger(__name__)
@@ -31,6 +32,12 @@ _ERROR_PREFIXES = (
     "openrouter error:",
     "no openrouter_api_key set",
 )
+_PRIORITY_SALIENCE = {
+    TaskPriority.LOW: 0.30,
+    TaskPriority.NORMAL: 0.50,
+    TaskPriority.HIGH: 0.70,
+    TaskPriority.URGENT: 0.90,
+}
 
 
 # ---------------------------------------------------------------------------
@@ -93,12 +100,14 @@ def _build_system_prompt(config: AgentConfig) -> str:
     # Inject multi-layer context for real Claude Code agents
     if config.provider == ProviderType.CLAUDE_CODE:
         from dharma_swarm.context import build_agent_context
+        from dharma_swarm.shakti import SHAKTI_HOOK
         ctx = build_agent_context(
             role=config.role.value,
             thread=config.thread,
         )
         if ctx:
             parts.append(ctx)
+        parts.append(SHAKTI_HOOK)
 
     return "\n\n".join(parts)
 
@@ -120,6 +129,61 @@ def _looks_like_provider_failure(content: str) -> bool:
     if not normalized:
         return True
     return any(normalized.startswith(prefix) for prefix in _ERROR_PREFIXES)
+
+
+def _task_file_path(task: Task) -> str:
+    """Infer file path context for a task mark."""
+    meta = task.metadata or {}
+    for key in ("file_path", "target_file", "path"):
+        value = meta.get(key)
+        if isinstance(value, str) and value.strip():
+            return value.strip()
+    return f"task:{task.id}"
+
+
+def _task_action(task: Task) -> str:
+    """Infer stigmergy action from task metadata."""
+    meta = task.metadata or {}
+    if meta.get("modified") or meta.get("writes_files"):
+        return "write"
+    return "scan"
+
+
+async def _leave_task_mark(
+    *,
+    agent_name: str,
+    task: Task,
+    result_text: str,
+    success: bool,
+) -> None:
+    """Leave a stigmergic mark after task execution.
+
+    Best-effort only: never fail task execution because marking failed.
+    """
+    try:
+        from dharma_swarm.stigmergy import StigmergicMark, StigmergyStore
+
+        salience = _PRIORITY_SALIENCE.get(task.priority, 0.5)
+        if not success:
+            salience = max(salience, 0.8)
+
+        observation = (result_text or "").strip().replace("\n", " ")
+        if not observation:
+            observation = f"{task.title} ({'success' if success else 'failure'})"
+        observation = f"{task.title}: {observation}"[:200]
+
+        mark = StigmergicMark(
+            agent=agent_name,
+            file_path=_task_file_path(task),
+            action=_task_action(task),  # type: ignore[arg-type]
+            observation=observation,
+            salience=salience,
+            connections=[task.id, task.priority.value, "success" if success else "failure"],
+        )
+        store = StigmergyStore()
+        await store.leave_mark(mark)
+    except Exception as exc:
+        logger.debug("Failed to leave task mark for %s: %s", agent_name, exc)
 
 
 # ---------------------------------------------------------------------------
@@ -203,12 +267,25 @@ class AgentRunner:
                 self._state.status = AgentStatus.IDLE
                 self._state.last_heartbeat = _utc_now()
 
+            await _leave_task_mark(
+                agent_name=self._config.name,
+                task=task,
+                result_text=result,
+                success=True,
+            )
+
             logger.info(
                 "Agent %s finished task %s", self._config.name, task.id
             )
             return result
 
         except Exception as exc:
+            await _leave_task_mark(
+                agent_name=self._config.name,
+                task=task,
+                result_text=str(exc),
+                success=False,
+            )
             async with self._lock:
                 self._state.status = AgentStatus.IDLE
                 self._state.current_task = None

@@ -27,6 +27,7 @@ import sys
 import time
 from datetime import datetime, timezone
 from pathlib import Path
+from typing import Any
 
 from dharma_swarm.context import (
     read_agni_state,
@@ -35,6 +36,9 @@ from dharma_swarm.context import (
     read_trishula_inbox,
 )
 from dharma_swarm.daemon_config import DaemonConfig, THREAD_PROMPTS, V7_BASE_RULES
+from dharma_swarm.shakti import ShaktiLoop
+from dharma_swarm.stigmergy import StigmergicMark, StigmergyStore
+from dharma_swarm.subconscious import SubconsciousStream
 from dharma_swarm.thread_manager import ThreadManager
 from dharma_swarm.telos_gates import DEFAULT_GATEKEEPER
 
@@ -43,6 +47,11 @@ logger = logging.getLogger(__name__)
 HOME = Path.home()
 DGC = HOME / "dgc-core"
 STATE_DIR = HOME / ".dharma"
+_LIVING_STATE_PATH = STATE_DIR / "living_state.json"
+_DREAM_THRESHOLD = 50
+_DREAM_HYSTERESIS = 10
+_SHAKTI_INTERVAL_SECONDS = 900
+_SHAKTI_SALIENCE_THRESHOLD = 0.7
 
 
 def build_prompt(
@@ -116,6 +125,125 @@ def run_claude_headless(prompt: str, timeout: int = 600) -> str:
         return "ERROR: claude CLI not found in PATH"
     except Exception as e:
         return f"ERROR: {e}"
+
+
+def _load_living_state() -> dict[str, Any]:
+    """Load persisted living-layer heartbeat state."""
+    if not _LIVING_STATE_PATH.exists():
+        return {
+            "last_dream_density": 0,
+            "last_shakti_at": 0,
+        }
+    try:
+        data = json.loads(_LIVING_STATE_PATH.read_text())
+        if not isinstance(data, dict):
+            return {
+                "last_dream_density": 0,
+                "last_shakti_at": 0,
+            }
+        data.setdefault("last_dream_density", 0)
+        data.setdefault("last_shakti_at", 0)
+        return data
+    except Exception:
+        return {
+            "last_dream_density": 0,
+            "last_shakti_at": 0,
+        }
+
+
+def _save_living_state(state: dict[str, Any]) -> None:
+    """Persist living-layer heartbeat state."""
+    try:
+        STATE_DIR.mkdir(parents=True, exist_ok=True)
+        _LIVING_STATE_PATH.write_text(json.dumps(state, indent=2))
+    except Exception as e:
+        logger.warning("Failed to persist living state: %s", e)
+
+
+async def _run_living_layers(thread: str, pulse_result: str) -> dict[str, Any]:
+    """Run subconscious + shakti heartbeat wiring from pulse.
+
+    This is the "breathing" bridge:
+    - Trigger subconscious dreams when stigmergy density crosses threshold.
+    - Use hysteresis to avoid repeated dream spam.
+    - Periodically run shakti perception and re-inject salient signals as marks.
+    """
+    summary: dict[str, Any] = {
+        "density": 0,
+        "dream_triggered": False,
+        "dream_associations": 0,
+        "shakti_perceptions": 0,
+        "shakti_escalations": 0,
+    }
+
+    try:
+        store = StigmergyStore()
+        density = store.density()
+        summary["density"] = density
+
+        state = _load_living_state()
+        now_ts = int(time.time())
+
+        threshold = int(os.getenv("DGC_DREAM_THRESHOLD", str(_DREAM_THRESHOLD)))
+        hysteresis = max(
+            1, int(os.getenv("DGC_DREAM_HYSTERESIS", str(_DREAM_HYSTERESIS)))
+        )
+        last_dream_density = int(state.get("last_dream_density", 0))
+
+        # Wake the subconscious only on meaningful density increases.
+        if density >= threshold and density >= (last_dream_density + hysteresis):
+            stream = SubconsciousStream(stigmergy=store)
+            associations = await stream.dream()
+            dream_count = len(associations)
+            if dream_count > 0:
+                summary["dream_triggered"] = True
+                summary["dream_associations"] = dream_count
+                state["last_dream_density"] = density
+
+        # Run shakti on a cadence, or immediately after a dream.
+        shakti_interval = max(
+            60, int(os.getenv("DGC_SHAKTI_INTERVAL_SEC", str(_SHAKTI_INTERVAL_SECONDS)))
+        )
+        last_shakti_at = int(state.get("last_shakti_at", 0))
+        should_run_shakti = summary["dream_triggered"] or (
+            (now_ts - last_shakti_at) >= shakti_interval
+        )
+        if should_run_shakti:
+            loop = ShaktiLoop(stigmergy=store)
+            perceptions = await loop.perceive(
+                current_context=pulse_result[:500],
+                agent_role="pulse",
+            )
+            summary["shakti_perceptions"] = len(perceptions)
+
+            salience_threshold = float(
+                os.getenv("DGC_SHAKTI_SALIENCE", str(_SHAKTI_SALIENCE_THRESHOLD))
+            )
+            escalations = [
+                p for p in perceptions
+                if p.salience >= salience_threshold or p.impact_level in {"module", "system"}
+            ]
+            summary["shakti_escalations"] = len(escalations)
+
+            # Feed high-salience perceptions back into lattice as connective marks.
+            for p in escalations[:5]:
+                mark = StigmergicMark(
+                    agent="shakti-pulse",
+                    file_path=p.connection or "shakti:unknown",
+                    action="connect",
+                    observation=(p.proposal or p.observation)[:200],
+                    salience=p.salience,
+                    connections=[thread, p.energy.value, p.impact_level],
+                )
+                await store.leave_mark(mark)
+
+            state["last_shakti_at"] = now_ts
+
+        _save_living_state(state)
+    except Exception as e:
+        logger.warning("Living layer heartbeat failed: %s", e)
+
+    return summary
 
 
 async def _store_pulse_result(result: str, thread: str) -> None:
@@ -209,6 +337,20 @@ def pulse(config: DaemonConfig | None = None) -> str:
 
     # Store in memory (async)
     asyncio.run(_store_pulse_result(result, thread))
+
+    # Living-layer heartbeat (subconscious + shakti)
+    living_summary = asyncio.run(_run_living_layers(thread, result))
+    if living_summary:
+        print(
+            "[pulse] Living: density={density} dream={dream} assoc={assoc} "
+            "perceptions={perceptions} escalations={escalations}".format(
+                density=living_summary.get("density", 0),
+                dream="yes" if living_summary.get("dream_triggered") else "no",
+                assoc=living_summary.get("dream_associations", 0),
+                perceptions=living_summary.get("shakti_perceptions", 0),
+                escalations=living_summary.get("shakti_escalations", 0),
+            )
+        )
 
     # Log to pulse log
     log_path = STATE_DIR / "pulse.log"

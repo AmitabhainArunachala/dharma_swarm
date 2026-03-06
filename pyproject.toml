@@ -24,6 +24,12 @@ dependencies = [
 [project.optional-dependencies]
 mcp = ["mcp>=1.0"]
 dev = ["pytest>=7.0", "pytest-asyncio>=0.21", "pytest-cov>=4.0"]
+infra = [
+    "langgraph>=0.2.0",
+    "temporalio>=1.8.0",
+    "qdrant-client>=1.11.0",
+    "neo4j>=5.25.0",
+]
 
 [project.scripts]
 dharma-swarm = "dharma_swarm.cli:app"
