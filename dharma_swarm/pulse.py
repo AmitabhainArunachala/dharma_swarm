@@ -108,11 +108,19 @@ Active thread: {thread}
     return prompt
 
 
-def run_claude_headless(prompt: str, timeout: int = 600) -> str:
+def run_claude_headless(
+    prompt: str,
+    timeout: int = 600,
+    model: str | None = None,
+) -> str:
     """Run Claude Code in headless mode — the REAL agent."""
     try:
+        command = ["claude", "-p", prompt, "--output-format", "text"]
+        if model:
+            command.extend(["--model", model])
+
         result = subprocess.run(
-            ["claude", "-p", prompt, "--output-format", "text"],
+            command,
             capture_output=True, text=True, timeout=timeout,
             env={**os.environ, "CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC": "1"},
         )
@@ -364,6 +372,98 @@ def pulse(config: DaemonConfig | None = None) -> str:
     return result
 
 
+def _check_and_run_cron_jobs(cfg: DaemonConfig | None = None) -> None:
+    """Check and run due cron jobs from `~/dharma_swarm/cron_jobs.json`."""
+    _ = cfg  # reserved for future per-job policy wiring
+
+    cron_file = Path.home() / "dharma_swarm" / "cron_jobs.json"
+    if not cron_file.exists():
+        return
+
+    try:
+        jobs = json.loads(cron_file.read_text())
+    except Exception as e:
+        print(f"[cron] Error reading cron_jobs.json: {e}")
+        return
+
+    if not isinstance(jobs, list):
+        print("[cron] cron_jobs.json must be a JSON list")
+        return
+
+    # Load last run tracking
+    last_run_file = STATE_DIR / "cron_last_run.json"
+    last_run_file.parent.mkdir(parents=True, exist_ok=True)
+    try:
+        last_runs = json.loads(last_run_file.read_text())
+        if not isinstance(last_runs, dict):
+            last_runs = {}
+    except Exception:
+        last_runs = {}
+
+    now = datetime.now()
+    slot_key = now.strftime("%Y-%m-%dT%H:%M")
+    did_run = False
+
+    for job in jobs:
+        if not isinstance(job, dict):
+            continue
+        if not job.get("enabled", False):
+            continue
+        if job.get("trigger") != "cron":
+            continue
+
+        job_id = str(job.get("id", "")).strip()
+        if not job_id:
+            continue
+        schedule = job.get("schedule", {})
+        if not isinstance(schedule, dict):
+            continue
+
+        try:
+            hour = int(schedule.get("hour"))
+            minute = int(schedule.get("minute", 0))
+        except (TypeError, ValueError):
+            continue
+
+        if hour is None:
+            continue
+
+        # Check if this hour/minute matches
+        if now.hour == hour and now.minute == minute:
+            # Check if already run this exact minute slot.
+            last_run_key = f"{job_id}:{slot_key}"
+            if last_run_key in last_runs:
+                continue
+
+            name = str(job.get("name", job_id))
+            prompt = str(job.get("prompt", "")).strip()
+            if not prompt:
+                print(f"[cron] Skipping {job_id}: empty prompt")
+                continue
+
+            model = str(job.get("model", "")).strip() or None
+            print(f"[cron] Running: {name} (hour={hour}, minute={minute})")
+
+            try:
+                result = run_claude_headless(
+                    prompt=prompt,
+                    model=model,
+                )
+                print(f"[cron] {job_id}: {result[:150].replace(chr(10), ' ')}")
+
+                # Mark as run
+                last_runs[last_run_key] = now.isoformat()
+                did_run = True
+            except Exception as e:
+                print(f"[cron] Error running {job_id}: {e}")
+
+    if did_run:
+        try:
+            last_run_file.write_text(json.dumps(last_runs, indent=2))
+        except Exception as e:
+            print(f"[cron] Error persisting cron last-run state: {e}")
+
+
 def daemon_loop(config: DaemonConfig | None = None):
     """Run continuous pulse loop with Garden Daemon parameters."""
     cfg = config or DaemonConfig()
@@ -401,6 +501,9 @@ def daemon_loop(config: DaemonConfig | None = None):
         except Exception as e:
             print(f"Pulse error: {e}")
 
+        # Check and run any due cron jobs
+        _check_and_run_cron_jobs(cfg)
+        
         time.sleep(interval)
 
 

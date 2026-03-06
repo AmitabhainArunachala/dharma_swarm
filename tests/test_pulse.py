@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import time
+from datetime import datetime
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -187,3 +188,84 @@ async def test_run_living_layers_handles_exceptions(monkeypatch, living_paths: P
     summary = await pulse._run_living_layers("alignment", "pulse result")
     assert summary["dream_triggered"] is False
     assert summary["shakti_perceptions"] == 0
+
+
+def test_check_and_run_cron_jobs_runs_due_job_once_per_slot(tmp_path: Path, monkeypatch):
+    fixed_now = datetime(2026, 3, 6, 4, 30, 10)
+
+    class _FixedDateTime(datetime):
+        @classmethod
+        def now(cls, tz=None):
+            return fixed_now if tz is None else fixed_now.astimezone(tz)
+
+    monkeypatch.setattr(pulse, "datetime", _FixedDateTime)
+    monkeypatch.setattr(pulse.Path, "home", lambda: tmp_path)
+
+    state_dir = tmp_path / ".dharma"
+    state_dir.mkdir(parents=True, exist_ok=True)
+    monkeypatch.setattr(pulse, "STATE_DIR", state_dir)
+
+    cron_dir = tmp_path / "dharma_swarm"
+    cron_dir.mkdir(parents=True, exist_ok=True)
+    cron_file = cron_dir / "cron_jobs.json"
+    cron_file.write_text(
+        json.dumps(
+            [
+                {
+                    "id": "morning_brief",
+                    "name": "Morning Brief",
+                    "trigger": "cron",
+                    "enabled": True,
+                    "schedule": {"hour": 4, "minute": 30},
+                    "model": "sonnet",
+                    "prompt": "say hi",
+                }
+            ]
+        )
+    )
+
+    calls: list[tuple[str, str | None]] = []
+
+    def _fake_run(prompt: str, timeout: int = 600, model: str | None = None) -> str:
+        calls.append((prompt, model))
+        return "ok"
+
+    monkeypatch.setattr(pulse, "run_claude_headless", _fake_run)
+
+    pulse._check_and_run_cron_jobs()
+    pulse._check_and_run_cron_jobs()
+
+    assert len(calls) == 1
+    assert calls[0] == ("say hi", "sonnet")
+
+    last_run = json.loads((state_dir / "cron_last_run.json").read_text())
+    assert "morning_brief:2026-03-06T04:30" in last_run
+
+
+def test_check_and_run_cron_jobs_ignores_invalid_job_payload(tmp_path: Path, monkeypatch):
+    monkeypatch.setattr(pulse.Path, "home", lambda: tmp_path)
+    monkeypatch.setattr(pulse, "STATE_DIR", tmp_path / ".dharma")
+
+    cron_dir = tmp_path / "dharma_swarm"
+    cron_dir.mkdir(parents=True, exist_ok=True)
+    cron_file = cron_dir / "cron_jobs.json"
+    cron_file.write_text(
+        json.dumps(
+            [
+                {"id": "a", "trigger": "cron", "enabled": True, "schedule": {"hour": "x"}},
+                {"id": "b", "trigger": "interval", "enabled": True},
+                {"id": "c", "trigger": "cron", "enabled": False, "schedule": {"hour": 1}},
+                "not-a-dict",
+            ]
+        )
+    )
+
+    called = {"n": 0}
+
+    def _fake_run(prompt: str, timeout: int = 600, model: str | None = None) -> str:
+        called["n"] += 1
+        return "ok"
+
+    monkeypatch.setattr(pulse, "run_claude_headless", _fake_run)
+    pulse._check_and_run_cron_jobs()
+    assert called["n"] == 0

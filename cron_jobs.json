@@ -26,7 +26,7 @@
       "minute": 30
     },
     "model": "opus",
-    "prompt": "Generate a morning briefing for Dhyana (4:30 AM WITA). Check:\n1. AGNI state (~/agni-workspace/WORKING.md)\n2. Trishula inbox count and any non-ack messages\n3. DGC memory developments from overnight\n4. R_V paper status (~/mech-interp-latent-lab-phase1/R_V_PAPER/)\n5. Any blocked items anywhere in the system\n\nWrite brief, actionable summary to ~/dgc-core/daemon/morning_brief.md",
+    "prompt": "Generate a morning briefing for Dhyana (4:30 AM WITA). Check:\n1. AGNI state (~/agni-workspace/WORKING.md)\n2. Trishula inbox count and any non-ack messages\n3. DGC memory developments from overnight\n4. R_V paper status (~/mech-interp-latent-lab-phase1/R_V_PAPER/)\n5. Any blocked items anywhere in the system\n6. DREAM JOURNAL: read ~/.dharma/subconscious/journal/LATEST_JOURNAL.md — if it exists, include the HOT-temperature ideas from last night's subconscious layer as a section called 'From the Subconscious'. Flag any publishable-relevant or experiment-relevant seeds.\n\nWrite brief, actionable summary to ~/dgc-core/daemon/morning_brief.md",
     "enabled": true
   },
   {
@@ -63,6 +63,30 @@
     },
     "model": "flash",
     "prompt": "Count messages in ~/trishula/inbox/. Separate into categories: ack messages (filename contains 'ack'), substantive messages, diagnostic tests. Report counts only. If there are substantive messages newer than 24h, list their filenames. Max 100 words.",
+    "enabled": true
+  },
+  {
+    "id": "subconscious_hum",
+    "name": "Subconscious HUM Dream Cycle",
+    "trigger": "cron",
+    "schedule": {
+      "hour": 3,
+      "minute": 0
+    },
+    "model": "sonnet",
+    "prompt": "Run a HUM dream cycle. Select semantically dense files from the entire system (PSMV, mech-interp, dharma_swarm, CLAUDE files, Kailash vault — everything).\n\nExecute:\ncd ~/dharma_swarm && python3 -c \"\nimport asyncio, json\nfrom dharma_swarm.subconscious_v2 import run_dream_cycle, WakeTrigger, select_dense_files\nfiles = select_dense_files(count=15)\nprint('Selected files:')\nfor f in files:\n    print(f'  {f.parent.name}/{f.name}')\nresult = asyncio.run(run_dream_cycle(file_paths=files, trigger=WakeTrigger.SCHEDULED))\nassociations = result['associations']\nhigh = [a for a in associations if a['salience'] >= 0.7]\nprint(f'\\nDream cycle: {len(associations)} total, {len(high)} high-salience')\nfor a in high:\n    print(f'  [{a[\\\"resonance_type\\\"]}] {a[\\\"salience\\\"]:.2f}: {a[\\\"description\\\"][:180]}')\n\"\n\nWrite results to ~/.dharma/witness/hum_$(date +%Y%m%d).md with: files selected, associations found, any invented vocabulary, flag HIGH VALUE if phenomenological+mechanistic bridge found.",
+    "enabled": true
+  },
+  {
+    "id": "hypnagogic_journal",
+    "name": "Hypnagogic Dream Journal",
+    "trigger": "cron",
+    "schedule": {
+      "hour": 4,
+      "minute": 0
+    },
+    "model": "sonnet",
+    "prompt": "Process last night's dream associations into a hypnagogic journal entry.\n\nExecute:\ncd ~/dharma_swarm && python3 -c \"\nimport asyncio\nfrom dharma_swarm.hypnagogic import process_recent_dreams\nresult = asyncio.run(process_recent_dreams(hours_back=8, min_salience=0.7))\nprint(f'Status: {result[\\\"status\\\"]}')\nif result.get(\\\"journal_path\\\"):\n    print(f'Journal: {result[\\\"journal_path\\\"]}')\n    print('\\nPreview:')\n    print(result.get(\\\"preview\\\", ''))\n\"\n\nThe journal will be at ~/.dharma/subconscious/journal/LATEST_JOURNAL.md\nReport: how many dreams were developed, temperature distribution (HOT/WARM/COLD), any publishable-relevant findings.",
     "enabled": true
   }
 ]
