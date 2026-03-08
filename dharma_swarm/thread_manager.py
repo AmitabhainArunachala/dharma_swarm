@@ -28,7 +28,10 @@ class ThreadManager:
 
     def _load_state(self) -> None:
         if self._state_file.exists():
-            data = json.loads(self._state_file.read_text())
+            try:
+                data = json.loads(self._state_file.read_text())
+            except (json.JSONDecodeError, OSError):
+                return
             self._current_index = data.get("current_index", 0)
             self._current_thread = data.get("current_thread", self._config.threads[0])
             self._contributions = data.get("contributions", self._contributions)

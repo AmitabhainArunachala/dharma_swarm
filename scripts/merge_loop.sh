@@ -14,6 +14,8 @@ STRICT_CORE="${MERGE_STRICT_CORE:-1}"
 REQUIRE_TRACKED="${MERGE_REQUIRE_TRACKED:-1}"
 RUN_TESTS="${MERGE_RUN_TESTS:-0}"
 APPEND_LEDGER="${MERGE_APPEND_LEDGER:-1}"
+IMPORT_LEGACY_ONCE="${MERGE_IMPORT_LEGACY_ONCE:-1}"
+IMPORT_LEGACY_DONE_FILE="${STATE}/merge_import_legacy.done"
 
 mkdir -p "${LOG_DIR}" "${STATE}"
 STAMP="$(date -u +%Y%m%dT%H%M%SZ)"
@@ -23,8 +25,8 @@ log() {
   printf '[%s] %s\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$*" | tee -a "${RUN_LOG}"
 }
 
-END_EPOCH="$((
-$(python3 - <<PY
+END_EPOCH="$(
+python3 - <<PY
 from datetime import datetime, timedelta
 from zoneinfo import ZoneInfo
 
@@ -38,8 +40,7 @@ if now >= end:
     end += timedelta(days=1)
 print(int(end.timestamp()))
 PY
-)
-))"
+)"
 
 log "Starting merge-control loop"
 log "Target JST: ${TARGET_JST}"
@@ -47,6 +48,22 @@ log "Target epoch: ${END_EPOCH}"
 log "Continue after target: ${CONTINUE_AFTER_TARGET}"
 log "Poll seconds: ${POLL_SECONDS}"
 log "Mission profile: ${MISSION_PROFILE}"
+
+if [[ "${IMPORT_LEGACY_ONCE}" == "1" ]] && [[ ! -f "${IMPORT_LEGACY_DONE_FILE}" ]]; then
+  log "Running one-time legacy archive import bootstrap"
+  set +e
+  import_out="$(python3 scripts/import_legacy_archive.py 2>&1)"
+  import_rc=$?
+  set -e
+  if [[ ${import_rc} -eq 0 ]]; then
+    log "OK legacy-import rc=0"
+    log "OUT ${import_out}"
+    printf '%s\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)" > "${IMPORT_LEGACY_DONE_FILE}"
+  else
+    log "WARN legacy-import rc=${import_rc}"
+    log "OUT ${import_out}"
+  fi
+fi
 
 cycle=0
 while true; do

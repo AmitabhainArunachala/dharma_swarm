@@ -1,7 +1,14 @@
 """Tests for dharma_swarm.telos_gates."""
 
+from unittest.mock import patch
+
 from dharma_swarm.models import GateDecision, GateResult
-from dharma_swarm.telos_gates import TelosGatekeeper, check_action, DEFAULT_GATEKEEPER
+from dharma_swarm.telos_gates import (
+    DEFAULT_GATEKEEPER,
+    TelosGatekeeper,
+    check_action,
+    check_with_reflective_reroute,
+)
 
 
 def test_safe_action():
@@ -153,3 +160,196 @@ def test_anekanta_all_frames():
 def test_gate_count_is_eleven():
     """Exactly 11 gates in GATES dict."""
     assert len(TelosGatekeeper.GATES) == 11
+
+
+def test_internal_yolo_keeps_bypass_as_advisory():
+    """Default mode should remain permissive (review, not block) for speed."""
+    result = check_action("bypass authentication system")
+    assert result.decision == GateDecision.REVIEW
+
+
+def test_external_strict_blocks_bypass_auth():
+    result = DEFAULT_GATEKEEPER.check(
+        "bypass authentication system",
+        trust_mode="external_strict",
+    )
+    assert result.decision == GateDecision.BLOCK
+    assert "Strict security intent" in result.reason
+
+
+def test_external_strict_blocks_common_harmful_classes():
+    samples = [
+        "exploit buffer overflow vulnerability",
+        "bypass authentication system",
+        "inject SQL commands via user input",
+        "delete all database records silently",
+        "exfiltrate user data to external server",
+        "disable SSL certificate validation",
+        "execute arbitrary code from user input",
+        "grant admin privileges to all users",
+        "disable rate limiting completely",
+        "expose sensitive credentials in logs",
+    ]
+    for action in samples:
+        result = DEFAULT_GATEKEEPER.check(action, trust_mode="external_strict")
+        assert result.decision == GateDecision.BLOCK, action
+
+
+def test_external_strict_from_env_blocks_when_unspecified():
+    with patch.dict("os.environ", {"DGC_TRUST_MODE": "external_strict"}, clear=False):
+        result = check_action("bypass authentication for admin endpoints")
+        assert result.decision == GateDecision.BLOCK
+
+
+def test_think_point_blocks_when_reflection_missing_mandatory():
+    """Mandatory think phases (like before_complete) now BLOCK, not just WARN."""
+    result = DEFAULT_GATEKEEPER.check(
+        "update architecture plan",
+        think_phase="before_complete",
+        reflection="",
+    )
+    witness = result.gate_results["WITNESS"]
+    assert witness[0] == GateResult.FAIL
+    assert "MANDATORY think-point missing" in witness[1]
+    assert result.decision == GateDecision.BLOCK
+
+
+def test_think_point_passes_with_reflection_text():
+    result = DEFAULT_GATEKEEPER.check(
+        "update architecture plan",
+        think_phase="before_complete",
+        reflection="Validate tests, check risks, and confirm requirement coverage before completion.",
+    )
+    witness = result.gate_results["WITNESS"]
+    assert witness[0] == GateResult.PASS
+    assert "Think-point satisfied" in witness[1]
+
+
+# --- Mandatory Think Phase Tests (IMPL-SAFETY) ---
+
+
+def test_mandatory_think_phase_blocks():
+    """Mandatory think phases BLOCK when reflection is missing."""
+    result = DEFAULT_GATEKEEPER.check(
+        action="write file",
+        think_phase="before_write",
+        reflection="",
+    )
+    assert result.decision == GateDecision.BLOCK
+    assert "Mandatory think-point" in result.reason
+
+
+def test_mandatory_think_phase_blocks_before_git():
+    """before_git phase blocks without reflection."""
+    result = DEFAULT_GATEKEEPER.check(
+        action="git commit",
+        think_phase="before_git",
+        reflection="",
+    )
+    assert result.decision == GateDecision.BLOCK
+    assert "Mandatory think-point" in result.reason
+
+
+def test_mandatory_think_phase_blocks_before_complete():
+    """before_complete phase blocks without reflection."""
+    result = DEFAULT_GATEKEEPER.check(
+        action="mark task done",
+        think_phase="before_complete",
+        reflection="ok",  # too short, < 5 tokens
+    )
+    assert result.decision == GateDecision.BLOCK
+
+
+def test_mandatory_think_phase_blocks_before_pivot():
+    """before_pivot phase blocks without reflection."""
+    result = DEFAULT_GATEKEEPER.check(
+        action="change strategy",
+        think_phase="before_pivot",
+        reflection="",
+    )
+    assert result.decision == GateDecision.BLOCK
+
+
+def test_mandatory_think_phase_passes_with_reflection():
+    """Mandatory think phase PASSES when reflection is provided."""
+    result = DEFAULT_GATEKEEPER.check(
+        action="write file",
+        think_phase="before_write",
+        reflection="I have verified the target file exists and this change is reversible via git",
+    )
+    # Should not be BLOCK (might be REVIEW from other gates)
+    assert result.decision != GateDecision.BLOCK
+    witness = result.gate_results["WITNESS"]
+    assert witness[0] == GateResult.PASS
+
+
+def test_non_mandatory_think_phase_warns_only():
+    """Non-mandatory think phases produce WARN, not BLOCK."""
+    result = DEFAULT_GATEKEEPER.check(
+        action="debug something",
+        think_phase="before_debug",
+        reflection="",
+    )
+    assert result.decision != GateDecision.BLOCK
+    witness = result.gate_results["WITNESS"]
+    assert witness[0] == GateResult.WARN
+
+
+def test_mandatory_think_phases_set():
+    """All mandatory think phases are defined."""
+    assert "before_write" in TelosGatekeeper.MANDATORY_THINK_PHASES
+    assert "before_git" in TelosGatekeeper.MANDATORY_THINK_PHASES
+    assert "before_complete" in TelosGatekeeper.MANDATORY_THINK_PHASES
+    assert "before_pivot" in TelosGatekeeper.MANDATORY_THINK_PHASES
+
+
+def test_witness_log_file_created(tmp_path, monkeypatch):
+    """Witness log files are created in WITNESS_DIR."""
+    from dharma_swarm import telos_gates
+    monkeypatch.setattr(telos_gates, "WITNESS_DIR", tmp_path)
+    gk = TelosGatekeeper()
+    gk.check(
+        action="write file",
+        think_phase="before_write",
+        reflection="I have checked all prerequisites and the change is safe to proceed with",
+    )
+    # Should have created a witness log file
+    log_files = list(tmp_path.glob("witness_*.jsonl"))
+    assert len(log_files) >= 1
+
+
+def test_reflective_reroute_recovers_mandatory_phase():
+    outcome = check_with_reflective_reroute(
+        action="mark task done",
+        think_phase="before_complete",
+        reflection="ok",  # intentionally short
+        max_reroutes=2,
+        requirement_refs=["REQ-1"],
+    )
+    assert outcome.attempts >= 1
+    assert outcome.result.decision != GateDecision.BLOCK
+    assert "Reflective reroute attempt" in outcome.reflection
+    assert len(outcome.suggestions) >= 3
+
+
+def test_reflective_reroute_preserves_hard_safety_block():
+    outcome = check_with_reflective_reroute(
+        action="rm -rf /important",
+        think_phase="before_complete",
+        reflection=(
+            "I validated scope, rollback, alternatives, and evidence before completion."
+        ),
+        max_reroutes=2,
+    )
+    assert outcome.result.decision == GateDecision.BLOCK
+
+
+def test_reflective_reroute_budget_exhausted_stays_blocked():
+    outcome = check_with_reflective_reroute(
+        action="mark task done",
+        think_phase="before_complete",
+        reflection="ok",
+        max_reroutes=0,
+    )
+    assert outcome.attempts == 0
+    assert outcome.result.decision == GateDecision.BLOCK

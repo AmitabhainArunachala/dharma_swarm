@@ -96,7 +96,8 @@ def _get_gate_count_today() -> int:
     if not gate_log.exists():
         return 0
     try:
-        return sum(1 for _ in open(gate_log))
+        with open(gate_log) as f:
+            return sum(1 for _ in f)
     except Exception:
         return 0
 
@@ -246,7 +247,8 @@ def _get_old_memory_total() -> int:
         path = mem_dir / f"{name}.jsonl"
         if path.exists():
             try:
-                total += sum(1 for _ in open(path))
+                with open(path) as f:
+                    total += sum(1 for _ in f)
             except Exception:
                 pass
     return total
@@ -1294,6 +1296,28 @@ class DGCApp(App):
 
     @work(thread=True)
     def _run_agni(self, command: str) -> None:
+        from dharma_swarm.telos_gates import check_with_reflective_reroute
+
+        gate = check_with_reflective_reroute(
+            action=f"agni:{command}",
+            content=command,
+            tool_name="tui_legacy_agni",
+            think_phase="before_complete",
+            reflection=(
+                "Remote AGNI execution request. Validate blast radius, "
+                "rollback path, and least-privilege command intent."
+            ),
+            max_reroutes=1,
+            requirement_refs=["agni:remote_exec"],
+        )
+        if gate.result.decision.value == "block":
+            self._out_thread(f"[red]TELOS BLOCK[/red]: {gate.result.reason}")
+            return
+        if gate.attempts:
+            self._out_thread(
+                f"[dim]Witness reroute applied ({gate.attempts} attempts).[/dim]"
+            )
+
         self._out_thread(f"[dim]AGNI: {command}[/dim]")
         try:
             ssh_key = HOME / ".ssh" / "openclaw_do"

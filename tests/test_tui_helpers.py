@@ -1,0 +1,147 @@
+"""Tests for dharma_swarm.tui_helpers -- status text builders."""
+
+import json
+import tempfile
+from pathlib import Path
+
+import pytest
+
+from dharma_swarm.tui_helpers import _read_json, build_status_text
+
+
+# ---------------------------------------------------------------------------
+# _read_json
+# ---------------------------------------------------------------------------
+
+
+def test_read_json_valid():
+    with tempfile.NamedTemporaryFile(mode="w", suffix=".json", delete=False) as f:
+        json.dump({"key": "value"}, f)
+        f.flush()
+        result = _read_json(Path(f.name))
+    assert result == {"key": "value"}
+
+
+def test_read_json_invalid():
+    with tempfile.NamedTemporaryFile(mode="w", suffix=".json", delete=False) as f:
+        f.write("not json at all")
+        f.flush()
+        result = _read_json(Path(f.name))
+    assert result is None
+
+
+def test_read_json_missing_file():
+    result = _read_json(Path("/nonexistent/path/file.json"))
+    assert result is None
+
+
+def test_read_json_empty_file():
+    with tempfile.NamedTemporaryFile(mode="w", suffix=".json", delete=False) as f:
+        f.write("")
+        f.flush()
+        result = _read_json(Path(f.name))
+    assert result is None
+
+
+def test_read_json_complex():
+    data = {"nested": {"list": [1, 2, 3], "bool": True, "null": None}}
+    with tempfile.NamedTemporaryFile(mode="w", suffix=".json", delete=False) as f:
+        json.dump(data, f)
+        f.flush()
+        result = _read_json(Path(f.name))
+    assert result == data
+
+
+# ---------------------------------------------------------------------------
+# build_status_text
+# ---------------------------------------------------------------------------
+
+
+def test_build_status_text_returns_string():
+    result = build_status_text()
+    assert isinstance(result, str)
+
+
+def test_build_status_text_has_header():
+    result = build_status_text()
+    assert "DGC System Status" in result
+
+
+def test_build_status_text_contains_source_modules():
+    """Should report source module count since the dharma_swarm dir exists."""
+    result = build_status_text()
+    assert "Source modules:" in result
+
+
+def test_build_status_text_thread_info(tmp_path, monkeypatch):
+    """If thread state exists, it should be included in output."""
+    import dharma_swarm.tui_helpers as helpers
+
+    # Create a mock .dharma directory with thread state
+    dharma_dir = tmp_path / ".dharma"
+    dharma_dir.mkdir()
+    thread_state = {"current_thread": "mechanistic"}
+    (dharma_dir / "thread_state.json").write_text(json.dumps(thread_state))
+
+    # Monkeypatch the state dir
+    monkeypatch.setattr(helpers, "DHARMA_STATE", dharma_dir)
+    result = build_status_text()
+    assert "mechanistic" in result
+
+
+def test_build_status_text_pulse_info(tmp_path, monkeypatch):
+    """If pulse log exists, it should show last pulse timestamp."""
+    import dharma_swarm.tui_helpers as helpers
+
+    dharma_dir = tmp_path / ".dharma"
+    dharma_dir.mkdir()
+    pulse_entry = {"timestamp": "2026-03-07T12:00:00Z", "status": "ok"}
+    (dharma_dir / "pulse_log.jsonl").write_text(json.dumps(pulse_entry) + "\n")
+
+    monkeypatch.setattr(helpers, "DHARMA_STATE", dharma_dir)
+    result = build_status_text()
+    assert "Last pulse:" in result
+    assert "2026-03-07" in result
+
+
+def test_build_status_text_archive_info(tmp_path, monkeypatch):
+    """If evolution archive exists, it should show entry count."""
+    import dharma_swarm.tui_helpers as helpers
+
+    dharma_dir = tmp_path / ".dharma"
+    evo_dir = dharma_dir / "evolution"
+    evo_dir.mkdir(parents=True)
+    (evo_dir / "archive.jsonl").write_text('{"id":"a"}\n{"id":"b"}\n{"id":"c"}\n')
+
+    monkeypatch.setattr(helpers, "DHARMA_STATE", dharma_dir)
+    result = build_status_text()
+    assert "Archive entries: 3" in result
+
+
+def test_build_status_text_ecosystem_info(tmp_path, monkeypatch):
+    """If manifest exists, should show ecosystem alive count."""
+    import dharma_swarm.tui_helpers as helpers
+
+    manifest = {
+        "ecosystem": {
+            "path1": {"exists": True},
+            "path2": {"exists": True},
+            "path3": {"exists": False},
+        }
+    }
+    manifest_path = tmp_path / ".dharma_manifest.json"
+    manifest_path.write_text(json.dumps(manifest))
+
+    monkeypatch.setattr(helpers, "HOME", tmp_path)
+    result = build_status_text()
+    assert "Ecosystem: 2/3 alive" in result
+
+
+def test_build_status_text_no_state_dir(tmp_path, monkeypatch):
+    """With empty state dir, should still produce header and source count."""
+    import dharma_swarm.tui_helpers as helpers
+
+    empty_dharma = tmp_path / ".dharma_nonexistent"
+    monkeypatch.setattr(helpers, "DHARMA_STATE", empty_dharma)
+    result = build_status_text()
+    assert "DGC System Status" in result

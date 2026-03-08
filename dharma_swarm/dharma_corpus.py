@@ -130,11 +130,14 @@ class DharmaCorpus:
                 stripped = line.strip()
                 if not stripped:
                     continue
-                data = json.loads(stripped)
-                claim = Claim(**data)
-                self._claims[claim.id] = claim
-                # Keep counter in sync with highest existing ID
-                self._update_counter_from_id(claim.id)
+                try:
+                    data = json.loads(stripped)
+                    claim = Claim(**data)
+                    self._claims[claim.id] = claim
+                    # Keep counter in sync with highest existing ID
+                    self._update_counter_from_id(claim.id)
+                except (json.JSONDecodeError, ValueError, KeyError):
+                    continue
 
     def _update_counter_from_id(self, claim_id: str) -> None:
         """Parse DC-YYYY-NNNN and advance internal counter if needed."""

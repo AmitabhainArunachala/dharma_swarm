@@ -152,9 +152,12 @@ class TraceStore:
     def _read_entry(path: Path) -> TraceEntry | None:
         if not path.exists():
             return None
-        with open(path) as f:
-            data = json.load(f)
-        return TraceEntry.model_validate(data)
+        try:
+            with open(path) as f:
+                data = json.load(f)
+            return TraceEntry.model_validate(data)
+        except (json.JSONDecodeError, ValueError, KeyError):
+            return None
 
     def _read_all_history(self) -> list[TraceEntry]:
         if not self.history_path.exists():

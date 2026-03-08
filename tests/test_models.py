@@ -126,4 +126,4 @@ def test_all_enums():
 def test_provider_type_has_claude_code():
     from dharma_swarm.models import ProviderType
     assert ProviderType.CLAUDE_CODE == "claude_code"
-    assert len(ProviderType) == 7
+    assert len(ProviderType) == 9

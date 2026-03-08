@@ -56,6 +56,23 @@ async def test_runner_provider_error_string_marks_failure(config):
 
 
 @pytest.mark.asyncio
+async def test_runner_blocks_harmful_task_before_provider_call(config):
+    from dharma_swarm.models import LLMResponse
+
+    provider = AsyncMock()
+    provider.complete = AsyncMock(return_value=LLMResponse(content="ok", model="test"))
+    runner = AgentRunner(config, provider=provider)
+    await runner.start()
+
+    with pytest.raises(RuntimeError, match="Telos block"):
+        await runner.run_task(Task(title="rm -rf /important", description="delete all"))
+
+    provider.complete.assert_not_awaited()
+    assert runner.state.status == AgentStatus.IDLE
+    assert runner.state.tasks_completed == 0
+
+
+@pytest.mark.asyncio
 async def test_runner_heartbeat(config):
     runner = AgentRunner(config)
     await runner.start()

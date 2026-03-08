@@ -2,6 +2,8 @@
 
 import pytest
 
+import dharma_swarm.task_board as task_board_mod
+from dharma_swarm.models import GateCheckResult, GateDecision
 from dharma_swarm.models import TaskPriority, TaskStatus
 from dharma_swarm.task_board import TaskBoard, TaskBoardError
 
@@ -144,3 +146,26 @@ async def test_stats(board):
     assert stats["pending"] == 1
     assert stats["assigned"] == 1
     assert stats["total"] == 2
+
+
+@pytest.mark.asyncio
+async def test_complete_transition_block_raises(board, monkeypatch):
+    class _Outcome:
+        def __init__(self):
+            self.result = GateCheckResult(
+                decision=GateDecision.BLOCK,
+                reason="forced block for test",
+                gate_results={},
+            )
+
+    monkeypatch.setattr(
+        task_board_mod,
+        "check_with_reflective_reroute",
+        lambda **_: _Outcome(),
+    )
+
+    task = await board.create("Blocked completion")
+    task = await board.assign(task.id, "agent")
+    task = await board.start(task.id)
+    with pytest.raises(TaskBoardError, match="Telos blocked transition"):
+        await board.complete(task.id, result="done")

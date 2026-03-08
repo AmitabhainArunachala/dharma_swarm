@@ -1,37 +1,34 @@
 {
-  "generated_utc": "2026-03-08T14:46:58Z",
-  "snapshot_dir_name": "20260308T144655Z",
-  "snapshot_path": "/Users/dhyana/dharma_swarm/docs/merge/snapshots/2026-03-08/20260308T144655Z",
+  "generated_utc": "2026-03-08T23:34:52Z",
+  "snapshot_dir_name": "20260308T233449Z",
+  "snapshot_path": "/Users/dhyana/dharma_swarm/docs/merge/snapshots/2026-03-08/20260308T233449Z",
   "profile": "workspace_auto",
-  "strict_core": true,
-  "require_tracked": true,
+  "strict_core": false,
+  "require_tracked": false,
   "git": {
     "ok": true,
     "branch_line": "## split/2026-03-08",
     "branch": "split/2026-03-08",
-    "head": "807779213dfc6d88c17d09453434df713c489953",
+    "head": "5a37a32ed2a6e12cc09a118196f81437efbd6c2a",
     "counts": {
-      "staged": 14,
-      "unstaged": 75,
-      "untracked": 123,
+      "staged": 11,
+      "unstaged": 74,
+      "untracked": 106,
       "deleted": 7,
-      "total_dirty": 212
+      "total_dirty": 191
     },
     "staged_files": [
-      "dharma_swarm/integrations/data_flywheel.py",
-      "dharma_swarm/integrations/nvidia_rag.py",
-      "docs/NVIDIA_INFRA_SELF_HEAL.md",
-      "scripts/allout_autopilot.py",
-      "scripts/caffeine_until_jst.sh",
-      "scripts/compounding_ledger.py",
-      "scripts/start_allout_tmux.sh",
-      "scripts/status_allout_tmux.sh",
-      "scripts/wire_nvidia_remote.sh",
-      "tests/test_allout_integration.py",
-      "tests/test_compounding_ledger.py",
-      "tests/test_integrations_data_flywheel.py",
-      "tests/test_integrations_nvidia_rag.py",
-      "tests/tui/test_app_plan_mode.py"
+      "docs/merge/CANONICAL_STATE.md",
+      "docs/merge/FACTS.json",
+      "docs/merge/MERGE_LEDGER.md",
+      "docs/merge/README.md",
+      "docs/merge/imports/.gitignore",
+      "docs/merge/imports/LATEST_LEGACY_IMPORT.json",
+      "docs/merge/imports/LATEST_LEGACY_IMPORT.md",
+      "scripts/import_legacy_archive.py",
+      "scripts/merge_loop.sh",
+      "scripts/merge_snapshot.py",
+      "tests/test_import_legacy_archive.py"
     ],
     "remote_lines": [
       "origin\thttps://github.com/shakti-saraswati/dharma_swarm.git (fetch)",
@@ -105,11 +102,20 @@
       "path": "/Users/dhyana/DHARMIC_GODEL_CLAW",
       "exists": true,
       "archive_jsonl": "/Users/dhyana/DHARMIC_GODEL_CLAW/src/dgm/archive.jsonl",
-      "archive_entries": 822
+      "archive_entries": 831
     },
     "dgc_core": {
       "path": "/Users/dhyana/dgc-core",
       "exists": true
     }
+  },
+  "legacy_import": {
+    "predictor_path": "/Users/dhyana/.dharma/evolution/predictor_data.jsonl",
+    "predictor_lines": 809,
+    "state_path": "/Users/dhyana/.dharma/evolution/legacy_import_state.json",
+    "state_exists": true,
+    "imported_total": 786,
+    "latest_report_json": "/Users/dhyana/dharma_swarm/docs/merge/imports/LATEST_LEGACY_IMPORT.json",
+    "latest_imported_now": 8
   }
 }

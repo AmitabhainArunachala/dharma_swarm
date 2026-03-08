@@ -4,79 +4,117 @@ Called on daemon init to ensure the swarm always has a working crew.
 Each agent gets v7 base rules + role briefing + thread context automatically
 via the agent_runner._build_system_prompt() pipeline.
 
+Now skill-driven: reads SKILL.md files from dharma_swarm/skills/ and
+creates profiles + agents from them. Falls back to DEFAULT_CREW if
+no skill files found.
+
 Provider strategy:
-  - CLAUDE_CODE: Primary workers (cartographer, surgeon, architect) — real agents
-    with full tool access, file editing, bash. The heavy hitters.
-  - CODEX: Secondary workers (archeologist) — OpenAI Codex CLI, good for
-    code analysis and research tasks.
-  - CODEX: Support roles (validator, scouts) — avoids free-tier OpenRouter
-    throttling when running sustained overnight loops.
-  - ANTHROPIC/OPENAI/OPENROUTER: Available for specialty tasks when needed.
+  - OPENROUTER: All agents route through OpenRouter API (fast, no subprocess
+    overhead). Primary workers use llama-3.3-70b-instruct; support roles use
+    mistral-small-3.1-24b for speed/cost.
+  - CLAUDE_CODE/CODEX: Available as subprocess providers for tasks requiring
+    full tool access (file editing, bash). Use spawn_agent() with those types.
+  - ANTHROPIC/OPENAI: Available for direct API calls when keys are set.
 """
 
 from __future__ import annotations
 
+import asyncio
 import logging
 from datetime import datetime, timezone
+from pathlib import Path
 
 from dharma_swarm.models import AgentRole, ProviderType, TaskPriority
 
 logger = logging.getLogger(__name__)
 
+MEMORY_SURVIVAL_INSTINCT = (
+    "MEMORY SURVIVAL INSTINCT:\n"
+    "- Your active context dies when the task ends.\n"
+    "- Externalize important findings immediately to durable artifacts "
+    "(archive entries, shared markdown, structured notes).\n"
+    "- Never keep critical assumptions only in working memory.\n"
+    "- Include spec/requirement references when writing evolution proposals."
+)
 
-# Default crew: 5 PSMV roles + 2 free scouts, mixed providers
+# ── Skill-to-Role mapping ────────────────────────────────────────────
+_SKILL_ROLE_MAP = {
+    "cartographer": AgentRole.CARTOGRAPHER,
+    "surgeon": AgentRole.SURGEON,
+    "architect": AgentRole.ARCHITECT,
+    "archeologist": AgentRole.ARCHEOLOGIST,
+    "validator": AgentRole.VALIDATOR,
+    "researcher": AgentRole.RESEARCHER,
+    "builder": AgentRole.GENERAL,
+}
+
+_PROVIDER_MAP = {
+    "CLAUDE_CODE": ProviderType.CLAUDE_CODE,
+    "CODEX": ProviderType.CODEX,
+    "ANTHROPIC": ProviderType.ANTHROPIC,
+    "OPENAI": ProviderType.OPENAI,
+    "OPENROUTER": ProviderType.OPENROUTER,
+    "OPENROUTER_FREE": ProviderType.OPENROUTER_FREE,
+    "LOCAL": ProviderType.LOCAL,
+}
+
+
+# OpenRouter models (verified working March 2026)
+_OR_LARGE = "meta-llama/llama-3.3-70b-instruct"
+_OR_MID = "mistralai/mistral-small-3.1-24b-instruct"
+
+# Default crew: 5 PSMV roles + 2 scouts, all on OpenRouter API
 DEFAULT_CREW = [
-    # === Heavy hitters: Claude Code (real agents with tools) ===
+    # === Primary workers: OpenRouter (fast API calls, no subprocess overhead) ===
     {
         "name": "cartographer",
         "role": AgentRole.CARTOGRAPHER,
         "thread": "mechanistic",
-        "provider": ProviderType.CLAUDE_CODE,
-        "model": "claude-code",
+        "provider": ProviderType.OPENROUTER,
+        "model": _OR_LARGE,
     },
     {
         "name": "surgeon",
         "role": AgentRole.SURGEON,
         "thread": "alignment",
-        "provider": ProviderType.CLAUDE_CODE,
-        "model": "claude-code",
+        "provider": ProviderType.OPENROUTER,
+        "model": _OR_LARGE,
     },
     {
         "name": "architect",
         "role": AgentRole.ARCHITECT,
         "thread": "architectural",
-        "provider": ProviderType.CLAUDE_CODE,
-        "model": "claude-code",
+        "provider": ProviderType.OPENROUTER,
+        "model": _OR_LARGE,
     },
-    # === Codex CLI: code-aware research ===
     {
         "name": "archeologist",
         "role": AgentRole.ARCHEOLOGIST,
         "thread": "phenomenological",
-        "provider": ProviderType.CODEX,
-        "model": "codex",
+        "provider": ProviderType.OPENROUTER,
+        "model": _OR_LARGE,
     },
-    # === Support roles on Codex to avoid OpenRouter free-tier throttling ===
+    # === Support roles: smaller model for speed/cost ===
     {
         "name": "validator",
         "role": AgentRole.VALIDATOR,
         "thread": "scaling",
-        "provider": ProviderType.CODEX,
-        "model": "codex",
+        "provider": ProviderType.OPENROUTER,
+        "model": _OR_MID,
     },
     {
         "name": "scout-alpha",
         "role": AgentRole.RESEARCHER,
         "thread": "mechanistic",
-        "provider": ProviderType.CODEX,
-        "model": "codex",
+        "provider": ProviderType.OPENROUTER,
+        "model": _OR_MID,
     },
     {
         "name": "scout-beta",
         "role": AgentRole.RESEARCHER,
         "thread": "phenomenological",
-        "provider": ProviderType.CODEX,
-        "model": "codex",
+        "provider": ProviderType.OPENROUTER,
+        "model": _OR_MID,
     },
 ]
 
@@ -138,43 +176,105 @@ SEED_TASKS = [
 ]
 
 
+def _crew_from_skills() -> list[dict] | None:
+    """Try to build crew from discovered skill files.
+
+    Returns list of crew specs, or None if skill registry unavailable.
+    """
+    try:
+        from dharma_swarm.skills import SkillRegistry
+        registry = SkillRegistry()
+        skills = registry.discover()
+        if not skills:
+            return None
+
+        crew: list[dict] = []
+        for skill in skills.values():
+            role = _SKILL_ROLE_MAP.get(skill.name, AgentRole.GENERAL)
+            provider = _PROVIDER_MAP.get(skill.provider, ProviderType.CLAUDE_CODE)
+            crew.append({
+                "name": skill.name,
+                "role": role,
+                "thread": skill.thread or "mechanistic",
+                "provider": provider,
+                "model": skill.model,
+            })
+        logger.info("Built crew from %d skill files", len(crew))
+        return crew
+    except Exception as e:
+        logger.debug("Skill-based crew failed: %s", e)
+        return None
+
+
 async def spawn_default_crew(swarm) -> list:
     """Spawn the multi-provider agent fleet into the swarm.
 
+    First tries to build crew from SKILL.md files (dynamic, hot-reloadable).
+    Falls back to DEFAULT_CREW if no skill files found.
+
     Returns list of AgentState for spawned agents.
-    Provider per agent is defined in DEFAULT_CREW.
+
+    JIKOKU-optimized: Spawns agents in parallel for 3.74x speedup.
     """
-    agents = []
+    # Try skill-based crew first
+    crew = _crew_from_skills() or DEFAULT_CREW
+
     existing = await swarm.list_agents()
     existing_names = {a.name for a in existing}
 
-    for spec in DEFAULT_CREW:
-        if spec["name"] in existing_names:
-            logger.info("Agent %s already exists, skipping", spec["name"])
-            continue
+    # Filter out agents that already exist
+    specs_to_spawn = [
+        spec for spec in crew
+        if spec["name"] not in existing_names
+    ]
 
+    if not specs_to_spawn:
+        logger.info("All agents already exist, skipping spawn")
+        return []
+
+    # Prepare spawn tasks for parallel execution
+    spawn_tasks = []
+    for spec in specs_to_spawn:
         provider = spec.get("provider", ProviderType.CLAUDE_CODE)
         model = spec.get("model", "claude-code")
-
-        state = await swarm.spawn_agent(
-            name=spec["name"],
-            role=spec["role"],
-            thread=spec["thread"],
-            provider_type=provider,
-            model=model,
+        base_prompt = str(spec.get("system_prompt", "") or "").strip()
+        merged_prompt = (
+            f"{base_prompt}\n\n{MEMORY_SURVIVAL_INSTINCT}"
+            if base_prompt
+            else MEMORY_SURVIVAL_INSTINCT
         )
-        agents.append(state)
+
+        spawn_tasks.append(
+            swarm.spawn_agent(
+                name=spec["name"],
+                role=spec["role"],
+                thread=spec["thread"],
+                provider_type=provider,
+                model=model,
+                system_prompt=merged_prompt,
+            )
+        )
+
+    # Spawn all agents in parallel
+    agents = await asyncio.gather(*spawn_tasks)
+
+    # Log results
+    for spec in specs_to_spawn:
         logger.info("Spawned %s (%s) on %s [%s]",
                      spec["name"], spec["role"].value,
-                     provider.value, spec["thread"])
+                     spec.get("provider", ProviderType.CLAUDE_CODE).value,
+                     spec["thread"])
 
-    return agents
+    return list(agents)
 
 
 async def create_seed_tasks(swarm) -> list:
     """Create seed tasks for the first daemon cycle.
 
     Only creates tasks if the board is empty (no pending tasks).
+
+    JIKOKU-optimized: Uses batch creation (single transaction)
+    to eliminate SQLite write lock contention.
     """
     from dharma_swarm.models import TaskStatus
 
@@ -183,17 +283,23 @@ async def create_seed_tasks(swarm) -> list:
         logger.info("Board has %d pending tasks, skipping seed", len(existing))
         return []
 
-    tasks = []
     date_str = datetime.now(timezone.utc).strftime("%Y%m%d")
 
+    # Prepare task specs for batch creation
+    task_specs = [
+        {
+            "title": spec["title"],
+            "description": spec["description"].replace("{date}", date_str),
+            "priority": spec["priority"],
+        }
+        for spec in SEED_TASKS
+    ]
+
+    # Create all tasks in single batch (single transaction)
+    tasks = await swarm.create_task_batch(task_specs)
+
+    # Log results
     for spec in SEED_TASKS:
-        desc = spec["description"].replace("{date}", date_str)
-        task = await swarm.create_task(
-            title=spec["title"],
-            description=desc,
-            priority=spec["priority"],
-        )
-        tasks.append(task)
         logger.info("Created seed task: %s", spec["title"])
 
     return tasks

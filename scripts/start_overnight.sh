@@ -11,6 +11,15 @@ STOP_FILE="$STATE/STOP_OVERNIGHT"
 mkdir -p "$LOG_DIR"
 rm -f "$STOP_FILE"
 
+# --- Mission preflight (fail-closed) ---
+MISSION_PREFLIGHT="${MISSION_PREFLIGHT:-1}"
+if [[ "${MISSION_PREFLIGHT}" == "1" ]]; then
+  (cd "$ROOT" && scripts/mission_preflight.sh) || {
+    echo "[start_overnight] Preflight failed — launch aborted." >&2
+    exit 1
+  }
+fi
+
 if [[ -f "$PID_FILE" ]]; then
   OLD_PID="$(cat "$PID_FILE" 2>/dev/null || true)"
   if [[ -n "${OLD_PID:-}" ]] && kill -0 "$OLD_PID" 2>/dev/null; then

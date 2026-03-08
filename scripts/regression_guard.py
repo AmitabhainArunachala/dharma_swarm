@@ -11,7 +11,7 @@ import sys
 from datetime import datetime
 from pathlib import Path
 
-BASELINE = 203
+BASELINE = 1731
 STATE_FILE = Path.home() / ".dharma" / "test_baseline.json"
 DHARMA_SWARM = Path.home() / "dharma_swarm"
 

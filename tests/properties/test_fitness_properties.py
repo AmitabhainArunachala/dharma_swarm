@@ -98,6 +98,7 @@ if ARCHIVE_AVAILABLE:
             dharmic_alignment=1.0,
             performance=1.0,
             utilization=1.0,
+            economic_value=1.0,  # Added in Phase 1
             elegance=1.0,
             efficiency=1.0,
             safety=1.0
@@ -114,6 +115,7 @@ if ARCHIVE_AVAILABLE:
             dharmic_alignment=0.0,
             performance=0.0,
             utilization=0.0,
+            economic_value=0.0,  # Added in Phase 1
             elegance=0.0,
             efficiency=0.0,
             safety=0.0

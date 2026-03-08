@@ -120,3 +120,39 @@ async def test_stats(mem):
     stats = await mem.stats()
     assert stats["session"] >= 1
     assert "immediate" in stats
+
+
+# -- Regression: double init_db() must not leak connections ---------------
+
+@pytest.mark.asyncio
+async def test_double_init_db_no_error(tmp_path):
+    """Calling init_db() twice must not raise and must leave a usable DB."""
+    m = StrangeLoopMemory(tmp_path / "double_init.db")
+    await m.init_db()
+    await m.init_db()  # second call — was leaking the first connection
+
+    # DB should still be usable after double init
+    entry = await m.remember("still works", layer=MemoryLayer.SESSION)
+    assert entry.content == "still works"
+
+    recalled = await m.recall(layer=MemoryLayer.SESSION, limit=5)
+    assert len(recalled) == 1
+
+    await m.close()
+
+
+# -- Regression: async context manager support ----------------------------
+
+@pytest.mark.asyncio
+async def test_async_context_manager(tmp_path):
+    """StrangeLoopMemory supports async with and cleans up on exit."""
+    db_file = tmp_path / "ctx_mgr.db"
+
+    async with StrangeLoopMemory(db_file) as m:
+        assert m._db is not None
+        await m.remember("inside context", layer=MemoryLayer.SESSION)
+        recalled = await m.recall(layer=MemoryLayer.SESSION, limit=5)
+        assert len(recalled) == 1
+
+    # After exiting the context manager, connection should be None
+    assert m._db is None

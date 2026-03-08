@@ -94,11 +94,20 @@ class StrangeLoopMemory:
 
     async def init_db(self) -> None:
         """Create the memories table and indexes."""
+        if self._db is not None:
+            await self._db.close()
         self.db_path.parent.mkdir(parents=True, exist_ok=True)
         self._db = await aiosqlite.connect(str(self.db_path))
         self._db.row_factory = aiosqlite.Row
         await self._db.executescript(_SCHEMA)
         await self._db.commit()
+
+    async def __aenter__(self) -> StrangeLoopMemory:
+        await self.init_db()
+        return self
+
+    async def __aexit__(self, *exc: object) -> None:
+        await self.close()
 
     async def close(self) -> None:
         """Close the database connection."""

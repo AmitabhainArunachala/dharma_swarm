@@ -1,0 +1,22 @@
+{
+  "generated_utc": "2026-03-08T23:29:40Z",
+  "source_archive": "/Users/dhyana/DHARMIC_GODEL_CLAW/src/dgm/archive.jsonl",
+  "predictor_path": "/Users/dhyana/.dharma/evolution/predictor_data.jsonl",
+  "state_path": "/Users/dhyana/.dharma/evolution/legacy_import_state.json",
+  "source_total": 830,
+  "eligible_total": 786,
+  "imported_now": 8,
+  "skipped_known": 778,
+  "skipped_status": 44,
+  "status_distribution": {
+    "applied": 543,
+    "approved": 3,
+    "rejected": 240
+  },
+  "top_components": [
+    [
+      "broken.py",
+      8
+    ]
+  ]
+}

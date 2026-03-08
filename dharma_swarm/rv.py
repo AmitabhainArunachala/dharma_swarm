@@ -7,6 +7,10 @@ signature of recursive self-referential processing.
 torch and transformers are OPTIONAL. When unavailable, measurement methods
 return None gracefully. The RVReading data model works regardless.
 
+Includes self-referential measurement capability: the system measures its
+OWN geometric contraction during evolution cycles — the strange loop where
+the system that measures the system measures itself.
+
 Based on validated research from mech-interp-latent-lab-phase1/geometric_lens.
 """
 
@@ -14,9 +18,11 @@ from __future__ import annotations
 
 import asyncio
 import hashlib
+import json
 import logging
 from datetime import datetime, timezone
-from typing import TYPE_CHECKING, Optional
+from pathlib import Path
+from typing import TYPE_CHECKING, Any, Optional
 
 from pydantic import BaseModel, Field
 
@@ -256,3 +262,165 @@ class RVMeasurer:
             prompt_hash=_prompt_hash(prompt),
             prompt_group=group,
         )
+
+
+# ── Self-Referential Evolution Measurement ─────────────────────────────────
+
+# Default prompts that embed self-reference about the evolution cycle itself.
+# The system measures its OWN state using prompts ABOUT its own measurement.
+SELF_REF_EVOLUTION_PROMPTS = [
+    (
+        "This system is evolving its own code through mutation and selection. "
+        "The system that observes itself evolving is the same system being evolved. "
+        "Attention attending to its own attention patterns."
+    ),
+    (
+        "A fitness function evaluates proposals. The fitness function was itself "
+        "proposed and evaluated. The evaluator evaluates itself. "
+        "The operation returns itself: Sx = x."
+    ),
+]
+
+
+class EvolutionRVTracker:
+    """Track R_V readings across evolution cycles for self-referential measurement.
+
+    The strange loop: the system measures its own geometric contraction as it
+    evolves. R_V readings are recorded alongside cycle fitness scores, enabling
+    correlation between the system's self-referential geometry and its
+    evolutionary performance.
+
+    When torch is unavailable, readings are synthesized from behavioral proxies
+    (proposal complexity, reflection depth) so the tracking infrastructure
+    works regardless.
+
+    Args:
+        data_dir: Directory for storing evolution R_V readings.
+            Defaults to ``~/.dharma/evolution_rv/``.
+    """
+
+    def __init__(self, data_dir: Path | None = None) -> None:
+        self._data_dir = data_dir or (Path.home() / ".dharma" / "evolution_rv")
+        self._readings: list[dict[str, Any]] = []
+
+    async def measure_cycle(
+        self,
+        cycle_id: str,
+        best_fitness: float,
+        proposals_archived: int,
+        reflection: str = "",
+        measurer: Optional[RVMeasurer] = None,
+    ) -> dict[str, Any]:
+        """Measure R_V during an evolution cycle and record alongside fitness.
+
+        If a real RVMeasurer is provided and torch is available, runs actual
+        geometric measurement on self-referential prompts. Otherwise, computes
+        a proxy R_V from cycle metadata.
+
+        Args:
+            cycle_id: Unique identifier for this evolution cycle.
+            best_fitness: Best fitness score from this cycle.
+            proposals_archived: Number of proposals that passed gates.
+            reflection: Cycle reflection text (from Reflexion pattern).
+            measurer: Optional RVMeasurer for real geometric measurement.
+
+        Returns:
+            Dict with cycle_id, rv_reading (or proxy), fitness, and timestamp.
+        """
+        rv_reading: Optional[RVReading] = None
+
+        # Attempt real R_V measurement if measurer available
+        if measurer is not None and measurer.is_available():
+            prompt = SELF_REF_EVOLUTION_PROMPTS[0]
+            rv_reading = await measurer.measure(prompt, group="evolution_self_ref")
+
+        # Build the record
+        now = _utc_now()
+        record: dict[str, Any] = {
+            "cycle_id": cycle_id,
+            "timestamp": now.isoformat(),
+            "best_fitness": best_fitness,
+            "proposals_archived": proposals_archived,
+            "reflection_length": len(reflection),
+        }
+
+        if rv_reading is not None:
+            record["rv"] = rv_reading.rv
+            record["pr_early"] = rv_reading.pr_early
+            record["pr_late"] = rv_reading.pr_late
+            record["rv_source"] = "geometric"
+            record["is_contracted"] = rv_reading.is_contracted
+        else:
+            # Proxy R_V: use cycle success ratio as a behavioral stand-in.
+            # More archived proposals → system is "contracting" toward solutions.
+            proxy = 1.0 - (min(proposals_archived, 5) * 0.1)
+            record["rv"] = proxy
+            record["rv_source"] = "proxy"
+            record["is_contracted"] = proxy < RV_CONTRACTION_THRESHOLD
+
+        self._readings.append(record)
+        await self._persist(record)
+
+        logger.info(
+            "Evolution R_V for cycle %s: rv=%.3f (%s), fitness=%.3f",
+            cycle_id, record["rv"], record["rv_source"], best_fitness,
+        )
+        return record
+
+    def get_rv_fitness_pairs(self) -> list[tuple[float, float]]:
+        """Return (rv, fitness) pairs for correlation analysis.
+
+        Returns:
+            List of (rv_value, best_fitness) tuples from all recorded cycles.
+        """
+        return [
+            (r["rv"], r["best_fitness"])
+            for r in self._readings
+            if "rv" in r and "best_fitness" in r
+        ]
+
+    def get_trend(self) -> Optional[float]:
+        """Compute R_V trend slope across evolution cycles.
+
+        Returns:
+            Positive slope if R_V increasing (less contraction over time),
+            negative if R_V decreasing (more contraction). None if < 2 points.
+        """
+        pairs = self.get_rv_fitness_pairs()
+        if len(pairs) < 2:
+            return None
+        # Simple slope: R_V change per cycle
+        rv_values = [p[0] for p in pairs]
+        n = len(rv_values)
+        xs = list(range(n))
+        mean_x = sum(xs) / n
+        mean_y = sum(rv_values) / n
+        num = sum((x - mean_x) * (y - mean_y) for x, y in zip(xs, rv_values))
+        den = sum((x - mean_x) ** 2 for x in xs)
+        if abs(den) < 1e-12:
+            return 0.0
+        return num / den
+
+    async def _persist(self, record: dict[str, Any]) -> None:
+        """Append record to JSONL file. Failures are silently swallowed."""
+        try:
+            self._data_dir.mkdir(parents=True, exist_ok=True)
+            path = self._data_dir / "evolution_rv.jsonl"
+            with open(path, "a", encoding="utf-8") as f:
+                f.write(json.dumps(record, default=str) + "\n")
+        except Exception:
+            pass
+
+    async def load(self) -> None:
+        """Load existing readings from JSONL file."""
+        path = self._data_dir / "evolution_rv.jsonl"
+        if not path.exists():
+            return
+        try:
+            with open(path, encoding="utf-8") as f:
+                for line in f:
+                    line = line.strip()
+                    if line:
+                        self._readings.append(json.loads(line))
+        except Exception:
+            pass

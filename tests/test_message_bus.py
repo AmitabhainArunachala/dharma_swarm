@@ -105,3 +105,42 @@ async def test_get_stats(bus):
     stats = await bus.get_stats()
     assert stats["total_messages"] == 2
     assert stats["unread_messages"] == 2
+
+
+# -- Regression: reply() TOCTOU fix — Row must be read inside connection --
+
+@pytest.mark.asyncio
+async def test_reply_toctou_regression(bus):
+    """Regression: reply() was constructing the Message from a Row object
+    after the connection context had closed (TOCTOU). The fix moves Message
+    construction inside the connection block. Verify reply returns a valid
+    ID and the reply message carries correct data from the original."""
+    original = Message(
+        from_agent="sender", to_agent="responder",
+        body="original question", subject="Important Topic",
+    )
+    await bus.send(original)
+
+    reply_id = await bus.reply(original.id, from_agent="responder", body="the answer")
+
+    # reply_id must be a non-empty string (proves Message was built correctly)
+    assert isinstance(reply_id, str)
+    assert len(reply_id) > 0
+
+    # The reply should be deliverable to the original sender
+    replies = await bus.receive("sender")
+    assert len(replies) == 1
+    reply_msg = replies[0]
+    assert reply_msg.id == reply_id
+    assert reply_msg.from_agent == "responder"
+    assert reply_msg.to_agent == "sender"
+    assert reply_msg.body == "the answer"
+    assert reply_msg.subject == "Re: Important Topic"
+    assert reply_msg.reply_to == original.id
+
+
+@pytest.mark.asyncio
+async def test_reply_nonexistent_raises(bus):
+    """Regression: reply() to a non-existent message must raise ValueError."""
+    with pytest.raises(ValueError, match="not found"):
+        await bus.reply("totally_fake_id", from_agent="x", body="orphan reply")

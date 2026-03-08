@@ -258,6 +258,107 @@ def run(
     _run(_run_loop())
 
 
+# --- Ledger ---
+
+ledger_app = typer.Typer(help="Orchestrator ledger commands")
+app.add_typer(ledger_app, name="ledger")
+
+
+@ledger_app.command("tail")
+def ledger_tail(
+    n: int = typer.Option(20, help="Number of recent events to show"),
+    session: Optional[str] = typer.Option(None, help="Session ID (default: most recent)"),
+    kind: str = typer.Option("all", help="Which ledger: task, progress, or all"),
+):
+    """Show recent events from the orchestrator ledgers."""
+    import json as _json
+    from pathlib import Path as _Path
+
+    ledger_base = _Path.home() / ".dharma" / "ledgers"
+    if not ledger_base.exists():
+        console.print("[dim]No ledgers found at ~/.dharma/ledgers/[/dim]")
+        return
+
+    sessions = sorted(ledger_base.iterdir(), key=lambda p: p.stat().st_mtime, reverse=True)
+    if not sessions:
+        console.print("[dim]No sessions found.[/dim]")
+        return
+
+    if session:
+        target = ledger_base / session
+        if not target.exists():
+            console.print(f"[red]Session {session} not found.[/red]")
+            raise typer.Exit(1)
+    else:
+        target = sessions[0]
+
+    console.print(f"[cyan]Session: {target.name}[/cyan]")
+
+    def _tail_file(path: _Path, label: str) -> None:
+        if not path.exists():
+            return
+        lines = [l for l in path.read_text().splitlines() if l.strip()][-n:]
+        if not lines:
+            return
+        console.print(f"\n[bold]{label}[/bold] ({path.name})")
+        for line in lines:
+            try:
+                ev = _json.loads(line)
+                ts = ev.get("ts_utc", "")[:19]
+                event = ev.get("event", "?")
+                task_id = ev.get("task_id", "")[:8]
+                extra = ""
+                if "duration_sec" in ev:
+                    extra = f" ({ev['duration_sec']:.2f}s)"
+                if "failure_signature" in ev:
+                    extra = f" sig={ev['failure_signature'][:40]}"
+                console.print(f"  [dim]{ts}[/dim] [green]{event}[/green] {task_id}{extra}")
+            except Exception:
+                console.print(f"  {line[:120]}")
+
+    if kind in ("task", "all"):
+        _tail_file(target / "task_ledger.jsonl", "Task Ledger")
+    if kind in ("progress", "all"):
+        _tail_file(target / "progress_ledger.jsonl", "Progress Ledger")
+
+
+@ledger_app.command("sessions")
+def ledger_sessions(
+    n: int = typer.Option(10, help="Number of recent sessions to list"),
+):
+    """List recent orchestrator sessions."""
+    from pathlib import Path as _Path
+
+    ledger_base = _Path.home() / ".dharma" / "ledgers"
+    if not ledger_base.exists():
+        console.print("[dim]No ledgers directory found.[/dim]")
+        return
+
+    sessions = sorted(ledger_base.iterdir(), key=lambda p: p.stat().st_mtime, reverse=True)[:n]
+    if not sessions:
+        console.print("[dim]No sessions found.[/dim]")
+        return
+
+    table = Table(title="Recent Sessions")
+    table.add_column("Session ID", style="cyan")
+    table.add_column("Task Events", style="green")
+    table.add_column("Progress Events", style="yellow")
+    table.add_column("Age")
+
+    import time as _time
+    now = _time.time()
+    for sess in sessions:
+        task_f = sess / "task_ledger.jsonl"
+        prog_f = sess / "progress_ledger.jsonl"
+        task_n = sum(1 for _ in task_f.open()) if task_f.exists() else 0
+        prog_n = sum(1 for _ in prog_f.open()) if prog_f.exists() else 0
+        age_h = (now - sess.stat().st_mtime) / 3600
+        age_str = f"{age_h:.1f}h ago" if age_h < 48 else f"{age_h/24:.0f}d ago"
+        table.add_row(sess.name, str(task_n), str(prog_n), age_str)
+
+    console.print(table)
+
+
 # --- Evolution ---
 
 evolve_app = typer.Typer(help="Evolution engine commands")
@@ -309,10 +410,89 @@ def evolve_trend(
             table.add_column("Timestamp", style="dim")
             table.add_column("Fitness", style="green")
             for ts, fitness in trend:
-                console.print(f"  {ts[:19]}  {fitness:.3f}")
+                table.add_row(ts[:19], f"{fitness:.3f}")
+            console.print(table)
         await swarm.shutdown()
 
     _run(_trend())
+
+
+@app.command()
+def evolve_verify(
+    state_dir: str = typer.Option(".dharma", help="State directory"),
+):
+    """Verify cryptographic integrity of evolution archive (Merkle chain)."""
+    async def _verify():
+        swarm = await _get_swarm(state_dir)
+        if swarm._engine is None:
+            console.print("[red]Darwin engine not initialized. Run 'dgc evolve propose' first.[/red]")
+            await swarm.shutdown()
+            return
+
+        valid, msg = swarm._engine.archive.verify_merkle_chain()
+        if valid:
+            console.print(f"[green]{msg}[/green]")
+        else:
+            console.print(f"[red]✗ {msg}[/red]")
+        await swarm.shutdown()
+
+    _run(_verify())
+
+
+@app.command()
+def evolve_economic(
+    entry_id: Optional[str] = typer.Option(None, help="Entry ID (or latest if not provided)"),
+    state_dir: str = typer.Option(".dharma", help="State directory"),
+):
+    """Show economic impact report for an evolution entry."""
+    async def _economic():
+        swarm = await _get_swarm(state_dir)
+        if swarm._engine is None:
+            console.print("[red]Darwin engine not initialized. Run 'dgc evolve propose' first.[/red]")
+            await swarm.shutdown()
+            return
+
+        await swarm._engine.archive.load()
+
+        # Get entry
+        if entry_id:
+            entry = await swarm._engine.archive.get_entry(entry_id)
+        else:
+            latest = await swarm._engine.archive.get_latest(n=1)
+            entry = latest[0] if latest else None
+
+        if not entry:
+            console.print("[red]Entry not found[/red]")
+            await swarm.shutdown()
+            return
+
+        # Get fitness score
+        fitness = entry.fitness
+        if fitness.economic_value == 0.5:
+            console.print(f"[yellow]Entry {entry.id[:8]} has no economic metrics (neutral score)[/yellow]")
+        else:
+            # Try to extract economic metrics from test results
+            # (In a real implementation, we'd store EconomicMetrics in test_results)
+            console.print(f"\n[bold]Economic Impact: Entry {entry.id[:8]}[/bold]")
+            console.print(f"Component: {entry.component}")
+            console.print(f"Description: {entry.description}")
+            console.print(f"\n[bold]Fitness Score[/bold]")
+            console.print(f"Economic Value: {fitness.economic_value:.3f}")
+            console.print(f"Overall Weighted: {fitness.weighted():.3f}")
+
+            # If we have test_results with economic metrics, display them
+            if "economic_metrics" in entry.test_results:
+                metrics = entry.test_results["economic_metrics"]
+                console.print(f"\n[bold]Detailed Metrics[/bold]")
+                console.print(f"Annual Value: ${metrics.get('annual_value_usd', 0):.2f}/year")
+                console.print(f"API Cost Saved: ${metrics.get('api_cost_saved', 0):.4f}/call")
+                console.print(f"Time Saved: {metrics.get('time_saved_ms', 0):.0f}ms/call")
+                console.print(f"Throughput Gain: {metrics.get('throughput_gain_pct', 0):.1f}%")
+                console.print(f"Maintenance Cost: ${metrics.get('maintenance_cost', 0):.2f}/year")
+
+        await swarm.shutdown()
+
+    _run(_economic())
 
 
 # --- Health ---
@@ -346,6 +526,79 @@ def health(
         await swarm.shutdown()
 
     _run(_health())
+
+
+@app.command()
+def sprint(
+    output: Optional[str] = typer.Option(None, help="Output file path (default: ~/.dharma/shared/SPRINT_8H_<date>.md)"),
+    local: bool = typer.Option(False, "--local", help="Generate locally without LLM call (offline mode)"),
+    test_summary: str = typer.Option("", help="Test results to include"),
+    prev_todo: str = typer.Option("", help="Previous TODO items to include"),
+):
+    """Generate today's adaptive 8-hour sprint prompt from live system state.
+
+    Reads morning brief, dream seeds, sprint handoff, witness logs, and
+    allout cycle history to generate a fresh GRANULAR/META/QUALITY sprint.
+    """
+    from datetime import date as _date
+    from dharma_swarm.master_prompt_engineer import (
+        gather_system_state,
+        generate_evolved_prompt,
+        generate_local_prompt,
+        _days_to_colm,
+        _SHARED_DIR,
+    )
+
+    today = _date.today().strftime("%Y%m%d")
+    out_path = Path(output) if output else _SHARED_DIR / f"SPRINT_8H_{today}.md"
+
+    async def _sprint():
+        system_state = gather_system_state()
+        colm_days, colm_paper = _days_to_colm()
+
+        live = system_state.get("live_signals", {})
+        console.print(f"[cyan]Sprint generator — {today}[/cyan]")
+        console.print(f"  COLM abstract: {colm_days} days | paper: {colm_paper} days")
+        console.print(f"  Morning brief: {'yes' if 'no morning' not in live.get('morning_brief','') else 'none'}")
+        console.print(f"  Dream seeds: {'yes' if 'no dream' not in live.get('dream_seeds','') else 'none'}")
+        console.print(f"  Sprint handoff: {'yes' if 'no handoff' not in live.get('sprint_handoff','') else 'none'}")
+
+        if local:
+            prompt_text = generate_local_prompt(
+                test_summary=test_summary,
+                prev_todo=prev_todo,
+                colm_days=colm_days,
+            )
+            mode = "local"
+        else:
+            try:
+                prompt_text = await generate_evolved_prompt(
+                    system_state=system_state,
+                    test_summary=test_summary,
+                    prev_todo=prev_todo,
+                    colm_days=colm_days,
+                )
+                mode = "LLM"
+            except RuntimeError as e:
+                console.print(f"[yellow]LLM unavailable ({e}), falling back to local mode[/yellow]")
+                prompt_text = generate_local_prompt(
+                    test_summary=test_summary,
+                    prev_todo=prev_todo,
+                    colm_days=colm_days,
+                )
+                mode = "local (fallback)"
+
+        out_path.parent.mkdir(parents=True, exist_ok=True)
+        out_path.write_text(
+            f"# 8-HOUR SPRINT — {today}\n"
+            f"**Generated**: {_date.today().isoformat()} | **Mode**: {mode}\n"
+            f"**COLM**: {colm_days} days (abstract) / {colm_paper} days (paper)\n\n"
+            + prompt_text
+        )
+        console.print(f"[green]Sprint written to: {out_path}[/green]")
+        console.print(f"  Length: {len(prompt_text):,} chars | Mode: {mode}")
+
+    _run(_sprint())
 
 
 if __name__ == "__main__":

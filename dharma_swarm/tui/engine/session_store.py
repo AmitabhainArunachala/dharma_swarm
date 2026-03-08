@@ -24,6 +24,20 @@ def _new_session_id() -> str:
     return f"dgc-{now:%Y%m%d}-{now:%H%M%S}-{secrets.token_hex(2)}"
 
 
+def _normalize_cwd(cwd: str) -> str:
+    """Return a stable absolute cwd string for path-equivalent matching."""
+    try:
+        return str(Path(cwd).expanduser().resolve())
+    except Exception:
+        return str(Path(cwd).expanduser())
+
+
+def _cwd_matches(meta_cwd: str, expected_cwd: str) -> bool:
+    if meta_cwd == expected_cwd:
+        return True
+    return _normalize_cwd(meta_cwd) == _normalize_cwd(expected_cwd)
+
+
 class SessionStore:
     """Stores canonical event transcripts and session metadata."""
 
@@ -186,3 +200,47 @@ class SessionStore:
                 break
         index["sessions"] = sessions
         self._write_index(index)
+
+    def list_sessions(self) -> list[dict[str, Any]]:
+        """Return index sessions in stored order (oldest -> newest append order)."""
+        index = self._read_index()
+        sessions = index.get("sessions", [])
+        return sessions if isinstance(sessions, list) else []
+
+    def latest_session(
+        self,
+        *,
+        cwd: str | None = None,
+        provider_id: str | None = None,
+        min_turns: int | None = None,
+    ) -> dict[str, Any] | None:
+        """Return the most recently updated session meta matching filters."""
+        latest_meta: dict[str, Any] | None = None
+        latest_key = ""
+        for entry in self.list_sessions():
+            sid = str(entry.get("session_id", "")).strip()
+            if not sid:
+                continue
+            try:
+                meta = self.load_meta(sid)
+            except Exception:
+                continue
+
+            if cwd and not _cwd_matches(str(meta.get("cwd", "")), cwd):
+                continue
+            if provider_id and str(meta.get("provider_id", "")) != provider_id:
+                continue
+            if min_turns is not None:
+                turns = int(meta.get("total_turns", 0) or 0)
+                if turns < int(min_turns):
+                    continue
+
+            updated = str(meta.get("updated_at", ""))
+            created = str(meta.get("created_at", ""))
+            key = updated or created
+            if not key:
+                continue
+            if key > latest_key:
+                latest_key = key
+                latest_meta = meta
+        return latest_meta

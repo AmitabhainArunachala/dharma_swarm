@@ -35,6 +35,38 @@ async def _get_applied(archive: EvolutionArchive) -> list[ArchiveEntry]:
     return await archive.get_best(n=999_999)
 
 
+async def _count_children(archive: EvolutionArchive) -> dict[str, int]:
+    """Count direct children for each entry in the archive.
+
+    Returns:
+        Mapping from entry_id to number of direct children.
+    """
+    counts: dict[str, int] = {}
+    for entry in archive._entries.values():
+        if entry.parent_id:
+            counts[entry.parent_id] = counts.get(entry.parent_id, 0) + 1
+    return counts
+
+
+def _novelty_weight(entry: ArchiveEntry, child_counts: dict[str, int]) -> float:
+    """Compute DGM-style novelty-adjusted weight.
+
+    Formula: fitness * (1.0 / (1.0 + n_children))
+    Balances exploitation (fitness) with exploration (fewer children = higher weight).
+
+    Args:
+        entry: The archive entry to weight.
+        child_counts: Mapping from entry_id to child count.
+
+    Returns:
+        Novelty-adjusted weight (always >= 0).
+    """
+    fitness = entry.fitness.weighted()
+    n_children = child_counts.get(entry.id, 0)
+    novelty = 1.0 / (1.0 + n_children)
+    return fitness * novelty
+
+
 # ---------------------------------------------------------------------------
 # Selection strategies
 # ---------------------------------------------------------------------------
@@ -62,7 +94,8 @@ async def tournament_select(
 
     pool_size = min(k, len(candidates))
     pool = random.sample(candidates, pool_size)
-    return max(pool, key=lambda e: e.fitness.weighted())
+    child_counts = await _count_children(archive)
+    return max(pool, key=lambda e: _novelty_weight(e, child_counts))
 
 
 async def roulette_select(
@@ -84,7 +117,8 @@ async def roulette_select(
     if not candidates:
         return None
 
-    weights = [e.fitness.weighted() for e in candidates]
+    child_counts = await _count_children(archive)
+    weights = [_novelty_weight(e, child_counts) for e in candidates]
     total = sum(weights)
 
     if total == 0.0:
@@ -114,7 +148,8 @@ async def rank_select(
         return None
 
     # Sort ascending so rank 1 = worst, rank N = best.
-    sorted_asc = sorted(candidates, key=lambda e: e.fitness.weighted())
+    child_counts = await _count_children(archive)
+    sorted_asc = sorted(candidates, key=lambda e: _novelty_weight(e, child_counts))
     rank_weights = list(range(1, len(sorted_asc) + 1))
 
     return random.choices(sorted_asc, weights=rank_weights, k=1)[0]

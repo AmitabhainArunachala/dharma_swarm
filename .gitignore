@@ -9,3 +9,20 @@ build/
 .dharma/
 *.db
 .venv/
+
+# Local runtime state (machine-specific)
+.claude-flow/
+.claude/
+.swarm/
+.dharma_baseline/
+.dharma_test/
+.mcp.json
+.worktrees/
+
+# Temporary analysis outputs
+*.bak
+.DS_Store
+.hypothesis/
+*.patch
+reports/forensic_*
+docs/merge/imports/legacy_import_*

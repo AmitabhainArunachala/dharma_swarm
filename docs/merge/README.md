@@ -16,6 +16,18 @@ cd ~/dharma_swarm
 python3 scripts/merge_snapshot.py --strict-core --require-tracked
 ```
 
+## Import Legacy Archive (One-Time Bootstrap)
+
+```bash
+cd ~/dharma_swarm
+python3 scripts/import_legacy_archive.py
+```
+
+Reports land in:
+
+- `docs/merge/imports/LATEST_LEGACY_IMPORT.md`
+- `docs/merge/imports/LATEST_LEGACY_IMPORT.json`
+
 ## Overnight Loop
 
 ```bash

@@ -119,6 +119,7 @@ class StreamOutput(RichLog):
 
     def handle_tool_result(self, result: ToolResult) -> None:
         """Render a tool execution result with success/error styling."""
+        self._flush_buffer()
         style = "red" if result.is_error else "green"
         icon = "\u2717" if result.is_error else "\u2713"
         duration = f" ({result.duration_ms}ms)" if result.duration_ms else ""
@@ -135,6 +136,7 @@ class StreamOutput(RichLog):
 
     def handle_tool_progress(self, progress: ToolProgress) -> None:
         """Render a tool progress heartbeat."""
+        self._flush_buffer()
         self.write(
             Text(
                 f"  \u23f3 {progress.tool_name} running... "
@@ -145,6 +147,7 @@ class StreamOutput(RichLog):
 
     def handle_result(self, result: ResultMessage) -> None:
         """Render session completion summary."""
+        self._flush_buffer()
         if result.is_error:
             error_detail = (
                 ", ".join(result.errors) if result.errors else "unknown"
@@ -200,6 +203,7 @@ class StreamOutput(RichLog):
         )
 
     def handle_tool_call_complete(self, tool_call: CanonicalToolCallComplete) -> None:
+        self._flush_buffer()
         args = tool_call.arguments
         if len(args) > 300:
             args = args[:300] + "..."
@@ -216,6 +220,7 @@ class StreamOutput(RichLog):
         )
 
     def handle_tool_result_canonical(self, result: CanonicalToolResult) -> None:
+        self._flush_buffer()
         style = "red" if result.is_error else "green"
         icon = "\u2717" if result.is_error else "\u2713"
         duration = f" ({result.duration_ms}ms)" if result.duration_ms else ""
@@ -231,6 +236,7 @@ class StreamOutput(RichLog):
         )
 
     def handle_tool_progress_canonical(self, progress: CanonicalToolProgress) -> None:
+        self._flush_buffer()
         self.write(
             Text(
                 f"  \u23f3 {progress.tool_name} running... "
@@ -240,6 +246,7 @@ class StreamOutput(RichLog):
         )
 
     def handle_usage_report(self, usage: CanonicalUsageReport) -> None:
+        self._flush_buffer()
         if usage.total_cost_usd is None:
             return
         self.write(

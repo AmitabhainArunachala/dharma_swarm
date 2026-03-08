@@ -4,6 +4,8 @@ import pytest
 
 from dharma_swarm.archive import ArchiveEntry, EvolutionArchive, FitnessScore
 from dharma_swarm.selector import (
+    _count_children,
+    _novelty_weight,
     elite_select,
     rank_select,
     roulette_select,
@@ -310,3 +312,109 @@ async def test_select_parent_proposed_only(proposed_only_archive):
     for strat in ("tournament", "roulette", "rank", "elite"):
         result = await select_parent(proposed_only_archive, strategy=strat)
         assert result is None, f"Strategy {strat!r} should skip proposed"
+
+
+# ---------------------------------------------------------------------------
+# Novelty bonus (Change 0A tests)
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_novelty_bonus_reduces_overexploited_parent(tmp_path):
+    """TEST 1: Entry B (fewer children) selected more often than pure fitness predicts."""
+    path = tmp_path / "novelty_archive.jsonl"
+    a = EvolutionArchive(path=path)
+    await a.load()
+
+    # A: high fitness (0.8), 10 children -> novelty_weight = 0.24 * (1/11) ≈ 0.022
+    entry_a = ArchiveEntry(
+        fitness=FitnessScore(correctness=0.8),
+        status="applied",
+        component="a.py",
+    )
+    await a.add_entry(entry_a)
+
+    # Create 10 children of A
+    for i in range(10):
+        child = ArchiveEntry(
+            parent_id=entry_a.id,
+            fitness=FitnessScore(correctness=0.1),
+            status="applied",
+            component=f"child{i}.py",
+        )
+        await a.add_entry(child)
+
+    # B: medium fitness (0.6), 0 children -> novelty_weight = 0.18 * 1.0 = 0.18
+    entry_b = ArchiveEntry(
+        fitness=FitnessScore(correctness=0.6),
+        status="applied",
+        component="b.py",
+    )
+    await a.add_entry(entry_b)
+
+    # C: high fitness (0.7), 2 children
+    entry_c = ArchiveEntry(
+        fitness=FitnessScore(correctness=0.7),
+        status="applied",
+        component="c.py",
+    )
+    await a.add_entry(entry_c)
+    for i in range(2):
+        child = ArchiveEntry(
+            parent_id=entry_c.id,
+            fitness=FitnessScore(correctness=0.1),
+            status="applied",
+            component=f"c_child{i}.py",
+        )
+        await a.add_entry(child)
+
+    # Run tournament 100 times with k=3
+    wins: dict[str, int] = {}
+    for _ in range(100):
+        winner = await tournament_select(a, k=3)
+        assert winner is not None
+        wins[winner.id] = wins.get(winner.id, 0) + 1
+
+    # B should win >20% despite lower fitness (novelty compensates)
+    b_wins = wins.get(entry_b.id, 0)
+    a_wins = wins.get(entry_a.id, 0)
+    # A has 10 children, so its novelty weight is very low
+    # B should be selected more than A
+    assert b_wins > a_wins, (
+        f"B (0 children) should beat A (10 children): B={b_wins}, A={a_wins}"
+    )
+
+
+def test_novelty_weight_formula():
+    """Verify the novelty weight formula: fitness * (1 / (1 + n_children))."""
+    entry = ArchiveEntry(
+        fitness=FitnessScore(correctness=0.8, safety=1.0),
+        status="applied",
+    )
+    # No children
+    assert _novelty_weight(entry, {}) == entry.fitness.weighted()
+
+    # 1 child
+    w1 = _novelty_weight(entry, {entry.id: 1})
+    assert w1 == pytest.approx(entry.fitness.weighted() * 0.5)
+
+    # 9 children
+    w9 = _novelty_weight(entry, {entry.id: 9})
+    assert w9 == pytest.approx(entry.fitness.weighted() * 0.1)
+
+
+@pytest.mark.asyncio
+async def test_count_children(tmp_path):
+    """_count_children correctly counts direct offspring."""
+    path = tmp_path / "count_archive.jsonl"
+    a = EvolutionArchive(path=path)
+    await a.load()
+
+    parent = ArchiveEntry(status="applied")
+    await a.add_entry(parent)
+    for _ in range(3):
+        child = ArchiveEntry(parent_id=parent.id, status="applied")
+        await a.add_entry(child)
+
+    counts = await _count_children(a)
+    assert counts[parent.id] == 3

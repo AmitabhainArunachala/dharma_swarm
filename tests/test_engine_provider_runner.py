@@ -67,3 +67,52 @@ async def test_provider_runner_normalizes_adapter_exception():
     assert event.event_type == EventType.TASK_FAILED
     assert event.source_agent == "bad"
     assert "adapter boom" in event.payload["error"]
+
+
+# ---------------------------------------------------------------------------
+# ProviderRunResult.ok edge cases
+# ---------------------------------------------------------------------------
+
+
+from dharma_swarm.engine.provider_runner import ProviderRunResult
+
+
+def test_run_result_ok_with_no_events():
+    result = ProviderRunResult()
+    assert result.ok is True
+
+
+def test_run_result_ok_with_only_non_failure_events():
+    result = ProviderRunResult(events=[
+        CanonicalEvent(event_type=EventType.TASK_ASSIGNED, source_agent="a"),
+        CanonicalEvent(event_type=EventType.TASK_COMPLETED, source_agent="a"),
+    ])
+    assert result.ok is True
+
+
+def test_run_result_not_ok_when_failure_present():
+    result = ProviderRunResult(events=[
+        CanonicalEvent(event_type=EventType.TASK_ASSIGNED, source_agent="a"),
+        CanonicalEvent(event_type=EventType.TASK_FAILED, source_agent="a"),
+    ])
+    assert result.ok is False
+
+
+# ---------------------------------------------------------------------------
+# Session ID preservation
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_provider_runner_preserves_session_id():
+    runner = ProviderRunner(_GoodAdapter())
+    result = await runner.run(CompletionRequest(prompt="test", session_id="my-sess"))
+    for event in result.events:
+        assert event.session_id == "my-sess"
+
+
+@pytest.mark.asyncio
+async def test_provider_runner_failure_preserves_session_id():
+    runner = ProviderRunner(_BadAdapter())
+    result = await runner.run(CompletionRequest(prompt="boom", session_id="fail-sess"))
+    assert result.events[0].session_id == "fail-sess"

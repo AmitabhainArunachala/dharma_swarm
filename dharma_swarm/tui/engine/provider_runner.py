@@ -69,6 +69,15 @@ class ProviderRunner(Widget):
     def is_running(self) -> bool:
         return self._active_task
 
+    def mark_session_end(self) -> None:
+        """Release UI lock once semantic session end is observed.
+
+        Claude can emit a logical SessionEnd event before the subprocess fully
+        exits. Unlocking here prevents the UI from appearing stuck in a
+        completed-but-still-finalizing state.
+        """
+        self._active_task = False
+
     @work(thread=True, exclusive=True, group="provider", exit_on_error=False)
     def run_provider(
         self,
@@ -212,5 +221,13 @@ class ProviderRunner(Widget):
         """Cancel active provider stream and worker."""
         self._cancel_requested = True
         self.workers.cancel_group(self, "provider")
-        with contextlib.suppress(Exception):
-            asyncio.run(self._adapter.cancel())
+        # Schedule adapter cancel on the running event loop (Textual main loop).
+        # asyncio.run() cannot be used here — it would raise RuntimeError
+        # because Textual's event loop is already running.
+        try:
+            loop = asyncio.get_running_loop()
+            loop.create_task(self._adapter.cancel())
+        except RuntimeError:
+            # No running loop (e.g. called from a plain thread) — fallback
+            with contextlib.suppress(Exception):
+                asyncio.run(self._adapter.cancel())

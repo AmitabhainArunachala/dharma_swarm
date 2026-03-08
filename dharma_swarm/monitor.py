@@ -1,11 +1,12 @@
 """System monitor -- swarm health tracking and anomaly detection.
 
-Watches traces, detects drift, tracks agent health, and provides
-actionable health summaries.  No LLM calls -- pure statistics on traces.
+Watches traces, detects drift, tracks agent health, provides
+actionable health summaries, and performs pop-quiz liveness checks.
 """
 
 from __future__ import annotations
 
+import logging
 import statistics
 from collections import Counter, defaultdict
 from datetime import datetime, timedelta, timezone
@@ -16,6 +17,8 @@ from pydantic import BaseModel, Field
 
 from dharma_swarm.models import _new_id, _utc_now
 from dharma_swarm.traces import TraceEntry, TraceStore
+
+logger = logging.getLogger(__name__)
 
 
 # ---------------------------------------------------------------------------
@@ -313,8 +316,8 @@ class SystemMonitor:
         # --- agent_silent ---
         # Agents seen before the window but not in it
         window_agents = {e.agent for e in window}
-        pre_window = [e for e in all_entries if e not in window]
-        pre_window_agents = {e.agent for e in pre_window}
+        window_ids = {e.id for e in window}
+        pre_window_agents = {e.agent for e in all_entries if e.id not in window_ids}
         silent_agents = pre_window_agents - window_agents
         for agent_name in sorted(silent_agents):
             anomalies.append(
@@ -357,7 +360,7 @@ class SystemMonitor:
             [e for e in all_entries if e.fitness is not None],
             key=lambda e: e.timestamp,
         )
-        fitness_values = [e.fitness.weighted() for e in chrono_with_fitness]
+        fitness_values = [e.fitness.weighted() for e in chrono_with_fitness if e.fitness is not None]
         if len(fitness_values) >= 3:
             last_3 = fitness_values[-3:]
             if last_3[0] > last_3[1] > last_3[2]:
@@ -373,6 +376,118 @@ class SystemMonitor:
                 )
 
         return anomalies
+
+    async def liveness_check(
+        self,
+        agent_name: str,
+        provider: Any,
+        challenge: str = "What is your current role and task?",
+        expected_keywords: list[str] | None = None,
+    ) -> dict[str, Any]:
+        """Inject a test prompt into a running agent to verify behavioral correctness.
+
+        Implements the Devin pop-quiz pattern: periodically verify that agents
+        are operating correctly by comparing responses against expected baselines.
+
+        Args:
+            agent_name: Name of the agent being tested.
+            provider: LLM provider with async ``complete()`` method.
+            challenge: The test prompt to send.
+            expected_keywords: Words that should appear in the response.
+                Defaults to [agent_name].
+
+        Returns:
+            Dict with 'passed' (bool), 'response' (str), 'keywords_found' (list),
+            and 'agent_name'.
+        """
+        if provider is None:
+            return {
+                "passed": False,
+                "agent_name": agent_name,
+                "response": "",
+                "reason": "No provider attached",
+            }
+
+        from dharma_swarm.models import LLMRequest
+
+        request = LLMRequest(
+            model="mock",
+            messages=[{"role": "user", "content": f"POP QUIZ: {challenge}"}],
+            system=f"You are agent '{agent_name}'. Answer the question briefly and accurately.",
+            max_tokens=200,
+            temperature=0.0,
+        )
+
+        try:
+            response = await provider.complete(request)
+            content = response.content.lower()
+
+            expected = expected_keywords or [agent_name.lower()]
+            found = [kw for kw in expected if kw.lower() in content]
+            passed = len(found) > 0
+
+            # Log the check as a trace
+            await self._store.log_entry(
+                TraceEntry(
+                    agent=agent_name,
+                    action="liveness_check",
+                    state="passed" if passed else "failed",
+                    metadata={
+                        "challenge": challenge,
+                        "keywords_found": found,
+                        "keywords_expected": expected,
+                        "response_preview": response.content[:200],
+                    },
+                )
+            )
+
+            logger.info(
+                "Liveness check for %s: %s (found %d/%d keywords)",
+                agent_name,
+                "PASSED" if passed else "FAILED",
+                len(found),
+                len(expected),
+            )
+
+            return {
+                "passed": passed,
+                "agent_name": agent_name,
+                "response": response.content[:200],
+                "keywords_found": found,
+                "keywords_expected": expected,
+            }
+        except Exception as exc:
+            logger.warning("Liveness check failed for %s: %s", agent_name, exc)
+            return {
+                "passed": False,
+                "agent_name": agent_name,
+                "response": "",
+                "reason": str(exc),
+            }
+
+    async def batch_liveness_check(
+        self,
+        agents: dict[str, Any],
+        challenge: str = "What is your current role and task?",
+    ) -> list[dict[str, Any]]:
+        """Run liveness checks on multiple agents.
+
+        Args:
+            agents: Mapping of agent_name to provider instance.
+            challenge: The test prompt to send to each agent.
+
+        Returns:
+            List of liveness check results, one per agent.
+        """
+        results: list[dict[str, Any]] = []
+        for agent_name, provider in agents.items():
+            result = await self.liveness_check(
+                agent_name=agent_name,
+                provider=provider,
+                challenge=challenge,
+            )
+            results.append(result)
+        return results
 
     @staticmethod
     def bridge_summary(bridge: Any) -> dict:

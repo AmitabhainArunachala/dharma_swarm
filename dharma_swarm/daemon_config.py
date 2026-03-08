@@ -7,7 +7,7 @@ thread rotation, quality gates, circuit breakers, and human overrides.
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from datetime import datetime
+from datetime import datetime, timezone
 from pathlib import Path
 
 
@@ -19,15 +19,21 @@ class CircuitBreaker:
     fitness_downtrend: int = 0
     max_downtrend: int = 3
     paused_until: datetime | None = None
+    cooldown_seconds: float = 1800.0  # 30 min cooldown after tripping
 
     def record_failure(self) -> bool:
         """Record a failure. Returns True if circuit should break."""
         self.consecutive_failures += 1
-        return self.consecutive_failures >= self.max_failures
+        if self.consecutive_failures >= self.max_failures:
+            from datetime import timedelta
+            self.paused_until = datetime.now(timezone.utc) + timedelta(seconds=self.cooldown_seconds)
+            return True
+        return False
 
     def record_success(self) -> None:
         """Record success, reset failure count."""
         self.consecutive_failures = 0
+        self.paused_until = None
 
     def record_fitness(self, fitness: float, prev_fitness: float) -> bool:
         """Track fitness trend. Returns True if downtrending too long."""
@@ -39,8 +45,13 @@ class CircuitBreaker:
 
     @property
     def is_broken(self) -> bool:
-        if self.paused_until and datetime.now() < self.paused_until:
-            return True
+        if self.paused_until:
+            if datetime.now(timezone.utc) < self.paused_until:
+                return True
+            # Cooldown expired -- reset the breaker
+            self.consecutive_failures = 0
+            self.paused_until = None
+            return False
         return self.consecutive_failures >= self.max_failures
 
 

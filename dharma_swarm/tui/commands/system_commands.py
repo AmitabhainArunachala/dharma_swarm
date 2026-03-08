@@ -49,6 +49,16 @@ class SystemCommandHandler:
         self.internet_enabled: bool = True
         self._conversation: list[dict[str, str]] = []
         self._conversation_max_pairs: int = 12
+        self._mode: str = "N"
+
+    @property
+    def mode(self) -> str:
+        """Current UI mode marker (N/A/P/S) mirrored from the app."""
+        return self._mode
+
+    def set_mode(self, mode: str) -> None:
+        """Set current mode marker used by command status output."""
+        self._mode = mode if mode in {"N", "A", "P", "S"} else "N"
 
     def handle(self, raw: str) -> tuple[str, str | None]:
         """Handle a slash command.
@@ -61,7 +71,7 @@ class SystemCommandHandler:
             - output_text: Rich-markup string to display, or empty string.
             - action: None for immediate output, or a string signal:
               "clear", "cancel", "chat:new", "chat:continue",
-              "paste", "copy", "copylast",
+              "paste", "copy", "copylast", "mode:set:<N|A|P|S>",
               "async:<cmd>:<arg>" for threaded commands.
         """
         parts = raw.split(None, 1)
@@ -89,6 +99,8 @@ class SystemCommandHandler:
             return "", cmd
         elif cmd == "net":
             return self._handle_net(arg), None
+        elif cmd == "plan":
+            return self._handle_plan(arg)
         elif cmd == "thread":
             return self._handle_thread(arg), None
         elif cmd == "notes":
@@ -149,6 +161,7 @@ class SystemCommandHandler:
             "\n[bold cyan]--- Chat & Control ---[/bold cyan]\n"
             "  [cyan]/thread[/cyan] [name]   Show/set research thread\n"
             "  [cyan]/net[/cyan] [on|off]    Internet mode for Claude\n"
+            "  [cyan]/plan[/cyan] [on|off]   Enforce plan-first mode policy\n"
             "  [cyan]/chat[/cyan] [continue] Launch full Claude Code UI\n"
             "  [cyan]/cancel[/cyan]          Cancel active Claude run\n"
             "  [cyan]/reset[/cyan]           Reset conversation memory\n"
@@ -163,6 +176,31 @@ class SystemCommandHandler:
             "  [cyan]Shift+click[/cyan]     Select text for copy (terminal native)\n\n"
             "[dim]Plain text (no /) talks to Claude via stream-json.[/dim]"
         )
+
+    def _handle_plan(self, arg: str) -> tuple[str, str | None]:
+        """Enable/disable/status for hard Plan Mode."""
+        mode = arg.strip().lower()
+        if not mode or mode == "status":
+            on = self._mode == "P"
+            color = "blue" if on else "yellow"
+            state = "ON" if on else "OFF"
+            return (
+                f"Plan mode: [{color}]{state}[/{color}] "
+                "(use /plan on or /plan off)",
+                None,
+            )
+        if mode in {"on", "enable", "1", "true"}:
+            return (
+                "[blue]Plan mode enabled.[/blue] "
+                "Execution will wait for explicit approval.",
+                "mode:set:P",
+            )
+        if mode in {"off", "disable", "0", "false"}:
+            return (
+                "[yellow]Plan mode disabled.[/yellow] Returning to Normal mode.",
+                "mode:set:N",
+            )
+        return "[red]Usage: /plan [on|off|status][/red]", None
 
     def _handle_net(self, arg: str) -> str:
         mode = arg.strip().lower()

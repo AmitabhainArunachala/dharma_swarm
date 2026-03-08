@@ -10,11 +10,13 @@ Usage:
   dgc chat                      Launch native Claude Code interactive UI
   dgc dashboard                 Launch interactive DGC dashboard (TUI)
   dgc status                    System status overview
+  dgc mission-status            Mission-level readiness across core/accelerators
   dgc up [--background]         Start the daemon
   dgc down                      Stop the daemon
   dgc daemon-status             Show daemon state
   dgc pulse                     Run one heartbeat pulse
   dgc swarm [plan]              Run orchestrator (build/research/deploy/maintenance)
+  dgc stress [--profile max]    Run end-to-end max-capacity stress harness
   dgc swarm --status            Show orchestrator state
   dgc swarm live [N]            Persistent tmux swarm (N agents)
   dgc swarm overnight start [H] [--aggressive]
@@ -32,6 +34,8 @@ Usage:
   dgc task list [--status S]    List tasks
   dgc evolve propose COMP DESC  Run evolution pipeline
   dgc evolve trend [--component C]
+  dgc rag health|search|chat    NVIDIA RAG integration endpoints
+  dgc flywheel jobs|start|...   NVIDIA Data Flywheel job lifecycle
   dgc run [--interval N]        Run orchestration loop
   dgc setup                     Install dependencies
   dgc migrate                   Migrate old DGC memory
@@ -42,6 +46,7 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import inspect
 import json
 import os
 import signal
@@ -131,7 +136,8 @@ def cmd_status() -> None:
     today = datetime.now(timezone.utc).strftime("%Y-%m-%d")
     gate_log = DGC_CORE / "memory" / "witness" / f"{today}.jsonl"
     if gate_log.exists():
-        count = sum(1 for _ in open(gate_log))
+        with open(gate_log) as f:
+            count = sum(1 for _ in f)
         print(f"Gates today: {count} checks")
     else:
         print("Gates today: 0 checks")
@@ -162,6 +168,334 @@ def cmd_status() -> None:
         print(f"\nClaude Code: {result.stdout.strip()}")
     except Exception:
         print("\nClaude Code: not found")
+
+    print("\nMission spine: run `dgc mission-status` for full readiness lanes")
+
+
+def _read_openclaw_summary() -> dict[str, Any]:
+    """Best-effort OpenClaw summary from ~/.openclaw/openclaw.json."""
+    oc_path = HOME / ".openclaw" / "openclaw.json"
+    if not oc_path.exists():
+        return {"present": False}
+    try:
+        payload = json.loads(oc_path.read_text())
+    except Exception:
+        return {"present": True, "readable": False}
+
+    providers = []
+    models = payload.get("models", {})
+    if isinstance(models, dict):
+        prov = models.get("providers", {})
+        if isinstance(prov, dict):
+            providers = sorted(prov.keys())
+
+    agents_count = 0
+    agents = payload.get("agents", {})
+    if isinstance(agents, dict):
+        lst = agents.get("list", [])
+        if isinstance(lst, list):
+            agents_count = len(lst)
+
+    return {
+        "present": True,
+        "readable": True,
+        "agents_count": agents_count,
+        "providers": providers,
+    }
+
+
+def _tracked_paths(paths: list[str]) -> dict[str, bool]:
+    """Return path->tracked bool for files relative to DHARMA_SWARM."""
+    try:
+        proc = subprocess.run(
+            ["git", "-C", str(DHARMA_SWARM), "ls-files", *paths],
+            capture_output=True,
+            text=True,
+            timeout=5,
+            check=False,
+        )
+        tracked = {line.strip() for line in proc.stdout.splitlines() if line.strip()}
+    except Exception:
+        tracked = set()
+    return {p: (p in tracked) for p in paths}
+
+
+def _core_mission_checks() -> dict[str, bool]:
+    """Checks for core mission-critical intelligence wiring."""
+    checks: dict[str, bool] = {}
+    try:
+        from dharma_swarm import evolution as evo
+
+        checks["planner_executor"] = hasattr(evo, "EvolutionPlan")
+        checks["circuit_breaker"] = "circuit_breaker_limit" in inspect.signature(
+            evo.DarwinEngine.__init__
+        ).parameters
+        checks["traceability_fields"] = all(
+            field in getattr(evo.Proposal, "model_fields", {})
+            for field in ("spec_ref", "requirement_refs")
+        )
+    except Exception:
+        checks["planner_executor"] = False
+        checks["circuit_breaker"] = False
+        checks["traceability_fields"] = False
+
+    try:
+        from dharma_swarm.telos_gates import TelosGatekeeper
+
+        params = inspect.signature(TelosGatekeeper.check).parameters
+        checks["think_points"] = (
+            "think_phase" in params and "reflection" in params
+        )
+    except Exception:
+        checks["think_points"] = False
+
+    try:
+        from dharma_swarm import startup_crew as sc
+
+        checks["memory_survival_instinct"] = "MEMORY SURVIVAL INSTINCT" in str(
+            getattr(sc, "MEMORY_SURVIVAL_INSTINCT", "")
+        )
+    except Exception:
+        checks["memory_survival_instinct"] = False
+
+    try:
+        from dharma_swarm.tui import app as tui_app
+
+        checks["tui_plan_mode_contract"] = "EnterPlanMode" in str(
+            getattr(tui_app, "_PLAN_MODE_SYSTEM_PROMPT", "")
+        )
+    except Exception:
+        checks["tui_plan_mode_contract"] = False
+
+    return checks
+
+
+MISSION_AUTONOMY_PROFILES: dict[str, dict[str, Any]] = {
+    "readonly_audit": {
+        "strict_core": True,
+        "require_tracked": True,
+        "trust_mode": "external_strict",
+        "description": "Read-only verification lane with strict safety posture.",
+    },
+    "workspace_auto": {
+        "strict_core": True,
+        "require_tracked": True,
+        "trust_mode": "internal_yolo",
+        "description": "Default autonomous local workspace lane.",
+    },
+    "strict_external": {
+        "strict_core": True,
+        "require_tracked": True,
+        "trust_mode": "external_strict",
+        "description": "External-facing lane with strict trust mode.",
+    },
+    "yolo_local_container": {
+        "strict_core": True,
+        "require_tracked": True,
+        "trust_mode": "internal_yolo",
+        "description": "Fast lane intended for isolated local/container execution.",
+    },
+}
+
+
+def _resolve_mission_profile(
+    profile: str | None,
+) -> tuple[str, dict[str, Any]] | tuple[None, None]:
+    if not profile:
+        return None, None
+    key = profile.strip().lower()
+    cfg = MISSION_AUTONOMY_PROFILES.get(key)
+    if not cfg:
+        return None, None
+    return key, cfg
+
+
+def cmd_mission_status(
+    *,
+    as_json: bool = False,
+    strict_core: bool = False,
+    require_tracked: bool = False,
+    profile: str | None = None,
+) -> int:
+    """Mission-level readiness report across core + accelerator lanes.
+
+    Returns:
+        Process-style status code:
+        - 0: pass
+        - 2: strict core lane failure
+        - 3: tracked wiring requirement failure
+    """
+    profile_name, profile_cfg = _resolve_mission_profile(profile)
+    if profile and not profile_cfg:
+        valid = ", ".join(sorted(MISSION_AUTONOMY_PROFILES))
+        if as_json:
+            print(
+                json.dumps(
+                    {
+                        "exit_code": 4,
+                        "error": f"Unknown autonomy profile: {profile}",
+                        "valid_profiles": sorted(MISSION_AUTONOMY_PROFILES),
+                    },
+                    indent=2,
+                )
+            )
+        else:
+            print(f"Unknown autonomy profile: {profile}")
+            print(f"Valid profiles: {valid}")
+        return 4
+
+    if profile_cfg:
+        strict_core = strict_core or bool(profile_cfg.get("strict_core", False))
+        require_tracked = require_tracked or bool(
+            profile_cfg.get("require_tracked", False)
+        )
+
+    core = _core_mission_checks()
+    core_pass = sum(1 for v in core.values() if v)
+
+    tracked = _tracked_paths(
+        [
+            "dharma_swarm/integrations/nvidia_rag.py",
+            "dharma_swarm/integrations/data_flywheel.py",
+            "scripts/caffeine_until_jst.sh",
+            "scripts/allout_autopilot.py",
+            "docs/NVIDIA_INFRA_SELF_HEAL.md",
+            "tests/test_integrations_nvidia_rag.py",
+            "tests/test_integrations_data_flywheel.py",
+            "tests/tui/test_app_plan_mode.py",
+        ]
+    )
+    tracked_count = sum(1 for v in tracked.values() if v)
+    local_only = [path for path, ok in tracked.items() if not ok]
+
+    oc = _read_openclaw_summary()
+
+    async def _probe_accelerators() -> dict[str, str]:
+        from dharma_swarm.integrations import DataFlywheelClient, NvidiaRagClient
+
+        out: dict[str, str] = {}
+        rag = NvidiaRagClient()
+        fw = DataFlywheelClient()
+        for label, fn in (
+            ("rag_health", lambda: rag.health(service="rag")),
+            ("ingest_health", lambda: rag.health(service="ingest")),
+            ("flywheel_jobs", fw.list_jobs),
+        ):
+            try:
+                await fn()
+                out[label] = "PASS"
+            except Exception as exc:
+                out[label] = f"BLOCKED: {exc}"
+        return out
+
+    try:
+        accel = _run(_probe_accelerators())
+    except Exception as exc:
+        accel = {
+            "rag_health": f"BLOCKED: {exc}",
+            "ingest_health": f"BLOCKED: {exc}",
+            "flywheel_jobs": f"BLOCKED: {exc}",
+        }
+
+    core_ok = core_pass == len(core)
+    tracked_ok = tracked_count == len(tracked)
+
+    if strict_core and not core_ok:
+        exit_code = 2
+    elif require_tracked and not tracked_ok:
+        exit_code = 3
+    else:
+        exit_code = 0
+
+    report: dict[str, Any] = {
+        "vision": (
+            "open, self-evolving, evidence-grounded agent orchestrator "
+            "with durable memory, quality gates, and optional accelerator lanes"
+        ),
+        "core": {
+            "pass_count": core_pass,
+            "total": len(core),
+            "ok": core_ok,
+            "checks": core,
+        },
+        "autonomy_profile": {
+            "name": profile_name or "none",
+            "strict_core": strict_core,
+            "require_tracked": require_tracked,
+            "trust_mode": (
+                profile_cfg.get("trust_mode")
+                if profile_cfg
+                else os.getenv("DGC_TRUST_MODE", "internal_yolo")
+            ),
+            "description": (
+                profile_cfg.get("description")
+                if profile_cfg
+                else "No profile selected."
+            ),
+        },
+        "tracked_wiring": {
+            "tracked_count": tracked_count,
+            "total": len(tracked),
+            "ok": tracked_ok,
+            "local_only": local_only,
+        },
+        "openclaw": oc,
+        "accelerators": accel,
+        "exit_code": exit_code,
+    }
+
+    if as_json:
+        print(json.dumps(report, indent=2))
+        return exit_code
+
+    print("=== DGC MISSION STATUS ===")
+    print(f"Vision: {report['vision']}.")
+    ap = report["autonomy_profile"]
+    print(
+        "Autonomy profile: "
+        f"{ap['name']} "
+        f"(strict_core={int(ap['strict_core'])}, "
+        f"require_tracked={int(ap['require_tracked'])}, "
+        f"trust_mode={ap['trust_mode']})"
+    )
+    print(f"\nCore intelligence lane: {core_pass}/{len(core)} wired")
+    for key in sorted(core):
+        status = "PASS" if core[key] else "MISS"
+        print(f"  [{status}] {key}")
+
+    print(f"\nTracked wiring footprint: {tracked_count}/{len(tracked)} in git")
+    for path in local_only:
+        print(f"  [LOCAL-ONLY] {path}")
+
+    print("\nOpenClaw lane:")
+    if not oc.get("present"):
+        print("  [MISS] ~/.openclaw/openclaw.json not found")
+    elif not oc.get("readable", True):
+        print("  [MISS] openclaw.json exists but is unreadable")
+    else:
+        print(
+            "  [PASS] config present "
+            f"(agents={oc.get('agents_count', 0)}, providers={len(oc.get('providers', []))})"
+        )
+
+    print("\nAccelerator lane (optional):")
+    for key in ("rag_health", "ingest_health", "flywheel_jobs"):
+        val = accel.get(key, "BLOCKED")
+        print(f"  [{key}] {val}")
+
+    print("\nInterpretation:")
+    if core_ok:
+        print("  Core lane is wired. Mission can proceed without accelerator deps.")
+    else:
+        print("  Core lane has gaps. Fix misses before scaling autonomy.")
+    if not tracked_ok:
+        print("  Promote LOCAL-ONLY files into git to avoid drift between sessions.")
+    if strict_core and not core_ok:
+        print("  Strict core mode failed.")
+    if require_tracked and not tracked_ok:
+        print("  Required-tracked mode failed.")
+
+    return exit_code
 
 
 def cmd_context(domain: str = "all") -> None:
@@ -305,7 +639,12 @@ def cmd_down() -> None:
     """Stop the daemon."""
     pid_file = DGC_CORE / "daemon" / "dgc.pid"
     if pid_file.exists():
-        pid = int(pid_file.read_text().strip())
+        try:
+            pid = int(pid_file.read_text().strip())
+        except ValueError:
+            print("Corrupted PID file, removing")
+            pid_file.unlink()
+            return
         try:
             os.kill(pid, signal.SIGTERM)
             print(f"Sent SIGTERM to daemon (PID {pid})")
@@ -329,6 +668,26 @@ def cmd_daemon_status() -> None:
 
 def cmd_agni(command: str) -> None:
     """Run command on AGNI VPS."""
+    from dharma_swarm.telos_gates import check_with_reflective_reroute
+
+    gate = check_with_reflective_reroute(
+        action=f"agni:{command}",
+        content=command,
+        tool_name="dgc_cli_agni",
+        think_phase="before_complete",
+        reflection=(
+            "Remote command execution on AGNI. Validate blast radius, "
+            "rollback path, and least-privilege intent."
+        ),
+        max_reroutes=1,
+        requirement_refs=["agni:remote_exec"],
+    )
+    if gate.result.decision.value == "block":
+        print(f"TELOS BLOCK: {gate.result.reason}")
+        sys.exit(2)
+    if gate.attempts:
+        print(f"[witness] reflective reroute applied ({gate.attempts} attempts)")
+
     ssh_key = HOME / ".ssh" / "openclaw_do"
     result = subprocess.run(
         ["ssh", "-i", str(ssh_key), "-o", "ConnectTimeout=10",
@@ -524,6 +883,61 @@ def cmd_swarm(extra_args: list[str]) -> None:
         if a in ("build", "research", "maintenance", "deploy"):
             plan_name = a
     orchestrate_run(plan_name)
+
+
+def cmd_stress(
+    profile: str,
+    state_dir: str,
+    provider_mode: str,
+    agents: int,
+    tasks: int,
+    evolutions: int,
+    evolution_concurrency: int,
+    cli_rounds: int,
+    cli_concurrency: int,
+    orchestration_timeout_sec: int,
+    external_research: bool,
+    external_timeout_sec: int,
+) -> None:
+    """Run the max-capacity stress harness."""
+    harness = DHARMA_SWARM / "scripts" / "dgc_max_stress.py"
+    if not harness.exists():
+        print(f"Stress harness not found: {harness}")
+        raise SystemExit(2)
+
+    cmd = [
+        sys.executable,
+        str(harness),
+        "--profile",
+        profile,
+        "--state-dir",
+        state_dir,
+        "--provider-mode",
+        provider_mode,
+        "--agents",
+        str(agents),
+        "--tasks",
+        str(tasks),
+        "--evolutions",
+        str(evolutions),
+        "--evolution-concurrency",
+        str(evolution_concurrency),
+        "--cli-rounds",
+        str(cli_rounds),
+        "--cli-concurrency",
+        str(cli_concurrency),
+        "--orchestration-timeout-sec",
+        str(orchestration_timeout_sec),
+        "--external-timeout-sec",
+        str(external_timeout_sec),
+    ]
+    if external_research:
+        cmd.append("--external-research")
+
+    print("Running DGC max stress harness...")
+    proc = subprocess.run(cmd, cwd=str(DHARMA_SWARM))
+    if proc.returncode != 0:
+        raise SystemExit(proc.returncode)
 
 
 # ---------------------------------------------------------------------------
@@ -724,6 +1138,107 @@ def cmd_evolve_rollback(entry_id: str, reason: str = "Manual rollback") -> None:
     _run(_rollback())
 
 
+def cmd_evolve_auto(
+    files: list[str] | None, model: str, context: str
+) -> None:
+    """LLM-powered autonomous evolution cycle."""
+    async def _auto():
+        from pathlib import Path
+
+        swarm = await _get_swarm()
+        if swarm._engine is None:
+            print("Engine not initialized")
+            await swarm.shutdown()
+            return
+
+        # Default: core modules worth evolving
+        if files:
+            source_files = [Path(f) for f in files]
+        else:
+            src = Path.home() / "dharma_swarm" / "dharma_swarm"
+            source_files = [
+                src / "evolution.py",
+                src / "selector.py",
+                src / "archive.py",
+                src / "monitor.py",
+                src / "telos_gates.py",
+                src / "context.py",
+            ]
+
+        # Get the OpenRouter provider
+        provider = swarm._router.get_provider(
+            __import__("dharma_swarm.models", fromlist=["ProviderType"]).ProviderType.OPENROUTER
+        )
+
+        print(f"Auto-evolving {len(source_files)} files with {model}...")
+        for sf in source_files:
+            print(f"  {sf.name}")
+        print()
+
+        result = await swarm._engine.auto_evolve(
+            provider=provider,
+            source_files=source_files,
+            model=model,
+            context=context,
+        )
+
+        print(f"\n=== Auto-Evolution Results ===")
+        print(f"Proposals generated: {result.proposals_submitted}")
+        print(f"Passed gates:        {result.proposals_gated}")
+        print(f"Tested:              {result.proposals_tested}")
+        print(f"Archived:            {result.proposals_archived}")
+        print(f"Best fitness:        {result.best_fitness:.3f}")
+        print(f"Duration:            {result.duration_seconds:.1f}s")
+        if result.reflection:
+            print(f"Reflection:          {result.reflection[:200]}")
+        if result.lessons_learned:
+            print("Lessons:")
+            for lesson in result.lessons_learned:
+                print(f"  - {lesson}")
+        await swarm.shutdown()
+
+    _run(_auto())
+
+
+def cmd_evolve_daemon(
+    interval: float, threshold: float, model: str, cycles: int | None
+) -> None:
+    """Run continuous autonomous evolution daemon."""
+    async def _daemon():
+        swarm = await _get_swarm()
+        if swarm._engine is None:
+            print("Engine not initialized")
+            await swarm.shutdown()
+            return
+
+        from dharma_swarm.models import ProviderType
+
+        provider = swarm._router.get_provider(ProviderType.OPENROUTER)
+
+        print(f"Darwin daemon starting")
+        print(f"  Model:     {model}")
+        print(f"  Interval:  {interval:.0f}s ({interval/60:.0f}min)")
+        print(f"  Threshold: {threshold}")
+        print(f"  Cycles:    {'infinite' if cycles is None else cycles}")
+        print(f"  Ctrl+C to stop\n")
+
+        try:
+            await swarm._engine.daemon_loop(
+                think_provider=provider,
+                model=model,
+                interval=interval,
+                fitness_threshold=threshold,
+                max_cycles=cycles,
+            )
+        except KeyboardInterrupt:
+            pass
+        finally:
+            await swarm.shutdown()
+            print("\nDaemon stopped.")
+
+    _run(_daemon())
+
+
 def cmd_stigmergy(file_path: str | None = None) -> None:
     """Show stigmergy marks and hot paths."""
     async def _stig():
@@ -778,6 +1293,316 @@ def cmd_hum() -> None:
             print("Subconscious module not available")
         await swarm.shutdown()
     _run(_hum())
+
+
+def cmd_rag_health(service: str = "rag", check_dependencies: bool = True) -> None:
+    """Check NVIDIA RAG health."""
+
+    async def _health():
+        from dharma_swarm.integrations import NvidiaRagClient
+
+        client = NvidiaRagClient()
+        payload = await client.health(
+            service=service,
+            check_dependencies=check_dependencies,
+        )
+        print(json.dumps(payload, indent=2))
+
+    _run(_health())
+
+
+def cmd_rag_search(query: str, top_k: int = 5, collection: str | None = None) -> None:
+    """Query NVIDIA RAG search endpoint."""
+
+    async def _search():
+        from dharma_swarm.integrations import NvidiaRagClient
+
+        client = NvidiaRagClient()
+        payload = await client.search(
+            query=query,
+            top_k=top_k,
+            collection_name=collection,
+        )
+        print(json.dumps(payload, indent=2))
+
+    _run(_search())
+
+
+def cmd_rag_chat(prompt: str, model: str | None = None) -> None:
+    """Run grounded chat via NVIDIA RAG."""
+
+    async def _chat():
+        from dharma_swarm.integrations import NvidiaRagClient
+
+        client = NvidiaRagClient()
+        payload = await client.chat(prompt=prompt, model=model)
+        print(json.dumps(payload, indent=2))
+
+    _run(_chat())
+
+
+def cmd_flywheel_jobs() -> None:
+    """List Data Flywheel jobs."""
+
+    async def _jobs():
+        from dharma_swarm.integrations import DataFlywheelClient
+
+        client = DataFlywheelClient()
+        payload = await client.list_jobs()
+        print(json.dumps(payload, indent=2))
+
+    _run(_jobs())
+
+
+def cmd_flywheel_start(
+    workload_id: str,
+    client_id: str,
+    eval_size: int,
+    val_ratio: float,
+    min_total_records: int,
+    limit: int,
+) -> None:
+    """Start a Data Flywheel job."""
+
+    async def _start():
+        from dharma_swarm.integrations import DataFlywheelClient
+
+        client = DataFlywheelClient()
+        payload = await client.create_job(
+            workload_id=workload_id,
+            client_id=client_id,
+            data_split_config={
+                "eval_size": eval_size,
+                "val_ratio": val_ratio,
+                "min_total_records": min_total_records,
+                "limit": limit,
+            },
+        )
+        print(json.dumps(payload, indent=2))
+
+    _run(_start())
+
+
+def cmd_flywheel_get(job_id: str) -> None:
+    """Get Data Flywheel job details."""
+
+    async def _get():
+        from dharma_swarm.integrations import DataFlywheelClient
+
+        client = DataFlywheelClient()
+        payload = await client.get_job(job_id)
+        print(json.dumps(payload, indent=2))
+
+    _run(_get())
+
+
+def cmd_flywheel_cancel(job_id: str) -> None:
+    """Cancel Data Flywheel job."""
+
+    async def _cancel():
+        from dharma_swarm.integrations import DataFlywheelClient
+
+        client = DataFlywheelClient()
+        payload = await client.cancel_job(job_id)
+        print(json.dumps(payload, indent=2))
+
+    _run(_cancel())
+
+
+def cmd_flywheel_delete(job_id: str) -> None:
+    """Delete Data Flywheel job."""
+
+    async def _delete():
+        from dharma_swarm.integrations import DataFlywheelClient
+
+        client = DataFlywheelClient()
+        payload = await client.delete_job(job_id)
+        print(json.dumps(payload, indent=2))
+
+    _run(_delete())
+
+
+def cmd_flywheel_watch(job_id: str, poll_sec: float, timeout_sec: float) -> None:
+    """Wait until a Data Flywheel job reaches terminal state."""
+
+    async def _watch():
+        from dharma_swarm.integrations import DataFlywheelClient
+
+        client = DataFlywheelClient()
+        payload = await client.wait_for_terminal(
+            job_id,
+            poll_sec=poll_sec,
+            timeout_sec=timeout_sec,
+        )
+        print(json.dumps(payload, indent=2))
+
+    _run(_watch())
+
+
+# ---------------------------------------------------------------------------
+# v0.4.0: Oz-inspired commands
+# ---------------------------------------------------------------------------
+
+
+def cmd_skills() -> None:
+    """List all discovered skills."""
+    from dharma_swarm.skills import SkillRegistry
+    registry = SkillRegistry()
+    skills = registry.discover()
+    if not skills:
+        print("No skills discovered. Add .skill.md files to dharma_swarm/skills/")
+        return
+    print(f"Discovered {len(skills)} skills:\n")
+    for skill in sorted(skills.values(), key=lambda s: s.priority):
+        tags = ", ".join(skill.tags[:5]) if skill.tags else "none"
+        print(f"  {skill.name:<16} model={skill.model:<12} "
+              f"autonomy={skill.autonomy:<10} tags=[{tags}]")
+        if skill.description:
+            print(f"  {'':16} {skill.description[:80]}")
+
+
+def cmd_route(description: str) -> None:
+    """Route a task to the best skill."""
+    from dharma_swarm.skills import SkillRegistry
+    from dharma_swarm.intent_router import IntentRouter
+    registry = SkillRegistry()
+    registry.discover()
+    router = IntentRouter(registry=registry)
+    skill_name, intent = router.route(description)
+    print(f"Task: {description}")
+    print(f"  Skill:      {skill_name}")
+    print(f"  Confidence: {intent.confidence:.0%}")
+    print(f"  Complexity: {intent.complexity}")
+    print(f"  Risk:       {intent.risk_level}")
+    print(f"  Agents:     {intent.recommended_agents}")
+    if intent.parallel:
+        print(f"  Parallel:   yes")
+
+
+def cmd_orchestrate(description: str) -> None:
+    """Decompose a task and show the orchestration plan."""
+    from dharma_swarm.skills import SkillRegistry
+    from dharma_swarm.intent_router import IntentRouter
+    registry = SkillRegistry()
+    registry.discover()
+    router = IntentRouter(registry=registry)
+    result = router.decompose(description)
+    print(f"Task: {result.original}")
+    print(f"Complexity: {result.estimated_complexity}")
+    print(f"Total agents: {result.total_agents}")
+    print(f"Parallel: {'yes' if result.has_parallel_work else 'no'}")
+    print(f"\nSub-tasks ({len(result.sub_tasks)}):")
+    for i, st in enumerate(result.sub_tasks, 1):
+        print(f"  {i}. [{st.primary_skill or 'general'}] {st.task}")
+        print(f"     complexity={st.complexity} risk={st.risk_level}")
+
+
+def cmd_autonomy(action: str) -> None:
+    """Check autonomy decision for an action."""
+    from dharma_swarm.adaptive_autonomy import AdaptiveAutonomy
+    auto = AdaptiveAutonomy(base_level="balanced")
+    decision = auto.should_auto_approve(action)
+    status = "AUTO-APPROVE" if decision.auto_approve else "REQUIRES APPROVAL"
+    print(f"Action: {action}")
+    print(f"  Risk:     {decision.risk.value}")
+    print(f"  Decision: {status}")
+    if decision.reason:
+        print(f"  Reason:   {decision.reason}")
+    if decision.escalate_to:
+        print(f"  Escalate: {decision.escalate_to}")
+
+
+def cmd_context_search(query: str, budget: int = 10_000) -> None:
+    """Search for task-relevant context."""
+    from dharma_swarm.context_search import ContextSearchEngine
+    engine = ContextSearchEngine()
+    engine.build_index()
+    results = engine.search(query, max_results=10)
+    if not results:
+        print("No relevant context found.")
+        return
+    print(f"Context search: '{query}'\n")
+    for r in results:
+        print(f"  [{r.relevance:.1f}] {r.path}")
+        if r.snippet:
+            print(f"         {r.snippet[:80]}...")
+        print()
+
+
+def cmd_compose(description: str) -> None:
+    """Compose a task into a DAG execution plan."""
+    async def _compose():
+        swarm = await _get_swarm()
+        result = await swarm.compose_task(description)
+        await swarm.shutdown()
+        if "error" in result:
+            print(f"Error: {result['error']}")
+            return
+        print(f"Task: {result['task']}")
+        print(f"Status: {result['status']}")
+        print(f"\nSteps ({len(result['steps'])}):")
+        for s in result["steps"]:
+            deps = f" (depends on: {', '.join(s['deps'])})" if s["deps"] else ""
+            print(f"  {s['id']}: [{s['skill']}] {s['task']}{deps}")
+        print(f"\nExecution waves: {len(result['waves'])}")
+        for i, wave in enumerate(result["waves"]):
+            print(f"  Wave {i+1}: {', '.join(wave)}")
+        if result["ready"]:
+            print(f"\nReady now: {', '.join(result['ready'])}")
+    _run(_compose())
+
+
+def cmd_execute_compose(description: str) -> None:
+    """Compose and execute a task DAG end-to-end."""
+    async def _exec():
+        swarm = await _get_swarm()
+        result = await swarm.execute_composition(description)
+        await swarm.shutdown()
+        if "error" in result:
+            print(f"Error: {result['error']}")
+            return
+        print(f"Task: {result['task']}")
+        print(f"Status: {result['status']}")
+        print(f"Completed: {result['steps_completed']}  "
+              f"Failed: {result['steps_failed']}  "
+              f"Skipped: {result['steps_skipped']}  "
+              f"Duration: {result['duration']}s")
+        for s in result.get("steps", []):
+            icon = "+" if s["success"] else "x"
+            line = f"  [{icon}] {s['id']}: [{s['skill']}]"
+            if s["error"]:
+                line += f" ERROR: {s['error']}"
+            elif s["output"]:
+                line += f" {s['output'][:100]}"
+            print(line)
+    _run(_exec())
+
+
+def cmd_handoff(from_agent: str, to_agent: str, context: str, content: str) -> None:
+    """Create a structured handoff between agents."""
+    async def _handoff():
+        swarm = await _get_swarm()
+        result = await swarm.create_handoff(
+            from_agent=from_agent, to_agent=to_agent,
+            task_context=context,
+            artifacts=[{"type": "context", "content": content, "summary": content[:60]}],
+        )
+        await swarm.shutdown()
+        print(f"Handoff created: {result.get('id', 'unknown')}")
+        print(f"  {result.get('summary', '')}")
+    _run(_handoff())
+
+
+def cmd_agent_memory(agent_name: str) -> None:
+    """Show agent memory stats."""
+    async def _mem():
+        swarm = await _get_swarm()
+        stats = await swarm.get_agent_memory(agent_name)
+        await swarm.shutdown()
+        print(f"Agent Memory: {agent_name}")
+        for k, v in stats.items():
+            print(f"  {k}: {v}")
+    _run(_mem())
 
 
 def cmd_run(interval: float) -> None:
@@ -889,6 +1714,170 @@ def cmd_chat(
 
 
 # ---------------------------------------------------------------------------
+# Sprint generator
+# ---------------------------------------------------------------------------
+
+def cmd_sprint(
+    output: str | None = None,
+    local: bool = False,
+    test_summary: str = "",
+    prev_todo: str = "",
+) -> None:
+    """Generate today's adaptive 8-hour sprint prompt from live system state."""
+    from datetime import date as _date
+    from dharma_swarm.master_prompt_engineer import (
+        gather_system_state,
+        generate_evolved_prompt,
+        generate_local_prompt,
+        _days_to_colm,
+        _SHARED_DIR,
+    )
+
+    today = _date.today().strftime("%Y%m%d")
+    out_path = Path(output) if output else _SHARED_DIR / f"SPRINT_8H_{today}.md"
+    colm_days, colm_paper = _days_to_colm()
+
+    print(f"[sprint] Generating sprint for {today}")
+    print(f"  COLM: {colm_days}d (abstract) / {colm_paper}d (paper)")
+
+    state = gather_system_state()
+    live = state.get("live_signals", {})
+    morning_ok = "no morning" not in live.get("morning_brief", "no morning")
+    dream_ok = "no dream" not in live.get("dream_seeds", "no dream")
+    handoff_ok = "no handoff" not in live.get("sprint_handoff", "no handoff")
+    print(f"  signals: morning={'yes' if morning_ok else 'none'} "
+          f"dreams={'yes' if dream_ok else 'none'} "
+          f"handoff={'yes' if handoff_ok else 'none'}")
+
+    if local:
+        prompt_text = generate_local_prompt(
+            test_summary=test_summary,
+            prev_todo=prev_todo,
+            colm_days=colm_days,
+        )
+        mode = "local"
+    else:
+        try:
+            import asyncio as _asyncio
+            prompt_text = _asyncio.run(generate_evolved_prompt(
+                system_state=state,
+                test_summary=test_summary,
+                prev_todo=prev_todo,
+                colm_days=colm_days,
+            ))
+            mode = "LLM"
+        except RuntimeError as exc:
+            print(f"  LLM unavailable ({exc}), using local mode")
+            prompt_text = generate_local_prompt(
+                test_summary=test_summary,
+                prev_todo=prev_todo,
+                colm_days=colm_days,
+            )
+            mode = "local (fallback)"
+
+    out_path.parent.mkdir(parents=True, exist_ok=True)
+    out_path.write_text(
+        f"# 8-HOUR SPRINT — {today}\n"
+        f"**Generated**: {_date.today().isoformat()} | **Mode**: {mode}\n"
+        f"**COLM**: {colm_days} days (abstract) / {colm_paper} days (paper)\n\n"
+        + prompt_text
+    )
+    print(f"[sprint] Written to: {out_path}")
+    print(f"  length: {len(prompt_text):,} chars | mode: {mode}")
+
+
+# ---------------------------------------------------------------------------
+# Ledger viewer
+# ---------------------------------------------------------------------------
+
+def cmd_ledger(
+    ledger_cmd: str | None = None,
+    n: int = 20,
+    session: str | None = None,
+    kind: str = "all",
+) -> None:
+    """Inspect orchestrator session ledgers."""
+    ledger_base = Path.home() / ".dharma" / "ledgers"
+
+    if ledger_cmd == "sessions" or ledger_cmd is None:
+        if not ledger_base.exists():
+            print("No ledgers directory found at ~/.dharma/ledgers/")
+            return
+        sessions = sorted(
+            (p for p in ledger_base.iterdir() if p.is_dir()),
+            key=lambda p: p.stat().st_mtime,
+            reverse=True,
+        )[:10]
+        if not sessions:
+            print("No sessions found.")
+            return
+        print(f"{'Session ID':<22} {'Task':>6} {'Progress':>10} {'Age':>10}")
+        print("-" * 52)
+        import time as _time
+        now = _time.time()
+        for sess in sessions:
+            tf = sess / "task_ledger.jsonl"
+            pf = sess / "progress_ledger.jsonl"
+            tc = sum(1 for _ in open(tf)) if tf.exists() else 0
+            pc = sum(1 for _ in open(pf)) if pf.exists() else 0
+            age_h = (now - sess.stat().st_mtime) / 3600
+            age_s = f"{age_h:.1f}h" if age_h < 48 else f"{age_h/24:.0f}d"
+            print(f"{sess.name:<22} {tc:>6} {pc:>10} {age_s:>10}")
+        if ledger_cmd is None:
+            print("\nUsage: dgc ledger tail | dgc ledger sessions")
+        return
+
+    if ledger_cmd == "tail":
+        if not ledger_base.exists():
+            print("No ledgers directory found.")
+            return
+        sessions = sorted(
+            (p for p in ledger_base.iterdir() if p.is_dir()),
+            key=lambda p: p.stat().st_mtime,
+            reverse=True,
+        )
+        if not sessions:
+            print("No sessions found.")
+            return
+        target = (ledger_base / session) if session else sessions[0]
+        if not target.exists():
+            print(f"Session not found: {session}")
+            return
+        print(f"Session: {target.name}")
+
+        def _tail_file(path: Path, label: str) -> None:
+            if not path.exists():
+                return
+            lines = [l for l in path.read_text().splitlines() if l.strip()][-n:]
+            if not lines:
+                return
+            print(f"\n{label} ({path.name})")
+            for line in lines:
+                try:
+                    ev = json.loads(line)
+                    ts = ev.get("ts_utc", "")[:19]
+                    event = ev.get("event", "?")
+                    tid = ev.get("task_id", "")[:8]
+                    extra = ""
+                    if "duration_sec" in ev:
+                        extra = f" ({ev['duration_sec']:.2f}s)"
+                    if "failure_signature" in ev:
+                        extra = f" sig={ev['failure_signature'][:50]}"
+                    print(f"  {ts}  {event:<28} {tid}{extra}")
+                except Exception:
+                    print(f"  {line[:120]}")
+
+        if kind in ("task", "all"):
+            _tail_file(target / "task_ledger.jsonl", "Task Ledger")
+        if kind in ("progress", "all"):
+            _tail_file(target / "progress_ledger.jsonl", "Progress Ledger")
+        return
+
+    print(f"Unknown ledger subcommand: {ledger_cmd}")
+    print("Usage: dgc ledger tail | dgc ledger sessions")
+
+
+# ---------------------------------------------------------------------------
 # Argument parser
 # ---------------------------------------------------------------------------
 
@@ -903,6 +1892,27 @@ def _build_parser() -> argparse.ArgumentParser:
 
     # -- status --
     sub.add_parser("status", help="System status overview")
+    p_mission = sub.add_parser("mission-status", help="Mission readiness lanes + gap report")
+    p_mission.add_argument("--json", action="store_true", help="Emit JSON report")
+    p_mission.add_argument(
+        "--strict-core",
+        action="store_true",
+        help="Exit non-zero if core lane is not fully wired",
+    )
+    p_mission.add_argument(
+        "--require-tracked",
+        action="store_true",
+        help="Exit non-zero if mission-critical files are local-only",
+    )
+    p_mission.add_argument(
+        "--profile",
+        choices=sorted(MISSION_AUTONOMY_PROFILES),
+        default=None,
+        help=(
+            "Apply autonomy profile defaults for strict checks "
+            "(strict-core/require-tracked)."
+        ),
+    )
 
     # -- chat --
     p_chat = sub.add_parser("chat", help="Launch native Claude Code interactive UI")
@@ -950,6 +1960,25 @@ def _build_parser() -> argparse.ArgumentParser:
     # -- swarm (captures all remaining args) --
     p_swarm = sub.add_parser("swarm", help="Swarm orchestrator + overnight/live")
     p_swarm.add_argument("swarm_args", nargs="*", default=[])
+
+    # -- stress --
+    p_stress = sub.add_parser("stress", help="Run max-capacity DGC stress harness")
+    p_stress.add_argument("--profile", choices=["quick", "full", "max"], default="full")
+    p_stress.add_argument("--state-dir", default=str(HOME / ".dharma" / "stress_lab"))
+    p_stress.add_argument(
+        "--provider-mode",
+        choices=["auto", "mock", "claude", "codex", "openrouter"],
+        default="auto",
+    )
+    p_stress.add_argument("--agents", type=int, default=8)
+    p_stress.add_argument("--tasks", type=int, default=36)
+    p_stress.add_argument("--evolutions", type=int, default=24)
+    p_stress.add_argument("--evolution-concurrency", type=int, default=6)
+    p_stress.add_argument("--cli-rounds", type=int, default=2)
+    p_stress.add_argument("--cli-concurrency", type=int, default=8)
+    p_stress.add_argument("--orchestration-timeout-sec", type=int, default=240)
+    p_stress.add_argument("--external-timeout-sec", type=int, default=120)
+    p_stress.add_argument("--external-research", action="store_true")
 
     # -- context --
     p_ctx = sub.add_parser("context", help="Load context for a domain")
@@ -1029,6 +2058,17 @@ def _build_parser() -> argparse.ArgumentParser:
     p_erb.add_argument("entry_id")
     p_erb.add_argument("--reason", default="Manual rollback")
 
+    p_eauto = evolve_sub.add_parser("auto", help="LLM-powered autonomous evolution")
+    p_eauto.add_argument("--files", nargs="*", help="Source files to evolve (default: core modules)")
+    p_eauto.add_argument("--model", default="meta-llama/llama-3.3-70b-instruct")
+    p_eauto.add_argument("--context", default="", help="Focus area or context for the LLM")
+
+    p_edaemon = evolve_sub.add_parser("daemon", help="Run continuous autonomous evolution")
+    p_edaemon.add_argument("--interval", type=float, default=1800.0, help="Seconds between cycles (default: 30min)")
+    p_edaemon.add_argument("--threshold", type=float, default=0.6, help="Min fitness to auto-commit")
+    p_edaemon.add_argument("--model", default="meta-llama/llama-3.3-70b-instruct")
+    p_edaemon.add_argument("--cycles", type=int, default=None, help="Max cycles (default: infinite)")
+
     # -- dharma --
     p_dharma = sub.add_parser("dharma", help="Dharma subsystem commands")
     dharma_sub = p_dharma.add_subparsers(dest="dharma_cmd")
@@ -1052,6 +2092,122 @@ def _build_parser() -> argparse.ArgumentParser:
     # -- run --
     p_run = sub.add_parser("run", help="Run orchestration loop")
     p_run.add_argument("--interval", type=float, default=2.0)
+
+    # -- rag --
+    p_rag = sub.add_parser("rag", help="NVIDIA RAG integration commands")
+    rag_sub = p_rag.add_subparsers(dest="rag_cmd")
+
+    p_rh = rag_sub.add_parser("health", help="Check rag/ingestor health")
+    p_rh.add_argument(
+        "--service",
+        choices=["rag", "ingest"],
+        default="rag",
+    )
+    p_rh.add_argument(
+        "--no-deps",
+        action="store_true",
+        help="Skip dependency checks",
+    )
+
+    p_rs = rag_sub.add_parser("search", help="Query RAG search endpoint")
+    p_rs.add_argument("query", nargs="+")
+    p_rs.add_argument("--top-k", type=int, default=5)
+    p_rs.add_argument("--collection", default=None)
+
+    p_rc = rag_sub.add_parser("chat", help="Run grounded chat completion")
+    p_rc.add_argument("prompt", nargs="+")
+    p_rc.add_argument("--model", default=None)
+
+    # -- flywheel --
+    p_fw = sub.add_parser("flywheel", help="NVIDIA Data Flywheel commands")
+    fw_sub = p_fw.add_subparsers(dest="flywheel_cmd")
+
+    fw_sub.add_parser("jobs", help="List flywheel jobs")
+
+    p_fws = fw_sub.add_parser("start", help="Start a flywheel job")
+    p_fws.add_argument("--workload-id", required=True)
+    p_fws.add_argument("--client-id", required=True)
+    p_fws.add_argument("--eval-size", type=int, default=20)
+    p_fws.add_argument("--val-ratio", type=float, default=0.1)
+    p_fws.add_argument("--min-total-records", type=int, default=50)
+    p_fws.add_argument("--limit", type=int, default=10000)
+
+    p_fwg = fw_sub.add_parser("get", help="Get flywheel job details")
+    p_fwg.add_argument("job_id")
+
+    p_fwc = fw_sub.add_parser("cancel", help="Cancel flywheel job")
+    p_fwc.add_argument("job_id")
+
+    p_fwd = fw_sub.add_parser("delete", help="Delete flywheel job")
+    p_fwd.add_argument("job_id")
+
+    p_fww = fw_sub.add_parser("watch", help="Wait for job completion")
+    p_fww.add_argument("job_id")
+    p_fww.add_argument("--poll-sec", type=float, default=5.0)
+    p_fww.add_argument("--timeout-sec", type=float, default=1800.0)
+
+    # -- skills --
+    sub.add_parser("skills", help="List discovered skills (v0.4.0)")
+
+    # -- route --
+    p_route = sub.add_parser("route", help="Route a task to best skill (v0.4.0)")
+    p_route.add_argument("task_desc", nargs="+", help="Task description")
+
+    # -- orchestrate --
+    p_orch = sub.add_parser("orchestrate", help="Decompose and orchestrate a task (v0.4.0)")
+    p_orch.add_argument("orch_desc", nargs="+", help="Task description")
+
+    # -- autonomy --
+    p_auto = sub.add_parser("autonomy", help="Check autonomy for an action (v0.4.0)")
+    p_auto.add_argument("auto_action", nargs="+", help="Action to check")
+
+    # -- context-search --
+    p_cs = sub.add_parser("context-search", help="Search for task-relevant context (v0.4.0)")
+    p_cs.add_argument("cs_query", nargs="+", help="Search query")
+    p_cs.add_argument("--budget", type=int, default=10000)
+
+    # -- compose (v0.4.1) --
+    p_comp = sub.add_parser("compose", help="Compose a task into DAG execution plan (v0.4.1)")
+    p_comp.add_argument("comp_desc", nargs="+", help="Task description")
+
+    # -- execute-compose (v0.4.2) --
+    p_exec_comp = sub.add_parser("execute-compose", help="Compose and execute a task DAG end-to-end")
+    p_exec_comp.add_argument("exec_comp_desc", nargs="+", help="Task description")
+
+    # -- handoff (v0.4.1) --
+    p_ho = sub.add_parser("handoff", help="Create a structured agent handoff (v0.4.1)")
+    p_ho.add_argument("--from", dest="ho_from", required=True, help="Source agent")
+    p_ho.add_argument("--to", dest="ho_to", required=True, help="Target agent")
+    p_ho.add_argument("--context", dest="ho_context", required=True, help="Task context")
+    p_ho.add_argument("content", nargs="+", help="Handoff content")
+
+    # -- agent-memory (v0.4.1) --
+    p_am = sub.add_parser("agent-memory", help="Agent self-editing memory (v0.4.1)")
+    p_am.add_argument("mem_agent", help="Agent name")
+
+    # -- sprint --
+    p_sprint = sub.add_parser("sprint", help="Generate today's adaptive 8-hour sprint prompt")
+    p_sprint.add_argument(
+        "--output", default=None, help="Output path (default: ~/.dharma/shared/SPRINT_8H_<date>.md)"
+    )
+    p_sprint.add_argument(
+        "--local", action="store_true", help="Generate without LLM (offline mode)"
+    )
+    p_sprint.add_argument("--test-summary", default="", help="Test results to include")
+    p_sprint.add_argument("--prev-todo", default="", help="Previous TODO items to include")
+
+    # -- ledger --
+    p_ledger = sub.add_parser("ledger", help="Inspect orchestrator session ledgers")
+    ledger_sub = p_ledger.add_subparsers(dest="ledger_cmd")
+
+    p_ledger_tail = ledger_sub.add_parser("tail", help="Show recent ledger events")
+    p_ledger_tail.add_argument("-n", type=int, default=20, help="Number of events")
+    p_ledger_tail.add_argument("--session", default=None, help="Session ID (default: most recent)")
+    p_ledger_tail.add_argument(
+        "--kind", choices=["task", "progress", "all"], default="all", help="Which ledger"
+    )
+
+    ledger_sub.add_parser("sessions", help="List recent sessions")
 
     return parser
 
@@ -1121,6 +2277,15 @@ def main() -> None:
             cmd_tui()
         case "status":
             cmd_status()
+        case "mission-status":
+            rc = cmd_mission_status(
+                as_json=args.json,
+                strict_core=args.strict_core,
+                require_tracked=args.require_tracked,
+                profile=args.profile,
+            )
+            if rc != 0:
+                raise SystemExit(rc)
         case "up":
             cmd_up(background=args.background)
         case "down":
@@ -1131,6 +2296,21 @@ def main() -> None:
             cmd_pulse()
         case "swarm":
             cmd_swarm(args.swarm_args)
+        case "stress":
+            cmd_stress(
+                profile=args.profile,
+                state_dir=args.state_dir,
+                provider_mode=args.provider_mode,
+                agents=args.agents,
+                tasks=args.tasks,
+                evolutions=args.evolutions,
+                evolution_concurrency=args.evolution_concurrency,
+                cli_rounds=args.cli_rounds,
+                cli_concurrency=args.cli_concurrency,
+                orchestration_timeout_sec=args.orchestration_timeout_sec,
+                external_research=args.external_research,
+                external_timeout_sec=args.external_timeout_sec,
+            )
         case "context":
             cmd_context(args.domain)
         case "memory":
@@ -1176,10 +2356,62 @@ def main() -> None:
                     cmd_evolve_promote(args.entry_id)
                 case "rollback":
                     cmd_evolve_rollback(args.entry_id, args.reason)
+                case "auto":
+                    cmd_evolve_auto(args.files, args.model, args.context)
+                case "daemon":
+                    cmd_evolve_daemon(args.interval, args.threshold, args.model, args.cycles)
                 case _:
                     parser.parse_args(["evolve", "--help"])
         case "run":
             cmd_run(interval=args.interval)
+        case "rag":
+            try:
+                match args.rag_cmd:
+                    case "health":
+                        cmd_rag_health(
+                            service=args.service,
+                            check_dependencies=not args.no_deps,
+                        )
+                    case "search":
+                        cmd_rag_search(
+                            query=" ".join(args.query),
+                            top_k=args.top_k,
+                            collection=args.collection,
+                        )
+                    case "chat":
+                        cmd_rag_chat(prompt=" ".join(args.prompt), model=args.model)
+                    case _:
+                        parser.parse_args(["rag", "--help"])
+            except Exception as e:
+                print(f"RAG command failed: {e}")
+                raise SystemExit(2)
+        case "flywheel":
+            try:
+                match args.flywheel_cmd:
+                    case "jobs":
+                        cmd_flywheel_jobs()
+                    case "start":
+                        cmd_flywheel_start(
+                            workload_id=args.workload_id,
+                            client_id=args.client_id,
+                            eval_size=args.eval_size,
+                            val_ratio=args.val_ratio,
+                            min_total_records=args.min_total_records,
+                            limit=args.limit,
+                        )
+                    case "get":
+                        cmd_flywheel_get(args.job_id)
+                    case "cancel":
+                        cmd_flywheel_cancel(args.job_id)
+                    case "delete":
+                        cmd_flywheel_delete(args.job_id)
+                    case "watch":
+                        cmd_flywheel_watch(args.job_id, args.poll_sec, args.timeout_sec)
+                    case _:
+                        parser.parse_args(["flywheel", "--help"])
+            except Exception as e:
+                print(f"Flywheel command failed: {e}")
+                raise SystemExit(2)
         case "dharma":
             match args.dharma_cmd:
                 case "status":
@@ -1194,6 +2426,39 @@ def main() -> None:
             cmd_stigmergy(args.stig_file)
         case "hum":
             cmd_hum()
+        case "skills":
+            cmd_skills()
+        case "route":
+            cmd_route(" ".join(args.task_desc))
+        case "orchestrate":
+            cmd_orchestrate(" ".join(args.orch_desc))
+        case "autonomy":
+            cmd_autonomy(" ".join(args.auto_action))
+        case "context-search":
+            cmd_context_search(" ".join(args.cs_query))
+        case "compose":
+            cmd_compose(" ".join(args.comp_desc))
+        case "execute-compose":
+            cmd_execute_compose(" ".join(args.exec_comp_desc))
+        case "handoff":
+            cmd_handoff(args.ho_from, args.ho_to, args.ho_context,
+                        " ".join(args.content))
+        case "agent-memory":
+            cmd_agent_memory(args.mem_agent)
+        case "sprint":
+            cmd_sprint(
+                output=args.output,
+                local=args.local,
+                test_summary=args.test_summary,
+                prev_todo=args.prev_todo,
+            )
+        case "ledger":
+            cmd_ledger(
+                ledger_cmd=args.ledger_cmd,
+                n=getattr(args, "n", 20),
+                session=getattr(args, "session", None),
+                kind=getattr(args, "kind", "all"),
+            )
         case _:
             parser.print_help()
 

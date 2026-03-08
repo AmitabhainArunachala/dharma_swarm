@@ -17,6 +17,7 @@ from pathlib import Path
 from typing import Any
 
 from dharma_swarm.daemon_config import DaemonConfig, THREAD_PROMPTS
+from dharma_swarm.jikoku_instrumentation import jikoku_auto_span
 from dharma_swarm.models import (
     AgentConfig,
     AgentRole,
@@ -74,6 +75,16 @@ class SwarmManager:
         self._canary: Any = None          # CanaryDeployer
         self._bridge_rv: Any = None       # ResearchBridge
         self._stigmergy: Any = None       # StigmergyStore
+
+        # v0.4.0: Oz-inspired systems
+        self._skill_registry: Any = None   # SkillRegistry
+        self._profile_mgr: Any = None      # ProfileManager
+        self._intent_router: Any = None    # IntentRouter
+        self._context_search: Any = None   # ContextSearchEngine
+        self._autonomy: Any = None         # AdaptiveAutonomy
+        self._skill_composer: Any = None  # SkillComposer
+        self._handoff: Any = None         # HandoffProtocol
+        self._agent_memories: dict[str, Any] = {}  # name -> AgentMemoryBank
 
         # Daemon state
         self._last_contribution: datetime | None = None
@@ -191,6 +202,44 @@ class SwarmManager:
 
         logger.info("Gödel Claw v1 subsystems initialized")
 
+        # v0.4.0: Oz-inspired systems (skill registry, profiles, intent router,
+        # context search, adaptive autonomy)
+        try:
+            from dharma_swarm.skills import SkillRegistry
+            from dharma_swarm.profiles import ProfileManager
+            from dharma_swarm.intent_router import IntentRouter
+            from dharma_swarm.context_search import ContextSearchEngine
+            from dharma_swarm.adaptive_autonomy import AdaptiveAutonomy
+
+            self._skill_registry = SkillRegistry()
+            self._skill_registry.discover()
+
+            profiles_dir = self.state_dir / "profiles"
+            self._profile_mgr = ProfileManager(profile_dir=profiles_dir)
+            self._profile_mgr.load_all()
+
+            self._intent_router = IntentRouter(registry=self._skill_registry)
+
+            self._context_search = ContextSearchEngine()
+            self._context_search.build_index()
+
+            self._autonomy = AdaptiveAutonomy(base_level="balanced")
+
+            # v0.4.1: Composition, handoff, agent memory
+            from dharma_swarm.skill_composer import SkillComposer
+            from dharma_swarm.handoff import HandoffProtocol
+            self._skill_composer = SkillComposer(
+                registry=self._skill_registry,
+                router=self._intent_router,
+            )
+            self._handoff = HandoffProtocol(
+                store_path=self.state_dir / "handoffs.jsonl",
+            )
+
+            logger.info("v0.4.0+ Oz-inspired systems initialized")
+        except Exception as e:
+            logger.debug("v0.4.0 systems init failed (non-fatal): %s", e)
+
     # --- Agent Operations ---
 
     async def spawn_agent(
@@ -207,28 +256,36 @@ class SwarmManager:
         If no system_prompt is given, v7 induction rules + role briefing are used.
         If a thread is specified, the thread focus prompt is appended.
         """
-        # Build system prompt with thread context if applicable
-        extra_prompt = ""
-        if thread and thread in THREAD_PROMPTS:
-            extra_prompt = f"\n\nCurrent research thread: {thread}\n{THREAD_PROMPTS[thread]}"
-
-        config = AgentConfig(
-            name=name,
-            role=role,
+        async with jikoku_auto_span(
+            category="execute.agent_spawn",
+            intent=f"Spawn agent {name} ({role.value})",
+            agent_name=name,
+            role=role.value,
             model=model,
-            provider=provider_type,
-            system_prompt=system_prompt + extra_prompt if system_prompt else extra_prompt,
-            thread=thread,
-        )
-        provider = self._router.get_provider(provider_type)
-        runner = await self._agent_pool.spawn(config, provider=provider)
-        await self._memory.remember(
-            f"Agent spawned: {name} ({role.value})"
-            + (f" [thread: {thread}]" if thread else ""),
-            layer=MemoryLayer.SESSION,
-            source="swarm",
-        )
-        return runner.state
+            provider=provider_type.value,
+        ):
+            # Build system prompt with thread context if applicable
+            extra_prompt = ""
+            if thread and thread in THREAD_PROMPTS:
+                extra_prompt = f"\n\nCurrent research thread: {thread}\n{THREAD_PROMPTS[thread]}"
+
+            config = AgentConfig(
+                name=name,
+                role=role,
+                model=model,
+                provider=provider_type,
+                system_prompt=system_prompt + extra_prompt if system_prompt else extra_prompt,
+                thread=thread,
+            )
+            provider = self._router.get_provider(provider_type)
+            runner = await self._agent_pool.spawn(config, provider=provider)
+            await self._memory.remember(
+                f"Agent spawned: {name} ({role.value})"
+                + (f" [thread: {thread}]" if thread else ""),
+                layer=MemoryLayer.SESSION,
+                source="swarm",
+            )
+            return runner.state
 
     async def list_agents(self) -> list[AgentState]:
         """List all agents in the pool."""
@@ -249,12 +306,53 @@ class SwarmManager:
         priority: TaskPriority = TaskPriority.NORMAL,
     ) -> Task:
         """Create a new task on the board."""
-        gate_result = self._gatekeeper.check(action=title, content=description)
-        if gate_result.decision.value == "block":
-            raise ValueError(f"Telos gate blocked: {gate_result.reason}")
-        return await self._task_board.create(
-            title=title, description=description, priority=priority
-        )
+        async with jikoku_auto_span(
+            category="execute.task_create",
+            intent=f"Create task: {title}",
+            priority=priority.value,
+            desc_length=len(description),
+        ):
+            gate_result = self._gatekeeper.check(action=title, content=description)
+            if gate_result.decision.value == "block":
+                raise ValueError(f"Telos gate blocked: {gate_result.reason}")
+            return await self._task_board.create(
+                title=title, description=description, priority=priority
+            )
+
+    async def create_task_batch(
+        self,
+        tasks: list[dict[str, Any]],
+    ) -> list[Task]:
+        """Create multiple tasks in a single batch operation.
+
+        JIKOKU-optimized: Uses single transaction to eliminate SQLite
+        write lock contention when creating multiple tasks.
+
+        Args:
+            tasks: List of task specs, each dict with keys:
+                   {title, description?, priority?}
+
+        Returns:
+            List of created Task objects.
+        """
+        async with jikoku_auto_span(
+            category="execute.task_create_batch",
+            intent=f"Create {len(tasks)} tasks in batch",
+            task_count=len(tasks),
+        ):
+            # Run telos gates on all tasks first
+            for spec in tasks:
+                gate_result = self._gatekeeper.check(
+                    action=spec["title"],
+                    content=spec.get("description", ""),
+                )
+                if gate_result.decision.value == "block":
+                    raise ValueError(
+                        f"Telos gate blocked task '{spec['title']}': {gate_result.reason}"
+                    )
+
+            # Batch create all tasks in single transaction
+            return await self._task_board.create_batch(tasks)
 
     async def list_tasks(
         self, status: TaskStatus | None = None
@@ -566,6 +664,213 @@ class SwarmManager:
             "context": policy.context,
         }
 
+    # --- v0.4.0: Oz-Inspired Operations ---
+
+    async def route_task(self, description: str) -> dict:
+        """Route a task to the best skill via intent detection.
+
+        Returns intent analysis including recommended skill, complexity,
+        risk level, and agent count.
+        """
+        if self._intent_router is None:
+            return {"error": "Intent router not initialized"}
+        skill_name, intent = self._intent_router.route(description)
+        return {
+            "skill": skill_name,
+            "confidence": intent.confidence,
+            "complexity": intent.complexity,
+            "risk": intent.risk_level,
+            "recommended_agents": intent.recommended_agents,
+            "parallel": intent.parallel,
+        }
+
+    async def decompose_task(self, description: str) -> dict:
+        """Decompose a complex task into sub-tasks.
+
+        Returns decomposed task with sub-tasks, agent recommendations,
+        and parallelism analysis.
+        """
+        if self._intent_router is None:
+            return {"error": "Intent router not initialized"}
+        result = self._intent_router.decompose(description)
+        return {
+            "original": result.original,
+            "sub_tasks": [
+                {
+                    "task": st.task,
+                    "skill": st.primary_skill,
+                    "complexity": st.complexity,
+                    "risk": st.risk_level,
+                }
+                for st in result.sub_tasks
+            ],
+            "total_agents": result.total_agents,
+            "has_parallel_work": result.has_parallel_work,
+            "estimated_complexity": result.estimated_complexity,
+        }
+
+    async def search_context(self, query: str, budget: int = 10_000) -> str:
+        """Search for task-relevant context (lazy loading).
+
+        Instead of dumping all 30K of context, returns only what's
+        relevant to the query. Saves ~26% tokens (Warp's finding).
+        """
+        if self._context_search is None:
+            return ""
+        return self._context_search.get_context_for_task(query, budget=budget)
+
+    async def check_autonomy(self, action: str) -> dict:
+        """Check if an action should be auto-approved.
+
+        Returns autonomy decision with risk level, confidence,
+        and whether to auto-approve or escalate.
+        """
+        if self._autonomy is None:
+            return {"auto_approve": False, "reason": "Autonomy engine not initialized"}
+        decision = self._autonomy.should_auto_approve(action)
+        return {
+            "auto_approve": decision.auto_approve,
+            "risk": decision.risk.value,
+            "reason": decision.reason,
+            "escalate_to": decision.escalate_to,
+        }
+
+    def list_skills(self) -> list[dict]:
+        """List all discovered skills."""
+        if self._skill_registry is None:
+            return []
+        return [
+            {
+                "name": s.name,
+                "model": s.model,
+                "provider": s.provider,
+                "autonomy": s.autonomy,
+                "tags": s.tags,
+                "description": s.description[:100],
+            }
+            for s in self._skill_registry.list_all()
+        ]
+
+    def hot_reload_skills(self) -> list[str]:
+        """Hot-reload changed skill files. Returns names of reloaded skills."""
+        if self._skill_registry is None:
+            return []
+        return self._skill_registry.hot_reload()
+
+    async def compose_task(self, description: str) -> dict:
+        """Compose a task into a DAG execution plan."""
+        if self._skill_composer is None:
+            return {"error": "Skill composer not initialized"}
+        plan = self._skill_composer.compose(description)
+        waves = plan.execution_order()
+        return {
+            "task": plan.task,
+            "status": plan.status,
+            "steps": [{"id": s.step_id, "skill": s.skill_name,
+                       "task": s.task, "deps": s.depends_on}
+                      for s in plan.steps],
+            "waves": [[s.step_id for s in wave] for wave in waves],
+            "ready": [s.step_id for s in plan.ready_steps()],
+        }
+
+    async def execute_composition(self, description: str) -> dict:
+        """Compose and execute a task as a DAG plan.
+
+        Builds a composition plan via SkillComposer, then runs it
+        through the DAGExecutor with a runner that creates real tasks.
+
+        Args:
+            description: Natural language task description.
+
+        Returns:
+            Execution result dict with step-by-step outcomes.
+        """
+        if self._skill_composer is None:
+            return {"error": "Skill composer not initialized"}
+
+        plan = self._skill_composer.compose(description)
+
+        from dharma_swarm.dag_executor import DAGExecutor
+        from dharma_swarm.skill_composer import SkillStep
+
+        async def _runner(step: SkillStep, context: str) -> str:
+            """Execute a composition step by creating and running a swarm task."""
+            task = await self.create_task(
+                title=step.task,
+                description=f"{step.task}\n\nContext:\n{context}" if context else step.task,
+            )
+            return f"Task {task.id} created: {step.task}"
+
+        executor = DAGExecutor(composer=self._skill_composer, runner_fn=_runner)
+        result = await executor.execute(plan)
+
+        return {
+            "task": result.plan_task,
+            "status": result.status,
+            "steps_completed": result.steps_completed,
+            "steps_failed": result.steps_failed,
+            "steps_skipped": result.steps_skipped,
+            "duration": round(result.total_duration_seconds, 2),
+            "steps": [
+                {
+                    "id": sr.step_id,
+                    "skill": sr.skill_name,
+                    "success": sr.success,
+                    "output": sr.output[:200] if sr.output else "",
+                    "error": sr.error,
+                }
+                for sr in result.step_results
+            ],
+        }
+
+    async def create_handoff(
+        self, from_agent: str, to_agent: str, task_context: str,
+        artifacts: list[dict],
+    ) -> dict:
+        """Create a structured handoff between agents."""
+        if self._handoff is None:
+            return {"error": "Handoff protocol not initialized"}
+        from dharma_swarm.handoff import Artifact, ArtifactType
+        typed = [
+            Artifact(
+                artifact_type=ArtifactType(a.get("type", "context")),
+                content=a.get("content", ""),
+                summary=a.get("summary", ""),
+                files_touched=a.get("files", []),
+            )
+            for a in artifacts
+        ]
+        h = await self._handoff.create_handoff(
+            from_agent=from_agent, to_agent=to_agent,
+            task_context=task_context, artifacts=typed,
+        )
+        return {"id": h.id, "status": h.status, "summary": h.summary()}
+
+    async def get_agent_memory(self, agent_name: str) -> dict:
+        """Get or create an agent's memory bank and return stats."""
+        if agent_name not in self._agent_memories:
+            from dharma_swarm.agent_memory import AgentMemoryBank
+            bank = AgentMemoryBank(
+                agent_name=agent_name,
+                base_path=self.state_dir / "agent_memory",
+            )
+            await bank.load()
+            self._agent_memories[agent_name] = bank
+        bank = self._agent_memories[agent_name]
+        return await bank.get_stats()
+
+    async def agent_remember(self, agent_name: str, key: str, value: str,
+                             category: str = "working", importance: float = 0.5) -> dict:
+        """Store a memory for an agent."""
+        if agent_name not in self._agent_memories:
+            await self.get_agent_memory(agent_name)
+        bank = self._agent_memories[agent_name]
+        entry = await bank.remember(key, value, category=category,
+                                    importance=importance, source=agent_name)
+        await bank.save()
+        return {"key": entry.key, "category": entry.category,
+                "importance": entry.importance}
+
     # --- Shutdown ---
 
     async def shutdown(self) -> None:
@@ -575,6 +880,7 @@ class SwarmManager:
             self._orchestrator.stop()
         if self._agent_pool:
             await self._agent_pool.shutdown_all()
-        await self._memory.remember(
-            "Swarm shutdown", layer=MemoryLayer.SESSION, source="swarm"
-        )
+        if self._memory:
+            await self._memory.remember(
+                "Swarm shutdown", layer=MemoryLayer.SESSION, source="swarm"
+            )

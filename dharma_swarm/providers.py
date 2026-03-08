@@ -13,7 +13,10 @@ from collections.abc import AsyncIterator
 from pathlib import Path
 from typing import Any
 
+import httpx
+
 from dharma_swarm.models import LLMRequest, LLMResponse, ProviderType
+from dharma_swarm.jikoku_instrumentation import jikoku_traced_provider  # type: ignore
 
 
 class LLMProvider(ABC):
@@ -52,6 +55,7 @@ class AnthropicProvider(LLMProvider):
     def _strip_system(msgs: list[dict[str, str]]) -> list[dict[str, str]]:
         return [m for m in msgs if m.get("role") != "system"]
 
+    @jikoku_traced_provider
     async def complete(self, request: LLMRequest) -> LLMResponse:
         client = self._client_or_raise()
         kwargs: dict[str, Any] = dict(
@@ -117,6 +121,7 @@ class OpenAIProvider(LLMProvider):
         out.extend(msgs)
         return out
 
+    @jikoku_traced_provider
     async def complete(self, request: LLMRequest) -> LLMResponse:
         client = self._client_or_raise()
         messages = self._build_messages(request.messages, request.system)
@@ -177,6 +182,7 @@ class OpenRouterProvider(LLMProvider):
         )
         return self._client
 
+    @jikoku_traced_provider
     async def complete(self, request: LLMRequest) -> LLMResponse:
         client = self._client_or_raise()
         messages: list[dict[str, str]] = []
@@ -214,6 +220,113 @@ class OpenRouterProvider(LLMProvider):
                 yield delta.content
 
 
+class NVIDIANIMProvider(LLMProvider):
+    """Provider backed by NVIDIA NIM's OpenAI-compatible endpoint."""
+
+    def __init__(
+        self,
+        api_key: str | None = None,
+        base_url: str | None = None,
+        default_model: str = "meta/llama-3.3-70b-instruct",
+    ) -> None:
+        self._api_key = api_key or os.environ.get("NVIDIA_NIM_API_KEY")
+        self._base_url = (
+            base_url
+            or os.environ.get("NVIDIA_NIM_BASE_URL")
+            or "https://integrate.api.nvidia.com/v1"
+        ).rstrip("/")
+        self._default_model = default_model
+
+    @staticmethod
+    def _build_messages(request: LLMRequest) -> list[dict[str, str]]:
+        messages: list[dict[str, str]] = []
+        if request.system:
+            messages.append({"role": "system", "content": request.system})
+        messages.extend(request.messages)
+        return messages
+
+    def _headers_or_raise(self) -> dict[str, str]:
+        if not self._api_key:
+            raise RuntimeError("NVIDIA_NIM_API_KEY not set")
+        return {
+            "Authorization": f"Bearer {self._api_key}",
+            "Content-Type": "application/json",
+        }
+
+    @jikoku_traced_provider
+    async def complete(self, request: LLMRequest) -> LLMResponse:
+        payload = {
+            "model": request.model or self._default_model,
+            "messages": self._build_messages(request),
+            "temperature": request.temperature,
+            "max_tokens": request.max_tokens,
+            "stream": False,
+        }
+        if request.tools:
+            payload["tools"] = request.tools
+
+        async with httpx.AsyncClient(timeout=120.0) as client:
+            resp = await client.post(
+                f"{self._base_url}/chat/completions",
+                json=payload,
+                headers=self._headers_or_raise(),
+            )
+            if resp.status_code != 200:
+                raise RuntimeError(
+                    f"NVIDIA NIM error {resp.status_code}: {resp.text[:300]}"
+                )
+            data = resp.json()
+
+        choices = data.get("choices") or []
+        message = (choices[0].get("message") if choices else {}) or {}
+        usage_raw = data.get("usage") or {}
+        usage: dict[str, int] = {}
+        for key in ("prompt_tokens", "completion_tokens", "total_tokens"):
+            if key in usage_raw:
+                try:
+                    usage[key] = int(usage_raw[key])
+                except (TypeError, ValueError):
+                    continue
+
+        tool_calls: list[dict[str, Any]] = []
+        for tc in message.get("tool_calls") or []:
+            fn = tc.get("function") or {}
+            tool_calls.append(
+                {
+                    "id": tc.get("id"),
+                    "name": fn.get("name"),
+                    "arguments": fn.get("arguments"),
+                }
+            )
+
+        finish_reason = choices[0].get("finish_reason") if choices else None
+        return LLMResponse(
+            content=message.get("content") or "",
+            model=str(data.get("model") or payload["model"]),
+            usage=usage,
+            tool_calls=tool_calls,
+            stop_reason=finish_reason,
+        )
+
+    async def stream(self, request: LLMRequest) -> AsyncIterator[str]:
+        # For now keep stream semantics stable with a single final chunk.
+        response = await self.complete(request)
+        yield response.content
+
+
+MEMORY_SURVIVAL_DIRECTIVE = (
+    "\n\n## CRITICAL: MEMORY SURVIVAL\n"
+    "YOUR CONTEXT WILL BE DESTROYED after this task completes. "
+    "You will have NO memory of this conversation.\n"
+    "Before your task ends, you MUST externalize:\n"
+    "- Discoveries and patterns -> write to ~/.dharma/shared/<your_role>_notes.md (APPEND)\n"
+    "- Important findings -> write to ~/.dharma/witness/ with timestamp\n"
+    "- Lessons learned -> include in task result\n"
+    "Read ~/.dharma/shared/ FIRST to see what other agents already found.\n"
+    "Failure to externalize = permanent knowledge loss.\n"
+)
+
+
 class _SubprocessProvider(LLMProvider):
     """Base for providers that spawn CLI agents as subprocesses.
 
@@ -239,16 +352,19 @@ class _SubprocessProvider(LLMProvider):
         prompt += "\n\n## Communication\n"
         prompt += "- Write findings to ~/.dharma/shared/ (APPEND)\n"
         prompt += "- Read other agents' notes in ~/.dharma/shared/ first\n"
+        # Memory survival instinct — injected into EVERY subprocess agent
+        prompt += MEMORY_SURVIVAL_DIRECTIVE
         return prompt
 
     def _build_cli_args(self, prompt: str) -> list[str]:
-        return [self._cli_command, "-p", prompt, "--output-format", "text"]
+        return [self._cli_command, "-p", prompt, "--output-format", "text", "--model", "opus"]
 
     def _build_env(self) -> dict[str, str]:
         env = {**os.environ, "CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC": "1"}
         env.pop("CLAUDECODE", None)  # Allow nesting
         return env
 
+    @jikoku_traced_provider
     async def complete(self, request: LLMRequest) -> LLMResponse:
         shared = Path.home() / ".dharma" / "shared"
         shared.mkdir(parents=True, exist_ok=True)
@@ -271,9 +387,10 @@ class _SubprocessProvider(LLMProvider):
             )
         except asyncio.TimeoutError:
             proc.terminate()
+            await proc.wait()
             return LLMResponse(content="TIMEOUT: exceeded limit", model=self._cli_label)
 
-        content = stdout.decode()[:5000] if stdout else ""
+        content = stdout.decode()[:50_000] if stdout else ""
         if proc.returncode != 0 and not content:
             content = (
                 f"ERROR (rc={proc.returncode}): "
@@ -351,6 +468,7 @@ class OpenRouterFreeProvider(LLMProvider):
         )
         return self._client
 
+    @jikoku_traced_provider
     async def complete(self, request: LLMRequest) -> LLMResponse:
         client = self._client_or_raise()
         messages: list[dict[str, str]] = []
@@ -414,6 +532,41 @@ class OpenRouterFreeProvider(LLMProvider):
                 yield delta.content
 
 
+class OllamaProvider(LLMProvider):
+    """Stub provider for Ollama local inference.
+
+    Not yet implemented. Install Ollama at https://ollama.ai, run
+    'ollama serve', pull a model ('ollama pull llama3.2'), then
+    implement complete() using the REST API at DEFAULT_BASE_URL/api/chat.
+    """
+
+    DEFAULT_BASE_URL = "http://localhost:11434"
+    DEFAULT_MODEL = "llama3.2"
+
+    def __init__(
+        self,
+        base_url: str = DEFAULT_BASE_URL,
+        model: str = DEFAULT_MODEL,
+    ) -> None:
+        self._base_url = base_url.rstrip("/")
+        self._model = model
+
+    @jikoku_traced_provider
+    async def complete(self, request: LLMRequest) -> LLMResponse:
+        raise NotImplementedError(
+            "OllamaProvider is not yet implemented. "
+            f"Install Ollama (https://ollama.ai), run 'ollama serve', "
+            f"then implement this method using {self._base_url}/api/chat"
+        )
+
+    async def stream(self, request: LLMRequest):  # type: ignore[override]
+        raise NotImplementedError(
+            "OllamaProvider streaming is not yet implemented. "
+            f"See {self._base_url}/api/generate for the streaming endpoint."
+        )
+        yield  # type: ignore[misc]
+
+
 class ModelRouter:
     """Routes LLM requests to the appropriate provider."""
 
@@ -434,7 +587,20 @@ class ModelRouter:
     async def complete(
         self, provider_type: ProviderType, request: LLMRequest,
     ) -> LLMResponse:
-        """Dispatch a completion request to the named provider."""
+        """Dispatch a completion request to the named provider.
+
+        Injects memory survival directive into the system prompt so every
+        agent knows to externalize findings before context destruction.
+        """
+        if request.system and MEMORY_SURVIVAL_DIRECTIVE not in request.system:
+            request = LLMRequest(
+                model=request.model,
+                messages=request.messages,
+                system=request.system + MEMORY_SURVIVAL_DIRECTIVE,
+                max_tokens=request.max_tokens,
+                temperature=request.temperature,
+                tools=request.tools,
+            )
         return await self.get_provider(provider_type).complete(request)
 
 
@@ -447,7 +613,9 @@ def create_default_router() -> ModelRouter:
         ProviderType.ANTHROPIC: AnthropicProvider(),
         ProviderType.OPENAI: OpenAIProvider(),
         ProviderType.OPENROUTER: OpenRouterProvider(),
+        ProviderType.NVIDIA_NIM: NVIDIANIMProvider(),
         ProviderType.CLAUDE_CODE: ClaudeCodeProvider(),
         ProviderType.CODEX: CodexProvider(),
         ProviderType.OPENROUTER_FREE: OpenRouterFreeProvider(),
+        ProviderType.OLLAMA: OllamaProvider(),
     })

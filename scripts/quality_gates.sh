@@ -16,19 +16,19 @@ echo "[GATE 1/7] Import Resolution..."
 python3 -c "
 import importlib, sys
 modules = [
-    'dharma_swarm.darwin.archive',
-    'dharma_swarm.darwin.selector',
-    'dharma_swarm.darwin.elegance',
-    'dharma_swarm.darwin.fitness_predictor',
-    'dharma_swarm.darwin.evolution_v3',
-    'dharma_swarm.infra.canonical_memory',
-    'dharma_swarm.infra.file_lock',
-    'dharma_swarm.infra.residual_stream',
-    'dharma_swarm.infra.systemic_monitor',
-    'dharma_swarm.infra.anomaly_detection',
-    'dharma_swarm.research.fidelity',
-    'dharma_swarm.research.brain',
-    'dharma_swarm.research.ssc_mathematical_core',
+    'dharma_swarm.archive',
+    'dharma_swarm.selector',
+    'dharma_swarm.elegance',
+    'dharma_swarm.fitness_predictor',
+    'dharma_swarm.evolution',
+    'dharma_swarm.memory',
+    'dharma_swarm.file_lock',
+    'dharma_swarm.monitor',
+    'dharma_swarm.traces',
+    'dharma_swarm.bridge',
+    'dharma_swarm.rv',
+    'dharma_swarm.metrics',
+    'dharma_swarm.stigmergy',
 ]
 failed = []
 for mod in modules:
@@ -53,9 +53,9 @@ python3 scripts/regression_guard.py
 echo ""
 echo "[GATE 3/7] New Module Unit Tests..."
 NEW_TESTS=""
-for f in tests/test_systemic_monitor.py tests/test_anomaly_detection.py \
-         tests/test_fidelity.py tests/test_brain.py \
-         tests/test_ssc_mathematical_core.py tests/test_evolution_v3.py; do
+for f in tests/test_monitor.py tests/test_traces.py \
+         tests/test_bridge.py tests/test_metrics.py \
+         tests/test_rv.py tests/test_evolution.py; do
     if [ -f "$f" ]; then
         NEW_TESTS="$NEW_TESTS $f"
     fi
@@ -72,8 +72,8 @@ fi
 echo ""
 echo "[GATE 4/7] Integration Tests..."
 INT_TESTS=""
-for f in tests/test_integration_darwin.py tests/test_integration_memory_lock.py \
-         tests/test_integration_gates.py tests/test_integration_orchestrator.py; do
+for f in tests/test_integration.py tests/test_file_lock.py \
+         tests/test_orchestrator.py tests/test_task_board.py; do
     if [ -f "$f" ]; then
         INT_TESTS="$INT_TESTS $f"
     fi
@@ -103,9 +103,7 @@ patterns = [
 ]
 
 scan_dirs = [
-    Path('dharma_swarm/darwin'),
-    Path('dharma_swarm/infra'),
-    Path('dharma_swarm/research'),
+    Path('dharma_swarm'),
 ]
 
 violations = []
@@ -131,7 +129,7 @@ print('GATE 5 PASSED: No hardcoded secrets found')
 echo ""
 echo "[GATE 6/7] Type Checking (advisory)..."
 if command -v pyright &> /dev/null; then
-    pyright dharma_swarm/darwin/ dharma_swarm/infra/ dharma_swarm/research/ 2>&1 || echo "GATE 6: Type errors found (non-blocking)"
+    pyright dharma_swarm/ 2>&1 || echo "GATE 6: Type errors found (non-blocking)"
 else
     echo "GATE 6 SKIPPED: pyright not installed"
 fi
@@ -166,7 +164,7 @@ class ComplexityVisitor(ast.NodeVisitor):
     def visit_BoolOp(self, node): self._complexity += len(node.values) - 1; self.generic_visit(node)
 
 violations = []
-for d in ['dharma_swarm/darwin', 'dharma_swarm/infra', 'dharma_swarm/research']:
+for d in ['dharma_swarm']:
     p = Path(d)
     if not p.exists():
         continue

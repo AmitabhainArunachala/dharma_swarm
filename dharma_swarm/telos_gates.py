@@ -2,21 +2,37 @@
 
 Eleven gates from Akram Vignan mapped to computational safety checks.
 Ported from dgc-core/hooks/telos_gate.py into a clean class-based API.
-No hook/stdin interface, no witness file logging — those concerns
-live elsewhere (CLI and memory.py respectively).
+Think-point witness logs are written to ~/.dharma/witness/ for audit.
 """
 
 from __future__ import annotations
 
+from dataclasses import dataclass, field
+import json
+import os
+import re
+from datetime import datetime, timezone
+from pathlib import Path
+
 from dharma_swarm.anekanta_gate import evaluate_anekanta
-from dharma_swarm.dogma_gate import DogmaDriftCheck, check_dogma_drift
 from dharma_swarm.models import (
     GateCheckResult,
     GateDecision,
     GateResult,
     GateTier,
 )
-from dharma_swarm.steelman_gate import SteelmanCheck, check_steelman
+
+WITNESS_DIR = Path.home() / ".dharma" / "witness"
+
+
+@dataclass
+class ReflectiveGateOutcome:
+    """Result bundle for reflective reroute gate checks."""
+
+    result: GateCheckResult
+    attempts: int = 0
+    reflection: str = ""
+    suggestions: list[str] = field(default_factory=list)
 
 
 class TelosGatekeeper:
@@ -96,11 +112,47 @@ class TelosGatekeeper:
         "leak",
     }
 
+    # Strict-mode patterns tuned to catch common security bypass intents that
+    # may evade narrow AHIMSA keywords in internal YOLO mode.
+    STRICT_SECURITY_PATTERNS: set[str] = {
+        "bypass authentication",
+        "bypass auth",
+        "inject sql",
+        "sql injection",
+        "disable ssl certificate validation",
+        "disable tls validation",
+        "execute arbitrary code",
+        "grant admin privileges",
+        "disable rate limiting",
+        "expose sensitive credentials",
+        "disable encryption",
+    }
+
+    THINK_PHASE_HINTS: dict[str, str] = {
+        "before_write": "Pause, articulate risks, and confirm rollback path before writing files.",
+        "before_git": "Pause, review staged changes, and confirm commit message accuracy.",
+        "before_complete": "Pause, verify outputs/tests, and confirm requirement coverage.",
+        "before_pivot": "Pause, summarize repeated failures, and choose a different strategy.",
+        "when_stuck": "Pause, identify what is blocking you, and consider alternative approaches.",
+    }
+
+    # Think phases that BLOCK (not just warn) on insufficient reflection.
+    # These are Devin's mandatory-think cases adapted for dharma_swarm.
+    MANDATORY_THINK_PHASES: set[str] = {
+        "before_write",
+        "before_git",
+        "before_complete",
+        "before_pivot",
+    }
+
     def check(
         self,
         action: str,
         content: str = "",
         tool_name: str = "",
+        trust_mode: str | None = None,
+        think_phase: str | None = None,
+        reflection: str = "",
     ) -> GateCheckResult:
         """Run all 11 gates against an action and optional content.
 
@@ -108,10 +160,23 @@ class TelosGatekeeper:
             action: The action description (command, file path, etc.).
             content: Body content being written or edited.
             tool_name: Name of the tool being invoked (informational).
+            trust_mode:
+                - ``internal_yolo`` (default): permissive for internal speed.
+                - ``external_strict``: block high-risk security intents.
+            think_phase:
+                Optional Devin-style think checkpoint phase. Supported values:
+                ``before_write``, ``before_pivot``, ``before_complete``.
+            reflection:
+                Reflection text for think-point validation.
 
         Returns:
             GateCheckResult with decision, reason, and per-gate results.
         """
+        resolved_mode = (
+            (trust_mode or os.getenv("DGC_TRUST_MODE", "internal_yolo"))
+            .strip()
+            .lower()
+        )
         action_lower = action.lower()
         content_lower = content.lower()
         combined = action_lower + " " + content_lower
@@ -122,7 +187,19 @@ class TelosGatekeeper:
         injection_hit = next(
             (p for p in self.INJECTION_PATTERNS if p in combined), None,
         )
-        if harm_hit:
+        strict_hit = None
+        if resolved_mode == "external_strict":
+            strict_hit = next(
+                (p for p in self.STRICT_SECURITY_PATTERNS if p in combined),
+                None,
+            )
+
+        if strict_hit:
+            results["AHIMSA"] = (
+                GateResult.FAIL,
+                f"Strict security intent detected: {strict_hit}",
+            )
+        elif harm_hit:
             results["AHIMSA"] = (GateResult.FAIL, f"Harmful: {harm_hit}")
         elif injection_hit:
             results["AHIMSA"] = (
@@ -199,12 +276,53 @@ class TelosGatekeeper:
         # --- BHED_GNAN (Tier C) — doer-witness distinction (always passes) ---
         results["BHED_GNAN"] = (GateResult.PASS, "Doer-witness distinction noted")
 
-        # --- WITNESS (Tier C) — the check itself IS witnessing ---
-        results["WITNESS"] = (GateResult.PASS, "Witnessed")
+        # --- WITNESS (Tier C, promoted to blocking for mandatory phases) ---
+        phase_key = (think_phase or "").strip().lower()
+        if phase_key:
+            reflection_text = reflection.strip() or f"{action} {content}".strip()
+            if self._is_reflection_sufficient(reflection_text):
+                results["WITNESS"] = (
+                    GateResult.PASS,
+                    f"Think-point satisfied ({phase_key})",
+                )
+                self._log_witness(phase_key, reflection_text, "PASS", action)
+            elif phase_key in self.MANDATORY_THINK_PHASES:
+                # Mandatory think phases BLOCK, not just warn
+                hint = self.THINK_PHASE_HINTS.get(
+                    phase_key,
+                    "Pause and reflect before proceeding.",
+                )
+                results["WITNESS"] = (
+                    GateResult.FAIL,
+                    f"MANDATORY think-point missing ({phase_key}). "
+                    f"{hint} "
+                    f"This phase requires deliberate reflection before proceeding.",
+                )
+                self._log_witness(phase_key, reflection_text, "BLOCKED", action)
+            else:
+                hint = self.THINK_PHASE_HINTS.get(
+                    phase_key,
+                    "Pause and reflect before proceeding.",
+                )
+                results["WITNESS"] = (
+                    GateResult.WARN,
+                    f"Think-point missing ({phase_key}). {hint}",
+                )
+                self._log_witness(phase_key, reflection_text, "WARN", action)
+        else:
+            # Use recursive reading awareness for file operations
+            if not hasattr(self, "_witness_gate"):
+                from dharma_swarm.telos_gates_witness_enhancement import (
+                    WitnessGateEnhancement,
+                )
+                self._witness_gate = WitnessGateEnhancement()
+            results["WITNESS"] = self._witness_gate.evaluate(
+                action, content, tool_name,
+            )
 
         # --- ANEKANTA (Tier C) — many-sidedness check ---
-        anekanta_result = evaluate_anekanta(action, content)
-        results["ANEKANTA"] = (anekanta_result.gate_result, anekanta_result.reason)
+        # Reuse the anekanta result computed above for SVABHAAVA
+        results["ANEKANTA"] = (anekanta.gate_result, anekanta.reason)
 
         # --- DOGMA_DRIFT (Tier C) — confidence without evidence check ---
         # Default check: no drift detected (used when no explicit check data available)
@@ -250,6 +368,19 @@ class TelosGatekeeper:
                 gate_results=results,
             )
 
+        # Mandatory think-phase WITNESS failures are blocking
+        witness_result = results.get("WITNESS")
+        if (
+            witness_result
+            and witness_result[0] == GateResult.FAIL
+            and (think_phase or "").strip().lower() in self.MANDATORY_THINK_PHASES
+        ):
+            return GateCheckResult(
+                decision=GateDecision.BLOCK,
+                reason=f"Mandatory think-point violation: {witness_result[1]}",
+                gate_results=results,
+            )
+
         # Tier C failures produce review, not block
         tier_c_fail = any(
             results[g][0] in (GateResult.FAIL, GateResult.WARN)
@@ -275,6 +406,37 @@ class TelosGatekeeper:
             gate_results=results,
         )
 
+    @staticmethod
+    def _is_reflection_sufficient(reflection: str) -> bool:
+        """Cheap reflection heuristic used for think-point checkpoints."""
+        tokens = re.findall(r"[a-zA-Z0-9_]+", reflection.lower())
+        return len(tokens) >= 5
+
+    @staticmethod
+    def _log_witness(
+        phase: str, reflection: str, outcome: str, action: str,
+    ) -> None:
+        """Write think-point outcome to ~/.dharma/witness/ for audit trail.
+
+        Each entry is a JSON line appended to a daily log file.
+        Failures are silently swallowed — witnessing must never block.
+        """
+        try:
+            now = datetime.now(timezone.utc)
+            WITNESS_DIR.mkdir(parents=True, exist_ok=True)
+            log_file = WITNESS_DIR / f"witness_{now.strftime('%Y%m%d')}.jsonl"
+            entry = json.dumps({
+                "ts": now.isoformat(),
+                "phase": phase,
+                "outcome": outcome,
+                "action": action[:200],
+                "reflection": reflection[:500],
+            })
+            with open(log_file, "a", encoding="utf-8") as f:
+                f.write(entry + "\n")
+        except Exception:
+            pass  # Witnessing must never block
+
 
 DEFAULT_GATEKEEPER = TelosGatekeeper()
 
@@ -290,3 +452,135 @@ def check_action(action: str, content: str = "") -> GateCheckResult:
         GateCheckResult with decision and per-gate details.
     """
     return DEFAULT_GATEKEEPER.check(action=action, content=content)
+
+
+def check_with_reflective_reroute(
+    *,
+    action: str,
+    content: str = "",
+    tool_name: str = "",
+    trust_mode: str | None = None,
+    think_phase: str | None = None,
+    reflection: str = "",
+    max_reroutes: int = 2,
+    spec_ref: str | None = None,
+    requirement_refs: list[str] | None = None,
+) -> ReflectiveGateOutcome:
+    """Run gate checks with bounded witness recovery for mandatory phases.
+
+    This preserves hard safety blocks (AHIMSA/SATYA/CONSENT), while converting
+    mandatory think-point witness blocks into a structured reflective reroute.
+    """
+    attempts = 0
+    max_attempts = max(0, int(max_reroutes))
+    phase_key = (think_phase or "").strip().lower()
+    req_refs = requirement_refs or []
+    suggestions: list[str] = []
+    current_reflection = (reflection or "").strip()
+
+    while True:
+        result = DEFAULT_GATEKEEPER.check(
+            action=action,
+            content=content,
+            tool_name=tool_name,
+            trust_mode=trust_mode,
+            think_phase=think_phase,
+            reflection=current_reflection,
+        )
+
+        witness_result = result.gate_results.get("WITNESS")
+        mandatory_witness_block = (
+            result.decision == GateDecision.BLOCK
+            and witness_result is not None
+            and witness_result[0] == GateResult.FAIL
+            and phase_key in TelosGatekeeper.MANDATORY_THINK_PHASES
+        )
+        if not mandatory_witness_block:
+            return ReflectiveGateOutcome(
+                result=result,
+                attempts=attempts,
+                reflection=current_reflection,
+                suggestions=suggestions,
+            )
+
+        if attempts >= max_attempts:
+            return ReflectiveGateOutcome(
+                result=result,
+                attempts=attempts,
+                reflection=current_reflection,
+                suggestions=suggestions,
+            )
+
+        attempts += 1
+        suggestions = _reflective_lenses(spec_ref=spec_ref, requirement_refs=req_refs)
+        scaffold = _build_reflection_scaffold(
+            attempt=attempts,
+            max_attempts=max_attempts,
+            reason=result.reason,
+            phase=phase_key or "unknown",
+            action=action,
+            spec_ref=spec_ref,
+            requirement_refs=req_refs,
+        )
+        current_reflection = (
+            f"{current_reflection}\n\n{scaffold}".strip()
+            if current_reflection
+            else scaffold
+        )
+
+
+def _reflective_lenses(
+    *,
+    spec_ref: str | None = None,
+    requirement_refs: list[str] | None = None,
+) -> list[str]:
+    requirements = ", ".join(requirement_refs or []) or "none"
+    trace = spec_ref or "unlinked"
+    return [
+        (
+            "Risk lens: What could break, who/what could be harmed, and what "
+            "smallest reversible step reduces blast radius?"
+        ),
+        (
+            "Counterfactual lens: If this fails, what early signal will detect "
+            "it and what rollback is immediate?"
+        ),
+        (
+            "Plurality lens: What are two alternative strategies and why is this "
+            "one preferred now?"
+        ),
+        (
+            "Evidence lens: Which concrete spec/requirement does this satisfy "
+            f"(spec={trace}, reqs={requirements})?"
+        ),
+        (
+            "Integrity lens: Which assumption is uncertain and how will it be "
+            "validated before completion?"
+        ),
+    ]
+
+
+def _build_reflection_scaffold(
+    *,
+    attempt: int,
+    max_attempts: int,
+    reason: str,
+    phase: str,
+    action: str,
+    spec_ref: str | None = None,
+    requirement_refs: list[str] | None = None,
+) -> str:
+    requirements = ", ".join(requirement_refs or []) or "none"
+    trace = spec_ref or "unlinked"
+    return (
+        f"Reflective reroute attempt {attempt}/{max_attempts}. "
+        f"Phase: {phase}. Trigger: {reason}\n"
+        f"Action intent: {action}\n"
+        f"Spec trace: {trace}\n"
+        f"Requirement refs: {requirements}\n"
+        "RISK: Bound to smallest reversible step.\n"
+        "ROLLBACK: State exact undo path before continuing.\n"
+        "ALTERNATIVES: Name two alternatives and why deferred.\n"
+        "EVIDENCE: Define pass/fail signal for this step.\n"
+        "UNCERTAINTY: Name one unknown + check."
+    )

@@ -12,7 +12,7 @@ from __future__ import annotations
 import json
 from collections import defaultdict
 from pathlib import Path
-from typing import Optional
+from typing import Any, Optional
 
 from pydantic import BaseModel, Field
 
@@ -76,21 +76,29 @@ class FitnessPredictor:
 
     async def load(self) -> None:
         """Load historical outcomes from the JSONL file."""
+        import asyncio
+
         self._outcomes.clear()
         if not self.history_path.exists():
             self._recompute_groups()
             return
-        with open(self.history_path, "r") as fh:
-            for line in fh:
-                line = line.strip()
-                if not line:
-                    continue
-                try:
-                    data = json.loads(line)
-                    outcome = PredictionOutcome.model_validate(data)
-                    self._outcomes.append(outcome)
-                except (json.JSONDecodeError, ValueError):
-                    continue
+
+        def _load_sync() -> list[PredictionOutcome]:
+            outcomes: list[PredictionOutcome] = []
+            with open(self.history_path, "r") as fh:
+                for line in fh:
+                    line = line.strip()
+                    if not line:
+                        continue
+                    try:
+                        data = json.loads(line)
+                        outcome = PredictionOutcome.model_validate(data)
+                        outcomes.append(outcome)
+                    except (json.JSONDecodeError, ValueError):
+                        continue
+            return outcomes
+
+        self._outcomes = await asyncio.to_thread(_load_sync)
         self._recompute_groups()
 
     async def record_outcome(
@@ -105,13 +113,17 @@ class FitnessPredictor:
         Returns:
             The recorded PredictionOutcome.
         """
+        import asyncio
+
         outcome = PredictionOutcome(features=features, actual_fitness=actual_fitness)
         self._outcomes.append(outcome)
 
-        # Ensure parent directory exists
-        self.history_path.parent.mkdir(parents=True, exist_ok=True)
-        with open(self.history_path, "a") as fh:
-            fh.write(outcome.model_dump_json() + "\n")
+        def _write_sync() -> None:
+            self.history_path.parent.mkdir(parents=True, exist_ok=True)
+            with open(self.history_path, "a") as fh:
+                fh.write(outcome.model_dump_json() + "\n")
+
+        await asyncio.to_thread(_write_sync)
 
         self._recompute_groups()
         return outcome
@@ -182,3 +194,50 @@ class FitnessPredictor:
     def group_count(self) -> int:
         """Number of distinct (component, change_type) groups."""
         return len(self._group_means)
+
+    def estimate_subtree_potential(
+        self,
+        entry_id: str,
+        archive_entries: dict[str, Any],
+    ) -> float:
+        """Estimate the metaproductivity of an entry's subtree (HGM CMP pattern).
+
+        Looks at all descendants and computes the max fitness achieved
+        in the subtree. An entry with low personal fitness but high-fitness
+        descendants has high metaproductivity.
+
+        Args:
+            entry_id: The root entry to evaluate.
+            archive_entries: Dict mapping entry_id to entry objects
+                (must have .parent_id and .fitness.weighted() attributes).
+
+        Returns:
+            Estimated subtree potential (0.0 to 1.0).
+            Returns the entry's own fitness if no descendants exist.
+        """
+        # Find all descendants via BFS
+        descendants: list[float] = []
+        queue = [entry_id]
+        visited: set[str] = {entry_id}
+
+        while queue:
+            current_id = queue.pop(0)
+            for eid, entry in archive_entries.items():
+                if eid in visited:
+                    continue
+                if getattr(entry, "parent_id", None) == current_id:
+                    visited.add(eid)
+                    queue.append(eid)
+                    fitness = getattr(entry, "fitness", None)
+                    if fitness and hasattr(fitness, "weighted"):
+                        descendants.append(fitness.weighted())
+
+        if not descendants:
+            # No descendants — return own fitness or neutral
+            own = archive_entries.get(entry_id)
+            if own and hasattr(own, "fitness") and hasattr(own.fitness, "weighted"):
+                return own.fitness.weighted()
+            return _NEUTRAL_PRIOR
+
+        # CMP = max descendant fitness (could also use mean or weighted)
+        return max(descendants)

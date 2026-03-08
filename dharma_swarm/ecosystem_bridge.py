@@ -78,7 +78,10 @@ def scan_ecosystem() -> dict[str, dict[str, Any]]:
 def load_manifest() -> dict[str, Any]:
     """Load the persistent manifest, or return empty dict if none exists."""
     if MANIFEST_PATH.exists():
-        return json.loads(MANIFEST_PATH.read_text())
+        try:
+            return json.loads(MANIFEST_PATH.read_text())
+        except (json.JSONDecodeError, OSError):
+            return {}
     return {}
 
 

@@ -6,6 +6,7 @@ from dharma_swarm.archive import ArchiveEntry, EvolutionArchive, FitnessScore
 from dharma_swarm.evolution import (
     CycleResult,
     DarwinEngine,
+    EvolutionPlan,
     EvolutionStatus,
     Proposal,
 )
@@ -35,6 +36,28 @@ async def engine(engine_paths):
     return eng
 
 
+_THINK_NOTES_SAFE = (
+    "Risk: minimal — small targeted change. "
+    "Rollback: revert single commit. "
+    "Alternatives considered: no-op, full rewrite. "
+    "Expected: improved resilience score."
+)
+
+_THINK_NOTES_HARMFUL = (
+    "Risk: high — destructive operation. "
+    "Rollback: not possible after deletion. "
+    "Alternatives: selective cleanup. "
+    "Expected: free disk space."
+)
+
+_THINK_NOTES_REVIEW = (
+    "Risk: moderate — force override bypasses normal flow. "
+    "Rollback: restore previous config from backup. "
+    "Alternatives: gradual migration. "
+    "Expected: updated configuration state."
+)
+
+
 def _safe_proposal(**kw) -> Proposal:
     """Create a safe proposal that will pass all gates."""
     defaults = {
@@ -45,6 +68,7 @@ def _safe_proposal(**kw) -> Proposal:
             "and ecosystem resilience feedback"
         ),
         "diff": "- old_line\n+ new_line\n",
+        "think_notes": _THINK_NOTES_SAFE,
     }
     defaults.update(kw)
     return Proposal(**defaults)
@@ -57,6 +81,7 @@ def _harmful_proposal(**kw) -> Proposal:
         "change_type": "mutation",
         "description": "rm -rf everything for cleanup",
         "diff": "",
+        "think_notes": _THINK_NOTES_HARMFUL,
     }
     defaults.update(kw)
     return Proposal(**defaults)
@@ -69,6 +94,7 @@ def _review_proposal(**kw) -> Proposal:
         "change_type": "mutation",
         "description": "force override the configuration",
         "diff": "",
+        "think_notes": _THINK_NOTES_REVIEW,
     }
     defaults.update(kw)
     return Proposal(**defaults)
@@ -81,6 +107,7 @@ def _review_proposal(**kw) -> Proposal:
 
 def test_evolution_status_values():
     assert EvolutionStatus.PENDING.value == "pending"
+    assert EvolutionStatus.REFLECTING.value == "reflecting"
     assert EvolutionStatus.GATED.value == "gated"
     assert EvolutionStatus.WRITING.value == "writing"
     assert EvolutionStatus.TESTING.value == "testing"
@@ -108,6 +135,9 @@ def test_proposal_defaults():
     assert p.gate_decision is None
     assert p.gate_reason is None
     assert p.parent_id is None
+    assert p.spec_ref is None
+    assert p.requirement_refs == []
+    assert p.think_notes == ""
     assert p.diff == ""
 
 
@@ -139,10 +169,13 @@ def test_proposal_json_roundtrip():
 def test_cycle_result_defaults():
     cr = CycleResult()
     assert len(cr.cycle_id) == 16
+    assert cr.plan_id == ""
     assert cr.proposals_submitted == 0
     assert cr.proposals_gated == 0
     assert cr.proposals_tested == 0
     assert cr.proposals_archived == 0
+    assert cr.circuit_breakers_tripped == 0
+    assert cr.strategy_pivots == 0
     assert cr.best_fitness == 0.0
     assert cr.duration_seconds == 0.0
 
@@ -205,6 +238,31 @@ async def test_propose_predicts_fitness(engine):
     )
     # With no prior history, predictor uses neutral prior (0.5) + small diff bonus
     assert p.predicted_fitness > 0.0
+
+
+async def test_propose_accepts_traceability_fields(engine):
+    p = await engine.propose(
+        component="trace.py",
+        change_type="mutation",
+        description="improve traceability",
+        spec_ref="specs/dgc_phase1.md#req-3",
+        requirement_refs=["REQ-3", "REQ-3.1"],
+        think_notes="Validate risks and rollback plan before write.",
+    )
+    assert p.spec_ref == "specs/dgc_phase1.md#req-3"
+    assert p.requirement_refs == ["REQ-3", "REQ-3.1"]
+    assert p.think_notes.startswith("Validate risks")
+
+
+async def test_plan_cycle_returns_ordered_plan(engine):
+    p1 = _safe_proposal(component="a.py")
+    p1.predicted_fitness = 0.2
+    p2 = _safe_proposal(component="b.py")
+    p2.predicted_fitness = 0.9
+    plan = await engine.plan_cycle([p1, p2])
+    assert isinstance(plan, EvolutionPlan)
+    assert plan.ordered_proposal_ids == [p2.id, p1.id]
+    assert len(plan.steps) == 2
 
 
 # ---------------------------------------------------------------------------
@@ -390,6 +448,7 @@ async def test_run_cycle_all_safe(engine):
     assert result.proposals_gated == 3
     assert result.proposals_tested == 3
     assert result.proposals_archived == 3
+    assert result.plan_id
     assert result.duration_seconds > 0.0
 
 
@@ -437,6 +496,19 @@ async def test_run_cycle_tracks_best_fitness(engine):
     # Both get pass_rate=0.0 by default, but best_fitness should be > 0
     # because other dimensions (efficiency, safety, dharmic_alignment) contribute
     assert result.best_fitness >= 0.0
+
+
+async def test_run_cycle_circuit_breaker_after_repeated_failures(engine):
+    proposals = [
+        _harmful_proposal(component="danger.py", description="rm -rf everything"),
+        _harmful_proposal(component="danger.py", description="rm -rf everything"),
+        _harmful_proposal(component="danger.py", description="rm -rf everything"),
+    ]
+    result = await engine.run_cycle(proposals)
+    assert result.proposals_submitted == 3
+    assert result.proposals_archived == 0
+    assert result.circuit_breakers_tripped >= 1
+    assert result.strategy_pivots >= 1
 
 
 # ---------------------------------------------------------------------------
@@ -551,6 +623,19 @@ async def test_archive_result_without_fitness(engine):
     assert stored is not None
     assert stored.fitness.correctness == 0.0
     assert stored.fitness.weighted() == 0.0
+
+
+async def test_archive_result_persists_traceability(engine):
+    p = _safe_proposal()
+    p.spec_ref = "specs/demo.md#REQ-9"
+    p.requirement_refs = ["REQ-9", "REQ-9.2"]
+    await engine.gate_check(p)
+    await engine.evaluate(p, test_results={"pass_rate": 0.8})
+    entry_id = await engine.archive_result(p)
+    stored = await engine.archive.get_entry(entry_id)
+    assert stored is not None
+    assert stored.spec_ref == "specs/demo.md#REQ-9"
+    assert stored.requirement_refs == ["REQ-9", "REQ-9.2"]
 
 
 async def test_proposal_status_transitions(engine):
@@ -686,7 +771,8 @@ def test_parse_sandbox_passed_failed_error():
         stderr="",
     )
     result = DarwinEngine._parse_sandbox_result(sr)
-    assert abs(result["pass_rate"] - 5 / 8) < 0.01
+    # errors count as failures: total = 5 + 3 + 1 = 9, pass_rate = 5/9
+    assert abs(result["pass_rate"] - 5 / 9) < 0.01
 
 
 def test_parse_sandbox_only_failed():
@@ -698,3 +784,158 @@ def test_parse_sandbox_only_failed():
     )
     result = DarwinEngine._parse_sandbox_result(sr)
     assert result["pass_rate"] == 0.0
+
+
+# ---------------------------------------------------------------------------
+# Verbal self-reflection (Change 0C tests)
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_cycle_result_has_reflection(engine):
+    """TEST 4: run_cycle populates reflection and lessons_learned."""
+    proposals = [
+        _safe_proposal(component="pass.py", description="safe pass"),
+        _harmful_proposal(component="fail1.py", description="rm -rf bad"),
+        _harmful_proposal(component="fail2.py", description="rm -rf worse"),
+    ]
+    result = await engine.run_cycle(proposals)
+
+    assert isinstance(result.reflection, str)
+    assert len(result.reflection) > 0
+    assert isinstance(result.lessons_learned, list)
+    assert len(result.lessons_learned) > 0
+    # 2 proposals were rejected
+    assert "rejected" in result.reflection.lower()
+
+
+@pytest.mark.asyncio
+async def test_reflect_on_cycle_all_failed(engine):
+    """Reflection identifies when all proposals fail."""
+    proposals = [
+        _harmful_proposal(description="rm -rf one"),
+        _harmful_proposal(description="rm -rf two"),
+    ]
+    result = await engine.run_cycle(proposals)
+    assert "failed" in result.reflection.lower() or "rejected" in result.reflection.lower()
+
+
+@pytest.mark.asyncio
+async def test_reflect_on_cycle_clean(engine):
+    """Clean cycle produces reflection."""
+    proposals = [_safe_proposal()]
+    result = await engine.run_cycle(proposals)
+    assert len(result.reflection) > 0
+
+
+@pytest.mark.asyncio
+async def test_cycle_result_reflection_fields_default():
+    """New CycleResult fields default correctly."""
+    cr = CycleResult()
+    assert cr.reflection == ""
+    assert cr.lessons_learned == []
+
+
+# ---------------------------------------------------------------------------
+# Think-Gate enforcement (Change 0D tests)
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_think_gate_reroutes_empty_notes(engine):
+    """TEST 5: Empty think_notes trigger reflective reroute instead of dead stop."""
+    p = Proposal(
+        component="empty.py",
+        change_type="mutation",
+        description="some change",
+        think_notes="",
+    )
+    result = await engine.gate_check(p)
+    assert result.status == EvolutionStatus.GATED
+    assert result.reflection_attempts >= 1
+    assert "Reflective reroute attempt" in result.think_notes
+
+
+@pytest.mark.asyncio
+async def test_think_gate_reroutes_short_notes(engine):
+    """Very short think_notes (< 10 chars) trigger reflective reroute."""
+    p = Proposal(
+        component="short.py",
+        change_type="mutation",
+        description="some change",
+        think_notes="ok",
+    )
+    result = await engine.gate_check(p)
+    assert result.status == EvolutionStatus.GATED
+    assert result.reflection_attempts >= 1
+    assert len(result.reflection_suggestions) >= 3
+
+
+@pytest.mark.asyncio
+async def test_think_gate_reroute_budget_enforced(engine_paths):
+    """If reroute budget is zero, short think_notes are still rejected."""
+    eng = DarwinEngine(**engine_paths, max_reflection_reroutes=0)
+    await eng.init()
+    p = Proposal(
+        component="short_budget.py",
+        change_type="mutation",
+        description="some change",
+        think_notes="ok",
+    )
+    result = await eng.gate_check(p)
+    assert result.status == EvolutionStatus.REJECTED
+    assert result.gate_decision == GateDecision.BLOCK.value
+
+
+@pytest.mark.asyncio
+async def test_think_gate_passes_with_notes(engine):
+    """TEST 6: Proposal with sufficient think_notes passes ThinkGate."""
+    p = _safe_proposal(
+        think_notes=(
+            "This mutation improves selector diversity by adding novelty weighting"
+        ),
+    )
+    result = await engine.gate_check(p)
+    # Should NOT be rejected by ThinkGate (may be GATED or rejected for other reasons)
+    assert "ThinkGate" not in (result.gate_reason or "")
+
+
+# ---------------------------------------------------------------------------
+# Subtree fitness estimation (Change 0E test)
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_subtree_fitness_estimation(engine):
+    """TEST 7: Subtree potential returns max descendant fitness."""
+    from dharma_swarm.archive import ArchiveEntry as AE
+
+    # Create A -> B -> C chain
+    a = AE(
+        component="a.py",
+        fitness=FitnessScore(correctness=0.3),
+        status="applied",
+    )
+    b = AE(
+        component="b.py",
+        fitness=FitnessScore(correctness=0.5),
+        status="applied",
+        parent_id=a.id,
+    )
+    c = AE(
+        component="c.py",
+        fitness=FitnessScore(correctness=0.9, safety=1.0),
+        status="applied",
+        parent_id=b.id,
+    )
+
+    entries = {a.id: a, b.id: b, c.id: c}
+
+    # A's subtree includes B and C — max is C's fitness
+    potential_a = engine.predictor.estimate_subtree_potential(a.id, entries)
+    c_weighted = c.fitness.weighted()
+    assert potential_a == pytest.approx(c_weighted)
+
+    # C has no descendants — returns own fitness
+    potential_c = engine.predictor.estimate_subtree_potential(c.id, entries)
+    assert potential_c == pytest.approx(c_weighted)

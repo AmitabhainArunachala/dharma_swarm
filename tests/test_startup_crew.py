@@ -39,6 +39,11 @@ class _FakeSwarm:
         self.create_calls.append(kwargs)
         return kwargs
 
+    async def create_task_batch(self, specs):
+        for spec in specs:
+            self.create_calls.append(spec)
+        return list(specs)
+
 
 @pytest.mark.asyncio
 async def test_spawn_default_crew_spawns_all_when_none_exist():
@@ -61,7 +66,8 @@ async def test_spawn_default_crew_skips_existing_names():
 
 
 @pytest.mark.asyncio
-async def test_spawn_default_crew_passes_provider_and_model_from_spec():
+async def test_spawn_default_crew_passes_provider_and_model_from_spec(monkeypatch):
+    monkeypatch.setattr(sc, "_crew_from_skills", lambda: None)
     swarm = _FakeSwarm()
     await sc.spawn_default_crew(swarm)
 
@@ -69,18 +75,41 @@ async def test_spawn_default_crew_passes_provider_and_model_from_spec():
     first_call = next(c for c in swarm.spawn_calls if c["name"] == first["name"])
     assert first_call["provider_type"] == first["provider"]
     assert first_call["model"] == first["model"]
+    assert "MEMORY SURVIVAL INSTINCT" in first_call["system_prompt"]
 
 
 @pytest.mark.asyncio
 async def test_spawn_default_crew_defaults_provider_and_model_when_missing(monkeypatch):
     custom = [{"name": "x", "role": AgentRole.GENERAL, "thread": "mechanistic"}]
     monkeypatch.setattr(sc, "DEFAULT_CREW", custom)
+    monkeypatch.setattr(sc, "_crew_from_skills", lambda: None)
     swarm = _FakeSwarm()
 
     await sc.spawn_default_crew(swarm)
     assert len(swarm.spawn_calls) == 1
     assert swarm.spawn_calls[0]["provider_type"] == ProviderType.CLAUDE_CODE
     assert swarm.spawn_calls[0]["model"] == "claude-code"
+    assert "MEMORY SURVIVAL INSTINCT" in swarm.spawn_calls[0]["system_prompt"]
+
+
+@pytest.mark.asyncio
+async def test_spawn_default_crew_merges_existing_system_prompt(monkeypatch):
+    custom = [{
+        "name": "x",
+        "role": AgentRole.GENERAL,
+        "thread": "mechanistic",
+        "provider": ProviderType.CLAUDE_CODE,
+        "model": "claude-code",
+        "system_prompt": "CUSTOM BASE",
+    }]
+    monkeypatch.setattr(sc, "DEFAULT_CREW", custom)
+    monkeypatch.setattr(sc, "_crew_from_skills", lambda: None)
+    swarm = _FakeSwarm()
+
+    await sc.spawn_default_crew(swarm)
+    prompt = swarm.spawn_calls[0]["system_prompt"]
+    assert "CUSTOM BASE" in prompt
+    assert "MEMORY SURVIVAL INSTINCT" in prompt
 
 
 @pytest.mark.asyncio

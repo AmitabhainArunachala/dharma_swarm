@@ -2,6 +2,10 @@
 
 Ported from the CHAIWALA sync MessageBus to async using aiosqlite.
 All operations non-blocking. No global singletons.
+
+Supports typed artifact attachments linked to messages (ArtifactType from
+handoff.py). Artifacts are stored in a dedicated ``artifacts`` table with
+a foreign key back to ``messages(id)``.
 """
 
 from __future__ import annotations
@@ -40,11 +44,25 @@ CREATE TABLE IF NOT EXISTS subscriptions (
     created_at TEXT NOT NULL, PRIMARY KEY (agent_id, topic)
 )"""
 
+_ARTIFACTS_DDL = """
+CREATE TABLE IF NOT EXISTS artifacts (
+    id TEXT PRIMARY KEY,
+    message_id TEXT NOT NULL,
+    artifact_type TEXT NOT NULL,
+    content TEXT NOT NULL,
+    summary TEXT DEFAULT '',
+    files_touched TEXT DEFAULT '[]',
+    metadata TEXT DEFAULT '{}',
+    created_at TEXT NOT NULL,
+    FOREIGN KEY (message_id) REFERENCES messages(id)
+)"""
+
 _INDEXES = [
     "CREATE INDEX IF NOT EXISTS idx_msg_to ON messages(to_agent)",
     "CREATE INDEX IF NOT EXISTS idx_msg_status ON messages(status)",
     "CREATE INDEX IF NOT EXISTS idx_msg_priority ON messages(priority)",
     "CREATE INDEX IF NOT EXISTS idx_sub_topic ON subscriptions(topic)",
+    "CREATE INDEX IF NOT EXISTS idx_art_msg ON artifacts(message_id)",
 ]
 
 _RECEIVE_ORDER = """
@@ -80,10 +98,13 @@ class MessageBus:
         self.db_path = db_path
 
     async def init_db(self) -> None:
-        """Create messages, heartbeats, and subscriptions tables."""
+        """Create messages, heartbeats, subscriptions, and artifacts tables."""
         self.db_path.parent.mkdir(parents=True, exist_ok=True)
         async with aiosqlite.connect(self.db_path) as db:
-            for ddl in (_MESSAGES_DDL, _HEARTBEATS_DDL, _SUBSCRIPTIONS_DDL):
+            for ddl in (
+                _MESSAGES_DDL, _HEARTBEATS_DDL, _SUBSCRIPTIONS_DDL,
+                _ARTIFACTS_DDL,
+            ):
                 await db.execute(ddl)
             for idx in _INDEXES:
                 await db.execute(idx)
@@ -141,15 +162,15 @@ class MessageBus:
                 (original_id,),
             )
             row = await cursor.fetchone()
-        if row is None:
-            raise ValueError(f"Message {original_id} not found")
-        reply_msg = Message(
-            from_agent=from_agent,
-            to_agent=row["from_agent"],
-            subject=f"Re: {row['subject']}" if row["subject"] else None,
-            body=body,
-            reply_to=original_id,
-        )
+            if row is None:
+                raise ValueError(f"Message {original_id} not found")
+            reply_msg = Message(
+                from_agent=from_agent,
+                to_agent=row["from_agent"],
+                subject=f"Re: {row['subject']}" if row["subject"] else None,
+                body=body,
+                reply_to=original_id,
+            )
         return await self.send(reply_msg)
 
     async def subscribe(self, agent_id: str, topic: str) -> None:
@@ -231,3 +252,220 @@ class MessageBus:
             "unread_by_agent": unread_by_agent, "known_agents": agents,
             "db_path": str(self.db_path),
         }
+
+    # ------------------------------------------------------------------
+    # Artifact attachment support
+    # ------------------------------------------------------------------
+
+    async def attach_artifact(
+        self,
+        message_id: str,
+        artifact_type: str,
+        content: str,
+        summary: str = "",
+        files_touched: list[str] | None = None,
+        metadata: dict[str, Any] | None = None,
+    ) -> str:
+        """Attach a typed artifact to an existing message.
+
+        Args:
+            message_id: The message to attach the artifact to.
+            artifact_type: A string from ArtifactType (e.g. ``"code_diff"``).
+            content: The artifact payload (code, analysis text, etc.).
+            summary: One-line summary for quick scanning.
+            files_touched: List of file paths affected by this artifact.
+            metadata: Arbitrary key-value metadata.
+
+        Returns:
+            The generated artifact ID.
+
+        Raises:
+            ValueError: If *message_id* does not reference an existing message.
+        """
+        artifact_id = _new_id()
+        async with aiosqlite.connect(self.db_path) as db:
+            # Verify the parent message exists.
+            cursor = await db.execute(
+                "SELECT id FROM messages WHERE id=?", (message_id,),
+            )
+            if await cursor.fetchone() is None:
+                raise ValueError(f"Message {message_id} not found")
+            await db.execute(
+                "INSERT INTO artifacts"
+                " (id, message_id, artifact_type, content, summary,"
+                "  files_touched, metadata, created_at)"
+                " VALUES (?,?,?,?,?,?,?,?)",
+                (
+                    artifact_id,
+                    message_id,
+                    artifact_type,
+                    content,
+                    summary,
+                    json.dumps(files_touched or []),
+                    json.dumps(metadata or {}),
+                    _now_iso(),
+                ),
+            )
+            await db.commit()
+        return artifact_id
+
+    async def get_artifacts(
+        self,
+        message_id: str,
+        artifact_type: str | None = None,
+    ) -> list[dict[str, Any]]:
+        """Retrieve artifacts attached to a message.
+
+        Args:
+            message_id: The message whose artifacts to fetch.
+            artifact_type: If provided, only return artifacts of this type.
+
+        Returns:
+            List of artifact dicts with keys: ``id``, ``message_id``,
+            ``artifact_type``, ``content``, ``summary``, ``files_touched``,
+            ``metadata``, ``created_at``.
+        """
+        async with aiosqlite.connect(self.db_path) as db:
+            db.row_factory = aiosqlite.Row
+            query = (
+                "SELECT id, message_id, artifact_type, content, summary,"
+                " files_touched, metadata, created_at"
+                " FROM artifacts WHERE message_id = ?"
+            )
+            params: list[Any] = [message_id]
+            if artifact_type is not None:
+                query += " AND artifact_type = ?"
+                params.append(artifact_type)
+            query += " ORDER BY created_at"
+            cursor = await db.execute(query, params)
+            rows = await cursor.fetchall()
+        return [
+            {
+                "id": row["id"],
+                "message_id": row["message_id"],
+                "artifact_type": row["artifact_type"],
+                "content": row["content"],
+                "summary": row["summary"],
+                "files_touched": json.loads(row["files_touched"]),
+                "metadata": json.loads(row["metadata"]),
+                "created_at": row["created_at"],
+            }
+            for row in rows
+        ]
+
+    async def send_with_artifacts(
+        self,
+        message: Message,
+        artifacts: list[dict[str, Any]],
+    ) -> str:
+        """Send a message with attached artifacts in a single transaction.
+
+        Each artifact dict must contain at least ``artifact_type`` and
+        ``content``.  Optional keys: ``summary``, ``files_touched``,
+        ``metadata``.
+
+        Args:
+            message: The message to send.
+            artifacts: List of artifact dicts to attach.
+
+        Returns:
+            The message ID.
+        """
+        async with aiosqlite.connect(self.db_path) as db:
+            # Insert the message.
+            await db.execute(
+                "INSERT INTO messages (id, from_agent, to_agent, subject, body,"
+                " priority, status, created_at, reply_to, metadata)"
+                " VALUES (?,?,?,?,?,?,?,?,?,?)",
+                (
+                    message.id,
+                    message.from_agent,
+                    message.to_agent,
+                    message.subject,
+                    message.body,
+                    message.priority.value,
+                    message.status.value,
+                    message.created_at.isoformat(),
+                    message.reply_to,
+                    json.dumps(message.metadata),
+                ),
+            )
+            # Insert each artifact in the same transaction.
+            for art in artifacts:
+                artifact_id = _new_id()
+                await db.execute(
+                    "INSERT INTO artifacts"
+                    " (id, message_id, artifact_type, content, summary,"
+                    "  files_touched, metadata, created_at)"
+                    " VALUES (?,?,?,?,?,?,?,?)",
+                    (
+                        artifact_id,
+                        message.id,
+                        art["artifact_type"],
+                        art["content"],
+                        art.get("summary", ""),
+                        json.dumps(art.get("files_touched", [])),
+                        json.dumps(art.get("metadata", {})),
+                        _now_iso(),
+                    ),
+                )
+            await db.commit()
+        return message.id
+
+    async def build_context_from_artifacts(
+        self,
+        agent_id: str,
+        budget: int = 5000,
+    ) -> str:
+        """Build injectable context from unread messages and their artifacts.
+
+        Reads all unread messages for *agent_id*, fetches their artifacts,
+        and formats them into a priority-sorted context string truncated to
+        *budget* characters.
+
+        Args:
+            agent_id: The agent to build context for.
+            budget: Maximum character count for the returned string.
+
+        Returns:
+            Formatted context string, or ``""`` if no unread messages with
+            artifacts exist.
+        """
+        messages = await self.receive(agent_id, status="unread")
+        if not messages:
+            return ""
+
+        # Collect (message, artifacts) pairs; skip messages with no artifacts.
+        msg_art_pairs: list[tuple[Message, list[dict[str, Any]]]] = []
+        for msg in messages:
+            arts = await self.get_artifacts(msg.id)
+            if arts:
+                msg_art_pairs.append((msg, arts))
+
+        if not msg_art_pairs:
+            return ""
+
+        sections: list[str] = ["# Artifact Context"]
+        used = len(sections[0])
+
+        for msg, arts in msg_art_pairs:
+            header = (
+                f"\n## [{msg.priority.value.upper()}] "
+                f"From {msg.from_agent}: {msg.subject or '(no subject)'}"
+            )
+            body_parts: list[str] = [header]
+            for art in arts:
+                label = art["artifact_type"]
+                summary = art.get("summary") or art["content"][:80]
+                body_parts.append(f"- **{label}**: {summary}")
+            section = "\n".join(body_parts)
+
+            if used + len(section) > budget:
+                remaining = budget - used
+                if remaining > 40:
+                    sections.append(section[:remaining] + "\n... [truncated]")
+                break
+            sections.append(section)
+            used += len(section)
+
+        return "\n".join(sections)

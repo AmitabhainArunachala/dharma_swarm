@@ -15,8 +15,6 @@ import re
 import zlib
 from collections import Counter
 from enum import Enum
-from typing import Optional
-
 from pydantic import BaseModel, Field
 
 

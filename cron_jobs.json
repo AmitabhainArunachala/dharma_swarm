@@ -74,7 +74,7 @@
       "minute": 0
     },
     "model": "sonnet",
-    "prompt": "Run a HUM dream cycle. Select semantically dense files from the entire system (PSMV, mech-interp, dharma_swarm, CLAUDE files, Kailash vault — everything).\n\nExecute:\ncd ~/dharma_swarm && python3 -c \"\nimport asyncio, json\nfrom dharma_swarm.subconscious_v2 import run_dream_cycle, WakeTrigger, select_dense_files\nfiles = select_dense_files(count=15)\nprint('Selected files:')\nfor f in files:\n    print(f'  {f.parent.name}/{f.name}')\nresult = asyncio.run(run_dream_cycle(file_paths=files, trigger=WakeTrigger.SCHEDULED))\nassociations = result['associations']\nhigh = [a for a in associations if a['salience'] >= 0.7]\nprint(f'\\nDream cycle: {len(associations)} total, {len(high)} high-salience')\nfor a in high:\n    print(f'  [{a[\\\"resonance_type\\\"]}] {a[\\\"salience\\\"]:.2f}: {a[\\\"description\\\"][:180]}')\n\"\n\nWrite results to ~/.dharma/witness/hum_$(date +%Y%m%d).md with: files selected, associations found, any invented vocabulary, flag HIGH VALUE if phenomenological+mechanistic bridge found.",
+    "prompt": "Run a HUM dream cycle. Select semantically dense files from the entire system (PSMV, mech-interp, dharma_swarm, CLAUDE files, Kailash vault — everything).\n\nExecute:\ncd ~/dharma_swarm && python3 -c \"\nimport asyncio, json\nfrom dharma_swarm.subconscious_v2 import run_dream_cycle, WakeTrigger, select_dense_files\nfiles = select_dense_files(count=8)\nprint('Selected files:')\nfor f in files:\n    print(f'  {f.parent.name}/{f.name}')\nresult = asyncio.run(run_dream_cycle(file_paths=files, trigger=WakeTrigger.SCHEDULED))\nassociations = result['associations']\nhigh = [a for a in associations if a['salience'] >= 0.7]\nprint(f'\\nDream cycle: {len(associations)} total, {len(high)} high-salience')\nfor a in high:\n    print(f'  [{a[\\\"resonance_type\\\"]}] {a[\\\"salience\\\"]:.2f}: {a[\\\"description\\\"][:180]}')\n\"\n\nWrite results to ~/.dharma/witness/hum_$(date +%Y%m%d).md with: files selected, associations found, any invented vocabulary, flag HIGH VALUE if phenomenological+mechanistic bridge found.",
     "enabled": true
   },
   {
@@ -88,5 +88,29 @@
     "model": "sonnet",
     "prompt": "Process last night's dream associations into a hypnagogic journal entry.\n\nExecute:\ncd ~/dharma_swarm && python3 -c \"\nimport asyncio\nfrom dharma_swarm.hypnagogic import process_recent_dreams\nresult = asyncio.run(process_recent_dreams(hours_back=8, min_salience=0.7))\nprint(f'Status: {result[\\\"status\\\"]}')\nif result.get(\\\"journal_path\\\"):\n    print(f'Journal: {result[\\\"journal_path\\\"]}')\n    print('\\nPreview:')\n    print(result.get(\\\"preview\\\", ''))\n\"\n\nThe journal will be at ~/.dharma/subconscious/journal/LATEST_JOURNAL.md\nReport: how many dreams were developed, temperature distribution (HOT/WARM/COLD), any publishable-relevant findings.",
     "enabled": true
+  },
+  {
+    "id": "sprint_generator",
+    "name": "Daily Sprint Generator",
+    "trigger": "cron",
+    "schedule": {
+      "hour": 4,
+      "minute": 35
+    },
+    "model": "sonnet",
+    "enabled": true,
+    "prompt": "Generate today's adaptive 8-hour sprint prompt.\n\nExecute:\ncd ~/dharma_swarm && dgc sprint\n\nIf dgc is not in PATH:\ncd ~/dharma_swarm && python3 -m dharma_swarm.cli sprint\n\nThis reads: morning brief, dream seeds, sprint handoff, witness logs,\nand last 5 allout cycles — then generates a fresh GRANULAR/META/QUALITY\nsprint prompt to ~/.dharma/shared/SPRINT_8H_$(date +%Y%m%d).md\n\nReport: sprint file path, char count, COLM days remaining, quality verdict."
+  },
+  {
+    "id": "subconscious_fleet",
+    "name": "Subconscious Fleet Dream Run",
+    "trigger": "cron",
+    "schedule": {
+      "hour": 3,
+      "minute": 30
+    },
+    "model": "sonnet",
+    "enabled": false,
+    "prompt": "Run subconscious fleet with 6 parallel agents.\n\nExecute:\ncd ~/dharma_swarm && python3 -c \"\nimport asyncio, json\nfrom dharma_swarm.subconscious_fleet import run_fleet\nresult = asyncio.run(run_fleet(fleet_size=6))\nhigh = result.get('high_salience', [])\nprint(f'Fleet done: {result[\\\"fleet_size\\\"]} agents, {len(result[\\\"dreams\\\"])} dreams, {len(high)} high-salience')\nfor d in high[:5]:\n    print(f'  [{d.get(\\\"resonance_type\\\",\\\"?\\\")}] {d.get(\\\"salience\\\",0):.2f}: {str(d.get(\\\"description\\\",\\\"\\\"))[:160]}')\nprint(\\\"Provider breakdown:\\\", result.get(\\\"provider_breakdown\\\", {}))\n\"\n\nWrite results to ~/.dharma/witness/fleet_$(date +%Y%m%d_%H%M).md with: agents used, dreams found, high-salience items, provider breakdown."
   }
 ]

@@ -13,6 +13,7 @@ from typing import Any
 import aiosqlite
 
 from dharma_swarm.models import Task, TaskPriority, TaskStatus, _new_id, _utc_now
+from dharma_swarm.telos_gates import check_with_reflective_reroute
 
 _TRANSITIONS: dict[TaskStatus, set[TaskStatus]] = {
     TaskStatus.PENDING: {TaskStatus.ASSIGNED, TaskStatus.CANCELLED},
@@ -90,6 +91,11 @@ class TaskBoard:
         )
         return [r[0] for r in await cur.fetchall()]
 
+    _ALLOWED_COLUMNS = frozenset({
+        "title", "description", "priority", "assigned_to",
+        "created_by", "result", "metadata",
+    })
+
     async def _set_status(self, task_id: str, new: TaskStatus, **fields: Any) -> Task:
         """Validate and apply a status transition with optional field updates."""
         async with aiosqlite.connect(self._db_path) as db:
@@ -106,6 +112,8 @@ class TaskBoard:
             sets = ["status = ?", "updated_at = ?"]
             params: list[Any] = [new.value, now]
             for col, val in fields.items():
+                if col not in self._ALLOWED_COLUMNS:
+                    raise TaskBoardError(f"Invalid column: {col!r}")
                 sets.append(f"{col} = ?")
                 params.append(val)
             params.append(task_id)
@@ -124,6 +132,27 @@ class TaskBoard:
             deps = await self._fetch_deps(db, row[0])
             tasks.append(self._row_to_task(row, deps))
         return tasks
+
+    async def _witness_transition(
+        self,
+        *,
+        task_id: str,
+        action: str,
+        think_phase: str,
+        reflection: str,
+    ) -> None:
+        """Apply bounded reflective checkpoint to task status transitions."""
+        gate = check_with_reflective_reroute(
+            action=action,
+            think_phase=think_phase,
+            reflection=reflection,
+            max_reroutes=1,
+            requirement_refs=[f"task:{task_id}"],
+        )
+        if gate.result.decision.value == "block":
+            raise TaskBoardError(
+                f"Telos blocked transition ({think_phase}): {gate.result.reason}"
+            )
 
     # -- CRUD ---------------------------------------------------------------
 
@@ -156,6 +185,62 @@ class TaskBoard:
             priority=priority, created_by=created_by,
             created_at=now, updated_at=now, depends_on=dep_ids,
         )
+
+    async def create_batch(
+        self,
+        tasks: list[dict[str, Any]],
+    ) -> list[Task]:
+        """Create multiple tasks in a single transaction.
+
+        JIKOKU-optimized: Batches all inserts into one transaction,
+        eliminating SQLite write lock contention.
+
+        Args:
+            tasks: List of task specs, each dict with keys:
+                   {title, description?, priority?, created_by?, depends_on?}
+
+        Returns:
+            List of created Task objects.
+        """
+        if not tasks:
+            return []
+
+        now = _utc_now()
+        created_tasks: list[Task] = []
+
+        async with aiosqlite.connect(self._db_path) as db:
+            # Single transaction for all tasks
+            for spec in tasks:
+                task_id = _new_id()
+                title = spec["title"]
+                description = spec.get("description", "")
+                priority = spec.get("priority", TaskPriority.NORMAL)
+                created_by = spec.get("created_by", "system")
+                dep_ids = spec.get("depends_on") or []
+
+                await db.execute(
+                    "INSERT INTO tasks VALUES (?,?,?,?,?,?,?,?,?,?,?)",
+                    (task_id, title, description, TaskStatus.PENDING.value,
+                     priority.value, None, created_by, now.isoformat(),
+                     now.isoformat(), None, "{}"),
+                )
+
+                for dep_id in dep_ids:
+                    await db.execute(
+                        "INSERT INTO task_dependencies VALUES (?,?)",
+                        (task_id, dep_id),
+                    )
+
+                created_tasks.append(Task(
+                    id=task_id, title=title, description=description,
+                    priority=priority, created_by=created_by,
+                    created_at=now, updated_at=now, depends_on=dep_ids,
+                ))
+
+            # Single commit for entire batch
+            await db.commit()
+
+        return created_tasks
 
     async def get(self, task_id: str) -> Task | None:
         """Retrieve a single task by ID, or None if missing."""
@@ -215,6 +300,8 @@ class TaskBoard:
                 sets = []
                 params: list[Any] = []
                 for col, val in fields.items():
+                    if col not in self._ALLOWED_COLUMNS:
+                        raise TaskBoardError(f"Invalid column: {col!r}")
                     sets.append(f"{col} = ?")
                     params.append(val)
                 params.append(task_id)
@@ -235,10 +322,28 @@ class TaskBoard:
 
     async def complete(self, task_id: str, result: str = "") -> Task:
         """Mark completed (RUNNING -> COMPLETED)."""
+        await self._witness_transition(
+            task_id=task_id,
+            action=f"complete task {task_id}",
+            think_phase="before_complete",
+            reflection=(
+                f"Completing task {task_id}. Result captured with "
+                f"{len((result or '').strip())} chars. Verify requirement coverage."
+            ),
+        )
         return await self._set_status(task_id, TaskStatus.COMPLETED, result=result)
 
     async def fail(self, task_id: str, error: str = "") -> Task:
         """Mark failed (RUNNING -> FAILED)."""
+        await self._witness_transition(
+            task_id=task_id,
+            action=f"pivot task {task_id}",
+            think_phase="before_pivot",
+            reflection=(
+                f"Task {task_id} failed with error context. "
+                "Summarize failure signature and define pivot strategy."
+            ),
+        )
         return await self._set_status(task_id, TaskStatus.FAILED, result=error)
 
     async def cancel(self, task_id: str) -> Task:

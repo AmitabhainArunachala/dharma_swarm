@@ -105,10 +105,12 @@ class ProviderType(str, Enum):
     ANTHROPIC = "anthropic"
     OPENAI = "openai"
     OPENROUTER = "openrouter"
+    NVIDIA_NIM = "nvidia_nim"
     LOCAL = "local"
     CLAUDE_CODE = "claude_code"
     CODEX = "codex"
     OPENROUTER_FREE = "openrouter_free"
+    OLLAMA = "ollama"
 
 
 # === Utility ===

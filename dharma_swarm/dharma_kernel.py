@@ -154,7 +154,17 @@ class KernelGuard:
         self._kernel: DharmaKernel | None = None
 
     async def load(self) -> DharmaKernel:
-        """Read kernel from disk, validate integrity, and return it."""
+        """Read kernel from disk, validate integrity, and return it.
+
+        Raises:
+            FileNotFoundError: If the kernel file does not exist.
+            ValueError: If the kernel integrity check fails.
+        """
+        if not self.path.exists():
+            raise FileNotFoundError(
+                f"Kernel file not found at {self.path}. "
+                "Use save() with DharmaKernel.create_default() to initialize."
+            )
         async with aiofiles.open(self.path, "r") as f:
             data = await f.read()
         kernel = DharmaKernel.model_validate_json(data)

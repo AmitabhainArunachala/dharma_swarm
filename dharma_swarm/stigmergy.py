@@ -11,7 +11,6 @@ non-blocking I/O.
 
 from __future__ import annotations
 
-import json
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Literal
@@ -205,13 +204,13 @@ async def leave_stigmergic_mark(
     observation: str,
     salience: float = 0.5,
     connections: list[str] | None = None,
-    action: str = "write",
+    action: Action = "write",
 ) -> str:
     """Create a mark and persist it via a default store. Returns the mark id."""
     mark = StigmergicMark(
         agent=agent,
         file_path=file_path,
-        action=action,  # type: ignore[arg-type]
+        action=action,
         observation=observation,
         salience=salience,
         connections=connections or [],

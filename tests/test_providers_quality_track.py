@@ -15,6 +15,7 @@ from dharma_swarm.providers import (
     ClaudeCodeProvider,
     CodexProvider,
     ModelRouter,
+    NVIDIANIMProvider,
     OpenAIProvider,
     OpenRouterFreeProvider,
     OpenRouterProvider,
@@ -186,5 +187,74 @@ def test_create_default_router_contains_expected_provider_types():
         ProviderType.CLAUDE_CODE,
         ProviderType.CODEX,
         ProviderType.OPENROUTER_FREE,
+        ProviderType.NVIDIA_NIM,
+        ProviderType.OLLAMA,
     }
     assert set(router._providers.keys()) == expected
+
+
+@pytest.mark.asyncio
+async def test_nvidia_nim_complete_uses_httpx(monkeypatch):
+    provider = NVIDIANIMProvider(api_key="k", base_url="https://nim.example/v1")
+    req = LLMRequest(
+        model="meta/llama-3.3-70b-instruct",
+        system="sys",
+        messages=[{"role": "user", "content": "hello"}],
+    )
+
+    class _Resp:
+        status_code = 200
+
+        @staticmethod
+        def json():
+            return {
+                "model": "nim-model",
+                "choices": [{"message": {"content": "ok"}, "finish_reason": "stop"}],
+                "usage": {"prompt_tokens": 1, "completion_tokens": 2, "total_tokens": 3},
+            }
+
+    captured = {}
+
+    class _Client:
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, exc_type, exc, tb):
+            return False
+
+        async def post(self, url, json, headers):
+            captured["url"] = url
+            captured["json"] = json
+            captured["headers"] = headers
+            return _Resp()
+
+    monkeypatch.setattr("dharma_swarm.providers.httpx.AsyncClient", lambda timeout: _Client())
+    out = await provider.complete(req)
+    assert out.content == "ok"
+    assert out.model == "nim-model"
+    assert captured["url"].endswith("/chat/completions")
+    assert captured["json"]["messages"][0]["role"] == "system"
+
+
+@pytest.mark.asyncio
+async def test_nvidia_nim_error_status_raises(monkeypatch):
+    provider = NVIDIANIMProvider(api_key="k", base_url="https://nim.example/v1")
+    req = LLMRequest(model="x", messages=[{"role": "user", "content": "hello"}])
+
+    class _Resp:
+        status_code = 500
+        text = "boom"
+
+    class _Client:
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, exc_type, exc, tb):
+            return False
+
+        async def post(self, url, json, headers):
+            return _Resp()
+
+    monkeypatch.setattr("dharma_swarm.providers.httpx.AsyncClient", lambda timeout: _Client())
+    with pytest.raises(RuntimeError, match="NVIDIA NIM error 500"):
+        await provider.complete(req)

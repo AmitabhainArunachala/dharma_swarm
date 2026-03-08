@@ -11,6 +11,7 @@ from dharma_swarm.providers import (
     ClaudeCodeProvider,
     CodexProvider,
     ModelRouter,
+    NVIDIANIMProvider,
     OpenAIProvider,
     OpenRouterFreeProvider,
     create_default_router,
@@ -72,9 +73,17 @@ def test_create_default_router():
     router = create_default_router()
     assert router.get_provider(ProviderType.ANTHROPIC) is not None
     assert router.get_provider(ProviderType.OPENAI) is not None
+    assert router.get_provider(ProviderType.NVIDIA_NIM) is not None
     assert router.get_provider(ProviderType.CLAUDE_CODE) is not None
     assert router.get_provider(ProviderType.CODEX) is not None
     assert router.get_provider(ProviderType.OPENROUTER_FREE) is not None
+
+
+def test_nvidia_nim_provider_no_key():
+    p = NVIDIANIMProvider(api_key=None)
+    p._api_key = None
+    with pytest.raises(RuntimeError, match="NVIDIA_NIM_API_KEY"):
+        p._headers_or_raise()
 
 
 # --- ClaudeCodeProvider tests ---
@@ -173,9 +182,9 @@ async def test_claude_code_provider_error():
 
 
 @pytest.mark.asyncio
-async def test_claude_code_provider_truncates_output():
-    """Verify output is truncated to 5000 chars."""
-    big_output = b"x" * 10000
+async def test_claude_code_provider_truncates_at_50000():
+    """Verify output is truncated to 50000 chars (not the old 5000)."""
+    big_output = b"x" * 100_000
 
     async def fake_exec(*args, **kwargs):
         mock_proc = AsyncMock()
@@ -190,7 +199,29 @@ async def test_claude_code_provider_truncates_output():
             LLMRequest(model="claude-code", messages=[{"role": "user", "content": "test"}])
         )
 
-    assert len(result.content) == 5000
+    assert len(result.content) == 50_000
+
+
+@pytest.mark.asyncio
+async def test_subprocess_output_not_truncated_at_5000():
+    """Verify that 10000-char output is preserved (old bug was truncating at 5000)."""
+    big_output = b"y" * 10_000
+
+    async def fake_exec(*args, **kwargs):
+        mock_proc = AsyncMock()
+        mock_proc.communicate = AsyncMock(return_value=(big_output, b""))
+        mock_proc.returncode = 0
+        mock_proc.terminate = AsyncMock()
+        return mock_proc
+
+    provider = ClaudeCodeProvider(timeout=10)
+    with patch("dharma_swarm.providers.asyncio.create_subprocess_exec", side_effect=fake_exec):
+        result = await provider.complete(
+            LLMRequest(model="claude-code", messages=[{"role": "user", "content": "test"}])
+        )
+
+    assert len(result.content) > 5000
+    assert len(result.content) == 10_000
 
 
 # --- CodexProvider tests ---
@@ -253,3 +284,53 @@ def test_openrouter_free_models_list():
     assert len(OpenRouterFreeProvider.FREE_MODELS) >= 3
     for model in OpenRouterFreeProvider.FREE_MODELS:
         assert ":free" in model
+
+
+# --- Memory Survival Directive Tests (IMPL-SAFETY) ---
+
+
+def test_memory_survival_directive_in_subprocess_prompt():
+    """Memory survival directive is injected into subprocess prompts."""
+    from dharma_swarm.providers import MEMORY_SURVIVAL_DIRECTIVE
+    provider = ClaudeCodeProvider(timeout=10)
+    request = LLMRequest(
+        model="claude-code",
+        messages=[{"role": "user", "content": "Do a thing"}],
+        system="You are a test agent.",
+    )
+    prompt = provider._build_prompt(request)
+    assert "CONTEXT WILL BE DESTROYED" in prompt
+    assert "externalize" in prompt.lower()
+
+
+def test_memory_survival_directive_content():
+    """Directive contains all required elements."""
+    from dharma_swarm.providers import MEMORY_SURVIVAL_DIRECTIVE
+    assert "MEMORY SURVIVAL" in MEMORY_SURVIVAL_DIRECTIVE
+    assert "~/.dharma/shared/" in MEMORY_SURVIVAL_DIRECTIVE
+    assert "~/.dharma/witness/" in MEMORY_SURVIVAL_DIRECTIVE
+    assert "knowledge loss" in MEMORY_SURVIVAL_DIRECTIVE.lower()
+
+
+@pytest.mark.asyncio
+async def test_model_router_injects_survival_directive():
+    """ModelRouter.complete injects survival directive into system prompt."""
+    from dharma_swarm.providers import MEMORY_SURVIVAL_DIRECTIVE
+
+    captured_request = None
+
+    class CapturingProvider(AnthropicProvider):
+        async def complete(self, request):
+            nonlocal captured_request
+            captured_request = request
+            return LLMResponse(content="ok", model="mock")
+
+    router = ModelRouter({ProviderType.ANTHROPIC: CapturingProvider(api_key="test")})
+    request = LLMRequest(
+        model="test",
+        messages=[{"role": "user", "content": "hi"}],
+        system="You are a coder.",
+    )
+    await router.complete(ProviderType.ANTHROPIC, request)
+    assert captured_request is not None
+    assert "CONTEXT WILL BE DESTROYED" in captured_request.system

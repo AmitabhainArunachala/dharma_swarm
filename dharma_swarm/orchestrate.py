@@ -162,12 +162,19 @@ def spawn_agent(spec: AgentSpec) -> subprocess.Popen:
 - Run pytest after any code change
 - Be brief. Ship code, not docs."""
 
-    proc = subprocess.Popen(
-        ["claude", "-p", full_prompt, "--output-format", "text"],
-        stdout=open(output_file, "w"),
-        stderr=subprocess.STDOUT,
-        env=env,
-    )
+    output_fh = open(output_file, "w")
+    try:
+        proc = subprocess.Popen(
+            ["claude", "-p", full_prompt, "--output-format", "text"],
+            stdout=output_fh,
+            stderr=subprocess.STDOUT,
+            env=env,
+        )
+    except Exception:
+        output_fh.close()
+        raise
+    # Attach file handle so callers can close it after proc finishes
+    proc._output_fh = output_fh  # type: ignore[attr-defined]
 
     return proc
 
@@ -205,6 +212,10 @@ def wait_for_swarm(procs: list[subprocess.Popen], timeout: int = 600) -> None:
         except subprocess.TimeoutExpired:
             proc.terminate()
             print(f"  Agent pid {proc.pid} timed out, terminated")
+        finally:
+            fh = getattr(proc, "_output_fh", None)
+            if fh and not fh.closed:
+                fh.close()
 
 
 def save_state(plan: SwarmPlan, results: dict) -> None:

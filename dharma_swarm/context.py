@@ -206,7 +206,10 @@ def read_agni_state() -> dict:
     for name, max_chars in [("WORKING.md", 500), ("HEARTBEAT.md", 300), ("PRIORITIES.md", 300)]:
         path = AGNI_WORKSPACE / name
         if path.exists():
-            content = path.read_text()
+            try:
+                content = path.read_text()
+            except Exception:
+                continue
             state[name.split(".")[0].lower()] = content[:max_chars]
             if name == "PRIORITIES.md":
                 age_h = (time.time() - path.stat().st_mtime) / 3600
@@ -220,14 +223,20 @@ def read_trishula_inbox() -> str:
     """Check for unread trishula messages."""
     if not TRISHULA_INBOX.exists():
         return "No trishula inbox found."
-    files = sorted(TRISHULA_INBOX.glob("*.md"), key=lambda f: f.stat().st_mtime, reverse=True)
+    try:
+        files = sorted(TRISHULA_INBOX.glob("*.md"), key=lambda f: f.stat().st_mtime, reverse=True)
+    except OSError:
+        return "Trishula inbox unreadable."
     if not files:
         return "Inbox empty."
     recent = files[:3]
     summaries = []
     for f in recent:
-        age_h = (time.time() - f.stat().st_mtime) / 3600
-        summaries.append(f"  {f.name} ({age_h:.0f}h ago, {f.stat().st_size} bytes)")
+        try:
+            age_h = (time.time() - f.stat().st_mtime) / 3600
+            summaries.append(f"  {f.name} ({age_h:.0f}h ago, {f.stat().st_size} bytes)")
+        except OSError:
+            summaries.append(f"  {f.name} (stat unavailable)")
     return f"{len(files)} messages, most recent:\n" + "\n".join(summaries)
 
 
@@ -238,11 +247,13 @@ def read_memory_context(state_dir: Path | None = None) -> str:
         return "No memory database yet."
     try:
         conn = sqlite3.connect(str(db_path))
-        conn.row_factory = sqlite3.Row
-        rows = conn.execute(
-            "SELECT content, layer, timestamp FROM memories ORDER BY timestamp DESC LIMIT 5"
-        ).fetchall()
-        conn.close()
+        try:
+            conn.row_factory = sqlite3.Row
+            rows = conn.execute(
+                "SELECT content, layer, timestamp FROM memories ORDER BY timestamp DESC LIMIT 5"
+            ).fetchall()
+        finally:
+            conn.close()
         if not rows:
             return "No memories stored yet."
         return "\n".join(f"  [{r['layer']}] {r['content'][:100]}" for r in rows)
@@ -269,7 +280,10 @@ def read_shipped() -> str:
     shipped_dir = AGNI_WORKSPACE / "05_SHIPPED"
     if not shipped_dir.exists():
         return "No shipped artifacts found."
-    items = sorted(shipped_dir.iterdir(), key=lambda p: p.stat().st_mtime, reverse=True)
+    try:
+        items = sorted(shipped_dir.iterdir(), key=lambda p: p.stat().st_mtime, reverse=True)
+    except OSError:
+        return "Shipped directory unreadable."
     recent = items[:10]
     lines = [f"{len(items)} shipped artifacts, most recent:"]
     for item in recent:
@@ -306,7 +320,10 @@ def read_agent_notes(exclude_role: str | None = None, max_per_agent: int = 500) 
         role = nf.stem.replace("_notes", "")
         if exclude_role and role.lower() == exclude_role.lower():
             continue
-        content = nf.read_text()
+        try:
+            content = nf.read_text()
+        except Exception:
+            continue
         # Last N chars — most recent findings
         tail = content[-max_per_agent:] if len(content) > max_per_agent else content
         sections.append(f"\n## {role}\n{tail}")
@@ -358,6 +375,18 @@ ROLE_PROFILES = {
 
 # Budget: total chars for context injection
 CONTEXT_BUDGET = 30_000
+
+MEMORY_SURVIVAL_DIRECTIVE = (
+    "\n\n## CRITICAL: MEMORY SURVIVAL\n"
+    "YOUR CONTEXT WILL BE DESTROYED after this task completes. "
+    "You will have NO memory of this conversation.\n"
+    "Before your task ends, you MUST externalize:\n"
+    "- Discoveries and patterns -> write to ~/.dharma/shared/<your_role>_notes.md (APPEND)\n"
+    "- Important findings -> write to ~/.dharma/witness/ with timestamp\n"
+    "- Lessons learned -> include in task result\n"
+    "Read ~/.dharma/shared/ FIRST to see what other agents already found.\n"
+    "Failure to externalize = permanent knowledge loss."
+)
 
 
 def build_agent_context(
@@ -425,6 +454,10 @@ def build_agent_context(
         if notes:
             sections.append(notes)
             used += len(notes)
+
+    # Memory survival instinct (Windsurf pattern)
+    sections.append(MEMORY_SURVIVAL_DIRECTIVE)
+    used += len(MEMORY_SURVIVAL_DIRECTIVE)
 
     result = "\n\n".join(sections)
 

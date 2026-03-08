@@ -88,7 +88,8 @@ def evaluate_anekanta(description: str, content: str = "") -> AnekantaResult:
 
     if frame_count == 2:
         all_frames = set(_FRAME_MAP.keys())
-        missing = (all_frames - set(frames_detected)).pop()
+        diff = all_frames - set(frames_detected)
+        missing = diff.pop() if diff else "unknown"
         return AnekantaResult(
             gate_result=GateResult.WARN,
             frames_detected=frames_detected,

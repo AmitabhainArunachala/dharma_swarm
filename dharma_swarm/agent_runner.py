@@ -15,11 +15,14 @@ from dharma_swarm.models import (
     AgentConfig,
     AgentState,
     AgentStatus,
+    GateDecision,
     LLMRequest,
     LLMResponse,
     Task,
     TaskPriority,
 )
+from dharma_swarm.agent_memory import AgentMemoryBank
+from dharma_swarm.telos_gates import check_with_reflective_reroute
 
 logger = logging.getLogger(__name__)
 
@@ -112,13 +115,25 @@ def _build_system_prompt(config: AgentConfig) -> str:
     return "\n\n".join(parts)
 
 
-def _build_prompt(task: Task, config: AgentConfig) -> LLMRequest:
-    """Build an LLMRequest from a task and agent config."""
+def _build_prompt(
+    task: Task,
+    config: AgentConfig,
+    plan_context: str = "",
+) -> LLMRequest:
+    """Build an LLMRequest from a task and agent config.
+
+    Args:
+        task: The task to execute.
+        config: Agent configuration.
+        plan_context: Optional formatted plan to inject (Manus pattern).
+    """
     system = _build_system_prompt(config)
-    user_content = f"## Task: {task.title}\n\n{task.description}"
+    user_parts = [f"## Task: {task.title}\n\n{task.description}"]
+    if plan_context:
+        user_parts.append(f"\n\n{plan_context}")
     return LLMRequest(
         model=config.model,
-        messages=[{"role": "user", "content": user_content}],
+        messages=[{"role": "user", "content": "\n".join(user_parts)}],
         system=system,
     )
 
@@ -197,6 +212,7 @@ class AgentRunner:
         config: Static configuration for the agent.
         provider: Optional LLM provider (duck-typed with ``complete``).
         sandbox: Optional code sandbox (duck-typed with ``execute``).
+        memory: Optional self-editing memory bank for the agent.
     """
 
     def __init__(
@@ -204,10 +220,12 @@ class AgentRunner:
         config: AgentConfig,
         provider: CompletionProvider | None = None,
         sandbox: CodeSandbox | None = None,
+        memory: AgentMemoryBank | None = None,
     ) -> None:
         self._config = config
         self._provider = provider
         self._sandbox = sandbox
+        self._memory = memory
         self._state = _state_from_config(config)
         self._lock = asyncio.Lock()
 
@@ -248,7 +266,50 @@ class AgentRunner:
             self._state.current_task = task.id
 
         try:
-            request = _build_prompt(task, self._config)
+            meta = task.metadata if isinstance(task.metadata, dict) else {}
+            spec_ref = str(meta.get("spec_ref", "")).strip() or None
+            req_refs_raw = meta.get("requirement_refs", [])
+            if isinstance(req_refs_raw, str):
+                req_refs = [req_refs_raw]
+            elif isinstance(req_refs_raw, list):
+                req_refs = [str(r) for r in req_refs_raw if str(r).strip()]
+            else:
+                req_refs = []
+            seed_reflection = str(meta.get("think_notes", "")).strip()
+            if not seed_reflection:
+                seed_reflection = (
+                    f"Task={task.title}. Goal: execute safely with bounded changes."
+                )
+
+            gate = check_with_reflective_reroute(
+                action=task.title,
+                content=task.description,
+                tool_name="agent_runner",
+                think_phase="before_complete",
+                reflection=seed_reflection,
+                max_reroutes=2,
+                spec_ref=spec_ref,
+                requirement_refs=req_refs,
+            )
+            if gate.result.decision == GateDecision.BLOCK:
+                raise RuntimeError(f"Telos block: {gate.result.reason}")
+
+            plan_context = ""
+            if gate.attempts:
+                plan_context = (
+                    "## Reflective Reroute Context\n"
+                    f"- Reroute attempts: {gate.attempts}\n"
+                    f"- Gate reason: {gate.result.reason}\n"
+                    "- Apply these lenses before execution:\n"
+                    + "\n".join(f"  - {s}" for s in gate.suggestions)
+                )
+            request = _build_prompt(task, self._config, plan_context=plan_context)
+
+            # Inject agent self-editing memory into system prompt
+            if self._memory is not None:
+                memory_ctx = await self._memory.get_working_context()
+                if memory_ctx.strip():
+                    request.system = request.system + "\n\n" + memory_ctx
 
             if self._provider is not None:
                 response = await self._provider.complete(request)
@@ -274,6 +335,9 @@ class AgentRunner:
                 success=True,
             )
 
+            # Record task result in agent memory
+            await self._record_task_memory(task, result)
+
             logger.info(
                 "Agent %s finished task %s", self._config.name, task.id
             )
@@ -286,6 +350,10 @@ class AgentRunner:
                 result_text=str(exc),
                 success=False,
             )
+
+            # Record failure as a learned lesson
+            await self._record_failure_memory(task, exc)
+
             async with self._lock:
                 self._state.status = AgentStatus.IDLE
                 self._state.current_task = None
@@ -294,6 +362,53 @@ class AgentRunner:
                 "Agent %s failed task %s", self._config.name, task.id
             )
             raise
+
+    # -- memory helpers ---------------------------------------------------
+
+    async def _record_task_memory(self, task: Task, result: str) -> None:
+        """Store a successful task result in agent memory.
+
+        Records the result as a working memory entry with salience
+        derived from task priority. Consolidates every 5 completed tasks.
+        Best-effort: never fails the task if memory operations error.
+        """
+        if self._memory is None:
+            return
+        try:
+            salience = _PRIORITY_SALIENCE.get(task.priority, 0.5)
+            await self._memory.remember(
+                key=f"task:{task.id}",
+                value=result[:200],
+                category="working",
+                importance=salience,
+                source=self._config.name,
+            )
+            # Consolidate periodically
+            if self._state.tasks_completed % 5 == 0:
+                await self._memory.consolidate()
+            await self._memory.save()
+        except Exception as exc:
+            logger.debug(
+                "Memory record failed for %s: %s", self._config.name, exc
+            )
+
+    async def _record_failure_memory(self, task: Task, exc: Exception) -> None:
+        """Store a task failure as a learned lesson in archival memory.
+
+        Best-effort: never masks the original exception.
+        """
+        if self._memory is None:
+            return
+        try:
+            await self._memory.learn_lesson(
+                f"Failed: {task.title}: {str(exc)[:100]}",
+                source=self._config.name,
+            )
+            await self._memory.save()
+        except Exception as mem_exc:
+            logger.debug(
+                "Memory lesson failed for %s: %s", self._config.name, mem_exc
+            )
 
     async def heartbeat(self) -> None:
         """Update the last_heartbeat timestamp."""
@@ -338,6 +453,7 @@ class AgentPool:
         config: AgentConfig,
         provider: CompletionProvider | None = None,
         sandbox: CodeSandbox | None = None,
+        memory: AgentMemoryBank | None = None,
     ) -> AgentRunner:
         """Create, start, and register an agent.
 
@@ -345,11 +461,12 @@ class AgentPool:
             config: Agent configuration.
             provider: Optional LLM provider.
             sandbox: Optional code sandbox.
+            memory: Optional self-editing memory bank.
 
         Returns:
             The started AgentRunner.
         """
-        runner = AgentRunner(config, provider=provider, sandbox=sandbox)
+        runner = AgentRunner(config, provider=provider, sandbox=sandbox, memory=memory)
         await runner.start()
         async with self._lock:
             self._agents[config.id] = runner

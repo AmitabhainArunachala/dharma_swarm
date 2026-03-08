@@ -13,6 +13,13 @@
 
 set -e
 
+# --- Mission preflight (fail-closed) ---
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+source "${SCRIPT_DIR}/scripts/mission_preflight.sh" || {
+    echo "[swarm] Preflight failed — launch aborted." >&2
+    exit 1
+}
+
 NUM_AGENTS="${1:-3}"
 SHARED="$HOME/.dharma/shared"
 SESSION="dharma"

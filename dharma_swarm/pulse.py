@@ -40,7 +40,7 @@ from dharma_swarm.shakti import ShaktiLoop
 from dharma_swarm.stigmergy import StigmergicMark, StigmergyStore
 from dharma_swarm.subconscious import SubconsciousStream
 from dharma_swarm.thread_manager import ThreadManager
-from dharma_swarm.telos_gates import DEFAULT_GATEKEEPER
+from dharma_swarm.telos_gates import check_with_reflective_reroute
 
 logger = logging.getLogger(__name__)
 
@@ -297,9 +297,30 @@ def pulse(config: DaemonConfig | None = None) -> str:
 
     inject = tm.check_inject_override(STATE_DIR)
 
-    # Check quiet hours
+    # Check quiet hours — run sleep cycle instead of skipping
     if datetime.now().hour in cfg.quiet_hours:
-        return f"QUIET: Hour {datetime.now().hour} is in quiet hours"
+        try:
+            from dharma_swarm.sleep_cycle import SleepCycle
+            store = StigmergyStore()
+            stream = SubconsciousStream(stigmergy=store)
+            cycle = SleepCycle(
+                stigmergy_store=store,
+                subconscious_stream=stream,
+            )
+            report = asyncio.run(cycle.run_full_cycle())
+            summary = (
+                f"SLEEP: phases={','.join(report.phases_completed)} "
+                f"decayed={report.marks_decayed} "
+                f"consolidated={report.memories_consolidated} "
+                f"dreams={report.dreams_generated}"
+            )
+            if report.errors:
+                summary += f" errors={len(report.errors)}"
+            print(f"[pulse] {summary}")
+            return summary
+        except Exception as e:
+            logger.warning("Sleep cycle failed: %s", e)
+            return f"QUIET: Hour {datetime.now().hour} (sleep cycle error: {e})"
 
     # Check circuit breaker
     if cfg.circuit_breaker.is_broken:
@@ -324,10 +345,23 @@ def pulse(config: DaemonConfig | None = None) -> str:
         inject=inject,
     )
 
-    # Telos gate check
-    gate_result = DEFAULT_GATEKEEPER.check(action="pulse", content=prompt[:2000])
-    if gate_result.decision.value == "block":
-        return f"TELOS BLOCK: {gate_result.reason}"
+    # Telos gate check with bounded reflective reroute
+    gate = check_with_reflective_reroute(
+        action="pulse",
+        content=prompt[:2000],
+        tool_name="pulse_daemon",
+        think_phase="before_complete",
+        reflection=(
+            f"Thread={thread}. Prompt assembled from memory, manifest, and inbox. "
+            "Validate safety and continue with bounded action."
+        ),
+        max_reroutes=1,
+        requirement_refs=[f"thread:{thread}", "daemon:pulse"],
+    )
+    if gate.result.decision.value == "block":
+        return f"TELOS BLOCK: {gate.result.reason}"
+    if gate.attempts:
+        print(f"[pulse] witness reroute applied ({gate.attempts} attempts)")
 
     # Execute via Claude Code headless
     print(f"[pulse] Thread: {thread} | Executing...")
@@ -443,6 +477,22 @@ def _check_and_run_cron_jobs(cfg: DaemonConfig | None = None) -> None:
 
             model = str(job.get("model", "")).strip() or None
             print(f"[cron] Running: {name} (hour={hour}, minute={minute})")
+
+            gate = check_with_reflective_reroute(
+                action=f"cron:{job_id}",
+                content=prompt[:2000],
+                tool_name="pulse_cron",
+                think_phase="before_complete",
+                reflection=(
+                    f"Cron job {job_id} scheduled at {hour:02d}:{minute:02d}. "
+                    "Validate safety and bounded execution."
+                ),
+                max_reroutes=1,
+                requirement_refs=[f"cron:{job_id}"],
+            )
+            if gate.result.decision.value == "block":
+                print(f"[cron] Blocked {job_id}: {gate.result.reason}")
+                continue
 
             try:
                 result = run_claude_headless(

@@ -11,6 +11,15 @@ set -e
 
 cd ~/dharma_swarm
 
+# --- Mission preflight (fail-closed) ---
+MISSION_PREFLIGHT="${MISSION_PREFLIGHT:-1}"
+if [[ "${MISSION_PREFLIGHT}" == "1" ]]; then
+  scripts/mission_preflight.sh || {
+    echo "[run_daemon] Preflight failed — daemon aborted." >&2
+    exit 1
+  }
+fi
+
 export OPENROUTER_API_KEY="${OPENROUTER_API_KEY:-$(grep -s OPENROUTER_API_KEY ~/.zshrc ~/.zprofile ~/.bash_profile 2>/dev/null | head -1 | sed 's/.*=//' | tr -d '"' | tr -d "'" | tr -d ' ')}"
 export ANTHROPIC_API_KEY="${ANTHROPIC_API_KEY:-$(grep -s ANTHROPIC_API_KEY ~/.zshrc ~/.zprofile ~/.bash_profile 2>/dev/null | head -1 | sed 's/.*=//' | tr -d '"' | tr -d "'" | tr -d ' ')}"
 

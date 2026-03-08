@@ -41,3 +41,26 @@ def test_from_env_invalid_values_fallback(monkeypatch):
     cfg = EngineSettings.from_env()
     assert cfg.knowledge_backend == "local"
     assert cfg.qdrant_vector_size == 256
+
+
+def test_from_env_backend_case_insensitive(monkeypatch):
+    monkeypatch.setenv("DGC_KNOWLEDGE_BACKEND", "  QDRANT  ")
+    for key in ["DGC_QDRANT_URL", "DGC_QDRANT_COLLECTION", "DGC_QDRANT_VECTOR_SIZE"]:
+        monkeypatch.delenv(key, raising=False)
+    cfg = EngineSettings.from_env()
+    assert cfg.knowledge_backend == "qdrant"
+
+
+def test_from_env_vector_size_clamps_minimum(monkeypatch):
+    monkeypatch.setenv("DGC_QDRANT_VECTOR_SIZE", "2")
+    for key in ["DGC_KNOWLEDGE_BACKEND", "DGC_QDRANT_URL", "DGC_QDRANT_COLLECTION"]:
+        monkeypatch.delenv(key, raising=False)
+    cfg = EngineSettings.from_env()
+    assert cfg.qdrant_vector_size == 8  # max(8, 2) = 8
+
+
+def test_defaults_without_from_env():
+    cfg = EngineSettings()
+    assert cfg.knowledge_backend == "local"
+    assert cfg.qdrant_vector_size == 256
+    assert cfg.qdrant_collection == "dgc_artifacts"

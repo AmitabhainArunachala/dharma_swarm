@@ -6,6 +6,7 @@ conventions: Pydantic BaseModel, async I/O, no singletons.
 
 from __future__ import annotations
 
+import hashlib
 import json
 from pathlib import Path
 from typing import Any, Optional
@@ -13,6 +14,7 @@ from typing import Any, Optional
 from pydantic import BaseModel, Field
 
 from dharma_swarm.models import _new_id, _utc_now
+from dharma_swarm.merkle_log import MerkleLog
 
 
 # ---------------------------------------------------------------------------
@@ -95,6 +97,10 @@ class ArchiveEntry(BaseModel):
 
     # MAP-Elites feature coordinates
     feature_coords: dict[str, float] = Field(default_factory=dict)
+
+    # Cryptographic audit trail (Merkle log)
+    merkle_root: Optional[str] = None          # SHA-256 hash after this entry
+    parent_merkle_root: Optional[str] = None   # Parent's merkle_root (for verification)
 
 
 class MAPElitesGrid:
@@ -203,6 +209,9 @@ class EvolutionArchive:
         self.path: Path = path or _DEFAULT_ARCHIVE_PATH
         self._entries: dict[str, ArchiveEntry] = {}
         self.grid = MAPElitesGrid()
+        # Merkle log for tamper-evident audit trail
+        merkle_path = self.path.parent / "merkle_log.json"
+        self.merkle_log = MerkleLog(merkle_path)
 
     # -- persistence ---------------------------------------------------------
 
@@ -250,12 +259,38 @@ class EvolutionArchive:
     async def add_entry(self, entry: ArchiveEntry) -> str:
         """Add a new entry and persist it.
 
+        Also appends to Merkle log for cryptographic tamper-evidence.
+
         Returns:
             The entry id.
         """
+        # Get parent's merkle root if this has a parent
+        if entry.parent_id:
+            parent = self._entries.get(entry.parent_id)
+            if parent and parent.merkle_root:
+                entry.parent_merkle_root = parent.merkle_root
+
+        # Append to Merkle log (tamper-evident audit trail)
+        merkle_data = {
+            "id": entry.id,
+            "timestamp": entry.timestamp,
+            "parent_id": entry.parent_id,
+            "component": entry.component,
+            "change_type": entry.change_type,
+            "description": entry.description,
+            "diff_hash": hashlib.sha256(entry.diff.encode()).hexdigest() if entry.diff else None,
+            "fitness_weighted": entry.fitness.weighted(),
+            "status": entry.status,
+        }
+        entry.merkle_root = self.merkle_log.append(merkle_data)
+
+        # Add to in-memory structures
         self._entries[entry.id] = entry
         self.grid.try_insert(entry)
+
+        # Persist to JSONL
         await self._append_line(entry)
+
         return entry.id
 
     async def get_entry(self, entry_id: str) -> ArchiveEntry | None:
@@ -349,3 +384,45 @@ class EvolutionArchive:
         entries = [e for e in entries if e.status == "applied"]
         entries.sort(key=lambda e: e.timestamp)
         return [(e.timestamp, e.fitness.weighted()) for e in entries]
+
+    def verify_merkle_chain(self) -> tuple[bool, str]:
+        """Verify cryptographic integrity of evolution history.
+
+        Uses the Merkle log to detect any tampering with the archive.
+
+        Returns:
+            Tuple of (is_valid, message)
+                is_valid: True if chain is intact, False if tampering detected
+                message: Human-readable verification result
+
+        Example:
+            >>> archive = EvolutionArchive()
+            >>> await archive.load()
+            >>> valid, msg = archive.verify_merkle_chain()
+            >>> print(f"Archive integrity: {msg}")
+        """
+        # Verify the underlying Merkle log structure
+        chain_valid, last_index = self.merkle_log.verify_chain()
+
+        if not chain_valid:
+            return False, f"Merkle chain broken at index {last_index}"
+
+        # Verify parent-child relationships match merkle roots
+        for entry in self._entries.values():
+            if entry.parent_id and entry.parent_merkle_root:
+                parent = self._entries.get(entry.parent_id)
+                if parent and parent.merkle_root:
+                    if parent.merkle_root != entry.parent_merkle_root:
+                        return False, (
+                            f"Parent merkle root mismatch for entry {entry.id[:8]}: "
+                            f"expected {parent.merkle_root[:16]}..., "
+                            f"got {entry.parent_merkle_root[:16]}..."
+                        )
+
+        chain_length = self.merkle_log.get_chain_length()
+        root = self.merkle_log.get_root()
+        root_display = root[:16] + "..." if root else "empty"
+        return True, (
+            f"✓ Archive verified: {chain_length} entries, "
+            f"Merkle root: {root_display}"
+        )

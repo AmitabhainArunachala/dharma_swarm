@@ -11,6 +11,7 @@ This is the central hub that:
 
 from __future__ import annotations
 
+import contextlib
 import json
 import os
 import secrets
@@ -43,6 +44,7 @@ from .engine.events import (
     UsageReport,
 )
 from .engine.provider_runner import ProviderRunner
+from .engine.session_store import SessionStore
 from .engine.session_state import SessionState
 from .screens.main import MainScreen
 from .screens.splash import SplashScreen
@@ -63,6 +65,16 @@ _MODE_NAMES: dict[str, str] = {
     "S": "sage",
 }
 _MODE_KEYS = list(_MODE_NAMES.keys())
+
+_PLAN_MODE_SYSTEM_PROMPT = (
+    "PLAN MODE CONTRACT (strict):\n"
+    "1) Plan before acting. Produce a numbered execution plan first.\n"
+    "2) Do not run mutating tools or write files until the user explicitly approves execution.\n"
+    "3) Read-only inspection is allowed for scoping and risk analysis.\n"
+    "4) If using EnterPlanMode, call it with an empty input object: {}.\n"
+    "5) If a tool returns InputValidationError for unexpected parameters, correct the call schema and retry.\n"
+    "6) End with a clear approval checkpoint."
+)
 
 
 class DGCApp(App):
@@ -89,8 +101,10 @@ class DGCApp(App):
     def __init__(self) -> None:
         super().__init__()
         self._session = SessionState()
+        self._session_store = SessionStore()
         self._commands = SystemCommandHandler()
         self._mode: str = "N"
+        self._commands.set_mode(self._mode)
         self._provider_runner: ProviderRunner | None = None
         self._provider_session_id: str | None = None
         # State context cache (same 60s TTL as old TUI)
@@ -111,9 +125,12 @@ class DGCApp(App):
 
     def on_mount(self) -> None:
         """Push screens and register theme on startup."""
-        # Push main screen first (it becomes the base), then splash on top
-        self.push_screen(MainScreen(), callback=self._on_main_ready)
-        self.push_screen(SplashScreen())
+        # Push main screen first (it becomes the base), then splash on top.
+        # The callback fires when the *pushed* screen is dismissed, so attach
+        # it to SplashScreen — when the user presses Enter/Esc/Space on the
+        # splash, it is dismissed and _on_main_ready runs.
+        self.push_screen(MainScreen())
+        self.push_screen(SplashScreen(), callback=self._on_main_ready)
 
         # Register and activate the warm dark theme
         try:
@@ -132,6 +149,7 @@ class DGCApp(App):
                 "[bold cyan]DGC[/bold cyan] -- Talk to Claude or type /help "
                 "for system commands\n"
             )
+            self._restore_last_session_context()
             self._run_status_on_startup()
 
     # ─── Screen Access ───────────────────────────────────────────────
@@ -142,6 +160,114 @@ class DGCApp(App):
             if isinstance(screen, MainScreen):
                 return screen
         return None
+
+    def _restore_last_session_context(self) -> None:
+        """Restore latest Claude session continuity for this workspace."""
+        auto_resume = os.getenv("DGC_AUTO_RESUME", "1").strip().lower()
+        if auto_resume in {"0", "false", "no", "off"}:
+            return
+
+        main = self._get_main_screen()
+        if not main:
+            return
+
+        try:
+            min_turns = int(os.getenv("DGC_AUTO_RESUME_MIN_TURNS", "2"))
+        except Exception:
+            min_turns = 2
+
+        allow_cross_workspace = os.getenv(
+            "DGC_AUTO_RESUME_CROSS_WORKSPACE", "0"
+        ).strip().lower() in {"1", "true", "yes", "on"}
+        debug_resume = os.getenv("DGC_AUTO_RESUME_DEBUG", "0").strip().lower() in {
+            "1",
+            "true",
+            "yes",
+            "on",
+        }
+
+        candidates: list[tuple[str, dict[str, Any]]] = [
+            (
+                "workspace+provider+min_turns",
+                {
+                    "cwd": str(DHARMA_SWARM),
+                    "provider_id": "claude",
+                    "min_turns": min_turns,
+                },
+            ),
+            (
+                "workspace+provider",
+                {
+                    "cwd": str(DHARMA_SWARM),
+                    "provider_id": "claude",
+                },
+            ),
+        ]
+        if allow_cross_workspace:
+            candidates.extend(
+                [
+                    (
+                        "provider+min_turns",
+                        {
+                            "provider_id": "claude",
+                            "min_turns": min_turns,
+                        },
+                    ),
+                    (
+                        "provider",
+                        {
+                            "provider_id": "claude",
+                        },
+                    ),
+                ]
+            )
+
+        meta: dict[str, Any] | None = None
+        selected_scope = ""
+        for scope, kwargs in candidates:
+            try:
+                meta = self._session_store.latest_session(**kwargs)
+            except Exception:
+                meta = None
+            if meta:
+                selected_scope = scope
+                break
+        if not meta:
+            if debug_resume:
+                main.stream_output.write_system(  # type: ignore[union-attr]
+                    "[dim]Auto-resume: no resumable Claude session found.[/dim]"
+                )
+            return
+
+        provider_sid = str(meta.get("provider_session_id", "") or "").strip()
+        local_sid = str(meta.get("session_id", "") or "").strip()
+        if not provider_sid or not local_sid:
+            if debug_resume:
+                main.stream_output.write_system(  # type: ignore[union-attr]
+                    "[dim]Auto-resume: session metadata missing provider session id.[/dim]"
+                )
+            return
+
+        self._session.session_id = local_sid
+        self._provider_session_id = provider_sid
+        with contextlib.suppress(Exception):
+            self._session.turn_count = int(meta.get("total_turns", 0) or 0)
+        with contextlib.suppress(Exception):
+            self._session.total_cost_usd = float(meta.get("total_cost_usd", 0.0) or 0.0)
+
+        status: StatusBar = main.status_bar  # type: ignore[assignment]
+        status.session_name = provider_sid[:8]
+        status.turn_count = self._session.turn_count
+        status.cost_usd = self._session.total_cost_usd
+        main.stream_output.write_system(  # type: ignore[union-attr]
+            "[dim]Restored prior Claude context: "
+            f"{provider_sid[:12]}... (turns={status.turn_count}). "
+            "Use Ctrl+N for a clean new session.[/dim]"
+        )
+        if selected_scope and selected_scope != "workspace+provider+min_turns":
+            main.stream_output.write_system(  # type: ignore[union-attr]
+                f"[dim]Auto-resume scope fallback: {selected_scope}.[/dim]"
+            )
 
     # ─── Event Routing: ProviderRunner -> Widgets ────────────────────
 
@@ -204,6 +330,10 @@ class DGCApp(App):
 
         elif isinstance(ev, SessionEnd):
             status.is_running = False
+            # SessionEnd means Claude has logically finished this turn. Release
+            # runner lock immediately to avoid completed-but-stuck UX states.
+            with contextlib.suppress(Exception):
+                self._provider_runner.mark_session_end()  # type: ignore[union-attr]
             if ev.success:
                 output.write_system("[dim]\u2713 Session complete.[/dim]")
             else:
@@ -319,6 +449,14 @@ class DGCApp(App):
         elif action in {"copy", "copylast"}:
             self._copy_last_reply()
 
+        elif action.startswith("mode:set:"):
+            target_mode = action.split(":", 2)[2] if ":" in action else ""
+            if self._set_mode(target_mode):
+                mode_name = _MODE_NAMES[self._mode].title()
+                output.write_system(f"[dim]Mode set to [{self._mode}] {mode_name}.[/dim]")
+            else:
+                output.write_error(f"[red]Unknown mode: {target_mode}[/red]")
+
         elif action.startswith("async:"):
             parts = action.split(":", 2)
             cmd = parts[1] if len(parts) > 1 else ""
@@ -334,22 +472,37 @@ class DGCApp(App):
 
         if self._provider_runner.is_running:
             main = self._get_main_screen()
-            if main:
-                main.stream_output.write_error(  # type: ignore[union-attr]
-                    "[yellow]Claude is already running. Use /cancel first.[/yellow]"
+            if main and not main.status_bar.is_running:  # type: ignore[union-attr]
+                # Stale lock recovery: semantic session ended, worker finalization
+                # may still be winding down. Unlock and continue.
+                with contextlib.suppress(Exception):
+                    self._provider_runner.cancel()
+                with contextlib.suppress(Exception):
+                    self._provider_runner.mark_session_end()  # type: ignore[attr-defined]
+                main.stream_output.write_system(  # type: ignore[union-attr]
+                    "[dim]Recovered stale provider lock after session end.[/dim]"
                 )
-            return
+            if self._provider_runner.is_running:
+                if main:
+                    main.stream_output.write_error(  # type: ignore[union-attr]
+                        "[yellow]Claude is already running. Use /cancel first.[/yellow]"
+                    )
+                return
 
         local_session_id = self._ensure_local_session_id()
 
         # Build state context for system prompt injection
         state_ctx = self._get_state_context()
-        system_append: str | None = None
+        system_parts: list[str] = []
+        mode_prompt = self._build_mode_system_prompt()
+        if mode_prompt:
+            system_parts.append(mode_prompt)
         if state_ctx:
-            system_append = (
+            system_parts.append(
                 "DGC mission-control context snapshot. "
                 "Treat as hints and verify.\n\n" + state_ctx[:6000]
             )
+        system_append: str | None = "\n\n".join(system_parts) if system_parts else None
 
         request = CompletionRequest(
             messages=[{"role": "user", "content": text}],
@@ -358,7 +511,7 @@ class DGCApp(App):
             enable_thinking=True,
             provider_options={
                 "internet_enabled": self._commands.internet_enabled,
-                "permission_mode": "bypassPermissions",
+                "permission_mode": self._resolve_permission_mode(),
             },
         )
         self._provider_runner.run_provider(
@@ -560,6 +713,29 @@ class DGCApp(App):
             if not arg:
                 out("[red]Usage: /agni <command>[/red]")
             else:
+                from dharma_swarm.telos_gates import check_with_reflective_reroute
+
+                gate = check_with_reflective_reroute(
+                    action=f"agni:{arg}",
+                    content=arg,
+                    tool_name="tui_agni",
+                    think_phase="before_complete",
+                    reflection=(
+                        "Remote AGNI execution request. Validate blast radius, "
+                        "rollback path, and least-privilege command intent."
+                    ),
+                    max_reroutes=1,
+                    requirement_refs=["agni:remote_exec"],
+                )
+                if gate.result.decision.value == "block":
+                    out(f"[red]TELOS BLOCK[/red]: {gate.result.reason}")
+                    return
+                if gate.attempts:
+                    out(
+                        "[dim]Witness reroute applied "
+                        f"({gate.attempts} attempts).[/dim]"
+                    )
+
                 out(f"[dim]AGNI: {arg}[/dim]")
                 ssh_key = HOME / ".ssh" / "openclaw_do"
                 proc = subprocess.run(
@@ -816,15 +992,7 @@ class DGCApp(App):
     def action_cycle_mode(self) -> None:
         """Cycle through N -> A -> P -> S operating modes."""
         idx = _MODE_KEYS.index(self._mode) if self._mode in _MODE_KEYS else 0
-        self._mode = _MODE_KEYS[(idx + 1) % len(_MODE_KEYS)]
-
-        main = self._get_main_screen()
-        if main:
-            main.status_bar.mode = self._mode  # type: ignore[union-attr]
-            # Update CSS classes for mode-specific styling
-            for key, name in _MODE_NAMES.items():
-                self.remove_class(f"mode-{name}")
-            self.add_class(f"mode-{_MODE_NAMES[self._mode]}")
+        self._set_mode(_MODE_KEYS[(idx + 1) % len(_MODE_KEYS)])
 
     def action_new_session(self) -> None:
         """Reset session state and clear the output."""
@@ -872,3 +1040,34 @@ class DGCApp(App):
                 "  (Shift bypasses Textual's mouse capture for native "
                 "terminal selection.)[/dim]"
             )
+
+    # ─── Mode Policy ─────────────────────────────────────────────────
+
+    def _resolve_permission_mode(self) -> str:
+        """Resolve provider permission mode based on active DGC mode."""
+        if self._mode == "P":
+            return "default"
+        return "bypassPermissions"
+
+    def _build_mode_system_prompt(self) -> str | None:
+        """Build mode-specific system policy instructions."""
+        if self._mode == "P":
+            return _PLAN_MODE_SYSTEM_PROMPT
+        return None
+
+    def _set_mode(self, mode: str) -> bool:
+        """Apply mode change and synchronize UI + command handler state."""
+        if mode not in _MODE_NAMES:
+            return False
+
+        self._mode = mode
+        self._commands.set_mode(mode)
+
+        main = self._get_main_screen()
+        if main:
+            main.status_bar.mode = self._mode  # type: ignore[union-attr]
+            for name in _MODE_NAMES.values():
+                self.remove_class(f"mode-{name}")
+            self.add_class(f"mode-{_MODE_NAMES[self._mode]}")
+
+        return True

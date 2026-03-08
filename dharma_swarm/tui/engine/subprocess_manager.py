@@ -116,7 +116,7 @@ class SubprocessManager(Widget):
             proc = subprocess.Popen(
                 cmd,
                 stdout=subprocess.PIPE,
-                stderr=subprocess.PIPE,
+                stderr=subprocess.DEVNULL,
                 bufsize=1,
                 text=True,
                 cwd=str(DHARMA_SWARM),

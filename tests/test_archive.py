@@ -6,6 +6,7 @@ from dharma_swarm.archive import (
     ArchiveEntry,
     EvolutionArchive,
     FitnessScore,
+    MAPElitesGrid,
     _DEFAULT_WEIGHTS,
 )
 
@@ -25,6 +26,8 @@ def test_fitness_weighted_default_weights():
     f = FitnessScore(
         correctness=1.0,
         dharmic_alignment=1.0,
+        performance=1.0,
+        utilization=1.0,
         elegance=1.0,
         efficiency=1.0,
         safety=1.0,
@@ -399,3 +402,159 @@ async def test_load_nonexistent_file(tmp_path):
     archive = EvolutionArchive(path=tmp_path / "does_not_exist.jsonl")
     await archive.load()
     assert await archive.get_latest(5) == []
+
+
+# ---------------------------------------------------------------------------
+# MAP-Elites grid (Change 0B tests)
+# ---------------------------------------------------------------------------
+
+
+def test_map_elites_grid_prevents_convergence():
+    """TEST 2: Grid bins diverse entries, replaces on higher fitness, rejects lower."""
+    grid = MAPElitesGrid()
+
+    # Create 10 entries with same high correctness but varying dharmic_alignment and elegance
+    entries = []
+    for i in range(10):
+        da = i * 0.1  # 0.0, 0.1, ..., 0.9
+        el = 1.0 - i * 0.1  # 1.0, 0.9, ..., 0.1
+        diff = "\n".join(f"+ line {j}" for j in range(i * 50))  # varying complexity
+        e = ArchiveEntry(
+            component=f"mod{i}.py",
+            fitness=FitnessScore(
+                correctness=0.8,
+                dharmic_alignment=da,
+                elegance=el,
+                efficiency=0.5,
+                safety=1.0,
+            ),
+            diff=diff,
+            status="applied",
+        )
+        entries.append(e)
+        grid.try_insert(e)
+
+    # Should land in at least 3 different cells
+    assert grid.occupied_bins >= 3
+
+    # Insert entry with higher fitness in an occupied bin
+    occupied_entry = entries[0]
+    coords = grid.compute_feature_coords(occupied_entry)
+    better = ArchiveEntry(
+        component="better.py",
+        fitness=FitnessScore(
+            correctness=1.0,
+            dharmic_alignment=coords["dharmic_alignment"],
+            elegance=coords["elegance"],
+            efficiency=0.9,
+            safety=1.0,
+        ),
+        feature_coords=coords,
+        status="applied",
+    )
+    assert grid.try_insert(better) is True
+
+    # Insert entry with lower fitness in same bin
+    worse = ArchiveEntry(
+        component="worse.py",
+        fitness=FitnessScore(correctness=0.1),
+        feature_coords=coords,
+        status="applied",
+    )
+    assert grid.try_insert(worse) is False
+
+
+def test_map_elites_coverage():
+    """TEST 3: Coverage = occupied_bins / total_bins."""
+    grid = MAPElitesGrid()
+    assert grid.total_bins == 125  # 5^3
+
+    # Insert entries spanning feature space
+    for da in [0.1, 0.5, 0.9]:
+        for el in [0.1, 0.9]:
+            e = ArchiveEntry(
+                fitness=FitnessScore(
+                    dharmic_alignment=da,
+                    elegance=el,
+                    correctness=0.5,
+                    safety=1.0,
+                ),
+                status="applied",
+            )
+            grid.try_insert(e)
+
+    assert grid.coverage() == grid.occupied_bins / 125
+
+
+def test_archive_entry_has_feature_coords():
+    """TEST 8: compute_feature_coords returns correct keys in [0, 1]."""
+    entry = ArchiveEntry(
+        fitness=FitnessScore(
+            dharmic_alignment=0.7,
+            elegance=0.4,
+            correctness=0.9,
+            safety=1.0,
+        ),
+        diff="\n".join(f"+ line {i}" for i in range(100)),
+        status="applied",
+    )
+    coords = MAPElitesGrid.compute_feature_coords(entry)
+    assert "dharmic_alignment" in coords
+    assert "elegance" in coords
+    assert "complexity" in coords
+    for v in coords.values():
+        assert 0.0 <= v <= 1.0
+
+
+def test_diverse_selection_from_grid():
+    """TEST 9: get_diverse_parents returns entries from different bins."""
+    grid = MAPElitesGrid()
+
+    # Insert entries in 5 clearly different bins
+    configs = [
+        (0.0, 0.0, ""),
+        (0.9, 0.0, ""),
+        (0.0, 0.9, ""),
+        (0.9, 0.9, ""),
+        (0.5, 0.5, "\n".join(f"+ line {i}" for i in range(400))),
+    ]
+    for da, el, diff in configs:
+        e = ArchiveEntry(
+            fitness=FitnessScore(
+                dharmic_alignment=da,
+                elegance=el,
+                correctness=0.5,
+                safety=1.0,
+            ),
+            diff=diff,
+            status="applied",
+        )
+        grid.try_insert(e)
+
+    diverse = grid.get_diverse_parents(n=3)
+    assert len(diverse) == 3
+    # Entries should be from different bins (different feature coords)
+    coord_sets = [
+        tuple(sorted(e.feature_coords.items())) for e in diverse
+    ]
+    assert len(set(coord_sets)) == 3  # all unique
+
+
+@pytest.mark.asyncio
+async def test_archive_get_diverse(archive):
+    """get_diverse returns entries via the MAP-Elites grid."""
+    # Add entries with different fitness profiles
+    for da, el in [(0.1, 0.9), (0.9, 0.1), (0.5, 0.5)]:
+        e = ArchiveEntry(
+            fitness=FitnessScore(
+                dharmic_alignment=da,
+                elegance=el,
+                correctness=0.5,
+                safety=1.0,
+            ),
+            status="applied",
+        )
+        await archive.add_entry(e)
+
+    diverse = await archive.get_diverse(n=3)
+    assert len(diverse) >= 1  # at least one unique bin
