@@ -1,0 +1,115 @@
+{
+  "generated_utc": "2026-03-08T14:46:58Z",
+  "snapshot_dir_name": "20260308T144655Z",
+  "snapshot_path": "/Users/dhyana/dharma_swarm/docs/merge/snapshots/2026-03-08/20260308T144655Z",
+  "profile": "workspace_auto",
+  "strict_core": true,
+  "require_tracked": true,
+  "git": {
+    "ok": true,
+    "branch_line": "## split/2026-03-08",
+    "branch": "split/2026-03-08",
+    "head": "807779213dfc6d88c17d09453434df713c489953",
+    "counts": {
+      "staged": 14,
+      "unstaged": 75,
+      "untracked": 123,
+      "deleted": 7,
+      "total_dirty": 212
+    },
+    "staged_files": [
+      "dharma_swarm/integrations/data_flywheel.py",
+      "dharma_swarm/integrations/nvidia_rag.py",
+      "docs/NVIDIA_INFRA_SELF_HEAL.md",
+      "scripts/allout_autopilot.py",
+      "scripts/caffeine_until_jst.sh",
+      "scripts/compounding_ledger.py",
+      "scripts/start_allout_tmux.sh",
+      "scripts/status_allout_tmux.sh",
+      "scripts/wire_nvidia_remote.sh",
+      "tests/test_allout_integration.py",
+      "tests/test_compounding_ledger.py",
+      "tests/test_integrations_data_flywheel.py",
+      "tests/test_integrations_nvidia_rag.py",
+      "tests/tui/test_app_plan_mode.py"
+    ],
+    "remote_lines": [
+      "origin\thttps://github.com/shakti-saraswati/dharma_swarm.git (fetch)",
+      "origin\thttps://github.com/shakti-saraswati/dharma_swarm.git (push)"
+    ]
+  },
+  "mission_status": {
+    "exit_code": 0,
+    "ok": true,
+    "json": {
+      "vision": "open, self-evolving, evidence-grounded agent orchestrator with durable memory, quality gates, and optional accelerator lanes",
+      "core": {
+        "pass_count": 6,
+        "total": 6,
+        "ok": true,
+        "checks": {
+          "planner_executor": true,
+          "circuit_breaker": true,
+          "traceability_fields": true,
+          "think_points": true,
+          "memory_survival_instinct": true,
+          "tui_plan_mode_contract": true
+        }
+      },
+      "autonomy_profile": {
+        "name": "workspace_auto",
+        "strict_core": true,
+        "require_tracked": true,
+        "trust_mode": "internal_yolo",
+        "description": "Default autonomous local workspace lane."
+      },
+      "tracked_wiring": {
+        "tracked_count": 8,
+        "total": 8,
+        "ok": true,
+        "local_only": []
+      },
+      "openclaw": {
+        "present": true,
+        "readable": true,
+        "agents_count": 15,
+        "providers": [
+          "moonshot",
+          "nvidia-nim",
+          "ollama",
+          "ollama-nemotron",
+          "openai",
+          "openrouter",
+          "zhipu"
+        ]
+      },
+      "accelerators": {
+        "rag_health": "BLOCKED: All connection attempts failed",
+        "ingest_health": "BLOCKED: All connection attempts failed",
+        "flywheel_jobs": "BLOCKED: GET http://127.0.0.1:8000/api/jobs failed: 404 {\"detail\":\"Not Found\"}"
+      },
+      "exit_code": 0
+    },
+    "stdout_tail": "{\n  \"vision\": \"open, self-evolving, evidence-grounded agent orchestrator with durable memory, quality gates, and optional accelerator lanes\",\n  \"core\": {\n    \"pass_count\": 6,\n    \"total\": 6,\n    \"ok\": true,\n    \"checks\": {\n      \"planner_executor\": true,\n      \"circuit_breaker\": true,\n      \"traceability_fields\": true,\n      \"think_points\": true,\n      \"memory_survival_instinct\": true,\n      \"tui_plan_mode_contract\": true\n    }\n  },\n  \"autonomy_profile\": {\n    \"name\": \"workspace_auto\",\n    \"strict_core\": true,\n    \"require_tracked\": true,\n    \"trust_mode\": \"internal_yolo\",\n    \"description\": \"Default autonomous local workspace lane.\"\n  },\n  \"tracked_wiring\": {\n    \"tracked_count\": 8,\n    \"total\": 8,\n    \"ok\": true,\n    \"local_only\": []\n  },\n  \"openclaw\": {\n    \"present\": true,\n    \"readable\": true,\n    \"agents_count\": 15,\n    \"providers\": [\n      \"moonshot\",\n      \"nvidia-nim\",\n      \"ollama\",\n      \"ollama-nemotron\",\n      \"openai\",\n      \"openrouter\",\n      \"zhipu\"\n    ]\n  },\n  \"accelerators\": {\n    \"rag_health\": \"BLOCKED: All connection attempts failed\",\n    \"ingest_health\": \"BLOCKED: All connection attempts failed\",\n    \"flywheel_jobs\": \"BLOCKED: GET http://127.0.0.1:8000/api/jobs failed: 404 {\\\"detail\\\":\\\"Not Found\\\"}\"\n  },\n  \"exit_code\": 0\n}\n",
+    "stderr_tail": ""
+  },
+  "health_check": {
+    "exit_code": 0,
+    "ok": true,
+    "stdout_tail": "Overall: HealthStatus.DEGRADED\n  Total traces: 69\n  Traces last hour: 0\n  Failure rate: 0.0%\n\nAnomalies (2):\n  [medium] Agent 'darwin_engine' was active before the window but has no traces in the last 1h\n  [medium] Agent 'darwin_planner' was active before the window but has no traces in the last 1h\n",
+    "stderr_tail": ""
+  },
+  "tests": null,
+  "legacy_sources": {
+    "dharmic_godel_claw": {
+      "path": "/Users/dhyana/DHARMIC_GODEL_CLAW",
+      "exists": true,
+      "archive_jsonl": "/Users/dhyana/DHARMIC_GODEL_CLAW/src/dgm/archive.jsonl",
+      "archive_entries": 822
+    },
+    "dgc_core": {
+      "path": "/Users/dhyana/dgc-core",
+      "exists": true
+    }
+  }
+}

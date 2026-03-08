@@ -1,10 +1,23 @@
 """Shared test fixtures for DHARMA SWARM."""
 
 import asyncio
+import os
 import tempfile
 from pathlib import Path
 
 import pytest
+from hypothesis import settings, Verbosity
+
+# Configure Hypothesis profiles for property-based testing
+settings.register_profile("ci", max_examples=100, verbosity=Verbosity.verbose)
+settings.register_profile("dev", max_examples=20, verbosity=Verbosity.normal)
+settings.register_profile("deep", max_examples=1000, deadline=None)
+
+# Use dev profile by default, CI profile in GitHub Actions
+if os.getenv("CI"):
+    settings.load_profile("ci")
+else:
+    settings.load_profile("dev")
 
 
 @pytest.fixture
