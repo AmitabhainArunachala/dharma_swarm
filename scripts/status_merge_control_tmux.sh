@@ -25,7 +25,10 @@ if [[ -n "${LATEST_LOG}" ]]; then
   tail -n 40 "${LATEST_LOG}"
 fi
 
-LATEST_STATE="${HOME}/dharma_swarm/docs/merge/CANONICAL_STATE.md"
+LATEST_STATE="${HOME}/.dharma/merge/CANONICAL_STATE.md"
+if [[ ! -f "${LATEST_STATE}" ]]; then
+  LATEST_STATE="${HOME}/dharma_swarm/docs/merge/CANONICAL_STATE.md"
+fi
 if [[ -f "${LATEST_STATE}" ]]; then
   echo
   echo "Latest canonical state: ${LATEST_STATE}"

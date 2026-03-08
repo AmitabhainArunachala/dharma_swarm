@@ -16,6 +16,13 @@ cd ~/dharma_swarm
 python3 scripts/merge_snapshot.py --strict-core --require-tracked
 ```
 
+State-only snapshot (no tracked file churn):
+
+```bash
+cd ~/dharma_swarm
+python3 scripts/merge_snapshot.py --strict-core --require-tracked --state-only
+```
+
 ## Import Legacy Archive (One-Time Bootstrap)
 
 ```bash
@@ -36,3 +43,6 @@ scripts/start_merge_control_tmux.sh 08:00
 scripts/status_merge_control_tmux.sh
 scripts/stop_merge_control_tmux.sh
 ```
+
+By default the loop now writes canonical outputs under `~/.dharma/merge/`
+(`MERGE_STATE_ONLY=1`) so the repo working tree stays clean during autonomous runs.

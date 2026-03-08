@@ -16,6 +16,7 @@ RUN_TESTS="${MERGE_RUN_TESTS:-0}"
 APPEND_LEDGER="${MERGE_APPEND_LEDGER:-1}"
 IMPORT_LEGACY_ONCE="${MERGE_IMPORT_LEGACY_ONCE:-1}"
 IMPORT_LEGACY_DONE_FILE="${STATE}/merge_import_legacy.done"
+STATE_ONLY="${MERGE_STATE_ONLY:-1}"
 
 mkdir -p "${LOG_DIR}" "${STATE}"
 STAMP="$(date -u +%Y%m%dT%H%M%SZ)"
@@ -48,6 +49,7 @@ log "Target epoch: ${END_EPOCH}"
 log "Continue after target: ${CONTINUE_AFTER_TARGET}"
 log "Poll seconds: ${POLL_SECONDS}"
 log "Mission profile: ${MISSION_PROFILE}"
+log "State-only outputs: ${STATE_ONLY}"
 
 if [[ "${IMPORT_LEGACY_ONCE}" == "1" ]] && [[ ! -f "${IMPORT_LEGACY_DONE_FILE}" ]]; then
   log "Running one-time legacy archive import bootstrap"
@@ -90,6 +92,9 @@ while true; do
   fi
   if [[ "${APPEND_LEDGER}" == "1" ]]; then
     cmd+=(--append-ledger)
+  fi
+  if [[ "${STATE_ONLY}" == "1" ]]; then
+    cmd+=(--state-only)
   fi
 
   set +e

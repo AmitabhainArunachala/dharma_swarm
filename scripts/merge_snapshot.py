@@ -13,11 +13,8 @@ from typing import Any
 
 ROOT = Path.home() / "dharma_swarm"
 DOCS_MERGE = ROOT / "docs" / "merge"
-SNAPSHOT_ROOT = DOCS_MERGE / "snapshots"
-CANONICAL_FACTS = DOCS_MERGE / "FACTS.json"
-CANONICAL_STATE = DOCS_MERGE / "CANONICAL_STATE.md"
-MERGE_LEDGER = DOCS_MERGE / "MERGE_LEDGER.md"
 STATE_DIR = Path.home() / ".dharma"
+STATE_MERGE = STATE_DIR / "merge"
 HEARTBEAT_FILE = STATE_DIR / "merge_heartbeat.json"
 
 
@@ -252,11 +249,11 @@ def legacy_import_facts() -> dict[str, Any]:
     }
 
 
-def ensure_ledger_exists() -> None:
-    if MERGE_LEDGER.exists():
+def ensure_ledger_exists(ledger_path: Path) -> None:
+    if ledger_path.exists():
         return
-    MERGE_LEDGER.parent.mkdir(parents=True, exist_ok=True)
-    MERGE_LEDGER.write_text(
+    ledger_path.parent.mkdir(parents=True, exist_ok=True)
+    ledger_path.write_text(
         "# DGC Merge Ledger\n\n"
         "Purpose: canonical merge decisions.\n\n"
         "## Decision Table\n\n"
@@ -267,8 +264,8 @@ def ensure_ledger_exists() -> None:
     )
 
 
-def append_ledger_log_line(summary: dict[str, Any]) -> None:
-    ensure_ledger_exists()
+def append_ledger_log_line(summary: dict[str, Any], ledger_path: Path) -> None:
+    ensure_ledger_exists(ledger_path)
     ts = summary["generated_utc"]
     branch = summary.get("git", {}).get("branch", "unknown")
     head = summary.get("git", {}).get("head", "unknown")[:12]
@@ -286,7 +283,7 @@ def append_ledger_log_line(summary: dict[str, Any]) -> None:
         f"branch={branch} head={head} mission_exit={mission_exit} tracked={tracked} "
         f"legacy_imported={imported_total} predictor_rows={predictor_rows}\n"
     )
-    with MERGE_LEDGER.open("a", encoding="utf-8") as f:
+    with ledger_path.open("a", encoding="utf-8") as f:
         f.write(line)
 
 
@@ -369,10 +366,11 @@ def write_snapshot_files(snapshot_dir: Path, summary: dict[str, Any]) -> None:
         )
 
 
-def write_canonical_outputs(summary: dict[str, Any]) -> None:
-    DOCS_MERGE.mkdir(parents=True, exist_ok=True)
-    CANONICAL_FACTS.write_text(json.dumps(summary, indent=2, ensure_ascii=True) + "\n", encoding="utf-8")
-    CANONICAL_STATE.write_text(render_canonical_state(summary), encoding="utf-8")
+def write_canonical_outputs(summary: dict[str, Any], facts_path: Path, state_path: Path) -> None:
+    facts_path.parent.mkdir(parents=True, exist_ok=True)
+    state_path.parent.mkdir(parents=True, exist_ok=True)
+    facts_path.write_text(json.dumps(summary, indent=2, ensure_ascii=True) + "\n", encoding="utf-8")
+    state_path.write_text(render_canonical_state(summary), encoding="utf-8")
 
 
 def write_heartbeat(summary: dict[str, Any]) -> None:
@@ -387,6 +385,20 @@ def write_heartbeat(summary: dict[str, Any]) -> None:
     HEARTBEAT_FILE.write_text(json.dumps(heartbeat, indent=2, ensure_ascii=True) + "\n", encoding="utf-8")
 
 
+def resolve_output_paths(*, state_only: bool) -> dict[str, Path]:
+    if state_only:
+        root = STATE_MERGE
+    else:
+        root = DOCS_MERGE
+    return {
+        "output_root": root,
+        "snapshot_root": root / "snapshots",
+        "canonical_facts": root / "FACTS.json",
+        "canonical_state": root / "CANONICAL_STATE.md",
+        "merge_ledger": root / "MERGE_LEDGER.md",
+    }
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description="Generate merge-control snapshot.")
     parser.add_argument("--profile", default=os.getenv("MISSION_PROFILE", "workspace_auto"))
@@ -398,11 +410,17 @@ def main() -> int:
         default="python3 -m pytest -q tests/test_dgc_cli.py tests/test_engine_provider_runner.py --tb=short",
     )
     parser.add_argument("--append-ledger", action="store_true")
+    parser.add_argument(
+        "--state-only",
+        action="store_true",
+        help="Write canonical outputs under ~/.dharma/merge instead of tracked docs/merge.",
+    )
     args = parser.parse_args()
 
+    paths = resolve_output_paths(state_only=args.state_only)
     stamp = utc_stamp()
     day = utc_day()
-    snapshot_dir = SNAPSHOT_ROOT / day / stamp
+    snapshot_dir = paths["snapshot_root"] / day / stamp
 
     git = get_git_facts()
     mission = run_mission_status(args.profile, args.strict_core, args.require_tracked)
@@ -413,9 +431,11 @@ def main() -> int:
         "generated_utc": utc_now().strftime("%Y-%m-%dT%H:%M:%SZ"),
         "snapshot_dir_name": stamp,
         "snapshot_path": str(snapshot_dir),
+        "output_root": str(paths["output_root"]),
         "profile": args.profile,
         "strict_core": bool(args.strict_core),
         "require_tracked": bool(args.require_tracked),
+        "state_only": bool(args.state_only),
         "git": git,
         "mission_status": mission,
         "health_check": health,
@@ -425,10 +445,10 @@ def main() -> int:
     }
 
     write_snapshot_files(snapshot_dir, summary)
-    write_canonical_outputs(summary)
+    write_canonical_outputs(summary, paths["canonical_facts"], paths["canonical_state"])
     write_heartbeat(summary)
     if args.append_ledger:
-        append_ledger_log_line(summary)
+        append_ledger_log_line(summary, paths["merge_ledger"])
 
     print(json.dumps(
         {
