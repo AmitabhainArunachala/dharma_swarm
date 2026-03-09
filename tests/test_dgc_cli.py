@@ -16,6 +16,7 @@ def test_dgc_cli_module_imports():
     from dharma_swarm import dgc_cli
     assert hasattr(dgc_cli, "main")
     assert hasattr(dgc_cli, "cmd_status")
+    assert hasattr(dgc_cli, "cmd_canonical_status")
     assert hasattr(dgc_cli, "cmd_pulse")
     assert hasattr(dgc_cli, "cmd_gates")
     assert hasattr(dgc_cli, "cmd_health")
@@ -132,6 +133,17 @@ def test_dgc_cli_mission_status_nonzero_exits():
             with pytest.raises(SystemExit) as exc:
                 main()
     assert exc.value.code == 2
+
+
+def test_dgc_cli_canonical_status_command():
+    """main() dispatches 'canonical-status' to cmd_canonical_status."""
+    from dharma_swarm.dgc_cli import main
+
+    with patch("sys.argv", ["dgc", "canonical-status", "--json"]):
+        with patch("dharma_swarm.dgc_cli.cmd_canonical_status", return_value=0) as mock:
+            main()
+            mock.assert_called_once()
+            assert mock.call_args.kwargs["as_json"] is True
 
 
 def test_dgc_cli_health_command():

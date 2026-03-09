@@ -11,6 +11,7 @@ Usage:
   dgc dashboard                 Launch interactive DGC dashboard (TUI)
   dgc status                    System status overview
   dgc mission-status            Mission-level readiness across core/accelerators
+  dgc canonical-status          Show which DGC/SAB repos are canonical vs split
   dgc up [--background]         Start the daemon
   dgc down                      Stop the daemon
   dgc daemon-status             Show daemon state
@@ -170,6 +171,7 @@ def cmd_status() -> None:
         print("\nClaude Code: not found")
 
     print("\nMission spine: run `dgc mission-status` for full readiness lanes")
+    print("Canonical topology: run `dgc canonical-status`")
 
 
 def _read_openclaw_summary() -> dict[str, Any]:
@@ -496,6 +498,59 @@ def cmd_mission_status(
         print("  Required-tracked mode failed.")
 
     return exit_code
+
+
+def cmd_canonical_status(*, as_json: bool = False) -> int:
+    """Show which local repos are canonical, support shells, or legacy."""
+    from dharma_swarm.workspace_topology import build_workspace_topology
+
+    topo = build_workspace_topology()
+    if as_json:
+        print(json.dumps(topo, indent=2))
+        return 0
+
+    print("=== DGC CANONICAL STATUS ===")
+    for domain in ("dgc", "sab"):
+        block = topo.get(domain, {})
+        label = domain.upper()
+        merged = "YES" if block.get("fully_merged") else "NO"
+        print(f"\n[{label}] fully merged: {merged}")
+        canonical_repo = block.get("canonical_repo") or "unknown"
+        print(f"Canonical authority: {canonical_repo}")
+        for repo in block.get("repos", []):
+            if not repo.get("exists"):
+                state = "missing"
+            elif not repo.get("is_git"):
+                state = "not-git"
+            else:
+                dirty = repo.get("dirty")
+                if dirty is None:
+                    state = "git-unknown"
+                else:
+                    counts = []
+                    if repo.get("modified_count"):
+                        counts.append(f"modified={repo['modified_count']}")
+                    if repo.get("untracked_count"):
+                        counts.append(f"untracked={repo['untracked_count']}")
+                    suffix = f" ({', '.join(counts)})" if counts else ""
+                    state = ("dirty" if dirty else "clean") + suffix
+            marker = "canonical" if repo.get("canonical") else repo.get("role")
+            branch = repo.get("branch") or "unknown-branch"
+            print(f"  - {repo.get('name')}: {marker} | {branch} | {state}")
+            print(f"    {repo.get('path')}")
+
+    if topo.get("warnings"):
+        print("\nWarnings:")
+        for warning in topo["warnings"]:
+            print(f"  - {warning}")
+
+    answer = topo.get("operator_answer", {})
+    print("\nOperator answer:")
+    print(f"  - Use {answer.get('dgc_code_authority')} as DGC code authority")
+    print(f"  - Use {answer.get('sab_runtime_authority')} as SAB runtime authority")
+    print(f"  - Treat {answer.get('legacy_dgc_archive')} as legacy until explicitly archived/frozen")
+    print(f"  - Treat {answer.get('sab_strategy_shell')} as SAB strategy shell, not runtime authority")
+    return 0
 
 
 def cmd_context(domain: str = "all") -> None:
@@ -1605,6 +1660,32 @@ def cmd_agent_memory(agent_name: str) -> None:
     _run(_mem())
 
 
+def cmd_model(action: str) -> None:
+    """Handle model management commands."""
+    from dharma_swarm.model_manager import (
+        show_current_model,
+        list_models,
+        format_model_table,
+        switch_model,
+        MODELS,
+    )
+
+    if action == "status" or action is None:
+        print(show_current_model())
+    elif action == "list":
+        models = list_models()
+        print(format_model_table(models))
+    elif action in MODELS or action.startswith("claude-") or action.startswith("gpt-"):
+        success, message = switch_model(action)
+        print(message)
+        if not success:
+            sys.exit(1)
+    else:
+        print(f"Unknown action or model: {action}")
+        print("Usage: dgc model [status|list|opus|sonnet|haiku|gpt-4o]")
+        sys.exit(1)
+
+
 def cmd_run(interval: float) -> None:
     """Run the orchestration loop."""
     async def _run_loop():
@@ -1913,6 +1994,8 @@ def _build_parser() -> argparse.ArgumentParser:
             "(strict-core/require-tracked)."
         ),
     )
+    p_canonical = sub.add_parser("canonical-status", help="Show canonical DGC/SAB repo topology")
+    p_canonical.add_argument("--json", action="store_true", help="Emit JSON report")
 
     # -- chat --
     p_chat = sub.add_parser("chat", help="Launch native Claude Code interactive UI")
@@ -2011,6 +2094,11 @@ def _build_parser() -> argparse.ArgumentParser:
 
     # -- migrate --
     sub.add_parser("migrate", help="Migrate old DGC memory")
+
+    # -- model --
+    p_model = sub.add_parser("model", help="Model management and switching")
+    p_model.add_argument("action", nargs="?", default="status",
+                         help="Action: status (default), list, or model alias (opus/sonnet/haiku/gpt-4o)")
 
     # -- agni --
     p_agni = sub.add_parser("agni", help="Run command on AGNI VPS")
@@ -2286,6 +2374,10 @@ def main() -> None:
             )
             if rc != 0:
                 raise SystemExit(rc)
+        case "canonical-status":
+            rc = cmd_canonical_status(as_json=args.json)
+            if rc != 0:
+                raise SystemExit(rc)
         case "up":
             cmd_up(background=args.background)
         case "down":
@@ -2329,6 +2421,8 @@ def main() -> None:
             cmd_setup()
         case "migrate":
             cmd_migrate()
+        case "model":
+            cmd_model(action=args.action)
         case "agni":
             cmd_agni(" ".join(args.remote_cmd))
         case "spawn":
