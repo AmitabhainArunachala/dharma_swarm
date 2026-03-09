@@ -41,12 +41,24 @@ async def test_create_task(swarm):
     task = await swarm.create_task("Build module", priority=TaskPriority.HIGH)
     assert task.title == "Build module"
     assert task.priority == TaskPriority.HIGH
+    assert task.metadata.get("trace_id", "").startswith("trc_")
+    assert task.metadata.get("created_via") == "swarm.create_task"
 
 
 @pytest.mark.asyncio
 async def test_create_task_blocked(swarm):
     with pytest.raises(ValueError, match="Telos gate blocked"):
         await swarm.create_task("rm -rf /everything")
+
+
+@pytest.mark.asyncio
+async def test_create_task_blocks_self_referential_heartbeat_task(swarm):
+    with pytest.raises(ValueError, match="Self-referential heartbeat task blocked"):
+        await swarm.create_task(
+            "Parse heartbeat.md",
+            description="Create a task about heartbeat.md and summarize heartbeat loops",
+            metadata={"source": "heartbeat"},
+        )
 
 
 @pytest.mark.asyncio

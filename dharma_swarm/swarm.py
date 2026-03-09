@@ -12,9 +12,10 @@ from __future__ import annotations
 import asyncio
 import logging
 import time
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
+from uuid import uuid4
 
 from dharma_swarm.daemon_config import DaemonConfig, THREAD_PROMPTS
 from dharma_swarm.jikoku_instrumentation import jikoku_auto_span
@@ -34,6 +35,10 @@ from dharma_swarm.models import (
 from dharma_swarm.providers import create_default_router
 
 logger = logging.getLogger(__name__)
+
+
+def _make_trace_id() -> str:
+    return f"trc_{uuid4().hex}"
 
 
 class SwarmManager:
@@ -58,6 +63,7 @@ class SwarmManager:
         self._agent_pool: Any = None
         self._message_bus: Any = None
         self._memory: Any = None
+        self._event_memory: Any = None
         self._orchestrator: Any = None
         self._gatekeeper: Any = None
         self._thread_mgr: Any = None
@@ -96,6 +102,7 @@ class SwarmManager:
         self.state_dir.mkdir(parents=True, exist_ok=True)
 
         from dharma_swarm.agent_runner import AgentPool
+        from dharma_swarm.engine.event_memory import EventMemoryStore
         from dharma_swarm.memory import StrangeLoopMemory
         from dharma_swarm.message_bus import MessageBus
         from dharma_swarm.orchestrator import Orchestrator
@@ -114,6 +121,8 @@ class SwarmManager:
 
         self._memory = StrangeLoopMemory(db_dir / "memory.db")
         await self._memory.init_db()
+        self._event_memory = EventMemoryStore(db_dir / "memory_plane.db")
+        await self._event_memory.init_db()
 
         self._agent_pool = AgentPool()
         self._gatekeeper = DEFAULT_GATEKEEPER
@@ -123,6 +132,7 @@ class SwarmManager:
             task_board=self._task_board,
             agent_pool=self._agent_pool,
             message_bus=self._message_bus,
+            event_memory=self._event_memory,
         )
 
         self._running = True
@@ -299,24 +309,68 @@ class SwarmManager:
 
     # --- Task Operations ---
 
+    @staticmethod
+    def _is_self_referential_heartbeat_task(
+        *,
+        title: str,
+        description: str,
+        metadata: dict[str, Any],
+    ) -> bool:
+        """Block heartbeat loops that create tasks about heartbeat artifacts."""
+        source = str(metadata.get("source", "")).lower()
+        if source not in {"heartbeat", "pulse", "daemon", "system_heartbeat"}:
+            return False
+        text = f"{title}\n{description}".lower()
+        has_heartbeat = "heartbeat" in text
+        self_referential = any(
+            marker in text
+            for marker in (
+                "heartbeat.md",
+                "parse heartbeat",
+                "summarize heartbeat",
+                "analyze heartbeat",
+                "task about heartbeat",
+            )
+        )
+        return has_heartbeat and self_referential
+
     async def create_task(
         self,
         title: str,
         description: str = "",
         priority: TaskPriority = TaskPriority.NORMAL,
+        metadata: dict[str, Any] | None = None,
     ) -> Task:
         """Create a new task on the board."""
+        incoming = dict(metadata or {})
+        if "trace_id" not in incoming:
+            incoming["trace_id"] = _make_trace_id()
+        incoming.setdefault("created_via", "swarm.create_task")
+        incoming.setdefault("created_at", datetime.now(timezone.utc).isoformat())
+
         async with jikoku_auto_span(
             category="execute.task_create",
             intent=f"Create task: {title}",
             priority=priority.value,
             desc_length=len(description),
+            trace_id=incoming["trace_id"],
         ):
+            if self._is_self_referential_heartbeat_task(
+                title=title,
+                description=description,
+                metadata=incoming,
+            ):
+                raise ValueError(
+                    "Self-referential heartbeat task blocked to prevent autoimmune loop"
+                )
             gate_result = self._gatekeeper.check(action=title, content=description)
             if gate_result.decision.value == "block":
                 raise ValueError(f"Telos gate blocked: {gate_result.reason}")
             return await self._task_board.create(
-                title=title, description=description, priority=priority
+                title=title,
+                description=description,
+                priority=priority,
+                metadata=incoming,
             )
 
     async def create_task_batch(
@@ -340,19 +394,41 @@ class SwarmManager:
             intent=f"Create {len(tasks)} tasks in batch",
             task_count=len(tasks),
         ):
+            batch_id = f"batch_{uuid4().hex}"
+            enriched: list[dict[str, Any]] = []
+
             # Run telos gates on all tasks first
             for spec in tasks:
+                spec_copy = dict(spec)
+                meta = dict(spec_copy.get("metadata") or {})
+                if "trace_id" not in meta:
+                    meta["trace_id"] = _make_trace_id()
+                meta.setdefault("batch_id", batch_id)
+                meta.setdefault("created_via", "swarm.create_task_batch")
+                meta.setdefault("created_at", datetime.now(timezone.utc).isoformat())
+                spec_copy["metadata"] = meta
+
+                if self._is_self_referential_heartbeat_task(
+                    title=str(spec_copy.get("title", "")),
+                    description=str(spec_copy.get("description", "")),
+                    metadata=meta,
+                ):
+                    raise ValueError(
+                        "Self-referential heartbeat task blocked to prevent autoimmune loop"
+                    )
+
                 gate_result = self._gatekeeper.check(
-                    action=spec["title"],
-                    content=spec.get("description", ""),
+                    action=spec_copy["title"],
+                    content=spec_copy.get("description", ""),
                 )
                 if gate_result.decision.value == "block":
                     raise ValueError(
-                        f"Telos gate blocked task '{spec['title']}': {gate_result.reason}"
+                        f"Telos gate blocked task '{spec_copy['title']}': {gate_result.reason}"
                     )
+                enriched.append(spec_copy)
 
             # Batch create all tasks in single transaction
-            return await self._task_board.create_batch(tasks)
+            return await self._task_board.create_batch(enriched)
 
     async def list_tasks(
         self, status: TaskStatus | None = None

@@ -96,6 +96,17 @@ class TaskBoard:
         "created_by", "result", "metadata",
     })
 
+    @staticmethod
+    def _coerce_db_value(col: str, val: Any) -> Any:
+        """Normalize Python values for SQLite writes."""
+        if col != "metadata":
+            return val
+        if val is None:
+            return json.dumps({}, ensure_ascii=True)
+        if isinstance(val, str):
+            return val
+        return json.dumps(val, ensure_ascii=True)
+
     async def _set_status(self, task_id: str, new: TaskStatus, **fields: Any) -> Task:
         """Validate and apply a status transition with optional field updates."""
         async with aiosqlite.connect(self._db_path) as db:
@@ -115,7 +126,7 @@ class TaskBoard:
                 if col not in self._ALLOWED_COLUMNS:
                     raise TaskBoardError(f"Invalid column: {col!r}")
                 sets.append(f"{col} = ?")
-                params.append(val)
+                params.append(self._coerce_db_value(col, val))
             params.append(task_id)
             await db.execute(
                 f"UPDATE tasks SET {', '.join(sets)} WHERE id = ?", params,
@@ -163,17 +174,19 @@ class TaskBoard:
         priority: TaskPriority = TaskPriority.NORMAL,
         created_by: str = "system",
         depends_on: list[str] | None = None,
+        metadata: dict[str, Any] | None = None,
     ) -> Task:
         """Create a new task and persist it."""
         task_id = _new_id()
         now = _utc_now()
         dep_ids: list[str] = depends_on or []
+        meta = dict(metadata or {})
         async with aiosqlite.connect(self._db_path) as db:
             await db.execute(
                 "INSERT INTO tasks VALUES (?,?,?,?,?,?,?,?,?,?,?)",
                 (task_id, title, description, TaskStatus.PENDING.value,
                  priority.value, None, created_by, now.isoformat(),
-                 now.isoformat(), None, "{}"),
+                 now.isoformat(), None, json.dumps(meta, ensure_ascii=True)),
             )
             for dep_id in dep_ids:
                 await db.execute(
@@ -184,6 +197,7 @@ class TaskBoard:
             id=task_id, title=title, description=description,
             priority=priority, created_by=created_by,
             created_at=now, updated_at=now, depends_on=dep_ids,
+            metadata=meta,
         )
 
     async def create_batch(
@@ -217,12 +231,13 @@ class TaskBoard:
                 priority = spec.get("priority", TaskPriority.NORMAL)
                 created_by = spec.get("created_by", "system")
                 dep_ids = spec.get("depends_on") or []
+                metadata = dict(spec.get("metadata") or {})
 
                 await db.execute(
                     "INSERT INTO tasks VALUES (?,?,?,?,?,?,?,?,?,?,?)",
                     (task_id, title, description, TaskStatus.PENDING.value,
                      priority.value, None, created_by, now.isoformat(),
-                     now.isoformat(), None, "{}"),
+                     now.isoformat(), None, json.dumps(metadata, ensure_ascii=True)),
                 )
 
                 for dep_id in dep_ids:
@@ -235,6 +250,7 @@ class TaskBoard:
                     id=task_id, title=title, description=description,
                     priority=priority, created_by=created_by,
                     created_at=now, updated_at=now, depends_on=dep_ids,
+                    metadata=metadata,
                 ))
 
             # Single commit for entire batch
@@ -285,15 +301,33 @@ class TaskBoard:
         status = fields.pop("status", None)
         if status is not None:
             if status == TaskStatus.ASSIGNED:
-                await self.assign(task_id, fields.get("assigned_to", ""))
+                await self.assign(
+                    task_id,
+                    fields.get("assigned_to", ""),
+                    metadata=fields.get("metadata"),
+                )
             elif status == TaskStatus.RUNNING:
-                await self.start(task_id)
+                await self.start(task_id, metadata=fields.get("metadata"))
             elif status == TaskStatus.COMPLETED:
-                await self.complete(task_id, fields.get("result", ""))
+                await self.complete(
+                    task_id,
+                    fields.get("result", ""),
+                    metadata=fields.get("metadata"),
+                )
             elif status == TaskStatus.FAILED:
-                await self.fail(task_id, fields.get("result", ""))
+                await self.fail(
+                    task_id,
+                    fields.get("result", ""),
+                    metadata=fields.get("metadata"),
+                )
             elif status == TaskStatus.CANCELLED:
-                await self.cancel(task_id)
+                await self.cancel(task_id, metadata=fields.get("metadata"))
+            elif status == TaskStatus.PENDING:
+                await self.requeue(
+                    task_id,
+                    reason=fields.get("result", ""),
+                    metadata=fields.get("metadata"),
+                )
         elif fields:
             # Raw column update (no status change)
             async with aiosqlite.connect(self._db_path) as db:
@@ -303,7 +337,7 @@ class TaskBoard:
                     if col not in self._ALLOWED_COLUMNS:
                         raise TaskBoardError(f"Invalid column: {col!r}")
                     sets.append(f"{col} = ?")
-                    params.append(val)
+                    params.append(self._coerce_db_value(col, val))
                 params.append(task_id)
                 await db.execute(
                     f"UPDATE tasks SET {', '.join(sets)} WHERE id = ?", params,
@@ -312,15 +346,35 @@ class TaskBoard:
 
     # -- status transitions -------------------------------------------------
 
-    async def assign(self, task_id: str, agent_id: str) -> Task:
+    async def assign(
+        self,
+        task_id: str,
+        agent_id: str,
+        metadata: dict[str, Any] | None = None,
+    ) -> Task:
         """Assign to an agent (PENDING -> ASSIGNED)."""
-        return await self._set_status(task_id, TaskStatus.ASSIGNED, assigned_to=agent_id)
+        fields: dict[str, Any] = {"assigned_to": agent_id}
+        if metadata is not None:
+            fields["metadata"] = metadata
+        return await self._set_status(task_id, TaskStatus.ASSIGNED, **fields)
 
-    async def start(self, task_id: str) -> Task:
+    async def start(
+        self,
+        task_id: str,
+        metadata: dict[str, Any] | None = None,
+    ) -> Task:
         """Mark running (ASSIGNED -> RUNNING)."""
-        return await self._set_status(task_id, TaskStatus.RUNNING)
+        fields: dict[str, Any] = {}
+        if metadata is not None:
+            fields["metadata"] = metadata
+        return await self._set_status(task_id, TaskStatus.RUNNING, **fields)
 
-    async def complete(self, task_id: str, result: str = "") -> Task:
+    async def complete(
+        self,
+        task_id: str,
+        result: str = "",
+        metadata: dict[str, Any] | None = None,
+    ) -> Task:
         """Mark completed (RUNNING -> COMPLETED)."""
         await self._witness_transition(
             task_id=task_id,
@@ -331,9 +385,17 @@ class TaskBoard:
                 f"{len((result or '').strip())} chars. Verify requirement coverage."
             ),
         )
-        return await self._set_status(task_id, TaskStatus.COMPLETED, result=result)
+        fields: dict[str, Any] = {"result": result}
+        if metadata is not None:
+            fields["metadata"] = metadata
+        return await self._set_status(task_id, TaskStatus.COMPLETED, **fields)
 
-    async def fail(self, task_id: str, error: str = "") -> Task:
+    async def fail(
+        self,
+        task_id: str,
+        error: str = "",
+        metadata: dict[str, Any] | None = None,
+    ) -> Task:
         """Mark failed (RUNNING -> FAILED)."""
         await self._witness_transition(
             task_id=task_id,
@@ -344,11 +406,75 @@ class TaskBoard:
                 "Summarize failure signature and define pivot strategy."
             ),
         )
-        return await self._set_status(task_id, TaskStatus.FAILED, result=error)
+        fields: dict[str, Any] = {"result": error}
+        if metadata is not None:
+            fields["metadata"] = metadata
+        return await self._set_status(task_id, TaskStatus.FAILED, **fields)
 
-    async def cancel(self, task_id: str) -> Task:
+    async def cancel(
+        self,
+        task_id: str,
+        metadata: dict[str, Any] | None = None,
+    ) -> Task:
         """Cancel (PENDING|ASSIGNED|RUNNING -> CANCELLED)."""
-        return await self._set_status(task_id, TaskStatus.CANCELLED)
+        fields: dict[str, Any] = {}
+        if metadata is not None:
+            fields["metadata"] = metadata
+        return await self._set_status(task_id, TaskStatus.CANCELLED, **fields)
+
+    async def requeue(
+        self,
+        task_id: str,
+        reason: str = "",
+        metadata: dict[str, Any] | None = None,
+    ) -> Task:
+        """Requeue a task back to pending with optional metadata merge."""
+        task = await self.get(task_id)
+        if task is None:
+            raise TaskBoardError(f"Task {task_id!r} not found")
+
+        merged_meta = dict(task.metadata or {})
+        if isinstance(metadata, dict):
+            merged_meta.update(metadata)
+
+        if task.status == TaskStatus.PENDING:
+            await self.update_task(
+                task_id,
+                assigned_to=None,
+                result=reason,
+                metadata=merged_meta,
+            )
+            refreshed = await self.get(task_id)
+            assert refreshed is not None
+            return refreshed
+
+        if task.status == TaskStatus.RUNNING:
+            await self._set_status(
+                task_id,
+                TaskStatus.FAILED,
+                result=reason,
+                metadata=merged_meta,
+            )
+            return await self._set_status(
+                task_id,
+                TaskStatus.PENDING,
+                assigned_to=None,
+                result=reason,
+                metadata=merged_meta,
+            )
+
+        if task.status in {TaskStatus.FAILED, TaskStatus.CANCELLED, TaskStatus.ASSIGNED}:
+            return await self._set_status(
+                task_id,
+                TaskStatus.PENDING,
+                assigned_to=None,
+                result=reason,
+                metadata=merged_meta,
+            )
+
+        raise TaskBoardError(
+            f"Cannot requeue task {task_id!r} from status {task.status.value}"
+        )
 
     # -- dependency management ----------------------------------------------
 

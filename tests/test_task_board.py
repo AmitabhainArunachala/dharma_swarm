@@ -24,6 +24,19 @@ async def test_create_task(board):
 
 
 @pytest.mark.asyncio
+async def test_create_task_persists_metadata(board):
+    trace_id = "trc_test_123"
+    task = await board.create(
+        "Metadata task",
+        metadata={"trace_id": trace_id, "created_via": "test"},
+    )
+    loaded = await board.get(task.id)
+    assert loaded is not None
+    assert loaded.metadata["trace_id"] == trace_id
+    assert loaded.metadata["created_via"] == "test"
+
+
+@pytest.mark.asyncio
 async def test_get_task(board):
     task = await board.create("Test task")
     found = await board.get(task.id)
@@ -125,6 +138,72 @@ async def test_get_ready_tasks(board):
     ready = await board.get_ready_tasks()
     ready_ids = [t.id for t in ready]
     assert t2.id in ready_ids
+
+
+@pytest.mark.asyncio
+async def test_create_batch_persists_metadata(board):
+    tasks = await board.create_batch(
+        [
+            {
+                "title": "Batch 1",
+                "metadata": {"trace_id": "trc_batch_1", "batch_id": "b1"},
+            },
+            {
+                "title": "Batch 2",
+                "metadata": {"trace_id": "trc_batch_2", "batch_id": "b1"},
+            },
+        ]
+    )
+    loaded = await board.get(tasks[0].id)
+    assert loaded is not None
+    assert loaded.metadata["trace_id"] == "trc_batch_1"
+    assert loaded.metadata["batch_id"] == "b1"
+
+
+@pytest.mark.asyncio
+async def test_update_task_serializes_metadata(board):
+    task = await board.create("Serialize metadata")
+    await board.update_task(task.id, metadata={"foo": "bar", "n": 1})
+    loaded = await board.get(task.id)
+    assert loaded is not None
+    assert loaded.metadata["foo"] == "bar"
+    assert loaded.metadata["n"] == 1
+
+
+@pytest.mark.asyncio
+async def test_requeue_failed_task_to_pending(board):
+    task = await board.create("Retry me")
+    await board.assign(task.id, "agent")
+    await board.start(task.id)
+    await board.fail(task.id, error="boom")
+
+    requeued = await board.requeue(
+        task.id,
+        reason="retry",
+        metadata={"retry_count": 1},
+    )
+    assert requeued.status == TaskStatus.PENDING
+    assert requeued.assigned_to is None
+    assert requeued.metadata["retry_count"] == 1
+
+
+@pytest.mark.asyncio
+async def test_update_task_pending_requeues(board):
+    task = await board.create("Pending requeue")
+    await board.assign(task.id, "agent")
+    await board.start(task.id)
+    await board.fail(task.id, error="fail once")
+
+    await board.update_task(
+        task.id,
+        status=TaskStatus.PENDING,
+        result="retry requested",
+        metadata={"retry_count": 2},
+    )
+    loaded = await board.get(task.id)
+    assert loaded is not None
+    assert loaded.status == TaskStatus.PENDING
+    assert loaded.metadata["retry_count"] == 2
 
 
 @pytest.mark.asyncio

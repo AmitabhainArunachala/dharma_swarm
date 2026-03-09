@@ -2,6 +2,7 @@
 
 import asyncio
 import json
+import time
 import pytest
 
 from dharma_swarm.models import (
@@ -25,6 +26,18 @@ class MockTaskBoard:
 
     async def update_task(self, task_id, **fields):
         self.updates.append((task_id, fields))
+        for task in self.tasks:
+            if task.id != task_id:
+                continue
+            if "status" in fields:
+                task.status = fields["status"]
+            if "assigned_to" in fields:
+                task.assigned_to = fields["assigned_to"]
+            if "result" in fields:
+                task.result = fields["result"]
+            if "metadata" in fields and isinstance(fields["metadata"], dict):
+                task.metadata = dict(fields["metadata"])
+            break
 
     async def get(self, task_id):
         for task in self.tasks:
@@ -187,12 +200,20 @@ class MockMessageBus:
 class DummyRunner:
     """Tiny runner shim to drive _execute_task paths in tests."""
 
-    def __init__(self, result: str | None = None, error: Exception | None = None):
+    def __init__(
+        self,
+        result: str | None = None,
+        error: Exception | None = None,
+        delay_seconds: float = 0.0,
+    ):
         self._result = result or "ok"
         self._error = error
+        self._delay_seconds = delay_seconds
         self._config = None
 
     async def run_task(self, task):
+        if self._delay_seconds > 0:
+            await asyncio.sleep(self._delay_seconds)
         if self._error:
             raise self._error
         return self._result
@@ -437,3 +458,133 @@ async def test_orchestrator_failure_records_signature(tmp_path):
     sig = failed[0].get("failure_signature", "")
     assert "timeout while reading provider stream" in sig
     assert "<id>" in sig
+
+
+@pytest.mark.asyncio
+async def test_orchestrator_timeout_marks_failed_without_retry(tmp_path):
+    board = MockTaskBoard()
+    board.tasks = [
+        Task(
+            id="t-timeout",
+            title="Slow task",
+            description="safe",
+            metadata={"timeout_seconds": 0.01, "max_retries": 0},
+        )
+    ]
+    pool = MockAgentPool(
+        [AgentState(id="a1", name="agent-1", role=AgentRole.GENERAL, status=AgentStatus.IDLE)]
+    )
+    pool.set_runner("a1", DummyRunner(result="late", delay_seconds=0.05))
+
+    orch = Orchestrator(
+        task_board=board,
+        agent_pool=pool,
+        ledger_dir=tmp_path,
+        session_id="sess_timeout",
+    )
+
+    await orch.route_next()
+    for _ in range(80):
+        if not orch._running_tasks:
+            break
+        await orch._collect_completed()
+        await asyncio.sleep(0.01)
+    await orch._collect_completed()
+
+    assert any(
+        task_id == "t-timeout"
+        and fields.get("status") == TaskStatus.FAILED
+        and "timed out" in str(fields.get("result", "")).lower()
+        for task_id, fields in board.updates
+    )
+
+
+@pytest.mark.asyncio
+async def test_orchestrator_timeout_requeues_with_retry_budget(tmp_path):
+    board = MockTaskBoard()
+    board.tasks = [
+        Task(
+            id="t-timeout-retry",
+            title="Slow retriable task",
+            description="safe",
+            metadata={"timeout_seconds": 0.01, "max_retries": 1},
+        )
+    ]
+    pool = MockAgentPool(
+        [AgentState(id="a1", name="agent-1", role=AgentRole.GENERAL, status=AgentStatus.IDLE)]
+    )
+    pool.set_runner("a1", DummyRunner(result="late", delay_seconds=0.05))
+
+    orch = Orchestrator(
+        task_board=board,
+        agent_pool=pool,
+        ledger_dir=tmp_path,
+        session_id="sess_timeout_retry",
+    )
+
+    await orch.route_next()
+    for _ in range(80):
+        if not orch._running_tasks:
+            break
+        await orch._collect_completed()
+        await asyncio.sleep(0.01)
+    await orch._collect_completed()
+
+    failed_seen = any(
+        task_id == "t-timeout-retry" and fields.get("status") == TaskStatus.FAILED
+        for task_id, fields in board.updates
+    )
+    pending_seen = any(
+        task_id == "t-timeout-retry" and fields.get("status") == TaskStatus.PENDING
+        for task_id, fields in board.updates
+    )
+    assert failed_seen
+    assert pending_seen
+
+
+@pytest.mark.asyncio
+async def test_route_next_skips_retry_backoff_tasks(agents):
+    board = MockTaskBoard()
+    board.tasks = [
+        Task(
+            id="t-backoff",
+            title="Wait",
+            metadata={"retry_not_before_epoch": time.time() + 60},
+        ),
+        Task(id="t-ready", title="Ready now"),
+    ]
+    pool = MockAgentPool(agents[:1])
+    orch = Orchestrator(task_board=board, agent_pool=pool)
+
+    dispatches = await orch.route_next()
+    assert len(dispatches) == 1
+    assert dispatches[0].task_id == "t-ready"
+
+
+@pytest.mark.asyncio
+async def test_dispatch_dropoff_requeues_once_when_runner_missing(tmp_path):
+    board = MockTaskBoard()
+    board.tasks = [
+        Task(
+            id="t-dropoff",
+            title="No runner",
+            metadata={"max_retries": 1},
+        )
+    ]
+    pool = MockAgentPool(
+        [AgentState(id="a1", name="agent-1", role=AgentRole.GENERAL, status=AgentStatus.IDLE)]
+    )
+    orch = Orchestrator(
+        task_board=board,
+        agent_pool=pool,
+        ledger_dir=tmp_path,
+        session_id="sess_dropoff",
+    )
+
+    await orch.route_next()
+    await orch._collect_completed()
+
+    assert any(
+        task_id == "t-dropoff" and fields.get("status") == TaskStatus.PENDING
+        for task_id, fields in board.updates
+    )
