@@ -21,6 +21,7 @@ class _FakeSwarm:
         self._existing = [_AgentStateStub(name=n) for n in (existing_names or [])]
         self.spawn_calls: list[dict] = []
         self.create_calls: list[dict] = []
+        self.create_batch_calls: list[list[dict]] = []
         self._pending_tasks = pending_tasks
 
     async def list_agents(self):
@@ -40,6 +41,7 @@ class _FakeSwarm:
         return kwargs
 
     async def create_task_batch(self, specs):
+        self.create_batch_calls.append(list(specs))
         for spec in specs:
             self.create_calls.append(spec)
         return list(specs)
@@ -118,6 +120,7 @@ async def test_create_seed_tasks_skips_when_pending_exist():
     tasks = await sc.create_seed_tasks(swarm)
     assert tasks == []
     assert swarm.create_calls == []
+    assert swarm.create_batch_calls == []
 
 
 @pytest.mark.asyncio
@@ -125,6 +128,7 @@ async def test_create_seed_tasks_creates_all_when_board_empty():
     swarm = _FakeSwarm(pending_tasks=0)
     tasks = await sc.create_seed_tasks(swarm)
     assert len(tasks) == len(sc.SEED_TASKS)
+    assert len(swarm.create_batch_calls) == 1
     assert len(swarm.create_calls) == len(sc.SEED_TASKS)
 
 
