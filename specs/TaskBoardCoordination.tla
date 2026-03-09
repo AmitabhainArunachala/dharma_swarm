@@ -163,11 +163,9 @@ SAFETY PROPERTIES (Invariants that must always hold)
 CRITICAL: Each task has exactly one owner (or NULL).
 
 Since task_owner is a function Tasks -> (Agents \cup {NULL}),
-this is guaranteed by the type system. We just verify that
-claimed/running tasks have non-NULL owners.
+this is guaranteed by the type system.
 *)
-NoTaskDuplication ==
-    TRUE  \* Trivially true by type system - task_owner is a function
+ASSUME NoTaskDuplication == TRUE  \* Guaranteed by type system - task_owner is a function
 
 (*
 Every claimed/running task has an owner.
@@ -208,6 +206,14 @@ OwnershipConsistency ==
         (task_owner[t] = a /\ task_status[t] \in {"claimed", "running"})
         => \E i \in 1..Len(agent_tasks[a]) : agent_tasks[a][i] = t
 
+(*
+If all agents fail, no task remains claimed or running.
+*)
+NoStuckTasks ==
+    (\A a \in Agents : agent_state[a] = "failed")
+    =>
+    (\A t \in Tasks : task_status[t] \in {"pending", "completed", "failed"})
+
 ----
 (*
 =============================================================================
@@ -217,10 +223,10 @@ LIVENESS PROPERTIES (Progress guarantees)
 
 (*
 Eventually, all pending tasks are either completed or failed
-(assuming at least one non-failed agent exists).
+(assuming at least one non-failed agent ALWAYS exists).
 *)
 EventualCompletion ==
-    (\E a \in Agents : agent_state[a] # "failed")
+    [](\E a \in Agents : agent_state[a] # "failed")
     =>
     \A t \in Tasks :
         task_status[t] = "pending"
@@ -233,14 +239,6 @@ ClaimedTasksEventuallyComplete ==
     \A t \in Tasks :
         task_status[t] = "claimed"
         ~> task_status[t] \in {"completed", "failed"}
-
-(*
-If all agents fail, no task remains claimed.
-*)
-NoStuckTasks ==
-    (\A a \in Agents : agent_state[a] = "failed")
-    =>
-    (\A t \in Tasks : task_status[t] \in {"pending", "completed", "failed"})
 
 ----
 (*

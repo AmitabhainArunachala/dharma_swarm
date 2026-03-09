@@ -1,0 +1,8 @@
+# TLA+ TLC Model Checker Output
+*_TTrace_*.tla
+*_TTrace_*.bin
+states/
+tla2tools.jar
+
+# OS Files
+.DS_Store
