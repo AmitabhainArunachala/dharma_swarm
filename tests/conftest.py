@@ -6,18 +6,21 @@ import tempfile
 from pathlib import Path
 
 import pytest
-from hypothesis import settings, Verbosity
+try:
+    from hypothesis import settings, Verbosity
 
-# Configure Hypothesis profiles for property-based testing
-settings.register_profile("ci", max_examples=100, verbosity=Verbosity.verbose)
-settings.register_profile("dev", max_examples=20, verbosity=Verbosity.normal)
-settings.register_profile("deep", max_examples=1000, deadline=None)
+    # Configure Hypothesis profiles for property-based testing
+    settings.register_profile("ci", max_examples=100, verbosity=Verbosity.verbose)
+    settings.register_profile("dev", max_examples=20, verbosity=Verbosity.normal)
+    settings.register_profile("deep", max_examples=1000, deadline=None)
 
-# Use dev profile by default, CI profile in GitHub Actions
-if os.getenv("CI"):
-    settings.load_profile("ci")
-else:
-    settings.load_profile("dev")
+    # Use dev profile by default, CI profile in GitHub Actions
+    if os.getenv("CI"):
+        settings.load_profile("ci")
+    else:
+        settings.load_profile("dev")
+except ImportError:
+    pass  # hypothesis not installed — property-based tests will be skipped
 
 
 @pytest.fixture

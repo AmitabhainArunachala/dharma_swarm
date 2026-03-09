@@ -256,8 +256,8 @@ async def test_check_health_critical_failure_rate(
 
 @pytest.mark.asyncio
 async def test_check_health_mean_fitness(store: TraceStore, monitor: SystemMonitor):
-    f1 = FitnessScore(correctness=1.0, dharmic_alignment=1.0, performance=1.0, utilization=1.0, elegance=1.0, efficiency=1.0, safety=1.0)
-    f2 = FitnessScore(correctness=0.5, dharmic_alignment=0.5, performance=0.5, utilization=0.5, elegance=0.5, efficiency=0.5, safety=0.5)
+    f1 = FitnessScore(correctness=1.0, dharmic_alignment=1.0, performance=1.0, utilization=1.0, economic_value=1.0, elegance=1.0, efficiency=1.0, safety=1.0)
+    f2 = FitnessScore(correctness=0.5, dharmic_alignment=0.5, performance=0.5, utilization=0.5, economic_value=0.5, elegance=0.5, efficiency=0.5, safety=0.5)
     await store.log_entry(_make_entry(fitness=f1))
     await store.log_entry(_make_entry(fitness=f2))
     report = await monitor.check_health()

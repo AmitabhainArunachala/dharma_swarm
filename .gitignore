@@ -26,3 +26,8 @@ build/
 *.patch
 reports/forensic_*
 docs/merge/imports/legacy_import_*
+
+# Local formal-verification artifacts
+specs/*.bak*
+specs/states/
+specs/tla2tools.jar

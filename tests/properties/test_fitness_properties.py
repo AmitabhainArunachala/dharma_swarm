@@ -3,8 +3,9 @@
 Tests that fitness calculations are always valid, bounded, and consistent.
 """
 
-from hypothesis import given, strategies as st
 import pytest
+hypothesis = pytest.importorskip("hypothesis", reason="hypothesis not installed")
+from hypothesis import given, strategies as st
 
 try:
     from dharma_swarm.archive import FitnessScore

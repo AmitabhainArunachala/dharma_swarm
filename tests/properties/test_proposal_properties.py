@@ -4,6 +4,8 @@ These tests find edge cases that unit tests miss by generating hundreds of test 
 Expected to find 3-8 bugs in boundary conditions, serialization, uniqueness.
 """
 
+import pytest
+hypothesis = pytest.importorskip("hypothesis", reason="hypothesis not installed")
 from hypothesis import given, strategies as st
 from hypothesis import assume
 import json

@@ -28,6 +28,7 @@ def test_fitness_weighted_default_weights():
         dharmic_alignment=1.0,
         performance=1.0,
         utilization=1.0,
+        economic_value=1.0,
         elegance=1.0,
         efficiency=1.0,
         safety=1.0,

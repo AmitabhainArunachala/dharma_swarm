@@ -44,7 +44,7 @@ class FitnessScore(BaseModel):
     dharmic_alignment: float = 0.0 # Gate outcomes (0-1)
     performance: float = 0.0       # Wall clock speedup (0-1) - JIKOKU
     utilization: float = 0.0       # Concurrent execution (0-1) - JIKOKU
-    economic_value: float = 0.5    # ROI-based fitness (0-1) - NEW - Economic fitness
+    economic_value: float = 0.0    # ROI-based fitness (0-1) - NEW - Economic fitness
     elegance: float = 0.0          # Code quality (0-1)
     efficiency: float = 0.0        # Diff size penalty (0-1)
     safety: float = 0.0            # Gate pass/fail (0-1)
