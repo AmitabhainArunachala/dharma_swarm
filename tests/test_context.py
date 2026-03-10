@@ -14,6 +14,7 @@ from dharma_swarm.context import (
     read_agni_state,
     read_agent_notes,
     read_engineering,
+    read_latent_gold_overview,
     read_manifest,
     read_memory_context,
     read_ops,
@@ -183,6 +184,28 @@ def test_read_memory_context_with_data(tmp_path):
     result = read_memory_context(state_dir=tmp_path)
     assert "witness" in result
     assert "Test memory" in result
+
+
+def test_read_latent_gold_overview_with_data(tmp_path):
+    from dharma_swarm.engine.conversation_memory import ConversationMemoryStore
+
+    db_dir = tmp_path / "db"
+    db_dir.mkdir()
+    store = ConversationMemoryStore(db_dir / "memory_plane.db")
+    store.record_turn(
+        session_id="sess-overview",
+        task_id="task-overview",
+        role="user",
+        content=(
+            "We could build a memory palace index for task recall.\n"
+            "Maybe preserve abandoned branches from the conversation."
+        ),
+        turn_index=1,
+    )
+
+    result = read_latent_gold_overview(state_dir=tmp_path, limit=3)
+    assert "[idea:" in result
+    assert "memory palace index" in result
 
 
 def test_read_shipped_returns_string():

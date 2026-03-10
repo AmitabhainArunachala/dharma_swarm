@@ -1,4 +1,4 @@
-"""Tests for allout_autopilot integration with master_prompt_engineer."""
+"""Tests for strange_loop integration with master_prompt_engineer."""
 
 from __future__ import annotations
 
@@ -10,7 +10,8 @@ from unittest.mock import patch
 sys.path.insert(0, str(Path.home() / "dharma_swarm" / "scripts"))
 sys.path.insert(0, str(Path.home() / "dharma_swarm"))
 
-from scripts.allout_autopilot import (
+from scripts.strange_loop import (
+    build_todo,
     build_compounding_event,
     execute_ranked_steps,
     extract_test_counts,
@@ -122,6 +123,18 @@ def test_rank_top_steps_can_include_noise_with_env():
     assert any("handoff at 04:00" in e.lower() for e in examples)
 
 
+def test_rank_top_steps_suppresses_infra_when_accelerators_dormant():
+    steps = [
+        "Bring up NVIDIA RAG services and verify `/v1/health` on ports 8081/8082.",
+        "Run provider core tests (`tests/test_providers.py`).",
+    ]
+    with patch.dict("os.environ", {"DGC_ACCELERATOR_MODE": "dormant"}, clear=False):
+        ranked = rank_top_steps(steps, limit=20)
+    examples = [item["example"] for item in ranked]
+    assert any("provider core tests" in e.lower() for e in examples)
+    assert not any("nvidia rag services" in e.lower() for e in examples)
+
+
 # ---------------------------------------------------------------------------
 # run_prompt_evolution
 # ---------------------------------------------------------------------------
@@ -148,7 +161,7 @@ def test_run_prompt_evolution_due_local(tmp_path: Path):
     shared_dir.mkdir()
 
     with patch.dict("os.environ", {"ALLOUT_EVOLVE_EVERY": "3"}, clear=True):
-        with patch("scripts.allout_autopilot.SHARED_DIR", shared_dir):
+        with patch("scripts.strange_loop.SHARED_DIR", shared_dir):
             result = run_prompt_evolution(
                 cycle=3,
                 results=[
@@ -182,7 +195,7 @@ def test_run_prompt_evolution_cycle_6(tmp_path: Path):
     shared_dir.mkdir()
 
     with patch.dict("os.environ", {"ALLOUT_EVOLVE_EVERY": "3"}, clear=True):
-        with patch("scripts.allout_autopilot.SHARED_DIR", shared_dir):
+        with patch("scripts.strange_loop.SHARED_DIR", shared_dir):
             result = run_prompt_evolution(
                 cycle=6,
                 results=[],
@@ -213,12 +226,54 @@ def test_execute_ranked_steps_uses_fallback_when_ranked_are_noops():
             return {"step": step, "action": "pytest_engine_safety", "rc": 0, "verify": "ok"}
         return {"step": step, "action": "noop_unmapped_step", "rc": 0, "verify": "noop"}
 
-    with patch("scripts.allout_autopilot.execute_single_step", side_effect=fake_execute):
+    with patch("scripts.strange_loop.execute_single_step", side_effect=fake_execute):
         actions = execute_ranked_steps(ranked, max_actions=2)
 
     assert len(actions) == 2
     assert all(a["action"] != "noop_unmapped_step" for a in actions)
     assert actions[0]["action"] == "pytest_provider_core"
+
+
+def test_execute_ranked_steps_skips_accelerator_items_when_dormant():
+    ranked = [
+        {"example": "Bring up NVIDIA RAG services and verify `/v1/health` on ports 8081/8082.", "score": 100},
+        {"example": "Run provider core tests (`tests/test_providers.py`).", "score": 90},
+    ]
+
+    def fake_execute(step: str) -> dict[str, object]:
+        low = step.lower()
+        if "provider core tests" in low:
+            return {"step": step, "action": "pytest_provider_core", "rc": 0, "verify": "ok"}
+        if "nvidia rag services" in low:
+            return {"step": step, "action": "should_not_run", "rc": 1, "verify": "bad"}
+        return {"step": step, "action": "noop_unmapped_step", "rc": 0, "verify": "noop"}
+
+    with patch.dict("os.environ", {"DGC_ACCELERATOR_MODE": "dormant"}, clear=False):
+        with patch("scripts.strange_loop.execute_single_step", side_effect=fake_execute):
+            actions = execute_ranked_steps(ranked, max_actions=1)
+
+    assert len(actions) == 1
+    assert actions[0]["action"] == "pytest_provider_core"
+
+
+def test_build_todo_omits_accelerator_fixups_when_dormant():
+    results = [
+        {"label": "rag-health", "rc": 2},
+        {"label": "ingest-health", "rc": 2},
+        {"label": "flywheel-jobs", "rc": 2},
+        {"label": "tests-provider", "rc": 0},
+    ]
+    signals = [
+        {"path": "/tmp/example.py", "todo_markers": 0, "defs": 9, "tests": 0},
+    ]
+
+    with patch.dict("os.environ", {"DGC_ACCELERATOR_MODE": "dormant"}, clear=False):
+        todo = build_todo(1, results, signals, min_steps=3, max_steps=5)
+
+    combined = "\n".join(todo).lower()
+    assert "nvidia rag" not in combined
+    assert "flywheel" not in combined
+    assert "focused tests" in combined
 
 
 def test_build_compounding_event_counts():

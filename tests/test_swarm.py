@@ -5,8 +5,8 @@ import asyncio
 import pytest
 
 from dharma_swarm.engine.conversation_memory import ConversationMemoryStore
-from dharma_swarm.models import AgentRole, TaskPriority, TaskStatus
-from dharma_swarm.swarm import SwarmManager
+from dharma_swarm.models import AgentRole, Message, TaskPriority, TaskStatus
+from dharma_swarm.swarm import SwarmCoordinationState, SwarmManager
 
 
 # startup_crew auto-spawns 7 agents (3 claude_code + 1 codex + 3 free) and 5 seed tasks on init
@@ -46,6 +46,25 @@ async def test_create_task(swarm):
     assert task.priority == TaskPriority.HIGH
     assert task.metadata.get("trace_id", "").startswith("trc_")
     assert task.metadata.get("created_via") == "swarm.create_task"
+
+
+@pytest.mark.asyncio
+async def test_create_task_normalizes_coordination_metadata(swarm):
+    task = await swarm.create_task(
+        "Route policy review",
+        metadata={
+            "claim_key": "route-policy",
+            "uncertainty": 0.7,
+            "coordination_shared_context": "Existing disagreement context",
+        },
+    )
+
+    assert task.metadata["coordination_claim_key"] == "route-policy"
+    assert task.metadata["coordination_topic"] == "route-policy"
+    assert task.metadata["coordination_uncertainty"] == pytest.approx(0.7)
+    assert task.metadata["coordination_state"] == "uncertain"
+    assert task.metadata["coordination_route"] == "synthesis_review"
+    assert "reviewer" in task.metadata["coordination_preferred_roles"]
 
 
 @pytest.mark.asyncio
@@ -190,6 +209,49 @@ async def test_run_does_not_consume_contribution_budget_without_work(
 
 
 @pytest.mark.asyncio
+async def test_rescue_recent_failures_requeues_transient_failure(swarm):
+    task = await swarm.create_task("Transient rescue target")
+    await swarm._task_board.assign(task.id, "agent-1")
+    await swarm._task_board.start(task.id)
+    await swarm._task_board.fail(
+        task.id,
+        "Connection error.",
+        metadata={"last_failure_source": "execution_error"},
+    )
+
+    rescued = await swarm.rescue_recent_failures(limit=4)
+
+    assert rescued
+    refreshed = await swarm.get_task(task.id)
+    assert refreshed is not None
+    assert refreshed.status == TaskStatus.PENDING
+    assert refreshed.metadata["auto_rescue_count"] == 1
+    assert refreshed.metadata["last_failure_class"] == "connection_transient"
+
+
+@pytest.mark.asyncio
+async def test_rescue_recent_failures_skips_duplicate_active_title(swarm):
+    failed = await swarm.create_task("Duplicate rescue title")
+    await swarm._task_board.assign(failed.id, "agent-1")
+    await swarm._task_board.start(failed.id)
+    await swarm._task_board.fail(
+        failed.id,
+        "Task execution timed out after 300.0s",
+        metadata={"last_failure_source": "timeout", "timeout_seconds": 300.0},
+    )
+
+    active = await swarm.create_task("Duplicate rescue title")
+    assert active.status == TaskStatus.PENDING
+
+    rescued = await swarm.rescue_recent_failures(limit=4)
+
+    assert rescued == []
+    refreshed = await swarm.get_task(failed.id)
+    assert refreshed is not None
+    assert refreshed.status == TaskStatus.FAILED
+
+
+@pytest.mark.asyncio
 async def test_status(swarm):
     await swarm.spawn_agent("a1")
     await swarm.create_task("t1")
@@ -197,6 +259,111 @@ async def test_status(swarm):
     assert len(state.agents) == _AUTO_AGENTS + 1
     assert state.tasks_pending == _AUTO_TASKS + 1
     assert state.uptime_seconds > 0
+
+
+@pytest.mark.asyncio
+async def test_coordination_status_reports_global_truth(swarm):
+    agents = await swarm.list_agents()
+    left, right = agents[0], agents[1]
+    await swarm._message_bus.send(
+        Message(
+            id="coord-msg-1",
+            from_agent=left.id,
+            to_agent=right.id,
+            subject="route-policy",
+            body="Mechanism, witness, ecosystem all agree.",
+            metadata={"topic": "route-policy"},
+        )
+    )
+    await swarm._message_bus.send(
+        Message(
+            id="coord-msg-2",
+            from_agent=right.id,
+            to_agent=left.id,
+            subject="route-policy",
+            body="Mechanism, witness, ecosystem all agree.",
+            metadata={"topic": "route-policy"},
+        )
+    )
+
+    coordination = await swarm.coordination_status(refresh=True)
+
+    assert isinstance(coordination, SwarmCoordinationState)
+    assert coordination.agent_count >= 2
+    assert coordination.message_count >= 2
+    assert coordination.global_truths >= 1
+    assert coordination.productive_disagreements == 0
+    assert coordination.is_globally_coherent is True
+    assert "route-policy" in coordination.global_truth_claim_keys
+
+
+@pytest.mark.asyncio
+async def test_coordination_status_reports_productive_disagreement(swarm):
+    agents = await swarm.list_agents()
+    left, right = agents[0], agents[1]
+    await swarm._message_bus.send(
+        Message(
+            id="coord-msg-3",
+            from_agent=left.id,
+            to_agent=right.id,
+            subject="route-policy",
+            body="Mechanism and architecture dominate this route.",
+            metadata={"topic": "route-policy"},
+        )
+    )
+    await swarm._message_bus.send(
+        Message(
+            id="coord-msg-4",
+            from_agent=right.id,
+            to_agent=left.id,
+            subject="route-policy",
+            body="Witness awareness and introspection dominate this route.",
+            metadata={"topic": "route-policy"},
+        )
+    )
+
+    coordination = await swarm.coordination_status(refresh=True)
+
+    assert coordination.global_truths == 0
+    assert coordination.productive_disagreements >= 1
+    assert coordination.is_globally_coherent is False
+    assert "route-policy" in coordination.productive_disagreement_claim_keys
+
+
+@pytest.mark.asyncio
+async def test_spawn_coordination_tasks_creates_synthesis_task(swarm):
+    agents = await swarm.list_agents()
+    left, right = agents[0], agents[1]
+    await swarm._message_bus.send(
+        Message(
+            id="coord-msg-5",
+            from_agent=left.id,
+            to_agent=right.id,
+            subject="route-policy",
+            body="Mechanism and architecture dominate this route.",
+            metadata={"topic": "route-policy"},
+        )
+    )
+    await swarm._message_bus.send(
+        Message(
+            id="coord-msg-6",
+            from_agent=right.id,
+            to_agent=left.id,
+            subject="route-policy",
+            body="Witness awareness and introspection dominate this route.",
+            metadata={"topic": "route-policy"},
+        )
+    )
+
+    coordination = await swarm.coordination_status(refresh=True)
+    created = await swarm.spawn_coordination_tasks(coordination=coordination, limit=2)
+
+    assert created
+    task = created[0]
+    assert task.metadata["coordination_origin"] == "sheaf_disagreement"
+    assert task.metadata["coordination_claim_key"] == "route-policy"
+    assert task.metadata["coordination_route"] == "synthesis_review"
+    assert task.priority == TaskPriority.HIGH
 
 
 # --- Gödel Claw v0.3.0 tests ---

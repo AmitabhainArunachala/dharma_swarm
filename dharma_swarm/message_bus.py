@@ -253,6 +253,30 @@ class MessageBus:
             "db_path": str(self.db_path),
         }
 
+    async def list_messages(
+        self,
+        *,
+        limit: int = 200,
+        agent_id: str | None = None,
+    ) -> list[Message]:
+        """List recent messages, optionally filtered to one agent."""
+        async with aiosqlite.connect(self.db_path) as db:
+            db.row_factory = aiosqlite.Row
+            query = (
+                "SELECT id, from_agent, to_agent, subject, body, priority,"
+                " status, created_at, read_at, reply_to, metadata"
+                " FROM messages"
+            )
+            params: list[Any] = []
+            if agent_id:
+                query += " WHERE from_agent = ? OR to_agent = ?"
+                params.extend([agent_id, agent_id])
+            query += " ORDER BY created_at DESC LIMIT ?"
+            params.append(max(1, int(limit)))
+            cursor = await db.execute(query, params)
+            rows = await cursor.fetchall()
+        return [_row_to_message(row) for row in rows]
+
     # ------------------------------------------------------------------
     # Artifact attachment support
     # ------------------------------------------------------------------
