@@ -24,6 +24,7 @@ dependencies = [
 [project.optional-dependencies]
 mcp = ["mcp>=1.0"]
 dev = ["pytest>=7.0", "pytest-asyncio>=0.21", "pytest-cov>=4.0"]
+router = ["fasttext-wheel>=0.9.2", "redis>=5.0.0"]
 infra = [
     "langgraph>=0.2.0",
     "temporalio>=1.8.0",

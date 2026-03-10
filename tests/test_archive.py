@@ -8,6 +8,7 @@ from dharma_swarm.archive import (
     FitnessScore,
     MAPElitesGrid,
     _DEFAULT_WEIGHTS,
+    normalize_fitness_weights,
 )
 
 
@@ -55,6 +56,14 @@ def test_fitness_json_roundtrip():
     f2 = FitnessScore.model_validate_json(data)
     assert f2.correctness == f.correctness
     assert f2.dharmic_alignment == f.dharmic_alignment
+
+
+def test_normalize_fitness_weights_merges_and_normalizes():
+    weights = normalize_fitness_weights({"correctness": 2.0, "safety": 0.0})
+    assert set(weights) == set(_DEFAULT_WEIGHTS)
+    assert sum(weights.values()) == pytest.approx(1.0)
+    assert weights["correctness"] > _DEFAULT_WEIGHTS["correctness"]
+    assert weights["safety"] == 0.0
 
 
 # ---------------------------------------------------------------------------
@@ -487,6 +496,12 @@ def test_map_elites_coverage():
     assert grid.coverage() == grid.occupied_bins / 125
 
 
+def test_map_elites_grid_supports_custom_bins():
+    grid = MAPElitesGrid(n_bins=7)
+    assert grid.total_bins == 343
+    assert grid.n_bins == 7
+
+
 def test_archive_entry_has_feature_coords():
     """TEST 8: compute_feature_coords returns correct keys in [0, 1]."""
     entry = ArchiveEntry(
@@ -559,3 +574,28 @@ async def test_archive_get_diverse(archive):
 
     diverse = await archive.get_diverse(n=3)
     assert len(diverse) >= 1  # at least one unique bin
+
+
+@pytest.mark.asyncio
+async def test_archive_reconfigure_grid_rebuilds_bins(tmp_path):
+    archive = EvolutionArchive(path=tmp_path / "rebucket.jsonl")
+    await archive.load()
+    for da, el in [(0.1, 0.9), (0.9, 0.1), (0.5, 0.5)]:
+        await archive.add_entry(
+            ArchiveEntry(
+                fitness=FitnessScore(
+                    dharmic_alignment=da,
+                    elegance=el,
+                    correctness=0.5,
+                    safety=1.0,
+                ),
+                status="applied",
+            )
+        )
+
+    before = archive.grid.occupied_bins
+    archive.reconfigure_grid(7)
+
+    assert archive.grid.n_bins == 7
+    assert archive.grid.total_bins == 343
+    assert archive.grid.occupied_bins == before

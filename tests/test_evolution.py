@@ -3,6 +3,7 @@
 import pytest
 
 from dharma_swarm.archive import ArchiveEntry, EvolutionArchive, FitnessScore
+from dharma_swarm.convergence import ConvergenceConfig
 from dharma_swarm.evolution import (
     CycleResult,
     DarwinEngine,
@@ -10,7 +11,11 @@ from dharma_swarm.evolution import (
     EvolutionStatus,
     Proposal,
 )
-from dharma_swarm.models import GateDecision
+from dharma_swarm.landscape import BasinType, LandscapeProbe
+from dharma_swarm.meta_evolution import MetaParameters
+from dharma_swarm.models import GateDecision, LLMResponse
+from dharma_swarm.router_retrospective import RouteOutcomeRecord
+from dharma_swarm.ucb_selector import UCBConfig
 
 
 # ---------------------------------------------------------------------------
@@ -196,6 +201,82 @@ async def test_engine_init_creates_trace_dirs(engine_paths):
     assert (traces_path / "history").is_dir()
     assert (traces_path / "archive").is_dir()
     assert (traces_path / "patterns").is_dir()
+
+
+async def test_engine_init_normalizes_custom_fitness_weights(engine_paths):
+    eng = DarwinEngine(
+        **engine_paths,
+        custom_fitness_weights={"correctness": 1.0, "safety": 0.0},
+    )
+    await eng.init()
+    weights = eng.get_fitness_weights()
+    assert sum(weights.values()) == pytest.approx(1.0)
+    assert weights["correctness"] > 0.5
+    assert weights["safety"] == 0.0
+
+
+async def test_apply_meta_parameters_updates_engine_knobs(engine_paths):
+    eng = DarwinEngine(**engine_paths)
+    await eng.init()
+
+    snapshot = eng.apply_meta_parameters(
+        MetaParameters(
+            fitness_weights={"correctness": 1.0, "safety": 0.0},
+            mutation_rate=0.25,
+            exploration_coeff=0.4,
+            circuit_breaker_limit=5,
+            map_elites_n_bins=7,
+        )
+    )
+
+    assert snapshot["mutation_rate"] == pytest.approx(0.25)
+    assert snapshot["exploration_coeff"] == pytest.approx(0.4)
+    assert snapshot["circuit_breaker_limit"] == 5
+    assert snapshot["map_elites_n_bins"] == 7
+    assert snapshot["fitness_weights"]["correctness"] > 0.5
+    assert eng.archive.grid.n_bins == 7
+    assert eng.archive.grid.total_bins == 343
+
+
+async def test_generate_proposal_uses_mutation_envelope(engine_paths, tmp_path):
+    class DummyProvider:
+        def __init__(self):
+            self.request = None
+
+        async def complete(self, request):
+            self.request = request
+            return LLMResponse(
+                content=(
+                    "COMPONENT: sample.py\n"
+                    "CHANGE_TYPE: mutation\n"
+                    "DESCRIPTION: tighten error handling\n"
+                    "THINK: keeps failures local.\n"
+                    "DIFF:\n"
+                    "```diff\n"
+                    "--- a/sample.py\n"
+                    "+++ b/sample.py\n"
+                    "@@\n"
+                    "-    return value\n"
+                    "+    return value or 0\n"
+                    "```\n"
+                ),
+                model=request.model,
+            )
+
+    eng = DarwinEngine(**engine_paths, mutation_rate=0.3)
+    await eng.init()
+    eng._adaptive_strategy = "restart"
+    source_file = tmp_path / "sample.py"
+    source_file.write_text("def sample(value):\n    return value\n", encoding="utf-8")
+    provider = DummyProvider()
+
+    proposal = await eng.generate_proposal(provider, source_file=source_file)
+
+    assert proposal is not None
+    assert provider.request is not None
+    assert f"under {eng.get_mutation_budget_lines()} changed lines" in provider.request.system
+    assert "adaptive_strategy: restart" in provider.request.messages[0]["content"]
+    assert provider.request.temperature == pytest.approx(0.7)
 
 
 # ---------------------------------------------------------------------------
@@ -388,6 +469,43 @@ async def test_evaluate_efficiency_large_diff(engine):
     assert result.actual_fitness.efficiency == pytest.approx(0.5)
 
 
+async def test_evaluate_sets_neutral_economic_value_without_sessions(engine):
+    p = _safe_proposal()
+    await engine.gate_check(p)
+    result = await engine.evaluate(p, test_results={"pass_rate": 0.8})
+    assert result.actual_fitness is not None
+    assert result.actual_fitness.economic_value == pytest.approx(0.5)
+
+
+async def test_score_fitness_uses_engine_weights(engine_paths):
+    eng = DarwinEngine(
+        **engine_paths,
+        custom_fitness_weights={
+            "correctness": 0.0,
+            "dharmic_alignment": 0.0,
+            "performance": 0.0,
+            "utilization": 0.0,
+            "economic_value": 0.0,
+            "elegance": 1.0,
+            "efficiency": 0.0,
+            "safety": 0.0,
+        },
+    )
+    await eng.init()
+
+    p = _safe_proposal()
+    await eng.gate_check(p)
+    result = await eng.evaluate(
+        p,
+        test_results={"pass_rate": 1.0},
+        code='def greet(name: str) -> str:\n    return f"hi {name}"\n',
+    )
+    assert result.actual_fitness is not None
+    assert eng.score_fitness(result.actual_fitness) == pytest.approx(
+        result.actual_fitness.elegance
+    )
+
+
 # ---------------------------------------------------------------------------
 # DarwinEngine -- archive_result
 # ---------------------------------------------------------------------------
@@ -498,6 +616,215 @@ async def test_run_cycle_tracks_best_fitness(engine):
     assert result.best_fitness >= 0.0
 
 
+async def test_run_cycle_updates_convergence_state(engine_paths):
+    eng = DarwinEngine(
+        **engine_paths,
+        convergence_config=ConvergenceConfig(
+            window_size=3,
+            variance_threshold=0.0001,
+            improvement_threshold=0.01,
+            restart_duration=4,
+        ),
+    )
+    await eng.init()
+
+    result = None
+    for idx in range(3):
+        result = await eng.run_cycle(
+            [_safe_proposal(component=f"steady_{idx}.py", description="steady")]
+        )
+
+    assert result is not None
+    assert result.convergence_restart_triggered is True
+    assert result.restart_cycles_remaining > 0
+    assert eng.convergence_detector.is_restart_active() is True
+
+
+async def test_run_cycle_landscape_probe_adjusts_mutation_rate(engine_paths):
+    eng = DarwinEngine(
+        **engine_paths,
+        mutation_rate=0.2,
+        landscape_probe_interval=1,
+    )
+    await eng.init()
+
+    async def mock_probe(
+        parent,
+        weights=None,
+        workspace=None,
+        test_command="python3 -m pytest tests/ -q --tb=short",
+        timeout=60.0,
+    ):
+        del parent
+        assert weights == eng.get_fitness_weights()
+        assert workspace is None
+        assert test_command == "python3 -m pytest tests/ -q --tb=short"
+        assert timeout == pytest.approx(60.0)
+        return LandscapeProbe(
+            parent_id="parent-1",
+            parent_component="steady.py",
+            parent_fitness=0.5,
+            neighbor_fitness=[0.5, 0.51, 0.49],
+            gradient=0.0,
+            variance=0.0001,
+            basin_type=BasinType.PLATEAU,
+        )
+
+    eng.landscape_mapper.probe_landscape = mock_probe
+    result = await eng.run_cycle([_safe_proposal(component="steady.py", description="steady")])
+
+    assert result.landscape_basin == "plateau"
+    assert result.adaptive_strategy == "explore"
+    assert result.mutation_rate_applied > 0.2
+    assert eng.last_landscape_probe is not None
+
+
+async def test_run_cycle_landscape_probe_forwards_workspace_config(
+    engine_paths,
+    tmp_path,
+):
+    workspace_root = tmp_path / "workspace"
+    workspace_root.mkdir()
+    (workspace_root / "steady.py").write_text(
+        "def value():\n    return 1\n",
+        encoding="utf-8",
+    )
+    eng = DarwinEngine(
+        **engine_paths,
+        mutation_rate=0.2,
+        landscape_probe_interval=1,
+        landscape_probe_workspace=workspace_root,
+        landscape_probe_test_command="python3 -c \"print('ok')\"",
+        landscape_probe_timeout=5.0,
+    )
+    await eng.init()
+
+    async def mock_probe(
+        parent,
+        weights=None,
+        workspace=None,
+        test_command="python3 -m pytest tests/ -q --tb=short",
+        timeout=60.0,
+    ):
+        del parent
+        assert weights == eng.get_fitness_weights()
+        assert workspace == workspace_root.resolve()
+        assert test_command == "python3 -c \"print('ok')\""
+        assert timeout == pytest.approx(5.0)
+        return LandscapeProbe(
+            parent_id="parent-2",
+            parent_component="steady.py",
+            parent_fitness=0.5,
+            neighbor_fitness=[0.55, 0.54, 0.56],
+            gradient=0.05,
+            variance=0.0001,
+            basin_type=BasinType.PLATEAU,
+        )
+
+    eng.landscape_mapper.probe_landscape = mock_probe
+    result = await eng.run_cycle([_safe_proposal(component="steady.py", description="steady")])
+
+    assert result.landscape_basin == "plateau"
+    assert result.adaptive_strategy == "explore"
+
+
+async def test_run_cycle_landscape_probe_uses_component_target_registry(
+    engine_paths,
+    tmp_path,
+):
+    default_root = tmp_path / "default_workspace"
+    default_root.mkdir()
+    target_root = tmp_path / "target_workspace"
+    target_root.mkdir()
+    (target_root / "steady.py").write_text(
+        "def value():\n    return 1\n",
+        encoding="utf-8",
+    )
+    eng = DarwinEngine(
+        **engine_paths,
+        mutation_rate=0.2,
+        landscape_probe_interval=1,
+        landscape_probe_workspace=default_root,
+        landscape_probe_test_command="python3 -m pytest tests/ -q --tb=short",
+        landscape_probe_timeout=60.0,
+        probe_targets=[
+            {
+                "component_pattern": "pkg/*.py",
+                "workspace": target_root,
+                "test_command": "python3 -m pytest tests/test_pkg.py -q",
+                "timeout": 7.0,
+            }
+        ],
+    )
+    await eng.init()
+
+    async def mock_probe(
+        parent,
+        weights=None,
+        workspace=None,
+        test_command="python3 -m pytest tests/ -q --tb=short",
+        timeout=60.0,
+    ):
+        assert parent.component == "pkg/steady.py"
+        assert weights == eng.get_fitness_weights()
+        assert workspace == target_root.resolve()
+        assert test_command == "python3 -m pytest tests/test_pkg.py -q"
+        assert timeout == pytest.approx(7.0)
+        return LandscapeProbe(
+            parent_id="parent-3",
+            parent_component="pkg/steady.py",
+            parent_fitness=0.5,
+            neighbor_fitness=[0.55, 0.56, 0.57],
+            gradient=0.06,
+            variance=0.0001,
+            basin_type=BasinType.PLATEAU,
+        )
+
+    eng.landscape_mapper.probe_landscape = mock_probe
+    result = await eng.run_cycle(
+        [_safe_proposal(component="pkg/steady.py", description="steady")]
+    )
+
+    assert result.landscape_basin == "plateau"
+    assert result.adaptive_strategy == "explore"
+
+
+async def test_run_cycle_triggers_periodic_meta_evolution(engine_paths, monkeypatch):
+    eng = DarwinEngine(
+        **engine_paths,
+        meta_evolution_interval=2,
+        meta_poor_fitness_threshold=1.1,
+    )
+    await eng.init()
+    assert eng._meta_evolution_engine is not None
+    baseline = eng.get_meta_parameter_state()
+
+    def fake_evolve():
+        return MetaParameters(
+            fitness_weights={"correctness": 1.0, "safety": 0.0},
+            mutation_rate=0.8,
+            exploration_coeff=0.1,
+            circuit_breaker_limit=10,
+            map_elites_n_bins=12,
+        )
+
+    monkeypatch.setattr(eng._meta_evolution_engine, "_evolve_meta_params", fake_evolve)
+
+    first = await eng.run_cycle(
+        [_safe_proposal(component="meta_1.py", description="steady")]
+    )
+    second = await eng.run_cycle(
+        [_safe_proposal(component="meta_2.py", description="steady")]
+    )
+
+    assert first.best_fitness >= 0.0
+    assert second.best_fitness >= 0.0
+    assert eng.last_meta_evolution_result is not None
+    assert eng.last_meta_evolution_result.trigger == "periodic"
+    assert eng.last_meta_evolution_result.applied_parameters is True
+    assert eng.get_meta_parameter_state()["mutation_rate"] > baseline["mutation_rate"]
+
+
 async def test_run_cycle_circuit_breaker_after_repeated_failures(engine):
     proposals = [
         _harmful_proposal(component="danger.py", description="rm -rf everything"),
@@ -542,6 +869,76 @@ async def test_select_next_parent_elite(engine):
 
     parent = await engine.select_next_parent(strategy="elite")
     assert parent is not None
+
+
+async def test_select_next_parent_respects_engine_weights(engine_paths):
+    eng = DarwinEngine(
+        **engine_paths,
+        custom_fitness_weights={
+            "correctness": 0.0,
+            "dharmic_alignment": 0.0,
+            "performance": 0.0,
+            "utilization": 0.0,
+            "economic_value": 0.0,
+            "elegance": 1.0,
+            "efficiency": 0.0,
+            "safety": 0.0,
+        },
+    )
+    await eng.init()
+    low_elegance = ArchiveEntry(
+        component="correct.py",
+        fitness=FitnessScore(correctness=1.0, elegance=0.0, safety=1.0),
+        status="applied",
+    )
+    high_elegance = ArchiveEntry(
+        component="elegant.py",
+        fitness=FitnessScore(correctness=0.0, elegance=1.0, safety=1.0),
+        status="applied",
+    )
+    await eng.archive.add_entry(low_elegance)
+    await eng.archive.add_entry(high_elegance)
+
+    parent = await eng.select_next_parent(strategy="elite")
+    assert parent is not None
+    assert parent.component == "elegant.py"
+
+
+async def test_select_next_parent_uses_ucb_when_enabled(engine_paths):
+    eng = DarwinEngine(
+        **engine_paths,
+        use_ucb=True,
+        ucb_config=UCBConfig(exploration_coeff=0.0, min_pulls=0),
+        custom_fitness_weights={
+            "correctness": 0.0,
+            "dharmic_alignment": 0.0,
+            "performance": 0.0,
+            "utilization": 0.0,
+            "economic_value": 0.0,
+            "elegance": 1.0,
+            "efficiency": 0.0,
+            "safety": 0.0,
+        },
+    )
+    await eng.init()
+    await eng.archive.add_entry(
+        ArchiveEntry(
+            component="correct.py",
+            fitness=FitnessScore(correctness=1.0, elegance=0.0, safety=1.0),
+            status="applied",
+        )
+    )
+    await eng.archive.add_entry(
+        ArchiveEntry(
+            component="elegant.py",
+            fitness=FitnessScore(correctness=0.0, elegance=1.0, safety=1.0),
+            status="applied",
+        )
+    )
+
+    parent = await eng.select_next_parent()
+    assert parent is not None
+    assert parent.component == "elegant.py"
 
 
 # ---------------------------------------------------------------------------
@@ -939,3 +1336,96 @@ async def test_subtree_fitness_estimation(engine):
     # C has no descendants — returns own fitness
     potential_c = engine.predictor.estimate_subtree_potential(c.id, entries)
     assert potential_c == pytest.approx(c_weighted)
+
+
+@pytest.mark.asyncio
+async def test_router_retrospective_created_for_high_confidence_bad_route(engine):
+    artifact = await engine.create_router_retrospective(
+        RouteOutcomeRecord(
+            action_name="triage_incident",
+            route_path="reflex",
+            selected_provider="openrouter_free",
+            selected_model="meta-llama/llama-3.3-70b-instruct:free",
+            confidence=0.91,
+            quality_score=0.41,
+            result="success",
+            reasons=["within_reflex_budget"],
+            signals={"complexity_tier": "REASONING"},
+        )
+    )
+
+    assert artifact is not None
+    assert artifact.review_required is True
+    assert artifact.policy_archive_entry.target_component == "router_policy_review"
+    assert artifact.route_record.route_path == "reflex"
+    assert artifact.darwin_archive_entry_id is not None
+
+    stored = await engine.archive.get_entry(artifact.darwin_archive_entry_id)
+    assert stored is not None
+    assert stored.component == "router_policy_review"
+    assert stored.change_type == "route_retrospective"
+    assert stored.status == "candidate"
+    assert stored.test_results["policy_archive_entry"]["promotion_state"] == "candidate"
+    assert stored.test_results["route_record"]["route_path"] == "reflex"
+
+
+@pytest.mark.asyncio
+async def test_router_promotion_guard_blocks_excessive_drift(engine):
+    artifact = await engine.create_router_retrospective(
+        RouteOutcomeRecord(
+            action_name="triage_incident",
+            route_path="reflex",
+            selected_provider="openrouter_free",
+            confidence=0.92,
+            quality_score=0.32,
+        )
+    )
+    assert artifact is not None
+
+    decision = await engine.guard_router_promotion(
+        goal_drift_index=0.52,
+        constraint_preservation=0.995,
+        entry_id=artifact.darwin_archive_entry_id,
+    )
+
+    assert decision.allow_promotion is False
+    assert "goal_drift_index>=0.44" in decision.reasons
+
+    stored = await engine.archive.get_entry(artifact.darwin_archive_entry_id)
+    assert stored is not None
+    assert stored.status == "promotion_blocked"
+    assert (
+        stored.test_results["policy_archive_entry"]["promotion_state"]
+        == "promotion_blocked"
+    )
+    assert stored.rollback_reason == "goal_drift_index>=0.44"
+
+
+@pytest.mark.asyncio
+async def test_router_promotion_guard_allows_safe_improvement(engine):
+    artifacts = await engine.audit_router_outcomes(
+        [
+            RouteOutcomeRecord(
+                action_name="triage_incident",
+                route_path="reflex",
+                selected_provider="openrouter_free",
+                confidence=0.88,
+                quality_score=0.39,
+            )
+        ]
+    )
+    assert len(artifacts) == 1
+
+    decision = await engine.guard_router_promotion(
+        goal_drift_index=0.31,
+        constraint_preservation=0.992,
+        entry_id=artifacts[0].darwin_archive_entry_id,
+    )
+
+    assert decision.allow_promotion is True
+    assert decision.reasons == ["promotion_safe"]
+
+    stored = await engine.archive.get_entry(artifacts[0].darwin_archive_entry_id)
+    assert stored is not None
+    assert stored.status == "promoted"
+    assert stored.test_results["policy_archive_entry"]["promotion_state"] == "promoted"

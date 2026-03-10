@@ -32,6 +32,37 @@ _DEFAULT_WEIGHTS: dict[str, float] = {
     "safety": 0.06,              # +1% (slightly more weight)
 }
 
+FITNESS_DIMENSIONS: tuple[str, ...] = tuple(_DEFAULT_WEIGHTS)
+
+
+def normalize_fitness_weights(
+    weights: dict[str, float] | None = None,
+) -> dict[str, float]:
+    """Return a normalized full fitness-weight mapping.
+
+    Partial overrides are merged onto the canonical defaults, then normalized so
+    the total weight mass remains 1.0.
+    """
+    if weights is None:
+        return dict(_DEFAULT_WEIGHTS)
+
+    unknown = sorted(set(weights) - set(_DEFAULT_WEIGHTS))
+    if unknown:
+        raise ValueError(f"Unknown fitness dimensions: {', '.join(unknown)}")
+
+    merged: dict[str, float] = dict(_DEFAULT_WEIGHTS)
+    for key, value in weights.items():
+        scalar = float(value)
+        if scalar < 0.0:
+            raise ValueError(f"Fitness weight for {key!r} must be non-negative")
+        merged[key] = scalar
+
+    total = sum(merged.values())
+    if total <= 0.0:
+        raise ValueError("At least one fitness weight must be positive")
+
+    return {key: value / total for key, value in merged.items()}
+
 
 class FitnessScore(BaseModel):
     """Multi-dimensional fitness score for an evolution entry.
@@ -54,7 +85,7 @@ class FitnessScore(BaseModel):
 
         Args:
             weights: Optional mapping of dimension name to weight.
-                     Defaults to the standard 5-dimension weighting.
+                     Defaults to the canonical fitness weighting.
         """
         w = weights or _DEFAULT_WEIGHTS
         return sum(getattr(self, k, 0.0) * v for k, v in w.items())
@@ -115,10 +146,11 @@ class MAPElitesGrid:
         - complexity: diff_size mapped to [0.0, 1.0] via min(diff_lines/500, 1.0)
     """
 
-    N_BINS: int = 5  # 5x5x5 = 125 cells max
+    N_BINS: int = 5  # Default 5x5x5 = 125 cells max
 
-    def __init__(self) -> None:
+    def __init__(self, n_bins: int | None = None) -> None:
         # grid[(d_bin, e_bin, c_bin)] = ArchiveEntry (best per cell)
+        self.n_bins = max(3, int(n_bins or self.N_BINS))
         self._grid: dict[tuple[int, int, int], ArchiveEntry] = {}
 
     @staticmethod
@@ -143,9 +175,9 @@ class MAPElitesGrid:
     def _coords_to_bin(self, coords: dict[str, float]) -> tuple[int, int, int]:
         """Convert feature coordinates to grid bin indices."""
         return (
-            self._bin_value(coords.get("dharmic_alignment", 0.0)),
-            self._bin_value(coords.get("elegance", 0.0)),
-            self._bin_value(coords.get("complexity", 0.0)),
+            self._bin_value(coords.get("dharmic_alignment", 0.0), self.n_bins),
+            self._bin_value(coords.get("elegance", 0.0), self.n_bins),
+            self._bin_value(coords.get("complexity", 0.0), self.n_bins),
         )
 
     def try_insert(self, entry: ArchiveEntry) -> bool:
@@ -165,14 +197,18 @@ class MAPElitesGrid:
             return True
         return False
 
-    def get_diverse_parents(self, n: int = 5) -> list[ArchiveEntry]:
+    def get_diverse_parents(
+        self,
+        n: int = 5,
+        weights: dict[str, float] | None = None,
+    ) -> list[ArchiveEntry]:
         """Return up to n entries from distinct bins, sorted by fitness.
 
         This provides diverse parents for the next evolution cycle.
         """
         entries = sorted(
             self._grid.values(),
-            key=lambda e: e.fitness.weighted(),
+            key=lambda e: e.fitness.weighted(weights=weights),
             reverse=True,
         )
         return entries[:n]
@@ -184,12 +220,18 @@ class MAPElitesGrid:
 
     @property
     def total_bins(self) -> int:
-        """Total possible bins (N_BINS^3)."""
-        return self.N_BINS ** 3
+        """Total possible bins (n_bins^3)."""
+        return self.n_bins ** 3
 
     def coverage(self) -> float:
         """Fraction of bins occupied."""
         return self.occupied_bins / self.total_bins if self.total_bins > 0 else 0.0
+
+    def rebuild(self, entries: list[ArchiveEntry]) -> None:
+        """Rebuild the grid from a list of applied entries."""
+        self._grid.clear()
+        for entry in entries:
+            self.try_insert(entry)
 
 
 # ---------------------------------------------------------------------------
@@ -205,10 +247,10 @@ class EvolutionArchive:
     All file I/O is async.  Entries are indexed in-memory after ``load()``.
     """
 
-    def __init__(self, path: Path | None = None) -> None:
+    def __init__(self, path: Path | None = None, grid_bins: int | None = None) -> None:
         self.path: Path = path or _DEFAULT_ARCHIVE_PATH
         self._entries: dict[str, ArchiveEntry] = {}
-        self.grid = MAPElitesGrid()
+        self.grid = MAPElitesGrid(n_bins=grid_bins)
         # Merkle log for tamper-evident audit trail
         merkle_path = self.path.parent / "merkle_log.json"
         self.merkle_log = MerkleLog(merkle_path)
@@ -218,6 +260,7 @@ class EvolutionArchive:
     async def load(self) -> None:
         """Read existing JSONL file into memory."""
         self._entries.clear()
+        self.grid.rebuild([])
         if not self.path.exists():
             return
         import aiofiles  # local import so the module is importable without it
@@ -293,6 +336,14 @@ class EvolutionArchive:
 
         return entry.id
 
+    def reconfigure_grid(self, n_bins: int) -> None:
+        """Change MAP-Elites granularity and rebuild from current applied entries."""
+        self.grid = MAPElitesGrid(n_bins=n_bins)
+        applied_entries = [
+            entry for entry in self._entries.values() if entry.status == "applied"
+        ]
+        self.grid.rebuild(applied_entries)
+
     async def get_entry(self, entry_id: str) -> ArchiveEntry | None:
         """Look up a single entry by id."""
         return self._entries.get(entry_id)
@@ -315,20 +366,41 @@ class EvolutionArchive:
         """Return all entries whose parent_id matches *entry_id*."""
         return [e for e in self._entries.values() if e.parent_id == entry_id]
 
+    async def list_entries(
+        self,
+        status: str | None = None,
+        component: str | None = None,
+    ) -> list[ArchiveEntry]:
+        """List archive entries with optional status/component filters."""
+        entries = list(self._entries.values())
+        if status is not None:
+            entries = [entry for entry in entries if entry.status == status]
+        if component is not None:
+            entries = [entry for entry in entries if entry.component == component]
+        entries.sort(key=lambda entry: entry.timestamp)
+        return entries
+
     async def get_best(
-        self, n: int = 5, component: str | None = None
+        self,
+        n: int = 5,
+        component: str | None = None,
+        weights: dict[str, float] | None = None,
     ) -> list[ArchiveEntry]:
         """Return the top *n* applied entries sorted by weighted fitness.
 
         Args:
             n: How many to return.
             component: If given, filter to entries matching this component.
+            weights: Optional weight override for ranking entries.
         """
         entries = list(self._entries.values())
         if component:
             entries = [e for e in entries if e.component == component]
         entries = [e for e in entries if e.status == "applied"]
-        entries.sort(key=lambda e: e.fitness.weighted(), reverse=True)
+        entries.sort(
+            key=lambda e: e.fitness.weighted(weights=weights),
+            reverse=True,
+        )
         return entries[:n]
 
     async def get_latest(self, n: int = 10) -> list[ArchiveEntry]:
@@ -338,7 +410,11 @@ class EvolutionArchive:
         )
         return entries[:n]
 
-    async def get_diverse(self, n: int = 5) -> list[ArchiveEntry]:
+    async def get_diverse(
+        self,
+        n: int = 5,
+        weights: dict[str, float] | None = None,
+    ) -> list[ArchiveEntry]:
         """Return diverse parents from the MAP-Elites grid.
 
         Args:
@@ -347,7 +423,7 @@ class EvolutionArchive:
         Returns:
             List of entries from distinct feature bins, sorted by fitness.
         """
-        return self.grid.get_diverse_parents(n=n)
+        return self.grid.get_diverse_parents(n=n, weights=weights)
 
     async def update_status(
         self, entry_id: str, status: str, reason: str | None = None
@@ -375,7 +451,9 @@ class EvolutionArchive:
         return True
 
     def fitness_over_time(
-        self, component: str | None = None
+        self,
+        component: str | None = None,
+        weights: dict[str, float] | None = None,
     ) -> list[tuple[str, float]]:
         """Return ``(timestamp, weighted_fitness)`` pairs for applied entries."""
         entries = list(self._entries.values())
@@ -383,7 +461,10 @@ class EvolutionArchive:
             entries = [e for e in entries if e.component == component]
         entries = [e for e in entries if e.status == "applied"]
         entries.sort(key=lambda e: e.timestamp)
-        return [(e.timestamp, e.fitness.weighted()) for e in entries]
+        return [
+            (e.timestamp, e.fitness.weighted(weights=weights))
+            for e in entries
+        ]
 
     def verify_merkle_chain(self) -> tuple[bool, str]:
         """Verify cryptographic integrity of evolution history.

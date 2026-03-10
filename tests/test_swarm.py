@@ -1,7 +1,10 @@
 """Tests for dharma_swarm.swarm — integration tests."""
 
+import asyncio
+
 import pytest
 
+from dharma_swarm.engine.conversation_memory import ConversationMemoryStore
 from dharma_swarm.models import AgentRole, TaskPriority, TaskStatus
 from dharma_swarm.swarm import SwarmManager
 
@@ -82,6 +85,108 @@ async def test_memory(swarm):
     await swarm.remember("test memory entry")
     entries = await swarm.recall(limit=5)
     assert len(entries) >= 1
+
+
+@pytest.mark.asyncio
+async def test_spawn_latent_gold_tasks_reopens_orphaned_branches(swarm):
+    store = ConversationMemoryStore(swarm.state_dir / "db" / "memory_plane.db")
+    store.record_turn(
+        session_id="sess-latent",
+        task_id="task-source",
+        role="user",
+        content=(
+            "We could build a memory palace index for task recall.\n"
+            "Maybe preserve abandoned branches from the conversation."
+        ),
+        turn_index=1,
+    )
+    store.mark_task_outcome("task-source", outcome="success")
+
+    created = await swarm.spawn_latent_gold_tasks(
+        limit=2,
+        max_pending=100,
+        min_salience=0.0,
+    )
+
+    assert created
+    assert created[0].metadata["latent_gold_reopened"] is True
+    assert created[0].metadata["latent_gold_shard_id"].startswith("shd_")
+
+    second = await swarm.spawn_latent_gold_tasks(
+        limit=2,
+        max_pending=100,
+        min_salience=0.0,
+    )
+    assert second == []
+
+
+@pytest.mark.asyncio
+async def test_run_dispatches_pending_work_even_when_generation_rate_limited(
+    swarm,
+    monkeypatch,
+):
+    calls = {"spawn": 0, "tick": 0}
+
+    async def fake_spawn(*args, **kwargs):
+        calls["spawn"] += 1
+        return []
+
+    async def fake_tick():
+        calls["tick"] += 1
+        swarm._running = False
+        return {"dispatched": 1, "settled": 0, "recovered": 0}
+
+    async def fake_sleep(_seconds):
+        return None
+
+    monkeypatch.setattr(swarm, "spawn_latent_gold_tasks", fake_spawn)
+    monkeypatch.setattr(swarm, "_contribution_allowed", lambda: False)
+    monkeypatch.setattr(swarm, "_in_quiet_hours", lambda: True)
+    monkeypatch.setattr(swarm._orchestrator, "tick", fake_tick)
+    monkeypatch.setattr(asyncio, "sleep", fake_sleep)
+
+    swarm._running = True
+    await swarm.run(interval=0.0)
+
+    assert calls["spawn"] == 0
+    assert calls["tick"] == 1
+    assert swarm._daily_contributions == 1
+
+
+@pytest.mark.asyncio
+async def test_run_does_not_consume_contribution_budget_without_work(
+    swarm,
+    monkeypatch,
+):
+    calls = {"spawn": 0, "tick": 0}
+
+    async def fake_spawn(*args, **kwargs):
+        calls["spawn"] += 1
+        return []
+
+    async def fake_tick():
+        calls["tick"] += 1
+        swarm._running = False
+        return {"dispatched": 0, "settled": 0, "recovered": 0}
+
+    async def fake_sleep(_seconds):
+        return None
+
+    monkeypatch.setattr(swarm, "spawn_latent_gold_tasks", fake_spawn)
+    monkeypatch.setattr(swarm, "_contribution_allowed", lambda: True)
+    monkeypatch.setattr(swarm, "_in_quiet_hours", lambda: False)
+    monkeypatch.setattr(swarm._orchestrator, "tick", fake_tick)
+    monkeypatch.setattr(asyncio, "sleep", fake_sleep)
+
+    swarm._running = True
+    swarm._daily_contributions = 0
+    swarm._last_contribution = None
+    await swarm.run(interval=0.0)
+
+    assert calls["spawn"] == 1
+    assert calls["tick"] == 1
+    assert swarm._daily_contributions == 0
+    assert swarm._last_contribution is None
 
 
 @pytest.mark.asyncio
