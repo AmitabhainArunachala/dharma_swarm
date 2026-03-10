@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import sys
 from pathlib import Path
 from unittest.mock import AsyncMock, patch
@@ -16,6 +17,7 @@ def test_dgc_cli_module_imports():
     from dharma_swarm import dgc_cli
     assert hasattr(dgc_cli, "main")
     assert hasattr(dgc_cli, "cmd_status")
+    assert hasattr(dgc_cli, "cmd_runtime_status")
     assert hasattr(dgc_cli, "cmd_canonical_status")
     assert hasattr(dgc_cli, "cmd_pulse")
     assert hasattr(dgc_cli, "cmd_gates")
@@ -83,6 +85,21 @@ def test_dgc_cli_status_command():
         with patch("dharma_swarm.dgc_cli.cmd_status") as mock:
             main()
             mock.assert_called_once()
+
+
+def test_dgc_cli_runtime_status_command():
+    """main() dispatches `runtime-status` to cmd_runtime_status."""
+    from dharma_swarm.dgc_cli import main
+
+    with patch(
+        "sys.argv",
+        ["dgc", "runtime-status", "--limit", "7", "--db-path", "/tmp/runtime.db"],
+    ):
+        with patch("dharma_swarm.dgc_cli.cmd_runtime_status") as mock:
+            main()
+            mock.assert_called_once()
+            assert mock.call_args.kwargs["limit"] == 7
+            assert mock.call_args.kwargs["db_path"] == "/tmp/runtime.db"
 
 
 def test_dgc_cli_mission_status_command():
@@ -345,6 +362,107 @@ def test_dgc_cli_flywheel_record_dispatch():
             mock_cmd.assert_called_once()
 
 
+def test_dgc_cli_reciprocity_summary_dispatch():
+    """main() dispatches reciprocity summary to cmd_reciprocity_summary."""
+    from dharma_swarm.dgc_cli import main
+
+    with patch("sys.argv", ["dgc", "reciprocity", "summary"]):
+        with patch("dharma_swarm.dgc_cli.cmd_reciprocity_summary") as mock_cmd:
+            main()
+            mock_cmd.assert_called_once()
+
+
+def test_dgc_cli_reciprocity_record_dispatch():
+    """main() dispatches reciprocity record to cmd_reciprocity_record."""
+    from dharma_swarm.dgc_cli import main
+
+    with patch("sys.argv", ["dgc", "reciprocity", "record", "--run-id", "run-1"]):
+        with patch("dharma_swarm.dgc_cli.cmd_reciprocity_record") as mock_cmd:
+            main()
+            mock_cmd.assert_called_once()
+
+
+def test_dgc_cli_reciprocity_record_inline_payload_dispatch():
+    """main() forwards inline reciprocity payloads to cmd_reciprocity_record."""
+    from dharma_swarm.dgc_cli import main
+
+    with patch(
+        "sys.argv",
+        ["dgc", "reciprocity", "record", "--run-id", "run-1", "--json", '{"actors":2}'],
+    ):
+        with patch("dharma_swarm.dgc_cli.cmd_reciprocity_record") as mock_cmd:
+            main()
+            mock_cmd.assert_called_once()
+            assert mock_cmd.call_args.kwargs["json_payload"] == '{"actors":2}'
+            assert mock_cmd.call_args.kwargs["file_path"] is None
+
+
+def test_dgc_cli_reciprocity_publish_dispatch():
+    """main() dispatches reciprocity publish to cmd_reciprocity_publish."""
+    from dharma_swarm.dgc_cli import main
+
+    with patch(
+        "sys.argv",
+        ["dgc", "reciprocity", "publish", "activity", "--json", '{"activity_id":"a1"}'],
+    ):
+        with patch("dharma_swarm.dgc_cli.cmd_reciprocity_publish") as mock_cmd:
+            main()
+            mock_cmd.assert_called_once()
+
+
+def test_dgc_cli_ouroboros_connections_dispatch():
+    """main() dispatches ouroboros connections to cmd_ouroboros_connections."""
+    from dharma_swarm.dgc_cli import main
+
+    with patch(
+        "sys.argv",
+        ["dgc", "ouroboros", "connections", "--json", "--limit", "7"],
+    ):
+        with patch("dharma_swarm.dgc_cli.cmd_ouroboros_connections") as mock_cmd:
+            main()
+            mock_cmd.assert_called_once()
+            assert mock_cmd.call_args.kwargs["as_json"] is True
+            assert mock_cmd.call_args.kwargs["limit"] == 7
+
+
+def test_dgc_cli_ouroboros_record_dispatch():
+    """main() dispatches ouroboros record to cmd_ouroboros_record."""
+    from dharma_swarm.dgc_cli import main
+
+    with patch(
+        "sys.argv",
+        ["dgc", "ouroboros", "record", "--run-id", "run-1", "--cycle-id", "cycle-9"],
+    ):
+        with patch("dharma_swarm.dgc_cli.cmd_ouroboros_record") as mock_cmd:
+            main()
+            mock_cmd.assert_called_once()
+            assert mock_cmd.call_args.kwargs["run_id"] == "run-1"
+            assert mock_cmd.call_args.kwargs["cycle_id"] == "cycle-9"
+
+
+def test_dgc_cli_ouroboros_record_inline_payload_dispatch():
+    """main() forwards inline ouroboros payloads to cmd_ouroboros_record."""
+    from dharma_swarm.dgc_cli import main
+
+    with patch(
+        "sys.argv",
+        [
+            "dgc",
+            "ouroboros",
+            "record",
+            "--run-id",
+            "run-1",
+            "--json",
+            '{"cycle_id":"cycle-9"}',
+        ],
+    ):
+        with patch("dharma_swarm.dgc_cli.cmd_ouroboros_record") as mock_cmd:
+            main()
+            mock_cmd.assert_called_once()
+            assert mock_cmd.call_args.kwargs["json_payload"] == '{"cycle_id":"cycle-9"}'
+            assert mock_cmd.call_args.kwargs["file_path"] is None
+
+
 def test_dgc_cli_rag_error_is_user_friendly(capsys):
     """RAG command failures should return concise CLI errors, not tracebacks."""
     from dharma_swarm.dgc_cli import main
@@ -367,6 +485,50 @@ def test_dgc_cli_flywheel_error_is_user_friendly(capsys):
                 main()
     assert exc.value.code == 2
     assert "Flywheel command failed: unreachable" in capsys.readouterr().out
+
+
+def test_dgc_cli_reciprocity_error_is_user_friendly(capsys):
+    """Reciprocity command failures should return concise CLI errors, not tracebacks."""
+    from dharma_swarm.dgc_cli import main
+
+    with patch("sys.argv", ["dgc", "reciprocity", "summary"]):
+        with patch(
+            "dharma_swarm.dgc_cli.cmd_reciprocity_summary",
+            side_effect=RuntimeError("offline"),
+        ):
+            with pytest.raises(SystemExit) as exc:
+                main()
+    assert exc.value.code == 2
+    assert "Reciprocity command failed: offline" in capsys.readouterr().out
+
+
+def test_dgc_cli_reciprocity_publish_invalid_json_is_user_friendly(capsys):
+    """Reciprocity publish should fail cleanly when payload is not a JSON object."""
+    from dharma_swarm.dgc_cli import main
+
+    with patch("sys.argv", ["dgc", "reciprocity", "publish", "activity", "--json", "[]"]):
+        with pytest.raises(SystemExit) as exc:
+            main()
+    assert exc.value.code == 2
+    assert (
+        "Reciprocity command failed: reciprocity publish payload must decode to a JSON object"
+        in capsys.readouterr().out
+    )
+
+
+def test_dgc_cli_ouroboros_error_is_user_friendly(capsys):
+    """Ouroboros command failures should return concise CLI errors, not tracebacks."""
+    from dharma_swarm.dgc_cli import main
+
+    with patch("sys.argv", ["dgc", "ouroboros", "connections"]):
+        with patch(
+            "dharma_swarm.dgc_cli.cmd_ouroboros_connections",
+            side_effect=RuntimeError("bad profile"),
+        ):
+            with pytest.raises(SystemExit) as exc:
+                main()
+    assert exc.value.code == 2
+    assert "Ouroboros command failed: bad profile" in capsys.readouterr().out
 
 
 def test_cmd_flywheel_export_prints_canonical_export(capsys, monkeypatch):
@@ -464,9 +626,732 @@ def test_cmd_flywheel_record_prints_registry_binding(capsys, monkeypatch):
     assert '"artifact_id": "art-88"' in out
 
 
+def test_cmd_runtime_status_prints_runtime_control_plane(capsys, monkeypatch):
+    """runtime-status should print the helper-rendered control-plane summary."""
+    import dharma_swarm.dgc_cli as cli
+
+    def _fake_build_runtime_status_text(*, limit, runtime_db_path):
+        assert limit == 3
+        assert runtime_db_path == Path("/tmp/runtime.db")
+        return "Runtime Control Plane\nSessions=2"
+
+    monkeypatch.setattr(
+        "dharma_swarm.tui_helpers.build_runtime_status_text",
+        _fake_build_runtime_status_text,
+    )
+
+    cli.cmd_runtime_status(limit=3, db_path="/tmp/runtime.db")
+
+    out = capsys.readouterr().out
+    assert "Runtime Control Plane" in out
+    assert "Sessions=2" in out
+
+
+def test_cmd_reciprocity_summary_prints_ledger_summary(capsys, monkeypatch):
+    """reciprocity summary should print the fetched ledger summary payload."""
+    import dharma_swarm.dgc_cli as cli
+
+    class _FakeClient:
+        async def ledger_summary(self):
+            return {"actors": 2, "obligations": 4, "chain_valid": True}
+
+    monkeypatch.setattr("dharma_swarm.integrations.ReciprocityCommonsClient", _FakeClient)
+
+    cli.cmd_reciprocity_summary()
+
+    out = capsys.readouterr().out
+    assert '"actors": 2' in out
+    assert '"obligations": 4' in out
+
+
+def test_cmd_reciprocity_record_prints_registry_binding(capsys, monkeypatch):
+    """reciprocity record should print fetched summary plus canonical registry binding."""
+    import dharma_swarm.dgc_cli as cli
+
+    async def _fake_record(**kwargs):
+        assert kwargs["run_id"] == "run-recip"
+        assert kwargs["summary_type"] == "ledger_summary"
+        return {
+            "summary": {"actors": 3, "obligations": 5},
+            "registry": {
+                "artifact_id": "art-recip",
+                "summary": {"source": "reciprocity_commons"},
+                "fact_ids": ["fact-r1"],
+            },
+        }
+
+    monkeypatch.setattr(cli, "_reciprocity_record_payload", _fake_record)
+
+    cli.cmd_reciprocity_record(run_id="run-recip")
+
+    out = capsys.readouterr().out
+    assert '"actors": 3' in out
+    assert '"artifact_id": "art-recip"' in out
+
+
+@pytest.mark.asyncio
+async def test_reciprocity_record_payload_requires_binding_before_fetch(monkeypatch):
+    """reciprocity record should fail before contacting the service without a canonical binding."""
+    import dharma_swarm.dgc_cli as cli
+
+    calls = {"constructed": 0, "summary": 0}
+
+    class _FakeClient:
+        def __init__(self):
+            calls["constructed"] += 1
+
+        async def ledger_summary(self):
+            calls["summary"] += 1
+            return {"actors": 1}
+
+    monkeypatch.setattr("dharma_swarm.integrations.ReciprocityCommonsClient", _FakeClient)
+
+    with pytest.raises(ValueError, match="session_id or run_id"):
+        await cli._reciprocity_record_payload()
+
+    assert calls == {"constructed": 0, "summary": 0}
+
+
+@pytest.mark.asyncio
+async def test_reciprocity_record_payload_normalizes_direct_session_binding(monkeypatch):
+    """reciprocity record helper should normalize direct session inputs before registry write."""
+    import dharma_swarm.dgc_cli as cli
+
+    seen: dict[str, object] = {}
+
+    class _FakeClient:
+        async def ledger_summary(self):
+            return {"actors": "4", "chain_valid": "true"}
+
+    class _FakeRuntimeState:
+        def __init__(self, db_path):
+            seen["runtime_db_path"] = db_path
+            self.db_path = db_path or Path("/tmp/default-runtime.db")
+
+    class _FakeMemoryLattice:
+        def __init__(self, *, db_path, event_log_dir=None):
+            seen["memory_db_path"] = db_path
+            seen["event_log_dir"] = event_log_dir
+            self.closed = False
+
+        async def close(self):
+            self.closed = True
+            seen["closed"] = True
+
+    class _FakeArtifact:
+        artifact_id = "art-direct"
+
+    class _FakeFact:
+        fact_id = "fact-direct"
+
+    class _FakeResult:
+        artifact = _FakeArtifact()
+        manifest_path = Path("/tmp/reciprocity-manifest.json")
+        summary = {"source": "reciprocity_commons", "summary_type": "ledger_summary"}
+        facts = [_FakeFact()]
+        receipt = {"event_id": "evt-direct"}
+
+    class _FakeRegistry:
+        def __init__(
+            self,
+            *,
+            runtime_state,
+            memory_lattice,
+            workspace_root=None,
+            provenance_root=None,
+        ):
+            seen["workspace_root"] = workspace_root
+            seen["provenance_root"] = provenance_root
+            seen["runtime_state"] = runtime_state
+            seen["memory_lattice"] = memory_lattice
+
+        async def record_reciprocity_summary(self, payload, **kwargs):
+            seen["record_payload"] = payload
+            seen["record_kwargs"] = kwargs
+            return _FakeResult()
+
+    monkeypatch.setattr("dharma_swarm.integrations.ReciprocityCommonsClient", _FakeClient)
+    monkeypatch.setattr("dharma_swarm.runtime_state.RuntimeStateStore", _FakeRuntimeState)
+    monkeypatch.setattr("dharma_swarm.memory_lattice.MemoryLattice", _FakeMemoryLattice)
+    monkeypatch.setattr("dharma_swarm.evaluation_registry.EvaluationRegistry", _FakeRegistry)
+
+    out = await cli._reciprocity_record_payload(
+        session_id="  sess-direct  ",
+        task_id="   ",
+        trace_id="   ",
+        summary_type="   ",
+        db_path="/tmp/runtime.db",
+        event_log_dir="/tmp/events",
+        workspace_root="/tmp/workspace",
+        provenance_root="/tmp/provenance",
+    )
+
+    assert seen["runtime_db_path"] == Path("/tmp/runtime.db")
+    assert seen["memory_db_path"] == Path("/tmp/runtime.db")
+    assert seen["event_log_dir"] == Path("/tmp/events")
+    assert seen["workspace_root"] == Path("/tmp/workspace")
+    assert seen["provenance_root"] == Path("/tmp/provenance")
+    assert seen["record_payload"] == {
+        "actors": "4",
+        "chain_valid": "true",
+        "service": "reciprocity_commons",
+        "source": "reciprocity_commons",
+        "summary_type": "ledger_summary",
+    }
+    assert seen["record_kwargs"] == {
+        "run_id": "",
+        "session_id": "sess-direct",
+        "task_id": "",
+        "trace_id": None,
+        "created_by": "dgc_cli",
+    }
+    assert seen["closed"] is True
+    assert out["registry"]["artifact_id"] == "art-direct"
+    assert out["registry"]["receipt_event_id"] == "evt-direct"
+
+
+@pytest.mark.asyncio
+async def test_reciprocity_record_payload_uses_file_payload_without_live_fetch(
+    monkeypatch,
+    tmp_path,
+):
+    """reciprocity record helper should accept archived JSON without contacting the service."""
+    import dharma_swarm.dgc_cli as cli
+
+    seen: dict[str, object] = {}
+    payload_path = tmp_path / "reciprocity-summary.json"
+    payload_path.write_text('{"actors":9,"chain_valid":false}', encoding="utf-8")
+
+    class _UnexpectedClient:
+        def __init__(self):
+            raise AssertionError("live service fetch should be skipped for file payloads")
+
+    class _FakeRuntimeState:
+        def __init__(self, db_path):
+            self.db_path = db_path or Path("/tmp/default-runtime.db")
+
+    class _FakeMemoryLattice:
+        def __init__(self, *, db_path, event_log_dir=None):
+            seen["memory_db_path"] = db_path
+            seen["event_log_dir"] = event_log_dir
+
+        async def close(self):
+            seen["closed"] = True
+
+    class _FakeArtifact:
+        artifact_id = "art-file"
+
+    class _FakeFact:
+        fact_id = "fact-file"
+
+    class _FakeResult:
+        artifact = _FakeArtifact()
+        manifest_path = Path("/tmp/reciprocity-manifest-file.json")
+        summary = {"source": "reciprocity_commons", "summary_type": "ledger_summary"}
+        facts = [_FakeFact()]
+        receipt = {"event_id": "evt-file"}
+
+    class _FakeRegistry:
+        def __init__(
+            self,
+            *,
+            runtime_state,
+            memory_lattice,
+            workspace_root=None,
+            provenance_root=None,
+        ):
+            seen["workspace_root"] = workspace_root
+            seen["provenance_root"] = provenance_root
+
+        async def record_reciprocity_summary(self, payload, **kwargs):
+            seen["record_payload"] = payload
+            seen["record_kwargs"] = kwargs
+            return _FakeResult()
+
+    monkeypatch.setattr("dharma_swarm.integrations.ReciprocityCommonsClient", _UnexpectedClient)
+    monkeypatch.setattr("dharma_swarm.runtime_state.RuntimeStateStore", _FakeRuntimeState)
+    monkeypatch.setattr("dharma_swarm.memory_lattice.MemoryLattice", _FakeMemoryLattice)
+    monkeypatch.setattr("dharma_swarm.evaluation_registry.EvaluationRegistry", _FakeRegistry)
+
+    out = await cli._reciprocity_record_payload(
+        session_id="sess-file",
+        file_path=str(payload_path),
+        event_log_dir="/tmp/events",
+        workspace_root="/tmp/workspace",
+        provenance_root="/tmp/provenance",
+    )
+
+    assert seen["record_payload"] == {
+        "actors": 9,
+        "chain_valid": False,
+        "service": "reciprocity_commons",
+        "source": "reciprocity_commons",
+        "summary_type": "ledger_summary",
+    }
+    assert seen["record_kwargs"] == {
+        "run_id": "",
+        "session_id": "sess-file",
+        "task_id": "",
+        "trace_id": None,
+        "created_by": "dgc_cli",
+    }
+    assert seen["closed"] is True
+    assert out["registry"]["artifact_id"] == "art-file"
+
+
+def test_cmd_reciprocity_publish_prints_service_response(capsys, monkeypatch):
+    """reciprocity publish should print the submitted record plus service response."""
+    import dharma_swarm.dgc_cli as cli
+
+    async def _fake_publish(**kwargs):
+        assert kwargs["record_type"] == "project"
+        assert kwargs["payload"] == {
+            "project_id": "proj-1",
+            "project_type": "mangrove_restoration",
+        }
+        return {
+            "record_type": "project",
+            "record": kwargs["payload"],
+            "response": {"accepted": True, "id": "proj-1"},
+        }
+
+    monkeypatch.setattr(cli, "_reciprocity_publish_payload", _fake_publish)
+
+    cli.cmd_reciprocity_publish(
+        record_type="project",
+        json_payload='{"project_id":"proj-1","project_type":"mangrove_restoration"}',
+    )
+
+    out = capsys.readouterr().out
+    assert '"record_type": "project"' in out
+    assert '"accepted": true' in out
+
+
+def test_cmd_reciprocity_publish_reads_json_file(capsys, monkeypatch, tmp_path):
+    """reciprocity publish should load a JSON object payload from disk."""
+    import dharma_swarm.dgc_cli as cli
+
+    payload_path = tmp_path / "activity.json"
+    payload_path.write_text('{"activity_id":"a-file","energy_mwh":12.5}', encoding="utf-8")
+
+    async def _fake_publish(**kwargs):
+        assert kwargs["record_type"] == "activity"
+        assert kwargs["payload"] == {"activity_id": "a-file", "energy_mwh": 12.5}
+        return {
+            "record_type": "activity",
+            "record": kwargs["payload"],
+            "response": {"accepted": True},
+        }
+
+    monkeypatch.setattr(cli, "_reciprocity_publish_payload", _fake_publish)
+
+    cli.cmd_reciprocity_publish(
+        record_type="activity",
+        file_path=str(payload_path),
+    )
+
+    out = capsys.readouterr().out
+    assert '"activity_id": "a-file"' in out
+    assert '"accepted": true' in out
+
+
+def test_cmd_ouroboros_connections_prints_summary(capsys, tmp_path):
+    """ouroboros connections should render profile, H0, and H1 sections."""
+    import dharma_swarm.dgc_cli as cli
+
+    package_dir = tmp_path / "pkg"
+    package_dir.mkdir()
+    (package_dir / "__init__.py").write_text("", encoding="utf-8")
+    (package_dir / "alpha.py").write_text(
+        '''"""Alpha observes recursive witness loops across shared state.
+This description is long enough to clear the profiling filter cleanly."""
+''',
+        encoding="utf-8",
+    )
+    (package_dir / "beta.py").write_text(
+        '''"""Beta observes recursive witness loops across shared state.
+This description is long enough to clear the profiling filter cleanly."""
+''',
+        encoding="utf-8",
+    )
+    (package_dir / "gamma.py").write_text(
+        '''"""Gamma claims a profound revolutionary awakening of cosmic scale.
+This intentionally performative language should diverge from witness-heavy modules."""
+''',
+        encoding="utf-8",
+    )
+
+    cli.cmd_ouroboros_connections(package_dir=str(package_dir), min_text_length=40)
+
+    out = capsys.readouterr().out
+    assert "H0: STRUCTURAL CONNECTIONS" in out
+    assert "H1: PRODUCTIVE DISAGREEMENTS" in out
+    assert "alpha" in out
+    assert "beta" in out
+    assert "gamma" in out
+    assert "Modules profiled: 3" in out
+
+
+def test_cmd_ouroboros_connections_json_output(capsys, tmp_path):
+    """ouroboros connections should support structured JSON output."""
+    import dharma_swarm.dgc_cli as cli
+
+    package_dir = tmp_path / "pkg"
+    package_dir.mkdir()
+    (package_dir / "__init__.py").write_text("", encoding="utf-8")
+    (package_dir / "alpha.py").write_text(
+        '''"""Alpha observes recursive witness loops across shared state.
+This description is long enough to clear the profiling filter cleanly."""
+''',
+        encoding="utf-8",
+    )
+    (package_dir / "beta.py").write_text(
+        '''"""Beta observes recursive witness loops across shared state.
+This description is long enough to clear the profiling filter cleanly."""
+''',
+        encoding="utf-8",
+    )
+    (package_dir / "gamma.py").write_text(
+        '''"""Gamma claims a profound revolutionary awakening of cosmic scale.
+This intentionally performative language should diverge from witness-heavy modules."""
+''',
+        encoding="utf-8",
+    )
+
+    cli.cmd_ouroboros_connections(
+        package_dir=str(package_dir),
+        min_text_length=40,
+        as_json=True,
+    )
+
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["summary"]["modules_profiled"] == 3
+    assert payload["summary"]["connections"] >= 1
+    assert any(row["module"] == "alpha" for row in payload["profiles"])
+
+
+def test_cmd_ouroboros_record_prints_registry_binding(capsys, monkeypatch):
+    """ouroboros record should print the selected observation plus registry binding."""
+    import dharma_swarm.dgc_cli as cli
+
+    async def _fake_record(**kwargs):
+        assert kwargs["run_id"] == "run-ouro"
+        assert kwargs["cycle_id"] == "cycle-7"
+        return {
+            "observation": {
+                "cycle_id": "cycle-7",
+                "signature": {"recognition_type": "GENUINE"},
+            },
+            "registry": {
+                "artifact_id": "art-ouro",
+                "summary": {"cycle_id": "cycle-7"},
+                "fact_ids": ["fact-o1"],
+            },
+        }
+
+    monkeypatch.setattr(cli, "_ouroboros_record_payload", _fake_record)
+
+    cli.cmd_ouroboros_record(run_id="run-ouro", cycle_id="cycle-7")
+
+    out = capsys.readouterr().out
+    assert '"cycle_id": "cycle-7"' in out
+    assert '"artifact_id": "art-ouro"' in out
+
+
+@pytest.mark.asyncio
+async def test_ouroboros_record_payload_requires_binding_before_log_read(monkeypatch, tmp_path):
+    """ouroboros record should fail before reading disk without a canonical binding."""
+    import dharma_swarm.dgc_cli as cli
+
+    log_path = tmp_path / "ouroboros_log.jsonl"
+    log_path.write_text('{"cycle_id":"cycle-1"}\n', encoding="utf-8")
+
+    calls = {"reads": 0}
+    original = cli._load_ouroboros_observation
+
+    def _tracked_loader(**kwargs):
+        calls["reads"] += 1
+        return original(**kwargs)
+
+    monkeypatch.setattr(cli, "_load_ouroboros_observation", _tracked_loader)
+
+    with pytest.raises(ValueError, match="session_id or run_id"):
+        await cli._ouroboros_record_payload(log_path=str(log_path))
+
+    assert calls["reads"] == 0
+
+
+@pytest.mark.asyncio
+async def test_ouroboros_record_payload_reads_selected_log_record(monkeypatch, tmp_path):
+    """ouroboros record helper should select a cycle from JSONL and normalize binding inputs."""
+    import dharma_swarm.dgc_cli as cli
+
+    log_path = tmp_path / "ouroboros_log.jsonl"
+    log_path.write_text(
+        "\n".join(
+            [
+                json.dumps(
+                    {
+                        "cycle_id": "cycle-1",
+                        "source": "dse_integration",
+                        "signature": {"recognition_type": "NONE", "swabhaav_ratio": 0.2},
+                    }
+                ),
+                json.dumps(
+                    {
+                        "cycle_id": "cycle-2",
+                        "source": "dse_integration",
+                        "signature": {"recognition_type": "GENUINE", "swabhaav_ratio": 0.8},
+                        "modifiers": {
+                            "quality": 0.85,
+                            "mimicry_penalty": 1.0,
+                            "recognition_bonus": 1.15,
+                            "witness_score": 0.8,
+                        },
+                        "is_genuine": True,
+                    }
+                ),
+            ]
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+
+    seen: dict[str, object] = {}
+
+    class _FakeRuntimeState:
+        def __init__(self, db_path):
+            seen["runtime_db_path"] = db_path
+            self.db_path = db_path or Path("/tmp/default-runtime.db")
+
+    class _FakeMemoryLattice:
+        def __init__(self, *, db_path, event_log_dir=None):
+            seen["memory_db_path"] = db_path
+            seen["event_log_dir"] = event_log_dir
+
+        async def close(self):
+            seen["closed"] = True
+
+    class _FakeArtifact:
+        artifact_id = "art-ouro-direct"
+
+    class _FakeFact:
+        fact_id = "fact-ouro-direct"
+
+    class _FakeResult:
+        artifact = _FakeArtifact()
+        manifest_path = Path("/tmp/ouroboros-manifest.json")
+        summary = {"cycle_id": "cycle-2", "recognition_type": "GENUINE"}
+        facts = [_FakeFact()]
+        receipt = {"event_id": "evt-ouro-direct"}
+
+    class _FakeRegistry:
+        def __init__(
+            self,
+            *,
+            runtime_state,
+            memory_lattice,
+            workspace_root=None,
+            provenance_root=None,
+        ):
+            seen["workspace_root"] = workspace_root
+            seen["provenance_root"] = provenance_root
+            seen["runtime_state"] = runtime_state
+            seen["memory_lattice"] = memory_lattice
+
+        async def record_ouroboros_observation(self, payload, **kwargs):
+            seen["record_payload"] = payload
+            seen["record_kwargs"] = kwargs
+            return _FakeResult()
+
+    monkeypatch.setattr("dharma_swarm.runtime_state.RuntimeStateStore", _FakeRuntimeState)
+    monkeypatch.setattr("dharma_swarm.memory_lattice.MemoryLattice", _FakeMemoryLattice)
+    monkeypatch.setattr("dharma_swarm.evaluation_registry.EvaluationRegistry", _FakeRegistry)
+
+    out = await cli._ouroboros_record_payload(
+        session_id="  sess-ouro  ",
+        task_id="   ",
+        trace_id="   ",
+        cycle_id=" cycle-2 ",
+        log_path=str(log_path),
+        db_path="/tmp/runtime.db",
+        event_log_dir="/tmp/events",
+        workspace_root="/tmp/workspace",
+        provenance_root="/tmp/provenance",
+    )
+
+    assert seen["runtime_db_path"] == Path("/tmp/runtime.db")
+    assert seen["memory_db_path"] == Path("/tmp/runtime.db")
+    assert seen["event_log_dir"] == Path("/tmp/events")
+    assert seen["workspace_root"] == Path("/tmp/workspace")
+    assert seen["provenance_root"] == Path("/tmp/provenance")
+    assert seen["record_payload"]["cycle_id"] == "cycle-2"
+    assert seen["record_payload"]["signature"]["recognition_type"] == "GENUINE"
+    assert seen["record_kwargs"] == {
+        "run_id": "",
+        "session_id": "sess-ouro",
+        "task_id": "",
+        "trace_id": None,
+        "created_by": "dgc_cli",
+    }
+    assert seen["closed"] is True
+    assert out["registry"]["artifact_id"] == "art-ouro-direct"
+    assert out["registry"]["receipt_event_id"] == "evt-ouro-direct"
+    assert out["log_path"] == str(log_path)
+
+
+@pytest.mark.asyncio
+async def test_ouroboros_record_payload_uses_inline_json_without_log_read(monkeypatch):
+    """ouroboros record helper should accept archived JSON without reading the log."""
+    import dharma_swarm.dgc_cli as cli
+
+    seen: dict[str, object] = {}
+
+    def _unexpected_loader(**kwargs):
+        raise AssertionError("log loading should be skipped for inline ouroboros payloads")
+
+    class _FakeRuntimeState:
+        def __init__(self, db_path):
+            self.db_path = db_path or Path("/tmp/default-runtime.db")
+
+    class _FakeMemoryLattice:
+        def __init__(self, *, db_path, event_log_dir=None):
+            seen["memory_db_path"] = db_path
+            seen["event_log_dir"] = event_log_dir
+
+        async def close(self):
+            seen["closed"] = True
+
+    class _FakeArtifact:
+        artifact_id = "art-ouro-inline"
+
+    class _FakeFact:
+        fact_id = "fact-ouro-inline"
+
+    class _FakeResult:
+        artifact = _FakeArtifact()
+        manifest_path = Path("/tmp/ouroboros-manifest-inline.json")
+        summary = {"cycle_id": "cycle-inline", "recognition_type": "GENUINE"}
+        facts = [_FakeFact()]
+        receipt = {"event_id": "evt-ouro-inline"}
+
+    class _FakeRegistry:
+        def __init__(
+            self,
+            *,
+            runtime_state,
+            memory_lattice,
+            workspace_root=None,
+            provenance_root=None,
+        ):
+            seen["workspace_root"] = workspace_root
+            seen["provenance_root"] = provenance_root
+
+        async def record_ouroboros_observation(self, payload, **kwargs):
+            seen["record_payload"] = payload
+            seen["record_kwargs"] = kwargs
+            return _FakeResult()
+
+    monkeypatch.setattr(cli, "_load_ouroboros_observation", _unexpected_loader)
+    monkeypatch.setattr("dharma_swarm.runtime_state.RuntimeStateStore", _FakeRuntimeState)
+    monkeypatch.setattr("dharma_swarm.memory_lattice.MemoryLattice", _FakeMemoryLattice)
+    monkeypatch.setattr("dharma_swarm.evaluation_registry.EvaluationRegistry", _FakeRegistry)
+
+    out = await cli._ouroboros_record_payload(
+        session_id="sess-inline",
+        json_payload='{"cycle_id":"cycle-inline","signature":{"recognition_type":"GENUINE"}}',
+        event_log_dir="/tmp/events",
+        workspace_root="/tmp/workspace",
+        provenance_root="/tmp/provenance",
+    )
+
+    assert seen["record_payload"] == {
+        "cycle_id": "cycle-inline",
+        "signature": {"recognition_type": "GENUINE"},
+    }
+    assert seen["record_kwargs"] == {
+        "run_id": "",
+        "session_id": "sess-inline",
+        "task_id": "",
+        "trace_id": None,
+        "created_by": "dgc_cli",
+    }
+    assert seen["closed"] is True
+    assert out["log_path"] is None
+    assert out["registry"]["artifact_id"] == "art-ouro-inline"
+
+
+@pytest.mark.asyncio
+async def test_ouroboros_record_payload_rejects_mixed_inline_and_log_sources(
+    monkeypatch,
+    tmp_path,
+):
+    """ouroboros record helper should reject ambiguous input source selection."""
+    import dharma_swarm.dgc_cli as cli
+
+    calls = {"reads": 0}
+    log_path = tmp_path / "ouroboros.jsonl"
+    log_path.write_text('{"cycle_id":"cycle-1"}\n', encoding="utf-8")
+
+    def _tracked_loader(**kwargs):
+        calls["reads"] += 1
+        raise AssertionError("loader should not run for invalid mixed-source inputs")
+
+    monkeypatch.setattr(cli, "_load_ouroboros_observation", _tracked_loader)
+
+    with pytest.raises(
+        ValueError,
+        match="ouroboros record accepts either --json/--file or --log-path/--cycle-id, not both",
+    ):
+        await cli._ouroboros_record_payload(
+            session_id="sess-inline",
+            json_payload='{"cycle_id":"cycle-inline"}',
+            log_path=str(log_path),
+        )
+
+    assert calls["reads"] == 0
+
+
+@pytest.mark.parametrize(
+    ("kwargs", "message"),
+    [
+        ({"threshold": -0.01}, "threshold must be >= 0"),
+        (
+            {"disagreement_threshold": -0.01},
+            "disagreement_threshold must be >= 0",
+        ),
+    ],
+)
+def test_cmd_ouroboros_connections_rejects_negative_thresholds(
+    monkeypatch,
+    kwargs,
+    message,
+):
+    import dharma_swarm.dgc_cli as cli
+
+    called = False
+
+    def _unexpected_profile(*args, **inner_kwargs):
+        nonlocal called
+        called = True
+        raise AssertionError("profile_python_modules should not be called")
+
+    monkeypatch.setattr(
+        "dharma_swarm.ouroboros.profile_python_modules",
+        _unexpected_profile,
+    )
+
+    with pytest.raises(ValueError, match=message):
+        cli.cmd_ouroboros_connections(**kwargs)
+
+    assert called is False
+
+
 def test_cmd_mission_status_formats_gap_report(capsys, monkeypatch):
     """Mission status should show core lane, local-only files, and accelerator state."""
     import dharma_swarm.dgc_cli as cli
+
+    seen_paths: list[str] = []
 
     monkeypatch.setattr(
         cli,
@@ -476,8 +1361,9 @@ def test_cmd_mission_status_formats_gap_report(capsys, monkeypatch):
     monkeypatch.setattr(
         cli,
         "_tracked_paths",
-        lambda _paths: {
+        lambda paths: seen_paths.extend(paths) or {
             "dharma_swarm/integrations/nvidia_rag.py": True,
+            "dharma_swarm/integrations/reciprocity_commons.py": True,
             "scripts/thinkodynamic_director.py": False,
         },
     )
@@ -495,6 +1381,7 @@ def test_cmd_mission_status_formats_gap_report(capsys, monkeypatch):
             "rag_health": "PASS",
             "ingest_health": "BLOCKED: offline",
             "flywheel_jobs": "BLOCKED: offline",
+            "reciprocity_health": "PASS",
         }
 
     monkeypatch.setattr(cli, "_run", _fake_run)
@@ -506,6 +1393,29 @@ def test_cmd_mission_status_formats_gap_report(capsys, monkeypatch):
     assert "Core intelligence lane: 1/2 wired" in out
     assert "[LOCAL-ONLY] scripts/thinkodynamic_director.py" in out
     assert "[rag_health] PASS" in out
+    assert "[reciprocity_health] PASS" in out
+    assert "dharma_swarm/evaluation_registry.py" in seen_paths
+    assert "dharma_swarm/ouroboros.py" in seen_paths
+    assert "scripts/connection_finder.py" in seen_paths
+    assert "scripts/ouroboros_experiment.py" in seen_paths
+    assert "tests/test_evaluation_registry.py" in seen_paths
+    assert "tests/test_ouroboros.py" in seen_paths
+    assert "dharma_swarm/integrations/reciprocity_commons.py" in seen_paths
+    assert "tests/test_integrations_reciprocity_commons.py" in seen_paths
+
+
+def test_mission_tracked_paths_include_behavioral_registry_lane():
+    """mission-status should watch the canonical registry and ouroboros lane files."""
+    import dharma_swarm.dgc_cli as cli
+
+    tracked = set(cli.MISSION_TRACKED_PATHS)
+
+    assert "dharma_swarm/evaluation_registry.py" in tracked
+    assert "dharma_swarm/ouroboros.py" in tracked
+    assert "scripts/connection_finder.py" in tracked
+    assert "scripts/ouroboros_experiment.py" in tracked
+    assert "tests/test_evaluation_registry.py" in tracked
+    assert "tests/test_ouroboros.py" in tracked
 
 
 def test_cmd_mission_status_strict_modes_return_codes(monkeypatch, capsys):
@@ -521,7 +1431,12 @@ def test_cmd_mission_status_strict_modes_return_codes(monkeypatch, capsys):
             coro.close()
         except Exception:
             pass
-        return {"rag_health": "BLOCKED", "ingest_health": "BLOCKED", "flywheel_jobs": "BLOCKED"}
+        return {
+            "rag_health": "BLOCKED",
+            "ingest_health": "BLOCKED",
+            "flywheel_jobs": "BLOCKED",
+            "reciprocity_health": "BLOCKED",
+        }
 
     monkeypatch.setattr(cli, "_run", _fake_run)
     rc_core = cli.cmd_mission_status(strict_core=True)
@@ -544,7 +1459,12 @@ def test_cmd_mission_status_json_output(monkeypatch, capsys):
             coro.close()
         except Exception:
             pass
-        return {"rag_health": "PASS", "ingest_health": "PASS", "flywheel_jobs": "PASS"}
+        return {
+            "rag_health": "PASS",
+            "ingest_health": "PASS",
+            "flywheel_jobs": "PASS",
+            "reciprocity_health": "PASS",
+        }
 
     monkeypatch.setattr(cli, "_run", _fake_run)
     rc = cli.cmd_mission_status(as_json=True)
@@ -567,7 +1487,12 @@ def test_cmd_mission_status_profile_enables_strict_checks(monkeypatch, capsys):
             coro.close()
         except Exception:
             pass
-        return {"rag_health": "PASS", "ingest_health": "PASS", "flywheel_jobs": "PASS"}
+        return {
+            "rag_health": "PASS",
+            "ingest_health": "PASS",
+            "flywheel_jobs": "PASS",
+            "reciprocity_health": "PASS",
+        }
 
     monkeypatch.setattr(cli, "_run", _fake_run)
     rc = cli.cmd_mission_status(profile="workspace_auto")
@@ -591,6 +1516,25 @@ def test_cmd_mission_status_marks_accelerators_dormant(monkeypatch, capsys):
     out = capsys.readouterr().out
     assert '"rag_health": "DORMANT"' in out
     assert '"flywheel_jobs": "DORMANT"' in out
+    assert '"reciprocity_health": "DORMANT"' in out
+
+
+def test_accelerator_mode_enables_when_reciprocity_url_present():
+    """Reciprocity URL alone should wake the optional accelerator lane."""
+    import dharma_swarm.dgc_cli as cli
+
+    with patch.dict(
+        "os.environ",
+        {
+            "DGC_NVIDIA_RAG_URL": "",
+            "DGC_NVIDIA_INGEST_URL": "",
+            "DGC_DATA_FLYWHEEL_URL": "",
+            "DGC_RECIPROCITY_COMMONS_URL": "http://commons.local/v1",
+            "DGC_ACCELERATOR_MODE": "",
+        },
+        clear=False,
+    ):
+        assert cli._accelerator_mode() == "enabled"
 
 
 def test_cmd_mission_status_unknown_profile_json(capsys):

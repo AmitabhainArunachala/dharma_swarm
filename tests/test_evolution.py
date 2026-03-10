@@ -1,5 +1,8 @@
 """Tests for dharma_swarm.evolution -- DarwinEngine orchestration loop."""
 
+import sys
+import types
+
 import pytest
 
 from dharma_swarm.archive import ArchiveEntry, EvolutionArchive, FitnessScore
@@ -616,6 +619,95 @@ async def test_evaluate_sets_neutral_economic_value_without_sessions(engine):
     result = await engine.evaluate(p, test_results={"pass_rate": 0.8})
     assert result.actual_fitness is not None
     assert result.actual_fitness.economic_value == pytest.approx(0.5)
+
+
+async def test_evaluate_applies_ouroboros_modifiers_for_substantial_text(
+    engine,
+    monkeypatch,
+):
+    p = _safe_proposal(
+        description=" ".join(["witness"] * 101),
+        think_notes="brief reflection",
+    )
+    await engine.gate_check(p)
+
+    calls: dict[str, object] = {}
+
+    def fake_score(text: str):
+        calls["text"] = text
+        return None, {
+            "quality": 0.25,
+            "mimicry_penalty": 0.5,
+            "recognition_bonus": 1.2,
+            "witness_score": 0.8,
+        }
+
+    def fake_apply(fitness: FitnessScore, modifiers: dict[str, float]) -> FitnessScore:
+        calls["fitness"] = fitness
+        calls["modifiers"] = modifiers
+        return FitnessScore(
+            correctness=fitness.correctness,
+            elegance=0.11,
+            dharmic_alignment=0.66,
+            performance=fitness.performance,
+            utilization=fitness.utilization,
+            economic_value=fitness.economic_value,
+            efficiency=fitness.efficiency,
+            safety=0.22,
+        )
+
+    fake_module = types.ModuleType("dharma_swarm.ouroboros")
+    fake_module.score_behavioral_fitness = fake_score
+    fake_module.apply_behavioral_modifiers = fake_apply
+    monkeypatch.setitem(sys.modules, "dharma_swarm.ouroboros", fake_module)
+
+    result = await engine.evaluate(p, test_results={"pass_rate": 0.9})
+
+    assert calls["text"] == p.description
+    assert isinstance(calls["fitness"], FitnessScore)
+    assert calls["modifiers"] == {
+        "quality": 0.25,
+        "mimicry_penalty": 0.5,
+        "recognition_bonus": 1.2,
+        "witness_score": 0.8,
+    }
+    assert result.actual_fitness is not None
+    assert result.actual_fitness.correctness == pytest.approx(0.9)
+    assert result.actual_fitness.elegance == pytest.approx(0.11)
+    assert result.actual_fitness.dharmic_alignment == pytest.approx(0.66)
+    assert result.actual_fitness.safety == pytest.approx(0.22)
+
+
+async def test_evaluate_skips_ouroboros_modifiers_for_short_text(engine, monkeypatch):
+    p = _safe_proposal(
+        description="Short safety fix",
+        think_notes=" ".join(["reflection"] * 150),
+    )
+    await engine.gate_check(p)
+
+    calls = {"score": 0, "apply": 0}
+
+    def fake_score(text: str):
+        del text
+        calls["score"] += 1
+        return None, {}
+
+    def fake_apply(fitness: FitnessScore, modifiers: dict[str, float]) -> FitnessScore:
+        del fitness, modifiers
+        calls["apply"] += 1
+        return FitnessScore()
+
+    fake_module = types.ModuleType("dharma_swarm.ouroboros")
+    fake_module.score_behavioral_fitness = fake_score
+    fake_module.apply_behavioral_modifiers = fake_apply
+    monkeypatch.setitem(sys.modules, "dharma_swarm.ouroboros", fake_module)
+
+    result = await engine.evaluate(p, test_results={"pass_rate": 0.75})
+
+    assert calls == {"score": 0, "apply": 0}
+    assert result.actual_fitness is not None
+    assert result.actual_fitness.correctness == pytest.approx(0.75)
+    assert result.actual_fitness.elegance == pytest.approx(0.5)
 
 
 async def test_score_fitness_uses_engine_weights(engine_paths):

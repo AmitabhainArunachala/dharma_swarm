@@ -210,7 +210,8 @@ class Orchestrator:
             coordination = await self._refresh_coordination_state()
         except Exception as exc:
             logger.debug("Coordination refresh failed (non-critical): %s", exc)
-        return {
+
+        summary = {
             "settled": settled,
             "recovered": recovered,
             "dispatched": len(dispatches),
@@ -219,6 +220,38 @@ class Orchestrator:
                 coordination.get("productive_disagreements", 0) or 0
             ),
         }
+
+        # Emit a tick-level runtime event when work happened
+        if (settled or recovered or dispatches) and self._event_memory is not None:
+            try:
+                dispatch_ids = [td.task_id for td in dispatches]
+                envelope = RuntimeEnvelope.create(
+                    event_type=RuntimeEventType.ACTION_EVENT,
+                    source="orchestrator.tick",
+                    agent_id="orchestrator",
+                    session_id=self._ledger.session_id,
+                    trace_id=f"tick:{self._ledger.session_id}",
+                    payload={
+                        "action_name": "tick_summary",
+                        "decision": "recorded",
+                        "confidence": 1.0,
+                        "settled": settled,
+                        "recovered": recovered,
+                        "dispatched_count": len(dispatches),
+                        "dispatched_task_ids": dispatch_ids[:20],
+                        "coordination_global_truths": summary["coordination_global_truths"],
+                        "coordination_disagreements": summary["coordination_disagreements"],
+                    },
+                )
+                ingest = getattr(self._event_memory, "ingest_envelope", None)
+                if ingest:
+                    result = ingest(envelope)
+                    if inspect.isawaitable(result):
+                        await result
+            except Exception:
+                pass  # Tick event emission is non-fatal
+
+        return summary
 
     async def run(self, interval: float = 1.0) -> None:
         """Continuous loop calling tick() until stop() is called."""

@@ -116,6 +116,7 @@ class Proposal(BaseModel):
     evidence_tier: str = EvidenceTier.UNVALIDATED.value
     promotion_state: str = PromotionState.CANDIDATE.value
     experiment_id: str | None = None
+    metadata: dict[str, Any] | None = None
 
     @field_validator('component')
     @classmethod
@@ -1242,6 +1243,47 @@ class DarwinEngine:
                     safety=safety,
                 )
 
+            # Ouroboros: behavioral-score the proposal text (non-fatal).
+            # Only applied when the description alone has substantial text
+            # (>100 words), excluding auto-generated reflection notes.
+            try:
+                proposal_text = proposal.description
+                if len(proposal_text.split()) > 100:
+                    from dharma_swarm.ouroboros import (
+                        apply_behavioral_modifiers,
+                        score_behavioral_fitness,
+                    )
+                    _, modifiers = score_behavioral_fitness(proposal_text)
+                    fitness = apply_behavioral_modifiers(fitness, modifiers)
+            except Exception:
+                pass  # Ouroboros is always non-fatal
+
+            # L4 compression: measure behavioral compression ability (non-fatal).
+            # Only applied when the description alone has substantial text
+            # (>50 words), providing L4-relevant behavioral metrics for the
+            # research bridge without requiring LLM calls.
+            try:
+                proposal_text = proposal.description
+                if hasattr(proposal, 'think_notes') and proposal.think_notes:
+                    proposal_text = proposal.think_notes
+                if len(proposal_text.split()) > 50:
+                    from dharma_swarm.metrics import MetricsAnalyzer
+
+                    _analyzer = MetricsAnalyzer()
+                    sig = _analyzer.analyze(proposal_text)
+
+                    # Store L4-relevant behavioral metrics alongside fitness
+                    proposal.metadata = proposal.metadata or {}
+                    proposal.metadata["l4_behavioral"] = {
+                        "swabhaav_ratio": sig.swabhaav_ratio,
+                        "entropy": sig.entropy,
+                        "self_reference_density": sig.self_reference_density,
+                        "recognition_type": sig.recognition_type.value,
+                        "paradox_tolerance": sig.paradox_tolerance,
+                    }
+            except Exception:
+                pass  # L4 correlation is always non-fatal
+
             proposal.actual_fitness = fitness
             proposal.status = EvolutionStatus.EVALUATED
             proposal.promotion_state = derive_promotion_state(
@@ -1328,6 +1370,31 @@ class DarwinEngine:
                     else []
                 ),
             )
+
+            # GAIA ecological fitness (non-fatal): blend ecological awareness
+            try:
+                from dharma_swarm.gaia_ledger import GaiaLedger
+                from dharma_swarm.gaia_fitness import (
+                    EcologicalFitness,
+                    detect_goodhart_drift,
+                )
+
+                ledger_dir = Path(self.archive.path).parent / "gaia_ledger"
+                if ledger_dir.exists():
+                    ledger = GaiaLedger(data_dir=ledger_dir)
+                    ledger.load()
+                    eco_fitness = EcologicalFitness()
+                    eco_score = eco_fitness.weighted_score(ledger)
+                    drift = detect_goodhart_drift(ledger)
+
+                    entry.test_results["gaia_fitness"] = eco_score
+                    entry.test_results["gaia_drifting"] = drift["is_drifting"]
+
+                    # If Goodhart drifting, annotate the entry
+                    if drift["is_drifting"]:
+                        entry.test_results["gaia_warning"] = drift["diagnosis"]
+            except Exception:
+                pass  # GAIA fitness is always non-fatal
 
             entry_id = await self.archive.add_entry(entry)
             proposal.status = EvolutionStatus.ARCHIVED

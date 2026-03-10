@@ -24,6 +24,7 @@ from __future__ import annotations
 
 import json
 import logging
+import os
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Sequence
@@ -58,6 +59,77 @@ def _virtual_agent_id(component: str) -> str:
     return f"{_VIRTUAL_AGENT_PREFIX}{component}"
 
 
+def _dedupe_text_parts(parts: Sequence[str]) -> list[str]:
+    """Normalize composed behavioral text without double-counting repeats."""
+    seen: set[str] = set()
+    ordered: list[str] = []
+    for part in parts:
+        text = str(part).strip()
+        if not text or text in seen:
+            continue
+        seen.add(text)
+        ordered.append(text)
+    return ordered
+
+
+def _coerce_int(value: Any, *, default: int = 0) -> int:
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return default
+
+
+def _coerce_float(value: Any, *, default: float = 0.0) -> float:
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return default
+
+
+def _coerce_bool(value: Any, *, default: bool = False) -> bool:
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, (int, float)):
+        return bool(value)
+    if isinstance(value, str):
+        normalized = value.strip().lower()
+        if normalized in {"1", "true", "yes", "on"}:
+            return True
+        if normalized in {"0", "false", "no", "off"}:
+            return False
+    return default
+
+
+def _coerce_text(value: Any, *, default: str = "") -> str:
+    if value is None:
+        return default
+    text = str(value).strip()
+    return text or default
+
+
+def _reciprocity_lane_enabled() -> bool:
+    configured = bool(os.getenv("DGC_RECIPROCITY_COMMONS_URL", "").strip())
+    raw = os.getenv("DGC_ACCELERATOR_MODE", "enabled" if configured else "dormant")
+    mode = raw.strip().lower()
+    return mode not in {"0", "off", "disabled", "none", "dormant"}
+
+
+def _reciprocity_issue_codes(summary_payload: dict[str, Any]) -> list[str]:
+    raw_issues = summary_payload.get("issues")
+    if not isinstance(raw_issues, list):
+        return []
+    codes: list[str] = []
+    for issue in raw_issues:
+        code = ""
+        if isinstance(issue, dict):
+            code = str(issue.get("code") or "").strip()
+        elif isinstance(issue, str):
+            code = issue.strip()
+        if code and code not in codes:
+            codes.append(code)
+    return codes
+
+
 class ObservationWindow(BaseModel):
     """Sliding window of recent cycle observations for convergence tracking."""
 
@@ -66,16 +138,23 @@ class ObservationWindow(BaseModel):
     rv_trajectory: list[float] = Field(default_factory=list)
     fitness_trajectory: list[float] = Field(default_factory=list)
 
+    def _refresh_trajectories(self) -> None:
+        self.rv_trajectory = [
+            float(record["rv"])
+            for record in self.observations
+            if record.get("rv") is not None
+        ]
+        self.fitness_trajectory = [
+            float(record["best_fitness"])
+            for record in self.observations
+            if record.get("best_fitness") is not None
+        ]
+
     def append(self, record: dict[str, Any]) -> None:
         self.observations.append(record)
-        if rv := record.get("rv"):
-            self.rv_trajectory.append(float(rv))
-        if fitness := record.get("best_fitness"):
-            self.fitness_trajectory.append(float(fitness))
         if len(self.observations) > self.max_size:
             self.observations = self.observations[-self.max_size:]
-            self.rv_trajectory = self.rv_trajectory[-self.max_size:]
-            self.fitness_trajectory = self.fitness_trajectory[-self.max_size:]
+        self._refresh_trajectories()
 
     @property
     def rv_trend(self) -> float | None:
@@ -119,10 +198,22 @@ class DSEIntegrator:
         self,
         archive_path: Path | None = None,
         coordination_interval: int = 5,
+        reciprocity_interval: int | None = None,
+        evaluation_registry: Any | None = None,
+        evaluation_run_id: str = "",
+        evaluation_session_id: str = "",
+        evaluation_task_id: str = "",
+        evaluation_trace_id: str | None = None,
+        evaluation_created_by: str = "dse.integration",
+        runtime_db_path: Path | str | None = None,
+        event_log_dir: Path | str | None = None,
+        workspace_root: Path | str | None = None,
+        provenance_root: Path | str | None = None,
     ) -> None:
         self._archive_path = archive_path or (
             Path.home() / ".dharma" / "evolution"
         )
+        self._runtime_root = self._archive_path.parent
         self._coordination_interval = max(1, coordination_interval)
         self._cycles_since_coordination = 0
         self._window = ObservationWindow()
@@ -134,6 +225,52 @@ class DSEIntegrator:
             observer=self._proxy_rv_observer,
         )
         self._last_observed: Any = None  # ObservedState at varying nesting depths
+
+        # Ouroboros: behavioral metrics on cycle output (lazy init)
+        self._ouroboros: Any = None
+
+        # Reciprocity Commons: external integrity snapshot (lazy init)
+        self._reciprocity: Any = None
+        self._reciprocity_enabled = _reciprocity_lane_enabled()
+        self._reciprocity_interval = max(
+            1,
+            reciprocity_interval if reciprocity_interval is not None else coordination_interval,
+        )
+        self._cycles_since_reciprocity = self._reciprocity_interval
+        self._last_reciprocity_summary: dict[str, Any] | None = None
+        self._last_reciprocity_error: str | None = None
+
+        # L4-R_V correlation bridge (lazy init)
+        self._research_bridge: Any = None
+        self._research_bridge_loaded = False
+
+        # Canonical evaluation registry sink (lazy init)
+        self._evaluation_registry: Any = evaluation_registry
+        self._evaluation_run_id = _coerce_text(evaluation_run_id)
+        self._evaluation_session_id = _coerce_text(evaluation_session_id)
+        self._evaluation_task_id = _coerce_text(evaluation_task_id)
+        self._evaluation_trace_id = _coerce_text(
+            evaluation_trace_id,
+            default="",
+        ) or None
+        self._evaluation_created_by = (
+            _coerce_text(evaluation_created_by, default="dse.integration")
+            or "dse.integration"
+        )
+        self._runtime_db_path = Path(runtime_db_path) if runtime_db_path is not None else (
+            self._runtime_root / "state" / "runtime.db"
+        )
+        self._event_log_dir = Path(event_log_dir) if event_log_dir is not None else (
+            self._runtime_root / "events"
+        )
+        self._workspace_root = Path(workspace_root) if workspace_root is not None else (
+            self._runtime_root / "workspace" / "sessions"
+        )
+        self._provenance_root = (
+            Path(provenance_root)
+            if provenance_root is not None
+            else self._workspace_root
+        )
 
     @staticmethod
     def _proxy_rv_observer(obs: Any) -> RVReading:
@@ -215,6 +352,25 @@ class DSEIntegrator:
                 "timestamp": observed.timestamp.isoformat(),
             }
         )
+        cycle_text = self._compose_cycle_text(result, observation)
+        # 4b. Ouroboros: behavioral-score the cycle's textual output
+        ouroboros_observation = self._ouroboros_observe(
+            cycle_id=result.cycle_id,
+            cycle_text=cycle_text,
+            record=record,
+        )
+        # 4c. L4-R_V correlation metrics
+        await self._l4_correlate(record, cycle_text=cycle_text)
+        # 4d. Reciprocity Commons ledger integrity snapshot
+        reciprocity_summary, reciprocity_fresh = await self._reciprocity_observe(record)
+        await self._record_canonical_evaluations(
+            proposals=proposals,
+            record=record,
+            ouroboros_observation=ouroboros_observation,
+            reciprocity_summary=reciprocity_summary,
+            reciprocity_fresh=reciprocity_fresh,
+        )
+
         self._window.append(record)
         await self._persist_observation(record)
 
@@ -228,6 +384,374 @@ class DSEIntegrator:
             return snapshot
 
         return None
+
+    @staticmethod
+    def _compose_cycle_text(
+        result: CycleResult,
+        observation: EvolutionObservation,
+    ) -> str:
+        text_parts = [
+            *observation.discoveries,
+            result.reflection,
+            *result.lessons_learned,
+        ]
+        return "\n".join(_dedupe_text_parts(text_parts))
+
+    def _ouroboros_observe(
+        self,
+        *,
+        cycle_id: str,
+        cycle_text: str,
+        record: dict[str, Any],
+    ) -> dict[str, Any] | None:
+        """Behavioral-score the cycle's textual output via the ouroboros loop.
+
+        Non-fatal: if the ouroboros module isn't available, skip silently.
+        """
+        try:
+            if self._ouroboros is None:
+                from dharma_swarm.ouroboros import OuroborosObserver
+                self._ouroboros = OuroborosObserver(
+                    log_path=self._archive_path / "observations" / "ouroboros_log.jsonl",
+                )
+
+            if cycle_text.strip():
+                obs = self._ouroboros.observe_cycle_text(
+                    cycle_text,
+                    cycle_id=cycle_id,
+                    source="dse_integration",
+                )
+                record["ouroboros"] = {
+                    "recognition_type": obs["signature"]["recognition_type"],
+                    "swabhaav_ratio": obs["signature"]["swabhaav_ratio"],
+                    "is_mimicry": obs["is_mimicry"],
+                    "is_genuine": obs["is_genuine"],
+                }
+                return dict(obs)
+        except Exception as exc:
+            logger.debug("Ouroboros observation failed (non-fatal): %s", exc)
+        return None
+
+    async def _l4_correlate(
+        self,
+        record: dict[str, Any],
+        *,
+        cycle_text: str,
+    ) -> None:
+        """Store and persist L4-R_V correlation metrics from ouroboros data.
+
+        Non-fatal: if metrics unavailable, skip silently.
+        """
+        try:
+            ouroboros_data = record.get("ouroboros")
+            if not ouroboros_data:
+                return
+
+            # The ouroboros observation already has swabhaav_ratio and recognition.
+            # Add correlation-relevant grouping for the ResearchBridge.
+            from dharma_swarm.bridge import ResearchBridge
+
+            if not hasattr(self, '_research_bridge') or self._research_bridge is None:
+                bridge_path = self._archive_path / "observations" / "bridge_data.jsonl"
+                self._research_bridge = ResearchBridge(data_path=bridge_path)
+                self._research_bridge_loaded = False
+
+            swabhaav = ouroboros_data.get("swabhaav_ratio", 0.5)
+            recognition = str(ouroboros_data.get("recognition_type", "NONE")).strip() or "NONE"
+            normalized_recognition = recognition.upper()
+            is_l4_like = swabhaav > 0.6 and normalized_recognition in ("GENUINE", "WITNESSED")
+            bridge_group = "dse_l4_like" if is_l4_like else "dse_evolution"
+
+            record["l4_correlation"] = {
+                "swabhaav_ratio": swabhaav,
+                "recognition_type": recognition,
+                "is_l4_like": is_l4_like,
+                "bridge_group": bridge_group,
+            }
+            if not cycle_text.strip():
+                return
+
+            if not self._research_bridge_loaded:
+                await self._research_bridge.load()
+                self._research_bridge_loaded = True
+
+            raw_rv = record.get("rv_reading")
+            rv_reading = (
+                RVReading.model_validate(raw_rv)
+                if isinstance(raw_rv, dict)
+                else None
+            )
+            prompt_text = (
+                f"dse_cycle:{record.get('cycle_id', 'unknown')}:"
+                f"{record.get('component') or 'unknown'}"
+            )
+            await self._research_bridge.add_measurement(
+                prompt_text=prompt_text,
+                prompt_group=bridge_group,
+                generated_text=cycle_text,
+                rv_reading=rv_reading,
+            )
+        except Exception as exc:
+            logger.debug("L4 correlation failed (non-fatal): %s", exc)
+
+    async def _reciprocity_observe(
+        self,
+        record: dict[str, Any],
+    ) -> tuple[dict[str, Any] | None, bool]:
+        """Sample the Reciprocity Commons summary when the lane is configured."""
+        if not self._reciprocity_enabled:
+            return (None, False)
+
+        self._cycles_since_reciprocity += 1
+        should_refresh = (
+            self._last_reciprocity_summary is None
+            or self._last_reciprocity_error is not None
+            or self._cycles_since_reciprocity >= self._reciprocity_interval
+        )
+        fresh_summary: dict[str, Any] | None = None
+
+        if should_refresh:
+            try:
+                if self._reciprocity is None:
+                    from dharma_swarm.integrations import ReciprocityCommonsClient
+
+                    self._reciprocity = ReciprocityCommonsClient()
+                summary_payload = await self._reciprocity.ledger_summary()
+                self._last_reciprocity_summary = self._normalize_reciprocity_summary(
+                    summary_payload
+                )
+                fresh_summary = dict(self._last_reciprocity_summary)
+                self._last_reciprocity_error = None
+                self._cycles_since_reciprocity = 0
+            except Exception as exc:
+                self._last_reciprocity_error = str(exc)
+                logger.debug("Reciprocity summary fetch failed (non-fatal): %s", exc)
+
+        if self._last_reciprocity_summary is not None:
+            reciprocity_summary = dict(self._last_reciprocity_summary)
+            if self._last_reciprocity_error:
+                reciprocity_summary["stale"] = True
+            record["reciprocity"] = reciprocity_summary
+        return (fresh_summary, fresh_summary is not None)
+
+    @staticmethod
+    def _normalize_reciprocity_summary(summary_payload: dict[str, Any]) -> dict[str, Any]:
+        return {
+            "source": str(
+                summary_payload.get("service")
+                or summary_payload.get("source")
+                or "reciprocity_commons"
+            ),
+            "summary_type": str(summary_payload.get("summary_type") or "ledger_summary"),
+            "actors": _coerce_int(summary_payload.get("actors")),
+            "activities": _coerce_int(summary_payload.get("activities")),
+            "projects": _coerce_int(summary_payload.get("projects")),
+            "obligations": _coerce_int(summary_payload.get("obligations")),
+            "active_obligations": _coerce_int(
+                summary_payload.get("active_obligations")
+            ),
+            "challenged_claims": _coerce_int(
+                summary_payload.get("challenged_claims")
+            ),
+            "invariant_issues": _coerce_int(summary_payload.get("invariant_issues")),
+            "chain_valid": _coerce_bool(
+                summary_payload.get("chain_valid"),
+                default=False,
+            ),
+            "total_obligation_usd": _coerce_float(
+                summary_payload.get("total_obligation_usd")
+            ),
+            "total_routed_usd": _coerce_float(summary_payload.get("total_routed_usd")),
+            "issue_codes": _reciprocity_issue_codes(summary_payload),
+        }
+
+    @staticmethod
+    def _unique_proposal_metadata_value(
+        proposals: Sequence[Proposal],
+        *keys: str,
+    ) -> tuple[str, bool]:
+        values: list[str] = []
+        for proposal in proposals:
+            metadata = proposal.metadata if isinstance(proposal.metadata, dict) else {}
+            for key in keys:
+                value = _coerce_text(metadata.get(key))
+                if value and value not in values:
+                    values.append(value)
+        if len(values) > 1:
+            return ("", True)
+        return (values[0] if values else "", False)
+
+    def _resolve_evaluation_binding(
+        self,
+        proposals: Sequence[Proposal],
+    ) -> dict[str, Any] | None:
+        run_id = self._evaluation_run_id
+        session_id = self._evaluation_session_id
+        task_id = self._evaluation_task_id
+        trace_id = self._evaluation_trace_id
+
+        if not run_id:
+            run_id, ambiguous = self._unique_proposal_metadata_value(
+                proposals,
+                "run_id",
+                "delegation_run_id",
+            )
+            if ambiguous:
+                logger.debug(
+                    "Skipping canonical evaluation recording: ambiguous run_id across proposals",
+                )
+                return None
+        if not session_id:
+            session_id, ambiguous = self._unique_proposal_metadata_value(
+                proposals,
+                "session_id",
+            )
+            if ambiguous:
+                logger.debug(
+                    "Skipping canonical evaluation recording: ambiguous session_id across proposals",
+                )
+                return None
+        if not task_id:
+            task_id, ambiguous = self._unique_proposal_metadata_value(
+                proposals,
+                "task_id",
+            )
+            if ambiguous:
+                logger.debug(
+                    "Skipping canonical evaluation recording: ambiguous task_id across proposals",
+                )
+                return None
+        if trace_id is None:
+            proposal_trace_id, ambiguous = self._unique_proposal_metadata_value(
+                proposals,
+                "trace_id",
+            )
+            if ambiguous:
+                logger.debug(
+                    "Skipping canonical evaluation recording: ambiguous trace_id across proposals",
+                )
+                return None
+            trace_id = proposal_trace_id or None
+
+        if not run_id and not session_id:
+            return None
+
+        return {
+            "run_id": run_id,
+            "session_id": session_id,
+            "task_id": task_id,
+            "trace_id": trace_id,
+        }
+
+    def _get_evaluation_registry(self) -> Any | None:
+        if self._evaluation_registry is not None:
+            return self._evaluation_registry
+        try:
+            from dharma_swarm.evaluation_registry import EvaluationRegistry
+            from dharma_swarm.memory_lattice import MemoryLattice
+            from dharma_swarm.runtime_state import RuntimeStateStore
+
+            runtime_state = RuntimeStateStore(self._runtime_db_path)
+            memory_lattice = MemoryLattice(
+                db_path=self._runtime_db_path,
+                event_log_dir=self._event_log_dir,
+            )
+            self._evaluation_registry = EvaluationRegistry(
+                runtime_state=runtime_state,
+                memory_lattice=memory_lattice,
+                workspace_root=self._workspace_root,
+                provenance_root=self._provenance_root,
+            )
+        except Exception as exc:
+            logger.debug("Canonical evaluation registry unavailable (non-fatal): %s", exc)
+            return None
+        return self._evaluation_registry
+
+    @staticmethod
+    def _registration_receipt(result: Any) -> dict[str, Any]:
+        artifact = getattr(result, "artifact", None)
+        facts = getattr(result, "facts", [])
+        receipt = getattr(result, "receipt", {}) or {}
+        summary = getattr(result, "summary", {}) or {}
+        return {
+            "artifact_id": str(getattr(artifact, "artifact_id", "") or ""),
+            "fact_ids": [
+                str(getattr(fact, "fact_id", "") or "")
+                for fact in facts
+                if getattr(fact, "fact_id", None)
+            ],
+            "receipt_event_id": str(receipt.get("event_id", "") or ""),
+            "summary": dict(summary) if isinstance(summary, dict) else {},
+        }
+
+    async def _record_canonical_evaluations(
+        self,
+        *,
+        proposals: Sequence[Proposal],
+        record: dict[str, Any],
+        ouroboros_observation: dict[str, Any] | None,
+        reciprocity_summary: dict[str, Any] | None,
+        reciprocity_fresh: bool,
+    ) -> None:
+        if ouroboros_observation is None and not reciprocity_fresh:
+            return
+
+        binding = self._resolve_evaluation_binding(proposals)
+        if binding is None:
+            return
+
+        registry = self._get_evaluation_registry()
+        if registry is None:
+            return
+
+        receipts: dict[str, Any] = {
+            "binding": {
+                "run_id": binding["run_id"],
+                "session_id": binding["session_id"],
+                "task_id": binding["task_id"],
+                "trace_id": binding["trace_id"],
+            }
+        }
+        recorded = False
+
+        if ouroboros_observation is not None:
+            try:
+                result = await registry.record_ouroboros_observation(
+                    ouroboros_observation,
+                    run_id=binding["run_id"],
+                    session_id=binding["session_id"],
+                    task_id=binding["task_id"],
+                    trace_id=binding["trace_id"],
+                    created_by=self._evaluation_created_by,
+                )
+                receipts["ouroboros"] = self._registration_receipt(result)
+                recorded = True
+            except Exception as exc:
+                logger.debug(
+                    "Canonical ouroboros recording failed (non-fatal): %s",
+                    exc,
+                )
+
+        if reciprocity_fresh and reciprocity_summary is not None:
+            try:
+                result = await registry.record_reciprocity_summary(
+                    reciprocity_summary,
+                    run_id=binding["run_id"],
+                    session_id=binding["session_id"],
+                    task_id=binding["task_id"],
+                    trace_id=binding["trace_id"],
+                    created_by=self._evaluation_created_by,
+                )
+                receipts["reciprocity"] = self._registration_receipt(result)
+                recorded = True
+            except Exception as exc:
+                logger.debug(
+                    "Canonical reciprocity recording failed (non-fatal): %s",
+                    exc,
+                )
+
+        if recorded:
+            record["canonical_evaluations"] = receipts
 
     def _run_coordination(self) -> CoordinationSnapshot:
         """Build noosphere site from observations, run Čech cohomology."""
@@ -368,6 +892,62 @@ class DSEIntegrator:
                 "System approaching observation fixed point (L5). "
                 "Consider bolder mutations to escape or validate stability."
             )
+
+        # Ouroboros: inject behavioral drift warnings
+        if self._ouroboros is not None:
+            try:
+                drift = self._ouroboros.detect_cycle_drift()
+                if drift.get("drifting"):
+                    context["ouroboros_warning"] = (
+                        f"Behavioral drift detected: {drift['reason']}. "
+                        f"Mimicry rate: {drift['mimicry_rate']:.1%}, "
+                        f"witness stance: {drift['avg_witness_stance']:.2f}"
+                    )
+                context["ouroboros_health"] = {
+                    "mimicry_rate": drift.get("mimicry_rate", 0.0),
+                    "witness_stance": drift.get("avg_witness_stance", 0.5),
+                    "drifting": drift.get("drifting", False),
+                }
+            except Exception:
+                pass
+
+        if self._last_reciprocity_summary is not None:
+            summary = self._last_reciprocity_summary
+            issue_codes = list(summary.get("issue_codes") or [])
+            invariant_issues = _coerce_int(summary.get("invariant_issues"))
+            challenged_claims = _coerce_int(summary.get("challenged_claims"))
+            chain_valid = _coerce_bool(summary.get("chain_valid"), default=False)
+            health = {
+                "chain_valid": chain_valid,
+                "invariant_issues": invariant_issues,
+                "challenged_claims": challenged_claims,
+                "issue_codes": issue_codes,
+                "stale": bool(self._last_reciprocity_error),
+            }
+            context["reciprocity_health"] = health
+            if not chain_valid or invariant_issues > 0 or challenged_claims > 0:
+                codes = ",".join(issue_codes) or "none"
+                stale_clause = " (stale)" if self._last_reciprocity_error else ""
+                context["reciprocity_warning"] = (
+                    f"Reciprocity integrity pressure{stale_clause}: "
+                    f"chain_valid={chain_valid}, "
+                    f"invariant_issues={invariant_issues}, "
+                    f"challenged_claims={challenged_claims}, "
+                    f"issue_codes={codes}"
+                )
+        elif self._reciprocity_enabled and self._last_reciprocity_error:
+            context["reciprocity_health"] = {
+                "chain_valid": None,
+                "invariant_issues": None,
+                "challenged_claims": None,
+                "issue_codes": [],
+                "stale": False,
+                "error": self._last_reciprocity_error,
+            }
+            context["reciprocity_warning"] = (
+                f"Reciprocity lane unavailable: {self._last_reciprocity_error}"
+            )
+
         return context
 
 

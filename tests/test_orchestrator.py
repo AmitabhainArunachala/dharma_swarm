@@ -85,6 +85,14 @@ class MockAgentPool:
         self._runners[agent_id] = runner
 
 
+class MockEventMemory:
+    def __init__(self):
+        self.envelopes = []
+
+    async def ingest_envelope(self, envelope):
+        self.envelopes.append(envelope)
+
+
 @pytest.fixture
 def agents():
     return [
@@ -209,6 +217,45 @@ async def test_tick(agents, tasks):
     # Should have dispatched
     assert len(pool._assignments) > 0
     assert activity["dispatched"] == 2
+
+
+@pytest.mark.asyncio
+async def test_tick_emits_runtime_event_with_coordination_summary(agents, tasks, monkeypatch):
+    board = MockTaskBoard()
+    board.tasks = [tasks[0]]
+    pool = MockAgentPool([agents[0]])
+    event_memory = MockEventMemory()
+    orch = Orchestrator(
+        task_board=board,
+        agent_pool=pool,
+        event_memory=event_memory,
+        session_id="sess-tick",
+    )
+
+    async def fake_refresh():
+        return {"global_truths": 3, "productive_disagreements": 1}
+
+    monkeypatch.setattr(orch, "_refresh_coordination_state", fake_refresh)
+
+    activity = await orch.tick()
+
+    assert activity["dispatched"] == 1
+    assert activity["coordination_global_truths"] == 3
+    assert activity["coordination_disagreements"] == 1
+    tick_events = [
+        envelope
+        for envelope in event_memory.envelopes
+        if envelope.payload.get("action_name") == "tick_summary"
+    ]
+    assert len(tick_events) == 1
+    envelope = tick_events[0]
+    assert envelope.source == "orchestrator.tick"
+    assert envelope.session_id == "sess-tick"
+    assert envelope.payload["action_name"] == "tick_summary"
+    assert envelope.payload["dispatched_count"] == 1
+    assert envelope.payload["dispatched_task_ids"] == ["t1"]
+    assert envelope.payload["coordination_global_truths"] == 3
+    assert envelope.payload["coordination_disagreements"] == 1
 
 
 @pytest.mark.asyncio

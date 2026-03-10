@@ -1,6 +1,7 @@
 """Tests for dharma_swarm.swarm — integration tests."""
 
 import asyncio
+from pathlib import Path
 
 import pytest
 
@@ -9,8 +10,15 @@ from dharma_swarm.models import AgentRole, Message, TaskPriority, TaskStatus
 from dharma_swarm.swarm import SwarmCoordinationState, SwarmManager
 
 
-# startup_crew auto-spawns 7 agents (3 claude_code + 1 codex + 3 free) and 5 seed tasks on init
-_AUTO_AGENTS = 7
+# startup_crew auto-spawns agents and seed tasks on init.
+# Count is dynamic: skill discovery may override DEFAULT_CREW.
+def _expected_agent_count() -> int:
+    from dharma_swarm.startup_crew import _crew_from_skills, DEFAULT_CREW
+    crew = _crew_from_skills() or DEFAULT_CREW
+    return len(crew)
+
+
+_AUTO_AGENTS = _expected_agent_count()
 _AUTO_TASKS = 5
 
 
@@ -27,6 +35,33 @@ async def test_init(swarm):
     state = await swarm.status()
     assert state.tasks_pending == _AUTO_TASKS
     assert len(state.agents) == _AUTO_AGENTS
+
+
+@pytest.mark.asyncio
+async def test_init_falls_back_to_state_local_manifest_when_global_write_is_blocked(
+    tmp_path,
+    monkeypatch,
+):
+    import dharma_swarm.ecosystem_bridge as ecosystem_bridge
+
+    state_dir = tmp_path / ".dharma"
+    calls: list[Path | None] = []
+
+    def fake_update_manifest(manifest_path=None):
+        calls.append(Path(manifest_path) if manifest_path is not None else None)
+        if manifest_path is None:
+            raise PermissionError("sandbox blocked global manifest")
+        return {"ecosystem": {}, "last_scan": "2026-03-11T00:00:00+00:00"}
+
+    monkeypatch.setattr(ecosystem_bridge, "update_manifest", fake_update_manifest)
+
+    swarm = SwarmManager(state_dir=state_dir)
+    await swarm.init()
+    try:
+        assert calls == [None, state_dir / "ecosystem_manifest.json"]
+        assert swarm._manifest["ecosystem"] == {}
+    finally:
+        await swarm.shutdown()
 
 
 @pytest.mark.asyncio

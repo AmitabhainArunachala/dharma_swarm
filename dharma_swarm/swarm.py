@@ -111,6 +111,11 @@ class SwarmManager:
         self._handoff: Any = None         # HandoffProtocol
         self._agent_memories: dict[str, Any] = {}  # name -> AgentMemoryBank
 
+        # v0.5.0: Thinkodynamic Director
+        self._director: Any = None               # ThinkodynamicDirector
+        self._director_interval_ticks: int = 10  # Run director every N ticks
+        self._tick_count: int = 0
+
         # Daemon state
         self._last_contribution: datetime | None = None
         self._daily_contributions: int = 0
@@ -161,8 +166,18 @@ class SwarmManager:
         self._running = True
 
         # Load ecosystem awareness on every init
-        from dharma_swarm.ecosystem_bridge import update_manifest
-        self._manifest = update_manifest()
+        from dharma_swarm.ecosystem_bridge import MANIFEST_PATH, update_manifest
+
+        fallback_manifest_path = self.state_dir / "ecosystem_manifest.json"
+        try:
+            self._manifest = update_manifest()
+        except PermissionError:
+            logger.debug(
+                "Global ecosystem manifest %s not writable; using state-local manifest %s",
+                MANIFEST_PATH,
+                fallback_manifest_path,
+            )
+            self._manifest = update_manifest(manifest_path=fallback_manifest_path)
 
         # Spawn default crew and seed tasks if this is a fresh start
         from dharma_swarm.startup_crew import spawn_default_crew, create_seed_tasks
@@ -272,6 +287,18 @@ class SwarmManager:
             logger.info("v0.4.0+ Oz-inspired systems initialized")
         except Exception as e:
             logger.debug("v0.4.0 systems init failed (non-fatal): %s", e)
+
+        # v0.5.0: Thinkodynamic Director
+        try:
+            from dharma_swarm.thinkodynamic_director import ThinkodynamicDirector
+
+            self._director = ThinkodynamicDirector(
+                state_dir=self.state_dir,
+            )
+            await self._director.init()
+            logger.info("ThinkodynamicDirector initialized")
+        except Exception as e:
+            logger.debug("ThinkodynamicDirector init failed (non-fatal): %s", e)
 
     # --- Agent Operations ---
 
@@ -961,6 +988,76 @@ class SwarmManager:
             )
         return rescued
 
+    async def _director_pulse(self) -> list[Task]:
+        """Run one ThinkodynamicDirector vision pulse.
+
+        Uses the lightweight ``sense()`` path (ecosystem signal ranking and
+        opportunity detection) to avoid shelling out to an LLM on every tick.
+        Tasks are enqueued via the director's own ``enqueue_workflow`` which
+        writes to the shared task-board database.
+
+        Returns:
+            List of tasks created by the director, possibly empty.
+        """
+        if self._director is None:
+            return []
+
+        try:
+            # Saturation guard: skip if the director already has plenty in-flight
+            active_count = await self._director.active_director_task_count()
+            if active_count >= self._director.max_active_tasks:
+                logger.debug(
+                    "Director pulse skipped: director tasks saturated (%d active)",
+                    active_count,
+                )
+                return []
+
+            # STRATOSPHERE: lightweight ecosystem sensing (no LLM call)
+            sense_result = self._director.sense()
+            opportunities = sense_result.get("opportunities", [])
+            if not opportunities:
+                logger.debug("Director pulse: no opportunities detected")
+                return []
+
+            # GROUND: compile a workflow from the top opportunity
+            import time as _time
+
+            cycle_id = f"swarm-{int(_time.time())}"
+            # Build a minimal vision stub so compile_workflow_from_vision
+            # falls through to the opportunity-based planner.
+            vision_stub: dict[str, Any] = {
+                "proposed_tasks": [],
+                "vision_text": "",
+                "vision_success": False,
+                "seeds": [],
+                "ecosystem": sense_result.get("signals", {}),
+            }
+            workflow = self._director.compile_workflow_from_vision(
+                vision_stub, sense_result, cycle_id=cycle_id,
+            )
+
+            # DELEGATE: enqueue into the shared task board
+            created = await self._director.enqueue_workflow(workflow)
+
+            if created and self._memory is not None:
+                primary = sense_result.get("primary")
+                label = primary.title if primary else "ecosystem signal"
+                await self._memory.remember(
+                    f"Director pulse: {len(created)} task(s) from '{label}'",
+                    layer=MemoryLayer.SESSION,
+                    source="thinkodynamic_director",
+                )
+                logger.info(
+                    "Director pulse created %d task(s) for '%s'",
+                    len(created),
+                    label,
+                )
+            return created
+
+        except Exception as exc:
+            logger.debug("Director pulse error: %s", exc)
+            return []
+
     async def run(self, interval: float | None = None) -> None:
         """Run the orchestration loop with Garden Daemon parameters.
 
@@ -1031,10 +1128,25 @@ class SwarmManager:
                         "Spawned %d coordination synthesis task(s)",
                         len(synthesized),
                     )
+
+                # Thinkodynamic Director: periodic vision pulse
+                director_proposals: list[Task] = []
+                self._tick_count += 1
+                if (
+                    allow_autonomous_generation
+                    and self._director is not None
+                    and self._tick_count % self._director_interval_ticks == 0
+                ):
+                    try:
+                        director_proposals = await self._director_pulse()
+                    except Exception as exc:
+                        logger.debug("Director pulse failed (non-fatal): %s", exc)
+
                 did_work = (
                     bool(reopened)
                     or bool(rescued)
                     or bool(synthesized)
+                    or bool(director_proposals)
                     or self._tick_did_work(activity)
                 )
 
@@ -1211,6 +1323,34 @@ class SwarmManager:
             result["stigmergy"] = True
             result["stigmergy_density"] = self._stigmergy.density()
         return result
+
+    async def gaia_health(self) -> dict:
+        """Return GAIA ecological subsystem health."""
+        try:
+            from dharma_swarm.gaia_ledger import GaiaLedger
+            from dharma_swarm.gaia_fitness import (
+                EcologicalFitness,
+                detect_goodhart_drift,
+            )
+
+            ledger_dir = self.state_dir / "gaia_ledger"
+            if not ledger_dir.exists():
+                return {"status": "no_ledger", "message": "No GAIA ledger found"}
+
+            ledger = GaiaLedger(data_dir=ledger_dir)
+            ledger.load()
+            eco = EcologicalFitness()
+            drift = detect_goodhart_drift(ledger)
+
+            return {
+                "status": "active",
+                "weighted_fitness": eco.weighted_score(ledger),
+                "is_drifting": drift["is_drifting"],
+                "verification_ratio": drift["verification_ratio"],
+                "diagnosis": drift["diagnosis"],
+            }
+        except Exception as e:
+            return {"status": "error", "message": str(e)}
 
     async def propose_claim(
         self, statement: str, category: str = "operational", **kwargs: Any

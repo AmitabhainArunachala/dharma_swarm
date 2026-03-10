@@ -166,7 +166,8 @@ async def run_skill(skill_key: str) -> dict:
     proc = None
 
     try:
-        args = [CLAUDE_BIN, "-p", prompt, "--output-format", "text"]
+        args = [CLAUDE_BIN, "-p", prompt, "--output-format", "text",
+                "--permission-mode", "bypassPermissions"]
         if model:
             args.extend(["--model", model])
 

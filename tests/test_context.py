@@ -17,6 +17,7 @@ from dharma_swarm.context import (
     read_latent_gold_overview,
     read_manifest,
     read_memory_context,
+    read_recent_memories,
     read_ops,
     read_research,
     read_shipped,
@@ -186,6 +187,33 @@ def test_read_memory_context_with_data(tmp_path):
     assert "Test memory" in result
 
 
+def test_read_recent_memories_with_data(tmp_path):
+    """Recent memories should be ordered newest-first and newline-normalized."""
+    db_dir = tmp_path / "db"
+    db_dir.mkdir()
+    db_path = db_dir / "memory.db"
+    conn = sqlite3.connect(str(db_path))
+    conn.execute(
+        "CREATE TABLE memories (content TEXT, layer TEXT, timestamp TEXT)"
+    )
+    conn.executemany(
+        "INSERT INTO memories VALUES (?, ?, ?)",
+        [
+            ("Older memory", "session", "2026-03-10T08:00:00"),
+            ("Newest memory\nwith detail", "witness", "2026-03-10T10:00:00"),
+        ],
+    )
+    conn.commit()
+    conn.close()
+
+    result = read_recent_memories(state_dir=tmp_path, max_entries=1)
+
+    assert "## Recent Session Memories" in result
+    assert "(witness)" in result
+    assert "Newest memory with detail" in result
+    assert "Older memory" not in result
+
+
 def test_read_latent_gold_overview_with_data(tmp_path):
     from dharma_swarm.engine.conversation_memory import ConversationMemoryStore
 
@@ -336,3 +364,44 @@ def test_context_includes_ops_layer():
     """All roles should include operational context."""
     result = build_agent_context(role="surgeon")
     assert "Operations Layer" in result or "Trishula" in result or "Memory" in result
+
+
+def test_build_agent_context_includes_recent_memories_when_budget_allows(
+    tmp_path,
+    monkeypatch,
+):
+    """Recent session memories should flow into the assembled agent context."""
+    db_dir = tmp_path / "db"
+    db_dir.mkdir()
+    db_path = db_dir / "memory.db"
+    conn = sqlite3.connect(str(db_path))
+    conn.execute(
+        "CREATE TABLE memories (content TEXT, layer TEXT, timestamp TEXT)"
+    )
+    conn.execute(
+        "INSERT INTO memories VALUES (?, ?, ?)",
+        (
+            "Runtime remembered a useful coordination pattern.",
+            "session",
+            "2026-03-10T12:00:00",
+        ),
+    )
+    conn.commit()
+    conn.close()
+
+    monkeypatch.setattr("dharma_swarm.context.read_research", lambda **_: "")
+    monkeypatch.setattr("dharma_swarm.context.read_engineering", lambda: "# Engineering Layer")
+    monkeypatch.setattr("dharma_swarm.context.read_ops", lambda _state_dir=None: "# Operations Layer")
+    monkeypatch.setattr(
+        "dharma_swarm.context.read_agent_notes",
+        lambda **_: "# Other Agent Findings",
+    )
+
+    result = build_agent_context(
+        role="surgeon",
+        thread="mechanistic",
+        state_dir=tmp_path,
+    )
+
+    assert "## Recent Session Memories" in result
+    assert "Runtime remembered a useful coordination pattern." in result

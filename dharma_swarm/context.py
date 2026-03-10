@@ -478,6 +478,54 @@ def read_ops(state_dir: Path | None = None) -> str:
 
 # ── L5: SWARM — What other agents found ─────────────────────────────
 
+
+def read_recent_memories(
+    state_dir: Path | None = None,
+    max_entries: int = 10,
+) -> str:
+    """Read recent session memories from StrangeLoopMemory database.
+
+    This is a lightweight synchronous read of the most recent memories,
+    designed to feed into the swarm context layer so agents can see what
+    the system has been doing lately.
+
+    Args:
+        state_dir: Override for ~/.dharma state directory.
+        max_entries: Maximum number of recent memories to return.
+
+    Returns:
+        Formatted string of recent memories, or empty string on failure.
+    """
+    try:
+        base_dir = state_dir or STATE_DIR
+        db_path = base_dir / "db" / "memory.db"
+        if not db_path.exists():
+            return ""
+
+        conn = sqlite3.connect(str(db_path))
+        try:
+            rows = conn.execute(
+                "SELECT content, layer, timestamp FROM memories "
+                "ORDER BY timestamp DESC LIMIT ?",
+                (max(1, max_entries),),
+            ).fetchall()
+        finally:
+            conn.close()
+
+        if not rows:
+            return ""
+
+        lines = ["## Recent Session Memories"]
+        for content, layer, timestamp in rows:
+            stamp = str(timestamp)[:19] if timestamp else "?"
+            layer_tag = str(layer) if layer else "unknown"
+            snippet = str(content).replace("\n", " ").strip()[:200]
+            lines.append(f"  [{stamp}] ({layer_tag}) {snippet}")
+        return "\n".join(lines)
+    except Exception:
+        return ""
+
+
 def read_agent_notes(exclude_role: str | None = None, max_per_agent: int = 500) -> str:
     """Read recent notes from other agents in the swarm."""
     if not SHARED_DIR.exists():
@@ -616,13 +664,21 @@ def build_agent_context(
             sections.append(ops)
             used += len(ops)
 
-    # L5: Swarm — other agents' notes
+    # L5: Swarm — other agents' notes + recent session memories
     notes_budget = int(budget * profile.get("notes_weight", 0.2))
     if notes_budget > 200:
         notes = read_agent_notes(exclude_role=role, max_per_agent=notes_budget // 5)
         if notes:
             sections.append(notes)
             used += len(notes)
+
+    # L5b: Recent memories from StrangeLoopMemory
+    remaining = budget - used
+    if remaining > 500:
+        memories = read_recent_memories(state_dir=state_dir, max_entries=5)
+        if memories:
+            sections.append(memories)
+            used += len(memories)
 
     # Memory survival instinct (Windsurf pattern)
     sections.append(MEMORY_SURVIVAL_DIRECTIVE)

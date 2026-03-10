@@ -235,6 +235,146 @@ def test_build_darwin_status_text_reports_recent_experiments(tmp_path, monkeypat
     assert "Recent archived mutations" in result
 
 
+def test_build_darwin_status_text_reports_dse_observation_stream(tmp_path, monkeypatch):
+    import dharma_swarm.tui_helpers as helpers
+
+    dharma_dir = tmp_path / ".dharma"
+    observations_dir = dharma_dir / "evolution" / "observations"
+    observations_dir.mkdir(parents=True)
+    (observations_dir / "coalgebra_stream.jsonl").write_text(
+        "\n".join(
+            [
+                json.dumps(
+                    {
+                        "cycle_id": "cycle-a",
+                        "component": "child.py",
+                        "rv": 0.9,
+                        "best_fitness": 0.4,
+                        "approaching_fixed_point": False,
+                        "ouroboros": {
+                            "recognition_type": "GENUINE",
+                            "swabhaav_ratio": 0.72,
+                            "is_mimicry": False,
+                            "is_genuine": True,
+                        },
+                        "l4_correlation": {
+                            "is_l4_like": True,
+                            "bridge_group": "dse_l4_like",
+                        },
+                    }
+                ),
+                json.dumps(
+                    {
+                        "cycle_id": "cycle-b",
+                        "component": "other.py",
+                        "rv": 0.8,
+                        "best_fitness": 0.6,
+                        "approaching_fixed_point": True,
+                        "ouroboros": {
+                            "recognition_type": "NONE",
+                            "swabhaav_ratio": 0.2,
+                            "is_mimicry": True,
+                            "is_genuine": False,
+                        },
+                        "l4_correlation": {
+                            "is_l4_like": False,
+                            "bridge_group": "dse_evolution",
+                        },
+                    }
+                ),
+            ]
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    (observations_dir / "coordination_log.jsonl").write_text(
+        json.dumps(
+            {
+                "global_truths": 2,
+                "productive_disagreements": 1,
+                "is_globally_coherent": False,
+            }
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+
+    monkeypatch.setattr(helpers, "DHARMA_STATE", dharma_dir)
+    result = build_darwin_status_text()
+
+    assert "DSE observation stream" in result
+    assert "observations=2" in result
+    assert "components=2" in result
+    assert "avg_rv=0.85" in result
+    assert "avg_fitness=0.50" in result
+    assert "mimicry=50.0%" in result
+    assert "witness=0.46" in result
+    assert "latest=NONE" in result
+    assert "l4_like=1/2" in result
+    assert "fixed_point=1/2" in result
+    assert "latest_component=other.py" in result
+    assert "coordination truths=2" in result
+    assert "disagreements=1" in result
+    assert "coherent=no" in result
+
+
+def test_build_darwin_status_text_reports_reciprocity_summary(tmp_path, monkeypatch):
+    import dharma_swarm.tui_helpers as helpers
+
+    dharma_dir = tmp_path / ".dharma"
+    observations_dir = dharma_dir / "evolution" / "observations"
+    observations_dir.mkdir(parents=True)
+    (observations_dir / "coalgebra_stream.jsonl").write_text(
+        "\n".join(
+            [
+                json.dumps(
+                    {
+                        "cycle_id": "cycle-a",
+                        "component": "child.py",
+                        "reciprocity": {
+                            "chain_valid": True,
+                            "invariant_issues": 0,
+                            "challenged_claims": 0,
+                            "total_routed_usd": 1000.0,
+                            "issue_codes": [],
+                        },
+                    }
+                ),
+                json.dumps(
+                    {
+                        "cycle_id": "cycle-b",
+                        "component": "other.py",
+                        "reciprocity": {
+                            "chain_valid": False,
+                            "invariant_issues": 2,
+                            "challenged_claims": 1,
+                            "total_routed_usd": 5000.0,
+                            "issue_codes": [
+                                "routing_missing_project",
+                                "verified_ecology_missing_audit",
+                            ],
+                        },
+                    }
+                ),
+            ]
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+
+    monkeypatch.setattr(helpers, "DHARMA_STATE", dharma_dir)
+    result = build_darwin_status_text()
+
+    assert "reciprocity invalid_chain=1/2" in result
+    assert "latest_issues=2" in result
+    assert "challenged=1" in result
+    assert "routed_usd=5000.00" in result
+    assert (
+        "issue_codes=routing_missing_project,verified_ecology_missing_audit"
+        in result
+    )
+
+
 def test_build_runtime_status_text_reports_runtime_db_state(tmp_path, monkeypatch):
     import dharma_swarm.tui_helpers as helpers
 

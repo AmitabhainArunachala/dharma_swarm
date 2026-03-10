@@ -56,6 +56,10 @@ ECOSYSTEM_PATHS = {
 MANIFEST_PATH = Path.home() / ".dharma_manifest.json"
 
 
+def _resolve_manifest_path(manifest_path: Path | str | None = None) -> Path:
+    return Path(manifest_path) if manifest_path is not None else MANIFEST_PATH
+
+
 def scan_ecosystem() -> dict[str, dict[str, Any]]:
     """Scan all known ecosystem paths and return their status."""
     status: dict[str, dict[str, Any]] = {}
@@ -75,29 +79,38 @@ def scan_ecosystem() -> dict[str, dict[str, Any]]:
     return status
 
 
-def load_manifest() -> dict[str, Any]:
+def load_manifest(manifest_path: Path | str | None = None) -> dict[str, Any]:
     """Load the persistent manifest, or return empty dict if none exists."""
-    if MANIFEST_PATH.exists():
+    resolved_path = _resolve_manifest_path(manifest_path)
+    if resolved_path.exists():
         try:
-            return json.loads(MANIFEST_PATH.read_text())
+            return json.loads(resolved_path.read_text(encoding="utf-8"))
         except (json.JSONDecodeError, OSError):
             return {}
     return {}
 
 
-def save_manifest(data: dict[str, Any]) -> None:
+def save_manifest(
+    data: dict[str, Any],
+    manifest_path: Path | str | None = None,
+) -> None:
     """Save the persistent manifest."""
+    resolved_path = _resolve_manifest_path(manifest_path)
     data["_updated"] = datetime.now(timezone.utc).isoformat()
     data["_source"] = "dharma_swarm.ecosystem_bridge"
-    MANIFEST_PATH.write_text(json.dumps(data, indent=2, default=str))
+    resolved_path.parent.mkdir(parents=True, exist_ok=True)
+    resolved_path.write_text(
+        json.dumps(data, indent=2, default=str),
+        encoding="utf-8",
+    )
 
 
-def update_manifest() -> dict[str, Any]:
+def update_manifest(manifest_path: Path | str | None = None) -> dict[str, Any]:
     """Scan ecosystem and update the persistent manifest."""
-    manifest = load_manifest()
+    manifest = load_manifest(manifest_path=manifest_path)
     manifest["ecosystem"] = scan_ecosystem()
     manifest["last_scan"] = datetime.now(timezone.utc).isoformat()
-    save_manifest(manifest)
+    save_manifest(manifest, manifest_path=manifest_path)
     return manifest
 
 

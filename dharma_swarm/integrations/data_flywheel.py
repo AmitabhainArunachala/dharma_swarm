@@ -3,7 +3,9 @@
 from __future__ import annotations
 
 import asyncio
+import math
 import os
+import time
 from dataclasses import dataclass
 from typing import Any
 
@@ -12,6 +14,10 @@ import httpx
 
 class DataFlywheelError(RuntimeError):
     """Raised when Data Flywheel API requests fail."""
+
+
+def _now() -> float:
+    return time.monotonic()
 
 
 @dataclass(slots=True)
@@ -60,22 +66,30 @@ class DataFlywheelClient:
         params: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
         url = f"{self.config.base_url.rstrip('/')}/{path.lstrip('/')}"
-        async with httpx.AsyncClient(
-            timeout=self.config.timeout_sec,
-            transport=self._transport,
-        ) as client:
-            resp = await client.request(
-                method=method,
-                url=url,
-                headers=self._headers(),
-                json=json_body,
-                params=params,
-            )
+        try:
+            async with httpx.AsyncClient(
+                timeout=self.config.timeout_sec,
+                transport=self._transport,
+            ) as client:
+                resp = await client.request(
+                    method=method,
+                    url=url,
+                    headers=self._headers(),
+                    json=json_body,
+                    params=params,
+                )
+        except httpx.RequestError as exc:
+            raise DataFlywheelError(f"{method} {url} failed: {exc}") from exc
         if resp.status_code >= 400:
             raise DataFlywheelError(
                 f"{method} {url} failed: {resp.status_code} {resp.text[:300]}"
             )
-        data = resp.json()
+        try:
+            data = resp.json()
+        except ValueError as exc:
+            raise DataFlywheelError(
+                f"{method} {url} returned invalid JSON: {exc}"
+            ) from exc
         if isinstance(data, dict):
             return data
         return {"data": data}
@@ -115,15 +129,20 @@ class DataFlywheelClient:
         timeout_sec: float = 1800.0,
     ) -> dict[str, Any]:
         """Wait until a job reaches terminal status."""
-        elapsed = 0.0
-        while elapsed <= timeout_sec:
+        if not math.isfinite(poll_sec) or poll_sec < 0:
+            raise DataFlywheelError("poll_sec must be a finite number >= 0")
+        if not math.isfinite(timeout_sec) or timeout_sec < 0:
+            raise DataFlywheelError("timeout_sec must be a finite number >= 0")
+
+        deadline = _now() + timeout_sec
+        while True:
             job = await self.get_job(job_id)
             status = str(job.get("status", "")).lower()
             if status in self.TERMINAL_STATES:
                 return job
+            if _now() >= deadline:
+                break
             await asyncio.sleep(poll_sec)
-            elapsed += poll_sec
         raise DataFlywheelError(
             f"Timed out waiting for flywheel job {job_id} after {timeout_sec:.1f}s"
         )
-
