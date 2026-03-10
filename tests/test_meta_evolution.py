@@ -2,6 +2,7 @@
 
 import pytest
 
+from dharma_swarm.archive import FITNESS_DIMENSIONS
 from dharma_swarm.evolution import CycleResult, DarwinEngine
 from dharma_swarm.meta_evolution import MetaEvolutionEngine, MetaParameters
 
@@ -137,3 +138,151 @@ async def test_observe_cycle_result_applies_bounded_update(
         <= baseline.circuit_breaker_limit + 1
     )
     assert second.meta_parameters.map_elites_n_bins <= baseline.map_elites_n_bins + 1
+
+
+@pytest.mark.asyncio
+async def test_meta_parameter_theta_roundtrip(engine_paths):
+    engine = DarwinEngine(**engine_paths)
+    await engine.init()
+    meta = MetaEvolutionEngine(engine, n_object_cycles_per_meta=2)
+
+    theta = meta.get_meta_parameter_theta()
+    restored = meta.apply_meta_parameter_theta(theta, auto_apply=False, bounded=False)
+
+    assert restored == meta.meta_params
+    assert abs(sum(restored.fitness_weights.values()) - 1.0) < 1e-9
+
+
+@pytest.mark.asyncio
+async def test_propose_natural_gradient_update_is_bounded(engine_paths):
+    engine = DarwinEngine(**engine_paths)
+    await engine.init()
+    meta = MetaEvolutionEngine(
+        engine,
+        n_object_cycles_per_meta=2,
+        max_weight_shift=0.02,
+        max_mutation_delta=0.03,
+        max_exploration_delta=0.1,
+        max_circuit_breaker_delta=1,
+        max_grid_delta=1,
+    )
+    baseline = meta.meta_params.model_copy(deep=True)
+    gradient = [0.05] * len(meta.get_meta_parameter_theta())
+
+    candidate = meta.propose_natural_gradient_update(gradient, step_size=0.4)
+
+    assert candidate != baseline
+    assert abs(candidate.mutation_rate - baseline.mutation_rate) <= 0.031
+    assert abs(candidate.exploration_coeff - baseline.exploration_coeff) <= 0.101
+    assert candidate.circuit_breaker_limit <= baseline.circuit_breaker_limit + 1
+    assert candidate.map_elites_n_bins <= baseline.map_elites_n_bins + 1
+
+
+@pytest.mark.asyncio
+async def test_poor_meta_cycle_uses_natural_gradient_and_exploration(
+    engine_paths,
+    tmp_path,
+    monkeypatch,
+):
+    engine = DarwinEngine(**engine_paths)
+    await engine.init()
+    meta = MetaEvolutionEngine(
+        engine,
+        meta_archive_path=tmp_path / "meta_archive_ng.jsonl",
+        n_object_cycles_per_meta=2,
+        poor_meta_fitness_threshold=0.9,
+    )
+    called: dict[str, bool] = {"natural": False, "explore": False}
+
+    async def fake_run_cycle(proposals):
+        del proposals
+        return CycleResult(best_fitness=0.0)
+
+    def fake_natural(*args, **kwargs):
+        called["natural"] = True
+        return MetaParameters(
+            fitness_weights={"correctness": 1.0, "safety": 0.0},
+            mutation_rate=0.2,
+            exploration_coeff=1.2,
+            circuit_breaker_limit=2,
+            map_elites_n_bins=6,
+        )
+
+    def fake_explore():
+        called["explore"] = True
+        return MetaParameters(
+            fitness_weights={"correctness": 0.0, "safety": 1.0},
+            mutation_rate=0.3,
+            exploration_coeff=1.4,
+            circuit_breaker_limit=4,
+            map_elites_n_bins=7,
+        )
+
+    monkeypatch.setattr(engine, "run_cycle", fake_run_cycle)
+    monkeypatch.setattr(meta, "propose_natural_gradient_update", fake_natural)
+    monkeypatch.setattr(meta, "_evolve_meta_params", fake_explore)
+
+    result = await meta.run_meta_cycle([])
+
+    assert result.evolved_parameters is True
+    assert called == {"natural": True, "explore": True}
+
+
+@pytest.mark.asyncio
+async def test_coordination_uncertainty_pressure_biases_gradients(engine_paths):
+    engine = DarwinEngine(**engine_paths)
+    await engine.init()
+    meta = MetaEvolutionEngine(engine, n_object_cycles_per_meta=2)
+
+    baseline = meta._trajectory_loss_gradient([0.4, 0.4])
+    summary = {
+        "observed_at": "2026-03-10T00:00:00+00:00",
+        "productive_disagreements": 2,
+        "cohomological_dimension": 1,
+        "is_globally_coherent": False,
+        "productive_disagreement_claim_keys": ["route-policy"],
+    }
+    meta.observe_coordination_summary(summary)
+    meta.observe_coordination_summary(summary)
+    pressured = meta._trajectory_loss_gradient([0.4, 0.4])
+
+    safety_idx = FITNESS_DIMENSIONS.index("safety")
+    exploration_idx = len(FITNESS_DIMENSIONS) + 1
+    circuit_idx = len(FITNESS_DIMENSIONS) + 2
+
+    assert meta._coordination_uncertainty_pressure() > 0.0
+    assert pressured[safety_idx] < baseline[safety_idx]
+    assert pressured[exploration_idx] < baseline[exploration_idx]
+    assert pressured[circuit_idx] > baseline[circuit_idx]
+
+
+@pytest.mark.asyncio
+async def test_meta_cycle_reports_coordination_pressure(engine_paths, tmp_path, monkeypatch):
+    engine = DarwinEngine(**engine_paths)
+    await engine.init()
+    meta = MetaEvolutionEngine(
+        engine,
+        meta_archive_path=tmp_path / "meta_archive_coordination.jsonl",
+        n_object_cycles_per_meta=2,
+        poor_meta_fitness_threshold=0.9,
+    )
+    meta.observe_coordination_summary(
+        {
+            "observed_at": "2026-03-10T00:00:00+00:00",
+            "productive_disagreements": 1,
+            "cohomological_dimension": 1,
+            "is_globally_coherent": False,
+            "productive_disagreement_claim_keys": ["route-policy"],
+        }
+    )
+
+    async def fake_run_cycle(proposals):
+        del proposals
+        return CycleResult(best_fitness=0.0)
+
+    monkeypatch.setattr(engine, "run_cycle", fake_run_cycle)
+
+    result = await meta.run_meta_cycle([])
+
+    assert result.coordination_pressure > 0.0
+    assert result.coordination_summary["productive_disagreements"] == 1

@@ -31,11 +31,19 @@ from dharma_swarm.archive import (
 from dharma_swarm.convergence import ConvergenceConfig, ConvergenceDetector
 from dharma_swarm.diff_applier import DiffApplier
 from dharma_swarm.elegance import evaluate_elegance
+from dharma_swarm.execution_profile import (
+    EvidenceTier,
+    ExecutionProfileRegistry,
+    PromotionState,
+    ResolvedExecutionProfile,
+    derive_promotion_state,
+)
+from dharma_swarm.experiment_memory import ExperimentMemory, ExperimentMemorySnapshot
+from dharma_swarm.experiment_log import ExperimentLog, ExperimentRecord
 from dharma_swarm.fitness_predictor import FitnessPredictor, ProposalFeatures
 from dharma_swarm.jikoku_instrumentation import jikoku_auto_span
 from dharma_swarm.landscape import FitnessLandscapeMapper, LandscapeProbe
 from dharma_swarm.models import GateDecision, GateResult, SandboxResult, _new_id, _utc_now
-from dharma_swarm.probe_targets import ProbeTargetRegistry, ResolvedProbeTarget
 from dharma_swarm.router_retrospective import (
     DriftGuardDecision,
     DriftGuardThresholds,
@@ -95,6 +103,19 @@ class Proposal(BaseModel):
     gate_reason: Optional[str] = None
     reflection_attempts: int = 0
     reflection_suggestions: list[str] = Field(default_factory=list)
+    test_results: dict[str, Any] = Field(default_factory=dict)
+    cycle_id: str | None = None
+    execution_profile: str = "default"
+    execution_matched_pattern: str | None = None
+    execution_workspace: str | None = None
+    execution_test_command: str | None = None
+    execution_timeout: float | None = None
+    execution_risk_level: str = "medium"
+    execution_rollback_policy: str = "revert_patch"
+    execution_expected_metrics: list[str] = Field(default_factory=list)
+    evidence_tier: str = EvidenceTier.UNVALIDATED.value
+    promotion_state: str = PromotionState.CANDIDATE.value
+    experiment_id: str | None = None
 
     @field_validator('component')
     @classmethod
@@ -179,16 +200,21 @@ class DarwinEngine:
         landscape_probe_workspace: Path | None = None,
         landscape_probe_test_command: str = "python3 -m pytest tests/ -q --tb=short",
         landscape_probe_timeout: float = 60.0,
-        probe_targets: ProbeTargetRegistry | list[dict[str, Any]] | None = None,
+        probe_targets: ExecutionProfileRegistry | list[dict[str, Any]] | None = None,
         meta_evolution_interval: int = 0,
         meta_archive_path: Path | None = None,
         meta_poor_fitness_threshold: float = 0.5,
         meta_auto_apply: bool = True,
+        experiment_log_path: Path | None = None,
         router_drift_thresholds: DriftGuardThresholds | None = None,
     ) -> None:
         self.archive = EvolutionArchive(path=archive_path)
         self.traces = TraceStore(base_path=traces_path)
         self.predictor = FitnessPredictor(history_path=predictor_path)
+        self.experiment_log = ExperimentLog(
+            path=experiment_log_path or (self.archive.path.parent / "experiments.jsonl")
+        )
+        self.experiment_memory = ExperimentMemory()
         self._circuit_breaker_limit = max(1, int(circuit_breaker_limit))
         self._max_reflection_reroutes = max(0, int(max_reflection_reroutes))
         self._fitness_weights = normalize_fitness_weights(custom_fitness_weights)
@@ -205,9 +231,12 @@ class DarwinEngine:
         )
         self._landscape_probe_test_command = landscape_probe_test_command
         self._landscape_probe_timeout = float(landscape_probe_timeout)
-        self.probe_target_registry = ProbeTargetRegistry.from_configs(probe_targets)
+        self.execution_profile_registry = ExecutionProfileRegistry.from_configs(
+            probe_targets
+        )
         self._meta_evolution_interval = max(0, int(meta_evolution_interval))
         self.last_meta_evolution_result: Any | None = None
+        self.last_coordination_summary: dict[str, Any] = {}
         self._meta_evolution_engine: Any | None = None
         if self._meta_evolution_interval > 0:
             from dharma_swarm.meta_evolution import MetaEvolutionEngine
@@ -223,6 +252,7 @@ class DarwinEngine:
         self._completed_cycles = 0
         self._adaptive_strategy = "explore"
         self.last_landscape_probe: LandscapeProbe | None = None
+        self.last_experiment_memory: ExperimentMemorySnapshot | None = None
         self.landscape_mapper = FitnessLandscapeMapper(self)
         self._initialized: bool = False
 
@@ -288,6 +318,15 @@ class DarwinEngine:
         self._map_elites_n_bins = self.archive.grid.n_bins
         return self.get_meta_parameter_state()
 
+    def observe_coordination_summary(self, summary: dict[str, Any] | None) -> None:
+        """Forward live coordination uncertainty into meta-evolution."""
+        self.last_coordination_summary = dict(summary or {})
+        if self._meta_evolution_engine is None:
+            return
+        observer = getattr(self._meta_evolution_engine, "observe_coordination_summary", None)
+        if callable(observer):
+            observer(summary or {})
+
     def get_active_mutation_rate(self) -> float:
         """Return mutation rate after convergence restart adjustments."""
         return self.convergence_detector.get_restart_mutation_rate(
@@ -298,51 +337,149 @@ class DarwinEngine:
         self,
         component_pattern: str,
         *,
+        name: str = "",
         workspace: Path | str | None = None,
         test_command: str | None = None,
         timeout: float | None = None,
         priority: int = 0,
-    ) -> ResolvedProbeTarget:
+        risk_level: str = "medium",
+        expected_metrics: list[str] | None = None,
+        rollback_policy: str = "revert_patch",
+        evidence_tier: EvidenceTier | str = EvidenceTier.COMPONENT,
+    ) -> ResolvedExecutionProfile:
         """Register a component-aware workspace probe target."""
-        target = self.probe_target_registry.register(
+        target = self.execution_profile_registry.register(
             component_pattern,
+            name=name,
             workspace=workspace,
             test_command=test_command,
             timeout=timeout,
             priority=priority,
+            risk_level=risk_level,
+            expected_metrics=expected_metrics,
+            rollback_policy=rollback_policy,
+            evidence_tier=evidence_tier,
         )
-        return ResolvedProbeTarget(
+        return ResolvedExecutionProfile(
             component=component_pattern,
+            profile_name=target.name or target.component_pattern,
             workspace=target.workspace,
             test_command=target.test_command,
             timeout=target.timeout,
             matched_pattern=target.component_pattern,
             priority=target.priority,
+            risk_level=target.risk_level,
+            expected_metrics=list(target.expected_metrics),
+            rollback_policy=target.rollback_policy,
+            evidence_tier=target.evidence_tier,
         )
 
-    def resolve_probe_target(self, component: str) -> ResolvedProbeTarget:
+    def resolve_probe_target(self, component: str) -> ResolvedExecutionProfile:
         """Resolve probe settings for a component with engine defaults overlaid."""
-        resolved = self.probe_target_registry.resolve(component)
-        return ResolvedProbeTarget(
+        return self.resolve_execution_target(
+            component,
+            fallback_test_command=self._landscape_probe_test_command,
+            fallback_timeout=self._landscape_probe_timeout,
+            fallback_workspace=self._landscape_probe_workspace,
+            fallback_evidence_tier=EvidenceTier.PROBE,
+            fallback_profile_name="probe_default",
+        )
+
+    def resolve_execution_target(
+        self,
+        component: str,
+        *,
+        fallback_test_command: str | None = None,
+        fallback_timeout: float | None = None,
+        fallback_workspace: Path | None = None,
+        fallback_evidence_tier: EvidenceTier | str = EvidenceTier.LOCAL,
+        fallback_profile_name: str = "default",
+        fallback_risk_level: str = "medium",
+        fallback_expected_metrics: list[str] | None = None,
+        fallback_rollback_policy: str = "revert_patch",
+    ) -> ResolvedExecutionProfile:
+        """Resolve execution settings for a component using registry and fallbacks."""
+        resolved = self.execution_profile_registry.resolve(component)
+        default_workspace = (
+            Path(fallback_workspace).resolve()
+            if fallback_workspace is not None
+            else None
+        )
+        try:
+            evidence_tier = (
+                resolved.evidence_tier
+                if resolved is not None
+                else (
+                    fallback_evidence_tier
+                    if isinstance(fallback_evidence_tier, EvidenceTier)
+                    else EvidenceTier(str(fallback_evidence_tier))
+                )
+            )
+        except ValueError:
+            evidence_tier = EvidenceTier.UNVALIDATED
+
+        return ResolvedExecutionProfile(
             component=component,
+            profile_name=(
+                resolved.profile_name if resolved else fallback_profile_name
+            ),
             workspace=(
                 resolved.workspace
                 if resolved and resolved.workspace is not None
-                else self._landscape_probe_workspace
+                else default_workspace
             ),
             test_command=(
                 resolved.test_command
                 if resolved and resolved.test_command is not None
-                else self._landscape_probe_test_command
+                else (
+                    fallback_test_command
+                    if fallback_test_command is not None
+                    else self._landscape_probe_test_command
+                )
             ),
             timeout=(
                 resolved.timeout
                 if resolved and resolved.timeout is not None
-                else self._landscape_probe_timeout
+                else (
+                    float(fallback_timeout)
+                    if fallback_timeout is not None
+                    else None
+                )
             ),
             matched_pattern=resolved.matched_pattern if resolved else None,
             priority=resolved.priority if resolved else 0,
+            risk_level=resolved.risk_level if resolved else fallback_risk_level,
+            expected_metrics=(
+                list(resolved.expected_metrics)
+                if resolved
+                else list(fallback_expected_metrics or ["pass_rate"])
+            ),
+            rollback_policy=(
+                resolved.rollback_policy if resolved else fallback_rollback_policy
+            ),
+            evidence_tier=evidence_tier,
         )
+
+    @staticmethod
+    def _stage_execution_context(
+        proposal: Proposal,
+        target: ResolvedExecutionProfile,
+        *,
+        cycle_id: str | None = None,
+    ) -> None:
+        """Attach resolved execution context to a proposal."""
+        proposal.cycle_id = cycle_id
+        proposal.execution_profile = target.profile_name
+        proposal.execution_matched_pattern = target.matched_pattern
+        proposal.execution_workspace = (
+            str(target.workspace) if target.workspace is not None else None
+        )
+        proposal.execution_test_command = target.test_command
+        proposal.execution_timeout = target.timeout
+        proposal.execution_risk_level = target.risk_level
+        proposal.execution_rollback_policy = target.rollback_policy
+        proposal.execution_expected_metrics = list(target.expected_metrics)
+        proposal.evidence_tier = target.evidence_tier.value
 
     def get_mutation_budget_lines(self) -> int:
         """Translate mutation rate into an LLM diff-size budget."""
@@ -352,12 +489,55 @@ class DarwinEngine:
         """Return the current landscape-guided mutation mode."""
         if self.convergence_detector.is_restart_active():
             return "restart"
+        if (
+            self.last_experiment_memory is not None
+            and self.last_experiment_memory.confidence >= 0.4
+            and self.last_experiment_memory.recommended_strategy
+        ):
+            recommended = self.last_experiment_memory.recommended_strategy
+            if recommended == "backtrack":
+                return "backtrack"
+            if self._adaptive_strategy == "explore":
+                return recommended
         return self._adaptive_strategy
+
+    async def refresh_experiment_memory(
+        self,
+        limit: int = 32,
+    ) -> ExperimentMemorySnapshot:
+        """Refresh experiment-memory snapshot from the recent experiment log."""
+        records = await self.experiment_log.get_recent(limit=limit)
+        self.last_experiment_memory = self.experiment_memory.analyze(records)
+        return self.last_experiment_memory
+
+    def _parent_memory_score(self, entry: ArchiveEntry) -> float:
+        """Bias parent fitness using recent experiment-memory outcomes."""
+        base = entry.fitness.weighted(weights=self._fitness_weights)
+        snapshot = self.last_experiment_memory
+        if snapshot is None or snapshot.records_considered == 0:
+            return base
+
+        parent_bias = snapshot.parent_scores.get(entry.id, 0.5)
+        component_bias = snapshot.component_scores.get(entry.component, 0.5)
+        multiplier = 1.0 + ((parent_bias - 0.5) * 0.6) + ((component_bias - 0.5) * 0.3)
+        if entry.component in snapshot.caution_components:
+            multiplier -= 0.15
+        multiplier = max(0.5, min(1.5, multiplier))
+        return base * multiplier
 
     def _build_propose_system(self) -> str:
         """Build the proposal-generation system prompt from live engine state."""
         strategy = self._current_adaptive_strategy()
         max_lines = self.get_mutation_budget_lines()
+        memory_guidance = ""
+        if (
+            self.last_experiment_memory is not None
+            and self.last_experiment_memory.lessons
+        ):
+            memory_guidance = "Recent experiment memory:\n" + "\n".join(
+                f"- {lesson}"
+                for lesson in self.last_experiment_memory.lessons[:3]
+            ) + "\n"
         strategy_guidance = {
             "exploit": "Bias toward small, local improvements near the current implementation.",
             "explore": "Allow broader alternatives while staying coherent and file-local.",
@@ -376,6 +556,7 @@ class DarwinEngine:
             "```diff\n"
             "<unified diff>\n"
             "```\n\n"
+            f"{memory_guidance}"
             "Rules:\n"
             f"- Keep changes under {max_lines} changed lines\n"
             f"- Current mutation mode: {strategy}. {strategy_guidance.get(strategy, strategy_guidance['explore'])}\n"
@@ -826,6 +1007,7 @@ class DarwinEngine:
             component=proposal.component,
         ):
             test_results = test_results or {}
+            proposal.test_results = dict(test_results)
 
             correctness = float(test_results.get("pass_rate", 0.0))
 
@@ -894,6 +1076,11 @@ class DarwinEngine:
 
             proposal.actual_fitness = fitness
             proposal.status = EvolutionStatus.EVALUATED
+            proposal.promotion_state = derive_promotion_state(
+                evidence_tier=proposal.evidence_tier,
+                pass_rate=correctness,
+                rolled_back=bool(test_results.get("rolled_back")),
+            ).value
 
             logger.info(
                 "Proposal %s evaluated: weighted=%.3f",
@@ -925,6 +1112,22 @@ class DarwinEngine:
         ):
             fitness = proposal.actual_fitness or FitnessScore()
             weighted_fitness = self.score_fitness(fitness)
+            experiment_id = proposal.experiment_id or _new_id()
+            proposal.experiment_id = experiment_id
+            test_results = dict(proposal.test_results)
+            test_results.setdefault(
+                "execution_target",
+                {
+                    "profile_name": proposal.execution_profile,
+                    "matched_pattern": proposal.execution_matched_pattern,
+                    "workspace": proposal.execution_workspace,
+                    "test_command": proposal.execution_test_command,
+                    "timeout": proposal.execution_timeout,
+                    "risk_level": proposal.execution_risk_level,
+                    "rollback_policy": proposal.execution_rollback_policy,
+                    "expected_metrics": list(proposal.execution_expected_metrics),
+                },
+            )
 
             entry = ArchiveEntry(
                 component=proposal.component,
@@ -935,6 +1138,11 @@ class DarwinEngine:
                 diff=proposal.diff,
                 parent_id=proposal.parent_id,
                 fitness=fitness,
+                test_results=test_results,
+                experiment_id=experiment_id,
+                execution_profile=proposal.execution_profile,
+                evidence_tier=proposal.evidence_tier,
+                promotion_state=proposal.promotion_state,
                 status="applied",
                 gates_passed=(
                     ["ALL"]
@@ -950,6 +1158,36 @@ class DarwinEngine:
 
             entry_id = await self.archive.add_entry(entry)
             proposal.status = EvolutionStatus.ARCHIVED
+            experiment = ExperimentRecord(
+                id=experiment_id,
+                proposal_id=proposal.id,
+                archive_entry_id=entry_id,
+                cycle_id=proposal.cycle_id,
+                component=proposal.component,
+                change_type=proposal.change_type,
+                description=proposal.description,
+                parent_id=proposal.parent_id,
+                execution_profile=proposal.execution_profile,
+                matched_pattern=proposal.execution_matched_pattern,
+                workspace=proposal.execution_workspace,
+                test_command=proposal.execution_test_command,
+                timeout=proposal.execution_timeout,
+                evidence_tier=proposal.evidence_tier,
+                promotion_state=proposal.promotion_state,
+                risk_level=proposal.execution_risk_level,
+                rollback_policy=proposal.execution_rollback_policy,
+                expected_metrics=list(proposal.execution_expected_metrics),
+                pass_rate=float(test_results.get("pass_rate", 0.0)),
+                weighted_fitness=weighted_fitness,
+                outcome=proposal.status.value,
+                test_results=test_results,
+                fitness=fitness,
+                agent_id=entry.agent_id,
+                model=entry.model,
+                tokens_used=entry.tokens_used,
+            )
+            await self.experiment_log.append(experiment)
+            await self.refresh_experiment_memory()
 
             # Record outcome in predictor for future predictions
             features = ProposalFeatures(
@@ -968,7 +1206,10 @@ class DarwinEngine:
                 metadata={
                     "proposal_id": proposal.id,
                     "entry_id": entry_id,
+                    "experiment_id": experiment_id,
                     "weighted_fitness": weighted_fitness,
+                    "promotion_state": proposal.promotion_state,
+                    "evidence_tier": proposal.evidence_tier,
                     "spec_ref": proposal.spec_ref,
                     "requirement_refs": proposal.requirement_refs,
                 },
@@ -1009,6 +1250,17 @@ class DarwinEngine:
 
         for proposal_id in plan.ordered_proposal_ids:
             proposal = proposal_by_id[proposal_id]
+            self._stage_execution_context(
+                proposal,
+                self.resolve_execution_target(
+                    proposal.component,
+                    fallback_evidence_tier=EvidenceTier.UNVALIDATED,
+                    fallback_profile_name="unvalidated",
+                    fallback_expected_metrics=[],
+                    fallback_rollback_policy="discard",
+                ),
+                cycle_id=result.cycle_id,
+            )
             # Gate check
             await self.gate_check(proposal)
             if proposal.status == EvolutionStatus.REJECTED:
@@ -1140,6 +1392,9 @@ class DarwinEngine:
                 state="pass" if result.tests_passed else "fail",
                 metadata={
                     "proposal_id": proposal.id,
+                    "workspace": str(applier.workspace),
+                    "test_command": test_command,
+                    "timeout": timeout,
                     "applied": result.applied,
                     "tests_passed": result.tests_passed,
                     "rolled_back": result.rolled_back,
@@ -1168,6 +1423,7 @@ class DarwinEngine:
         proposal: Proposal,
         test_command: str = "python3 -m pytest tests/ -q --tb=short",
         timeout: float = 60.0,
+        workspace: Path | None = None,
     ) -> tuple[Proposal, SandboxResult]:
         """Run a test command in a sandbox and record the result.
 
@@ -1178,6 +1434,7 @@ class DarwinEngine:
             proposal: The gated proposal to test.
             test_command: Shell command to run inside the sandbox.
             timeout: Maximum seconds before the command is killed.
+            workspace: Optional working directory for sandbox execution.
 
         Returns:
             A tuple of ``(proposal, SandboxResult)``.
@@ -1185,7 +1442,9 @@ class DarwinEngine:
         from dharma_swarm.sandbox import LocalSandbox
 
         proposal.status = EvolutionStatus.WRITING
-        sandbox = LocalSandbox()
+        sandbox = LocalSandbox(
+            workdir=Path(workspace).resolve() if workspace is not None else None
+        )
         try:
             proposal.status = EvolutionStatus.TESTING
             result = await sandbox.execute(test_command, timeout=timeout)
@@ -1198,6 +1457,9 @@ class DarwinEngine:
                     state=proposal.status.value,
                     metadata={
                         "proposal_id": proposal.id,
+                        "workspace": str(sandbox.workdir),
+                        "test_command": test_command,
+                        "timeout": timeout,
                         "exit_code": result.exit_code,
                         "stdout_preview": result.stdout[:200],
                     },
@@ -1240,6 +1502,16 @@ class DarwinEngine:
 
         for proposal_id in plan.ordered_proposal_ids:
             proposal = proposal_by_id[proposal_id]
+            target = self.resolve_execution_target(
+                proposal.component,
+                fallback_test_command=test_command,
+                fallback_timeout=timeout,
+                fallback_evidence_tier=EvidenceTier.LOCAL,
+                fallback_profile_name="local_default",
+                fallback_expected_metrics=["pass_rate"],
+                fallback_rollback_policy="revert_patch",
+            )
+            self._stage_execution_context(proposal, target, cycle_id=result.cycle_id)
             # Gate check
             await self.gate_check(proposal)
             if proposal.status == EvolutionStatus.REJECTED:
@@ -1255,7 +1527,10 @@ class DarwinEngine:
             # Apply diff (if present) then sandbox test
             if proposal.diff.strip():
                 proposal, test_results = await self.apply_diff_and_test(
-                    proposal, test_command=test_command, timeout=timeout
+                    proposal,
+                    test_command=target.test_command or test_command,
+                    timeout=target.timeout or timeout,
+                    workspace=target.workspace,
                 )
                 if test_results.get("rolled_back"):
                     logger.warning(
@@ -1264,7 +1539,10 @@ class DarwinEngine:
                     )
             else:
                 proposal, sr = await self.apply_in_sandbox(
-                    proposal, test_command=test_command, timeout=timeout
+                    proposal,
+                    test_command=target.test_command or test_command,
+                    timeout=target.timeout or timeout,
+                    workspace=target.workspace,
                 )
                 test_results = self._parse_sandbox_result(sr)
 
@@ -1323,16 +1601,32 @@ class DarwinEngine:
             An ``ArchiveEntry``, or ``None`` if the archive is empty.
         """
         if strategy == "ucb" or (self.use_ucb and strategy == "tournament"):
-            return await self.ucb_selector.select_parent(
+            selected = await self.ucb_selector.select_parent(
                 self.archive,
                 weights=self._fitness_weights,
             )
-        return await select_parent(
-            self.archive,
-            strategy=strategy,
-            weights=self._fitness_weights,
-            **kwargs,
-        )
+        else:
+            selected = await select_parent(
+                self.archive,
+                strategy=strategy,
+                weights=self._fitness_weights,
+                **kwargs,
+            )
+
+        await self.refresh_experiment_memory()
+        if selected is None or self.last_experiment_memory is None:
+            return selected
+
+        candidates = await self.archive.get_best(n=5, weights=self._fitness_weights)
+        if not candidates:
+            return selected
+        if all(candidate.id != selected.id for candidate in candidates):
+            candidates.append(selected)
+
+        best = max(candidates, key=self._parent_memory_score)
+        if self._parent_memory_score(best) > (self._parent_memory_score(selected) * 1.05):
+            return best
+        return selected
 
     # -- analytics -----------------------------------------------------------
 
@@ -1649,6 +1943,7 @@ class DarwinEngine:
         source_files: list[Path],
         model: str = "meta-llama/llama-3.3-70b-instruct",
         test_command: str = "python3 -m pytest tests/ -q --tb=short -x --timeout=10",
+        timeout: float = 60.0,
         context: str = "",
     ) -> CycleResult:
         """Autonomous evolution: LLM proposes improvements, engine evaluates them.
@@ -1661,11 +1956,13 @@ class DarwinEngine:
             source_files: List of Python files to propose improvements for.
             model: Model identifier for the provider.
             test_command: Shell command for testing proposals.
+            timeout: Fallback timeout for component test execution.
             context: Extra context to guide the LLM (focus areas, recent errors).
 
         Returns:
             A CycleResult summarizing the autonomous evolution cycle.
         """
+        await self.refresh_experiment_memory()
         proposals: list[Proposal] = []
         for sf in source_files:
             proposal = await self.generate_proposal(
@@ -1684,6 +1981,7 @@ class DarwinEngine:
         result = await self.run_cycle_with_sandbox(
             proposals,
             test_command=test_command,
+            timeout=timeout,
         )
 
         logger.info(

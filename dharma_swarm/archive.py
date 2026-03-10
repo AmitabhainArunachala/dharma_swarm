@@ -13,6 +13,7 @@ from typing import Any, Optional
 
 from pydantic import BaseModel, Field
 
+from dharma_swarm.execution_profile import EvidenceTier, PromotionState
 from dharma_swarm.models import _new_id, _utc_now
 from dharma_swarm.merkle_log import MerkleLog
 
@@ -112,6 +113,10 @@ class ArchiveEntry(BaseModel):
     # Evaluation
     fitness: FitnessScore = Field(default_factory=FitnessScore)
     test_results: dict[str, Any] = Field(default_factory=dict)
+    experiment_id: str | None = None
+    execution_profile: str = "default"
+    evidence_tier: str = EvidenceTier.UNVALIDATED.value
+    promotion_state: str = PromotionState.CANDIDATE.value
 
     # Dharmic gates
     gates_passed: list[str] = Field(default_factory=list)
@@ -324,6 +329,8 @@ class EvolutionArchive:
             "diff_hash": hashlib.sha256(entry.diff.encode()).hexdigest() if entry.diff else None,
             "fitness_weighted": entry.fitness.weighted(),
             "status": entry.status,
+            "execution_profile": entry.execution_profile,
+            "promotion_state": entry.promotion_state,
         }
         entry.merkle_root = self.merkle_log.append(merkle_data)
 
