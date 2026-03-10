@@ -85,7 +85,7 @@ class EvaluationRegistry:
         resolved_client_id = str(client_id or job_payload.get("client_id") or "").strip()
         status = str(job_payload.get("status") or "unknown").strip() or "unknown"
 
-        stored = self.artifact_store.create_text_artifact(
+        stored = await self.artifact_store.create_text_artifact_async(
             session_id=resolved_session_id,
             artifact_type="evaluations",
             artifact_kind="flywheel_job_result",
@@ -110,7 +110,7 @@ class EvaluationRegistry:
                 "source": "data_flywheel",
             },
         )
-        artifact = await self.artifact_store.record_artifact_async(stored)
+        artifact = stored.record
 
         facts: list[MemoryFact] = []
         facts.append(

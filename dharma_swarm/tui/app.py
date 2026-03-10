@@ -1423,7 +1423,12 @@ class DGCApp(App):
                 out("[dim]No orchestrator state.[/dim]")
 
         elif cmd == "evolve":
-            if not arg or len(arg.split(None, 1)) < 2:
+            evolve_mode = arg.strip().lower()
+            if evolve_mode in {"status", "report", "memory"}:
+                from dharma_swarm.tui_helpers import build_darwin_status_text
+
+                out(build_darwin_status_text())
+            elif not arg or len(arg.split(None, 1)) < 2:
                 out("[red]Usage: /evolve <component> <description>[/red]")
             else:
                 parts = arg.split(None, 1)
@@ -1439,10 +1444,17 @@ class DGCApp(App):
                 except Exception as exc:
                     out(f"  [red]Evolution failed: {exc}[/red]")
 
+        elif cmd == "darwin":
+            from dharma_swarm.tui_helpers import build_darwin_status_text
+
+            out(build_darwin_status_text())
+
         elif cmd == "archive":
             out("[dim]Loading archive...[/dim]")
             archive_path = DHARMA_STATE / "evolution" / "archive.jsonl"
             if archive_path.exists():
+                from dharma_swarm.archive import FitnessScore
+
                 entries: list[dict[str, Any]] = []
                 for line in archive_path.read_text().strip().split("\n")[-10:]:
                     try:
@@ -1450,10 +1462,17 @@ class DGCApp(App):
                     except Exception:
                         pass
                 for entry in entries:
+                    fitness_payload = entry.get("fitness", {})
+                    try:
+                        weighted = FitnessScore(**fitness_payload).weighted()
+                    except Exception:
+                        weighted = 0.0
                     out(
                         f"  {entry.get('id', '?')[:12]}  "
-                        f"fitness={entry.get('fitness', '?')}  "
-                        f"{entry.get('component', '?')}"
+                        f"{entry.get('component', '?')}  "
+                        f"{entry.get('promotion_state', 'candidate')}  "
+                        f"{entry.get('execution_profile', 'default')}  "
+                        f"fit={weighted:.2f}"
                     )
             else:
                 out("[dim]No archive found.[/dim]")
@@ -1499,12 +1518,9 @@ class DGCApp(App):
                 out(f"  [red]Context failed: {exc}[/red]")
 
         elif cmd == "runtime":
-            out("[dim]Runtime matrix...[/dim]")
-            import shutil
+            from dharma_swarm.tui_helpers import build_runtime_status_text
 
-            for prog in ["claude", "python3", "node"]:
-                path = shutil.which(prog)
-                out(f"  {prog}: {path or 'not found'}")
+            out(build_runtime_status_text())
 
         elif cmd == "git":
             out("[dim]Git status...[/dim]")

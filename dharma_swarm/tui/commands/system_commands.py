@@ -118,7 +118,7 @@ class SystemCommandHandler:
         # Threaded commands (need @work in the app layer)
         elif cmd in {
             "status", "pulse", "health", "self", "context", "memory",
-            "witness", "gates", "agni", "swarm", "evolve", "archive",
+            "witness", "gates", "agni", "swarm", "evolve", "darwin", "archive",
             "logs", "runtime", "git", "truth", "dharma", "corpus",
             "stigmergy", "hum",
         }:
@@ -143,11 +143,13 @@ class SystemCommandHandler:
             "  [cyan]/witness[/cyan] <msg>   Record observation\n"
             "  [cyan]/notes[/cyan]           Shared agent notes\n"
             "  [cyan]/archive[/cyan]         Evolution archive (last 10)\n"
+            "  [cyan]/darwin[/cyan]          Darwin experiment memory + trust ladder\n"
             "  [cyan]/logs[/cyan]            Tail system logs\n"
             "\n[bold cyan]--- Agents & Swarm ---[/bold cyan]\n"
             "  [cyan]/swarm[/cyan] [op]      Swarm: status | start [h] | stop | report | yolo\n"
             "  [cyan]/gates[/cyan] <action>  Test telos gates\n"
             "  [cyan]/evolve[/cyan] <c> <d>  Darwin Engine evolution\n"
+            "  [cyan]/evolve status[/cyan]   Darwin operator visibility\n"
             "  [cyan]/agni[/cyan] <cmd>      Run on AGNI VPS\n"
             "  [cyan]/trishula[/cyan]        Trishula inbox\n"
             "\n[bold cyan]--- Integrations ---[/bold cyan]\n"

@@ -35,11 +35,13 @@ DGC_COMMANDS: tuple[DGCCommand, ...] = (
     DGCCommand("Witness", "Record observation", "/witness", "memory"),
     DGCCommand("Agent Notes", "Shared agent notes", "/notes", "memory"),
     DGCCommand("Archive", "Evolution archive (last 10)", "/archive", "memory"),
+    DGCCommand("Darwin Status", "Darwin experiment memory and trust ladder", "/darwin", "memory"),
     DGCCommand("Logs", "Tail system logs", "/logs", "memory"),
     # Agents
     DGCCommand("Swarm Status", "Swarm status", "/swarm status", "agents"),
     DGCCommand("Test Gates", "Test telos gates", "/gates", "agents"),
     DGCCommand("Evolve", "Darwin Engine evolution", "/evolve", "agents"),
+    DGCCommand("Evolve Status", "Darwin operator visibility", "/evolve status", "agents"),
     DGCCommand("AGNI VPS", "Run command on AGNI", "/agni", "agents"),
     DGCCommand("Trishula Inbox", "Trishula inbox messages", "/trishula", "agents"),
     # Integrations

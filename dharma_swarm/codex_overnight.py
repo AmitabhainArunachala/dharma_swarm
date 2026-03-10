@@ -91,6 +91,22 @@ def _safe_text(text: str, *, limit: int = 1200) -> str:
     return squashed[: limit - 3] + "..."
 
 
+def _coerce_text(value: str | bytes | None) -> str:
+    if value is None:
+        return ""
+    if isinstance(value, bytes):
+        return value.decode("utf-8", errors="ignore")
+    return value
+
+
+def _resolve_cycle_summary(*, output_file: Path, stdout: str) -> str:
+    if output_file.exists():
+        summary_text = output_file.read_text(encoding="utf-8", errors="ignore").strip()
+        if summary_text:
+            return summary_text
+    return stdout.strip()
+
+
 def _read_mission(args: argparse.Namespace) -> str:
     if args.mission_file:
         return Path(args.mission_file).expanduser().read_text(encoding="utf-8").strip()
@@ -318,11 +334,14 @@ def run_cycle(
     timed_out = False
     try:
         proc = run_cmd(cmd, cwd=repo_root, timeout=timeout, input_text=prompt)
-        stdout = (proc.stdout or "") + (proc.stderr or "")
+        stdout = _coerce_text(proc.stdout) + _coerce_text(proc.stderr)
         rc = proc.returncode
     except subprocess.TimeoutExpired as exc:
         timed_out = True
-        stdout = (exc.stdout or "") + (exc.stderr or "")
+        stdout = (
+            _coerce_text(getattr(exc, "stdout", None) or getattr(exc, "output", None))
+            + _coerce_text(exc.stderr)
+        )
         rc = 124
     duration_sec = time.time() - start
 
@@ -330,7 +349,7 @@ def run_cycle(
     if not output_file.exists():
         output_file.write_text("", encoding="utf-8")
 
-    summary_text = output_file.read_text(encoding="utf-8", errors="ignore").strip()
+    summary_text = _resolve_cycle_summary(output_file=output_file, stdout=stdout)
     (run_dir / "latest_last_message.txt").write_text(summary_text + "\n", encoding="utf-8")
 
     after = gather_git_snapshot(repo_root)

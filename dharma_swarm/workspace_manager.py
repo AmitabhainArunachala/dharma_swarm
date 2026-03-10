@@ -160,7 +160,7 @@ class WorkspaceManager:
             await asyncio.to_thread(shutil.copy2, source, dest)
             artifact: ArtifactRecord | None = None
             if self.artifact_store is not None and session_id:
-                stored = self.artifact_store.record_existing_artifact(
+                stored = await self.artifact_store.record_existing_artifact_async(
                     dest,
                     session_id=session_id,
                     artifact_type=artifact_type,
@@ -175,8 +175,6 @@ class WorkspaceManager:
                     },
                 )
                 artifact = stored.record
-                if self.runtime_state is not None:
-                    artifact = await self.artifact_store.record_artifact_async(stored)
             elif self.runtime_state is not None:
                 artifact = await self.runtime_state.record_artifact(
                     ArtifactRecord(

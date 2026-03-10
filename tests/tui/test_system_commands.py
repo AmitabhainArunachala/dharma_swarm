@@ -88,3 +88,17 @@ def test_model_set_and_auto_actions() -> None:
     out, action = handler.handle("model auto banana")
     assert "Usage" in out
     assert action is None
+
+
+def test_darwin_command_routes_to_async_handler() -> None:
+    handler = SystemCommandHandler()
+    out, action = handler.handle("darwin")
+    assert out == ""
+    assert action == "async:darwin:"
+
+
+def test_evolve_status_routes_to_async_handler() -> None:
+    handler = SystemCommandHandler()
+    out, action = handler.handle("evolve status")
+    assert out == ""
+    assert action == "async:evolve:status"
