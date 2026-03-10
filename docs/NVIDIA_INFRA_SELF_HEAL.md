@@ -6,6 +6,15 @@ Note: NVIDIA RAG blueprint services generally require Linux + NVIDIA GPU runtime
 On macOS hosts, self-heal reports `local_nvidia_gpu_runtime_unavailable` and
 you should point DGC to a remote GPU deployment for RAG/ingest endpoints.
 
+## Dormant vs armed mode
+
+Use `DGC_ACCELERATOR_MODE=dormant` when you want unattended loops to ignore the
+accelerator lane entirely instead of repeatedly probing dead localhost endpoints.
+Use `DGC_ACCELERATOR_MODE=enabled` when real local/remote endpoints are ready.
+
+The tmux launchers now auto-load `~/.dharma/env/nvidia_remote.env`, so the
+persisted mode travels with the loop without manual `source` steps.
+
 ## Prerequisites
 
 1. Docker Desktop is running.
@@ -53,7 +62,7 @@ DGC_NVIDIA_INGEST_URL=http://127.0.0.1:8082/v1 \
 DGC_DATA_FLYWHEEL_URL=http://127.0.0.1:8000/api \
 ALLOUT_EXECUTE=1 \
 ALLOUT_ACTIONS_PER_CYCLE=20 \
-python3 scripts/allout_autopilot.py --hours 0.1 --poll-seconds 1 --max-cycles 1
+python3 scripts/strange_loop.py --hours 0.1 --poll-seconds 1 --max-cycles 1
 ```
 
 ## One-shot remote wiring + launch gate
