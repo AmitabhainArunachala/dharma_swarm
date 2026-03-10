@@ -254,6 +254,7 @@ class DarwinEngine:
         self.last_landscape_probe: LandscapeProbe | None = None
         self.last_experiment_memory: ExperimentMemorySnapshot | None = None
         self.landscape_mapper = FitnessLandscapeMapper(self)
+        self._dse_integrator: Any | None = None
         self._initialized: bool = False
 
     def get_fitness_weights(self) -> dict[str, float]:
@@ -332,6 +333,32 @@ class DarwinEngine:
         return self.convergence_detector.get_restart_mutation_rate(
             self._base_mutation_rate
         )
+
+    @staticmethod
+    def _component_key_for_source_file(source_file: Path) -> str:
+        """Derive a stable component key from a concrete source path."""
+        try:
+            return str(source_file.resolve().relative_to(Path.cwd().resolve()))
+        except ValueError:
+            return source_file.name
+
+    def get_contextual_mutation_rate(
+        self,
+        *,
+        component: str | None = None,
+        profile_name: str | None = None,
+    ) -> float:
+        """Return the active mutation rate after experiment-memory biasing."""
+        rate = self.get_active_mutation_rate()
+        snapshot = self.last_experiment_memory
+        if snapshot is None or snapshot.records_considered == 0:
+            return rate
+
+        if component:
+            rate *= snapshot.component_mutation_bias.get(component, 1.0)
+        if profile_name:
+            rate *= snapshot.profile_mutation_bias.get(profile_name, 1.0)
+        return max(0.01, min(1.0, rate))
 
     def register_probe_target(
         self,
@@ -481,9 +508,18 @@ class DarwinEngine:
         proposal.execution_expected_metrics = list(target.expected_metrics)
         proposal.evidence_tier = target.evidence_tier.value
 
-    def get_mutation_budget_lines(self) -> int:
+    def get_mutation_budget_lines(
+        self,
+        *,
+        component: str | None = None,
+        profile_name: str | None = None,
+    ) -> int:
         """Translate mutation rate into an LLM diff-size budget."""
-        return max(12, min(160, round(12 + (self.get_active_mutation_rate() * 160))))
+        mutation_rate = self.get_contextual_mutation_rate(
+            component=component,
+            profile_name=profile_name,
+        )
+        return max(12, min(160, round(12 + (mutation_rate * 160))))
 
     def _current_adaptive_strategy(self) -> str:
         """Return the current landscape-guided mutation mode."""
@@ -525,10 +561,18 @@ class DarwinEngine:
         multiplier = max(0.5, min(1.5, multiplier))
         return base * multiplier
 
-    def _build_propose_system(self) -> str:
+    def _build_propose_system(
+        self,
+        *,
+        component: str | None = None,
+        profile_name: str | None = None,
+    ) -> str:
         """Build the proposal-generation system prompt from live engine state."""
         strategy = self._current_adaptive_strategy()
-        max_lines = self.get_mutation_budget_lines()
+        max_lines = self.get_mutation_budget_lines(
+            component=component,
+            profile_name=profile_name,
+        )
         memory_guidance = ""
         if (
             self.last_experiment_memory is not None
@@ -538,6 +582,20 @@ class DarwinEngine:
                 f"- {lesson}"
                 for lesson in self.last_experiment_memory.lessons[:3]
             ) + "\n"
+        if (
+            component
+            and self.last_experiment_memory is not None
+            and self.last_experiment_memory.records_considered > 0
+        ):
+            component_guidance = self._component_memory_guidance(
+                component=component,
+                profile_name=profile_name,
+            )
+            if component_guidance:
+                memory_guidance += "Target-specific guidance:\n" + "\n".join(
+                    f"- {line}"
+                    for line in component_guidance
+                ) + "\n"
         strategy_guidance = {
             "exploit": "Bias toward small, local improvements near the current implementation.",
             "explore": "Allow broader alternatives while staying coherent and file-local.",
@@ -566,6 +624,69 @@ class DarwinEngine:
             "- The diff must be a valid unified diff (--- a/file, +++ b/file, @@ hunks)\n"
             "- If the code is already good, say DESCRIPTION: no-op and leave DIFF empty"
         )
+
+    def _component_memory_guidance(
+        self,
+        *,
+        component: str,
+        profile_name: str | None = None,
+    ) -> list[str]:
+        """Return bounded, human-readable mutation guidance for a target component."""
+        snapshot = self.last_experiment_memory
+        if snapshot is None or snapshot.records_considered == 0:
+            return []
+
+        guidance: list[str] = []
+        component_bias = snapshot.component_mutation_bias.get(component)
+        if component in snapshot.caution_components:
+            guidance.append(
+                f"{component} has been fragile recently; prefer smaller, reversible edits."
+            )
+        if component_bias is not None and component_bias < 0.95:
+            guidance.append(
+                f"Lower mutation pressure on {component} (bias {component_bias:.2f}) until failures stop repeating."
+            )
+        if profile_name:
+            profile_bias = snapshot.profile_mutation_bias.get(profile_name)
+            if profile_bias is not None and profile_bias > 1.05:
+                guidance.append(
+                    f"Profile {profile_name} has been validating well; moderate exploration is acceptable."
+                )
+        guidance.extend(snapshot.avoidance_hints[:2])
+        return guidance[:3]
+
+    @staticmethod
+    def _compact_reason(reason: str | None) -> str:
+        """Compress a failure reason into a stable, human-readable signature token."""
+        normalized = re.sub(r"\s+", " ", (reason or "").strip().lower())
+        normalized = re.sub(r"[^a-z0-9._ -]", "", normalized)
+        if not normalized:
+            return "unknown"
+        words = normalized.split()[:6]
+        compact = " ".join(words).strip()
+        return compact[:60] or "unknown"
+
+    def _derive_experiment_failure(
+        self,
+        proposal: Proposal,
+        test_results: dict[str, Any],
+        weighted_fitness: float,
+    ) -> tuple[str | None, str | None]:
+        """Classify a Darwin experiment failure into bounded categories."""
+        if proposal.gate_decision == GateDecision.BLOCK.value:
+            reason = self._compact_reason(proposal.gate_reason)
+            return ("gate_block", f"gate_block:{reason}")
+        if test_results.get("rolled_back"):
+            return ("rollback", "rollback:apply_or_test")
+        exit_code = test_results.get("exit_code")
+        if exit_code not in (None, 0):
+            return ("test_failure", f"test_failure:exit_{int(exit_code)}")
+        pass_rate = float(test_results.get("pass_rate", 0.0))
+        if pass_rate < 1.0:
+            return ("test_failure", "test_failure:pass_rate_drop")
+        if weighted_fitness < 0.35:
+            return ("low_fitness", "low_fitness:weak_total_score")
+        return (None, None)
 
     async def _update_cycle_dynamics(self, result: CycleResult) -> None:
         """Update convergence/UCB state after a completed cycle."""
@@ -620,6 +741,53 @@ class DarwinEngine:
                     },
                 )
             )
+
+    async def _emit_coalgebra_observation(
+        self,
+        result: CycleResult,
+        proposals: list[Proposal],
+        new_entries: list[ArchiveEntry],
+    ) -> None:
+        """Emit a self-observed evolution observation after each cycle.
+
+        Delegates to the DSE integrator which:
+        1. Wraps the cycle in the self-observation monad
+        2. Publishes discoveries to the sheaf coordination layer
+        3. Every N cycles, runs Čech cohomology (H⁰ = global truths,
+           H¹ = productive disagreements backed by Anekanta)
+        4. Feeds coordination results back as engine context
+
+        Fire-and-forget — failures never break the core pipeline.
+        """
+        try:
+            if self._dse_integrator is None:
+                from dharma_swarm.dse_integration import DSEIntegrator
+                self._dse_integrator = DSEIntegrator(
+                    archive_path=self.archive.path.parent,
+                    coordination_interval=5,
+                )
+
+            snapshot = await self._dse_integrator.after_cycle(
+                result,
+                proposals,
+                new_entries,
+            )
+
+            if snapshot is not None:
+                self.last_coordination_summary = (
+                    self._dse_integrator.get_coordination_context()
+                )
+                logger.info(
+                    "DSE coordination: H⁰=%d truths, H¹=%d disagreements, "
+                    "coherent=%s, rv_trend=%s, fixed_point=%s",
+                    snapshot.global_truths,
+                    snapshot.productive_disagreements,
+                    snapshot.is_globally_coherent,
+                    f"{snapshot.rv_trend:.4f}" if snapshot.rv_trend is not None else "n/a",
+                    snapshot.approaching_fixed_point,
+                )
+        except Exception as exc:
+            logger.debug("DSE observation emission failed: %s", exc)
 
     async def _refresh_landscape_guidance(self, result: CycleResult) -> None:
         """Probe the archive landscape periodically and adjust mutation strategy."""
@@ -1128,6 +1296,11 @@ class DarwinEngine:
                     "expected_metrics": list(proposal.execution_expected_metrics),
                 },
             )
+            failure_class, failure_signature = self._derive_experiment_failure(
+                proposal,
+                test_results,
+                weighted_fitness,
+            )
 
             entry = ArchiveEntry(
                 component=proposal.component,
@@ -1180,6 +1353,8 @@ class DarwinEngine:
                 pass_rate=float(test_results.get("pass_rate", 0.0)),
                 weighted_fitness=weighted_fitness,
                 outcome=proposal.status.value,
+                failure_class=failure_class,
+                failure_signature=failure_signature,
                 test_results=test_results,
                 fitness=fitness,
                 agent_id=entry.agent_id,
@@ -1245,6 +1420,7 @@ class DarwinEngine:
             plan_id=plan.id,
         )
         best_fitness = 0.0
+        new_entries: list[ArchiveEntry] = []
         proposal_by_id = {p.id: p for p in proposals}
         failure_streaks: dict[str, int] = defaultdict(int)
 
@@ -1278,8 +1454,11 @@ class DarwinEngine:
             result.proposals_tested += 1
 
             # Archive
-            await self.archive_result(proposal)
+            entry_id = await self.archive_result(proposal)
             result.proposals_archived += 1
+            archived_entry = await self.archive.get_entry(entry_id)
+            if archived_entry is not None:
+                new_entries.append(archived_entry)
 
             # Track best
             if proposal.actual_fitness:
@@ -1307,6 +1486,7 @@ class DarwinEngine:
         # Verbal self-reflection (Reflexion pattern)
         await self.reflect_on_cycle(result, proposals)
         await self._maybe_run_meta_evolution(result)
+        await self._emit_coalgebra_observation(result, proposals, new_entries)
 
         return result
 
@@ -1497,6 +1677,7 @@ class DarwinEngine:
             plan_id=plan.id,
         )
         best_fitness = 0.0
+        new_entries: list[ArchiveEntry] = []
         proposal_by_id = {p.id: p for p in proposals}
         failure_streaks: dict[str, int] = defaultdict(int)
 
@@ -1551,8 +1732,11 @@ class DarwinEngine:
             result.proposals_tested += 1
 
             # Archive
-            await self.archive_result(proposal)
+            entry_id = await self.archive_result(proposal)
             result.proposals_archived += 1
+            archived_entry = await self.archive.get_entry(entry_id)
+            if archived_entry is not None:
+                new_entries.append(archived_entry)
 
             # Track best
             if proposal.actual_fitness:
@@ -1580,6 +1764,7 @@ class DarwinEngine:
         # Verbal self-reflection (Reflexion pattern)
         await self.reflect_on_cycle(result, proposals)
         await self._maybe_run_meta_evolution(result)
+        await self._emit_coalgebra_observation(result, proposals, new_entries)
 
         return result
 
@@ -1866,14 +2051,32 @@ class DarwinEngine:
         if len(source) > 15_000:
             source = source[:15_000] + "\n# ... truncated ..."
 
+        component_key = self._component_key_for_source_file(source_file)
+        target = self.resolve_execution_target(
+            component_key,
+            fallback_test_command=None,
+            fallback_timeout=None,
+            fallback_workspace=None,
+            fallback_evidence_tier=EvidenceTier.UNVALIDATED,
+            fallback_profile_name="llm_default",
+            fallback_expected_metrics=[],
+            fallback_rollback_policy="discard",
+        )
         strategy = self._current_adaptive_strategy()
-        mutation_rate = self.get_active_mutation_rate()
-        mutation_budget = self.get_mutation_budget_lines()
+        mutation_rate = self.get_contextual_mutation_rate(
+            component=component_key,
+            profile_name=target.profile_name,
+        )
+        mutation_budget = self.get_mutation_budget_lines(
+            component=component_key,
+            profile_name=target.profile_name,
+        )
         user_msg = (
             "## Mutation Envelope\n"
             f"- mutation_rate: {mutation_rate:.3f}\n"
             f"- diff_budget_lines: {mutation_budget}\n"
-            f"- adaptive_strategy: {strategy}\n\n"
+            f"- adaptive_strategy: {strategy}\n"
+            f"- execution_profile: {target.profile_name}\n\n"
             f"## File: {source_file.name}\n\n```python\n{source}\n```"
         )
         if context:
@@ -1882,7 +2085,10 @@ class DarwinEngine:
         request = LLMRequest(
             model=model,
             messages=[{"role": "user", "content": user_msg}],
-            system=self._build_propose_system(),
+            system=self._build_propose_system(
+                component=component_key,
+                profile_name=target.profile_name,
+            ),
             max_tokens=2048,
             temperature=min(1.0, max(0.3, 0.4 + mutation_rate)),
         )
@@ -1921,6 +2127,7 @@ class DarwinEngine:
                 metadata={
                     "proposal_id": proposal.id,
                     "source_file": str(source_file),
+                    "execution_profile": target.profile_name,
                     "model": model,
                     "description": desc[:200],
                     "diff_lines": len(diff.splitlines()),

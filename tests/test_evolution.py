@@ -343,6 +343,83 @@ async def test_generate_proposal_includes_experiment_memory_guidance(
     assert "Profile pkg_profile is strongest recently" in provider.request.system
 
 
+async def test_generate_proposal_uses_component_specific_mutation_guidance(
+    engine_paths,
+    tmp_path,
+):
+    class DummyProvider:
+        def __init__(self):
+            self.request = None
+
+        async def complete(self, request):
+            self.request = request
+            return LLMResponse(
+                content=(
+                    "COMPONENT: sample.py\n"
+                    "CHANGE_TYPE: mutation\n"
+                    "DESCRIPTION: tighten error handling\n"
+                    "THINK: keep the change small and reversible.\n"
+                    "DIFF:\n"
+                    "```diff\n"
+                    "--- a/sample.py\n"
+                    "+++ b/sample.py\n"
+                    "@@\n"
+                    "-    return value\n"
+                    "+    return value or 0\n"
+                    "```\n"
+                ),
+                model=request.model,
+            )
+
+    eng = DarwinEngine(**engine_paths, mutation_rate=0.4)
+    await eng.init()
+    await eng.experiment_log.append(
+        ExperimentRecord(
+            component="sample.py",
+            execution_profile="llm_default",
+            promotion_state="candidate",
+            evidence_tier="local",
+            pass_rate=0.0,
+            weighted_fitness=0.1,
+            failure_class="rollback",
+            failure_signature="rollback:apply_or_test",
+        )
+    )
+    await eng.experiment_log.append(
+        ExperimentRecord(
+            component="sample.py",
+            execution_profile="llm_default",
+            promotion_state="candidate",
+            evidence_tier="local",
+            pass_rate=0.0,
+            weighted_fitness=0.1,
+            failure_class="rollback",
+            failure_signature="rollback:apply_or_test",
+        )
+    )
+    await eng.refresh_experiment_memory()
+    source_file = tmp_path / "sample.py"
+    source_file.write_text("def sample(value):\n    return value\n", encoding="utf-8")
+    provider = DummyProvider()
+
+    proposal = await eng.generate_proposal(provider, source_file=source_file)
+
+    assert proposal is not None
+    assert provider.request is not None
+    expected_rate = eng.get_contextual_mutation_rate(
+        component="sample.py",
+        profile_name="llm_default",
+    )
+    expected_budget = eng.get_mutation_budget_lines(
+        component="sample.py",
+        profile_name="llm_default",
+    )
+    assert f"mutation_rate: {expected_rate:.3f}" in provider.request.messages[0]["content"]
+    assert f"under {expected_budget} changed lines" in provider.request.system
+    assert "Target-specific guidance:" in provider.request.system
+    assert "Avoid repeating rollback / apply_or_test" in provider.request.system
+
+
 # ---------------------------------------------------------------------------
 # DarwinEngine -- propose
 # ---------------------------------------------------------------------------
@@ -1352,6 +1429,21 @@ async def test_archive_result_persists_traceability(engine):
     assert stored is not None
     assert stored.spec_ref == "specs/demo.md#REQ-9"
     assert stored.requirement_refs == ["REQ-9", "REQ-9.2"]
+
+
+async def test_archive_result_records_failure_classification(engine_paths):
+    eng = DarwinEngine(**engine_paths)
+    await eng.init()
+    proposal = _safe_proposal(component="fragile.py")
+    await eng.gate_check(proposal)
+    await eng.evaluate(proposal, test_results={"pass_rate": 0.2, "exit_code": 1})
+
+    await eng.archive_result(proposal)
+    recent = await eng.experiment_log.get_recent(limit=1)
+
+    assert recent
+    assert recent[0].failure_class == "test_failure"
+    assert recent[0].failure_signature == "test_failure:exit_1"
 
 
 async def test_proposal_status_transitions(engine):

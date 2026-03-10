@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 from datetime import datetime, timezone
 
 from dharma_swarm.monad import (
@@ -200,3 +201,59 @@ def test_is_idempotent_false_when_nested_readings_diverge() -> None:
     )
 
     assert is_idempotent(outer) is False
+
+
+def test_observed_state_dict_roundtrip_is_json_safe() -> None:
+    observed = ObservedState(
+        state={"payload": ["alpha", "beta"]},
+        rv_reading=_reading(0.55),
+        introspection={"origin": "unit-test"},
+        observation_depth=1,
+        timestamp=_ts(14),
+    )
+
+    payload = observed.to_dict()
+    restored = ObservedState.from_dict(json.loads(json.dumps(payload)))
+
+    assert payload["rv_reading"]["rv"] == 0.55
+    assert restored == observed
+
+
+def test_nested_observed_state_roundtrip_preserves_wrapper_structure() -> None:
+    inner = ObservedState(
+        state={"id": 7},
+        rv_reading=_reading(0.45),
+        introspection={"inner": True},
+        observation_depth=1,
+        timestamp=_ts(15),
+    )
+    outer = ObservedState(
+        state=inner,
+        rv_reading=_reading(0.4),
+        introspection={"outer": True},
+        observation_depth=2,
+        timestamp=_ts(16),
+    )
+
+    payload = outer.to_dict()
+    restored = ObservedState.from_dict(payload)
+
+    assert payload["state"]["__observed_state__"] is True
+    assert restored == outer
+    assert flatten(restored) == flatten(outer)
+
+
+def test_observed_state_roundtrip_supports_custom_payload_codec() -> None:
+    observed = ObservedState(
+        state={3, 1, 2},
+        rv_reading=_reading(0.72),
+        introspection={"codec": "set"},
+        observation_depth=1,
+        timestamp=_ts(17),
+    )
+
+    payload = observed.to_dict(state_serializer=lambda value: sorted(value))
+    restored = ObservedState.from_dict(payload, state_loader=set)
+
+    assert payload["state"] == [1, 2, 3]
+    assert restored == observed

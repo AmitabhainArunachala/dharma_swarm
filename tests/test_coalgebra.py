@@ -260,6 +260,49 @@ async def test_step_wraps_real_darwin_engine_archive(engine_paths, monkeypatch):
     assert "wrapped real engine" in observation.discoveries
 
 
+def test_evolution_observation_roundtrip_preserves_archive_lineage():
+    parent = ArchiveEntry(
+        component="parent.py",
+        change_type="mutation",
+        description="parent state",
+        diff="- root\n+ parent\n",
+        fitness=FitnessScore(correctness=0.9, dharmic_alignment=1.0, safety=1.0),
+        status="applied",
+    )
+    child = ArchiveEntry(
+        component="child.py",
+        change_type="mutation",
+        description="child state",
+        parent_id=parent.id,
+        diff="- parent\n+ child\n",
+        fitness=FitnessScore(correctness=0.6, dharmic_alignment=1.0, safety=1.0),
+        status="applied",
+    )
+    observation = EvolutionObservation(
+        cycle_id="cycle-serialize",
+        next_state=child,
+        fitness=child.fitness,
+        rv=_reading(0.6),
+        discoveries=["preserve parent linkage"],
+        archive_entry_id=child.id,
+        proposal_ids=["proposal-1"],
+        cycle_result=CycleResult(
+            cycle_id="cycle-serialize",
+            proposals_submitted=1,
+            proposals_archived=1,
+            best_fitness=0.6,
+        ),
+    )
+
+    restored = EvolutionObservation.from_dict(observation.to_dict())
+
+    assert isinstance(restored.next_state, ArchiveEntry)
+    assert restored.next_state.parent_id == parent.id
+    assert restored.archive_entry_id == child.id
+    assert restored.cycle_result.cycle_id == "cycle-serialize"
+    assert restored.rv == _reading(0.6)
+
+
 async def test_distributive_law_wraps_observation_with_introspection(tmp_path):
     engine = FakeDarwinEngine(
         tmp_path / "archive.jsonl",

@@ -38,6 +38,8 @@ class ExperimentRecord(BaseModel):
     pass_rate: float = 0.0
     weighted_fitness: float = 0.0
     outcome: str = "archived"
+    failure_class: str | None = None
+    failure_signature: str | None = None
     test_results: dict[str, Any] = Field(default_factory=dict)
     fitness: FitnessScore = Field(default_factory=FitnessScore)
     agent_id: str = ""

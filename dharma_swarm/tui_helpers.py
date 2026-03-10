@@ -22,6 +22,31 @@ def _read_json(path: Path) -> dict | None:
         return None
 
 
+def _load_jsonl_tail(path: Path, *, limit: int) -> list[dict]:
+    """Load up to *limit* JSONL objects from the tail of *path*."""
+    if not path.exists():
+        return []
+    try:
+        text = path.read_text().strip()
+    except Exception:
+        return []
+    if not text:
+        return []
+
+    rows: list[dict] = []
+    for line in text.split("\n")[-limit:]:
+        line = line.strip()
+        if not line:
+            continue
+        try:
+            data = json.loads(line)
+        except Exception:
+            continue
+        if isinstance(data, dict):
+            rows.append(data)
+    return rows
+
+
 def build_status_text() -> str:
     """Build the system status panel text (Rich markup).
 
@@ -91,5 +116,103 @@ def build_status_text() -> str:
             if eco:
                 alive = sum(1 for v in eco.values() if v.get("exists"))
                 lines.append(f"  Ecosystem: {alive}/{len(eco)} alive")
+
+    return "\n".join(lines)
+
+
+def build_darwin_status_text(
+    *,
+    limit: int = 20,
+    archive_limit: int = 6,
+) -> str:
+    """Build a high-signal Darwin visibility panel for TUI/CLI surfaces."""
+    from dharma_swarm.archive import FitnessScore
+    from dharma_swarm.experiment_log import ExperimentRecord
+    from dharma_swarm.experiment_memory import ExperimentMemory
+
+    lines: list[str] = ["[bold cyan]--- Darwin Control ---[/bold cyan]"]
+    evo_dir = DHARMA_STATE / "evolution"
+    experiments_path = evo_dir / "experiments.jsonl"
+    archive_path = evo_dir / "archive.jsonl"
+
+    raw_records = _load_jsonl_tail(experiments_path, limit=limit)
+    records: list[ExperimentRecord] = []
+    for row in raw_records:
+        try:
+            if "fitness" in row and isinstance(row["fitness"], dict):
+                row = dict(row)
+                row["fitness"] = FitnessScore(**row["fitness"])
+            records.append(ExperimentRecord.model_validate(row))
+        except Exception:
+            continue
+
+    if records:
+        snapshot = ExperimentMemory().analyze(records)
+        strategy = snapshot.recommended_strategy or "steady"
+        lines.append(
+            "  Recent experiments: "
+            f"{snapshot.records_considered}  "
+            f"avg_fitness={snapshot.avg_weighted_fitness:.2f}  "
+            f"strategy={strategy}  "
+            f"confidence={snapshot.confidence:.2f}"
+        )
+
+        promotion_counts: dict[str, int] = {}
+        for record in records:
+            key = (
+                record.promotion_state.value
+                if hasattr(record.promotion_state, "value")
+                else str(record.promotion_state)
+            )
+            promotion_counts[key] = promotion_counts.get(key, 0) + 1
+        if promotion_counts:
+            ordered = ", ".join(
+                f"{key}={promotion_counts[key]}"
+                for key in sorted(promotion_counts)
+            )
+            lines.append(f"  Promotion ladder: {ordered}")
+
+        if snapshot.failure_classes:
+            failure_summary = ", ".join(
+                f"{name}={count}"
+                for name, count in sorted(
+                    snapshot.failure_classes.items(),
+                    key=lambda item: (-item[1], item[0]),
+                )[:3]
+            )
+            lines.append(f"  Failure classes: {failure_summary}")
+
+        if snapshot.caution_components:
+            lines.append(
+                "  Fragile components: "
+                + ", ".join(snapshot.caution_components[:3])
+            )
+
+        if snapshot.avoidance_hints:
+            lines.append("  [cyan]Avoidance hints[/cyan]")
+            for hint in snapshot.avoidance_hints[:3]:
+                lines.append(f"    - {hint}")
+    else:
+        lines.append("  [dim]No Darwin experiment history found.[/dim]")
+
+    raw_entries = _load_jsonl_tail(archive_path, limit=archive_limit)
+    if raw_entries:
+        lines.append("  [cyan]Recent archived mutations[/cyan]")
+        for entry in raw_entries[-archive_limit:]:
+            fitness_payload = entry.get("fitness", {})
+            try:
+                weighted = FitnessScore(**fitness_payload).weighted()
+            except Exception:
+                weighted = 0.0
+            lines.append(
+                "    "
+                f"{str(entry.get('id', '?'))[:8]}  "
+                f"{entry.get('component', '?')}  "
+                f"{entry.get('promotion_state', 'candidate')}  "
+                f"{entry.get('execution_profile', 'default')}  "
+                f"fit={weighted:.2f}"
+            )
+    elif not records:
+        lines.append("  [dim]No Darwin archive found.[/dim]")
 
     return "\n".join(lines)

@@ -20,6 +20,23 @@ V = TypeVar("V")
 
 Observer = Callable[[T], RVReading | None]
 KleisliMorphism = Callable[[T], "ObservedState[U]"]
+_OBSERVED_STATE_MARKER = "__observed_state__"
+
+
+def _identity(value: Any) -> Any:
+    return value
+
+
+def _is_observed_payload(value: Any) -> bool:
+    return isinstance(value, Mapping) and value.get(_OBSERVED_STATE_MARKER) is True
+
+
+def _coerce_timestamp(value: Any) -> datetime:
+    if isinstance(value, datetime):
+        return value
+    if value is None:
+        return _utc_now()
+    return datetime.fromisoformat(str(value))
 
 
 @dataclass(slots=True)
@@ -39,6 +56,52 @@ class ObservedState(Generic[T]):
             self.rv_reading is None
             and not self.introspection
             and self.observation_depth == 0
+        )
+
+    def to_dict(
+        self,
+        *,
+        state_serializer: Callable[[T], Any] | None = None,
+    ) -> dict[str, Any]:
+        """Return a JSON-friendly representation of the observed payload."""
+        serialize = state_serializer or _identity
+        state: Any
+        if isinstance(self.state, ObservedState):
+            state = self.state.to_dict(state_serializer=state_serializer)
+        else:
+            state = serialize(self.state)
+        return {
+            _OBSERVED_STATE_MARKER: True,
+            "state": state,
+            "rv_reading": (
+                None if self.rv_reading is None else self.rv_reading.model_dump(mode="json")
+            ),
+            "introspection": dict(self.introspection),
+            "observation_depth": self.observation_depth,
+            "timestamp": self.timestamp.isoformat(),
+        }
+
+    @classmethod
+    def from_dict(
+        cls,
+        data: Mapping[str, Any],
+        *,
+        state_loader: Callable[[Any], T] | None = None,
+    ) -> "ObservedState[T]":
+        """Rebuild an observed payload from ``to_dict`` output."""
+        load = state_loader or _identity
+        raw_state = data.get("state")
+        if _is_observed_payload(raw_state):
+            state = cls.from_dict(raw_state, state_loader=state_loader)
+        else:
+            state = load(raw_state)
+        raw_rv = data.get("rv_reading")
+        return cls(
+            state=state,
+            rv_reading=None if raw_rv is None else RVReading.model_validate(raw_rv),
+            introspection=dict(data.get("introspection", {})),
+            observation_depth=int(data.get("observation_depth", 0)),
+            timestamp=_coerce_timestamp(data.get("timestamp")),
         )
 
 

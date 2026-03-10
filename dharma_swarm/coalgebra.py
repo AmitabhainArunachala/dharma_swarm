@@ -22,6 +22,8 @@ DiscoveriesExtractor = Callable[
     [CycleResult, list[ArchiveEntry], list[Proposal]],
     list[str],
 ]
+ObservationScorer = Callable[[ArchiveEntry], float]
+NextState = ArchiveEntry | Proposal | dict[str, Any] | None
 
 
 class DarwinLike(Protocol):
@@ -40,13 +42,51 @@ class EvolutionObservation(BaseModel):
     """Observable output of one evolution step."""
 
     cycle_id: str = ""
-    next_state: ArchiveEntry | dict[str, Any] | None = None
+    next_state: NextState = None
     fitness: FitnessScore = Field(default_factory=FitnessScore)
     rv: RVReading | None = None
     discoveries: list[str] = Field(default_factory=list)
     archive_entry_id: str | None = None
     proposal_ids: list[str] = Field(default_factory=list)
     cycle_result: CycleResult = Field(default_factory=CycleResult)
+
+    def to_dict(self) -> dict[str, Any]:
+        """Return a JSON-friendly representation of the observation."""
+        return {
+            "cycle_id": self.cycle_id,
+            "next_state": _serialize_next_state(self.next_state),
+            "fitness": self.fitness.model_dump(mode="json"),
+            "rv": None if self.rv is None else self.rv.model_dump(mode="json"),
+            "discoveries": list(self.discoveries),
+            "archive_entry_id": self.archive_entry_id,
+            "proposal_ids": list(self.proposal_ids),
+            "cycle_result": self.cycle_result.model_dump(mode="json"),
+        }
+
+    @classmethod
+    def from_dict(cls, data: Mapping[str, Any]) -> "EvolutionObservation":
+        """Rebuild an observation from ``to_dict`` output."""
+        raw_fitness = data.get("fitness")
+        raw_cycle_result = data.get("cycle_result")
+        raw_rv = data.get("rv")
+        return cls(
+            cycle_id=str(data.get("cycle_id", "")),
+            next_state=_deserialize_next_state(data.get("next_state")),
+            fitness=(
+                FitnessScore()
+                if raw_fitness is None
+                else FitnessScore.model_validate(raw_fitness)
+            ),
+            rv=None if raw_rv is None else RVReading.model_validate(raw_rv),
+            discoveries=list(data.get("discoveries", [])),
+            archive_entry_id=data.get("archive_entry_id"),
+            proposal_ids=list(data.get("proposal_ids", [])),
+            cycle_result=(
+                CycleResult()
+                if raw_cycle_result is None
+                else CycleResult.model_validate(raw_cycle_result)
+            ),
+        )
 
 
 ObservationIntrospectionBuilder = Callable[[EvolutionObservation], Mapping[str, Any]]
@@ -77,6 +117,107 @@ def _clone_batches(
     return cloned
 
 
+def _serialize_next_state(next_state: NextState) -> dict[str, Any] | None:
+    if next_state is None:
+        return None
+    if isinstance(next_state, ArchiveEntry):
+        return {
+            "kind": "archive_entry",
+            "value": next_state.model_dump(mode="json"),
+        }
+    if isinstance(next_state, Proposal):
+        return {
+            "kind": "proposal",
+            "value": next_state.model_dump(mode="json"),
+        }
+    if isinstance(next_state, Mapping):
+        return {
+            "kind": "mapping",
+            "value": dict(next_state),
+        }
+    raise TypeError(f"Unsupported evolution next_state: {type(next_state)!r}")
+
+
+def _deserialize_next_state(data: Any) -> NextState:
+    if data is None:
+        return None
+    if not isinstance(data, Mapping):
+        raise TypeError(f"Serialized next_state must be a mapping, got {type(data)!r}")
+    kind = data.get("kind")
+    if kind is None:
+        return dict(data)
+    value = data.get("value")
+    if kind == "archive_entry":
+        return ArchiveEntry.model_validate(value or {})
+    if kind == "proposal":
+        return Proposal.model_validate(value or {})
+    if kind == "mapping":
+        return dict(value or {})
+    raise ValueError(f"Unknown serialized next_state kind: {kind}")
+
+
+def _default_discoveries(
+    result: CycleResult,
+    entries: list[ArchiveEntry],
+    proposals: list[Proposal],
+) -> list[str]:
+    return _dedupe_preserve_order(
+        [
+            *result.lessons_learned,
+            *(entry.description for entry in entries),
+            *(proposal.description for proposal in proposals),
+        ]
+    )
+
+
+def _select_next_state(
+    result: CycleResult,
+    entries: Sequence[ArchiveEntry],
+    *,
+    score_entry: ObservationScorer,
+) -> ArchiveEntry | dict[str, Any]:
+    if entries:
+        return max(entries, key=score_entry)
+    return {
+        "kind": "empty_cycle",
+        "cycle_id": result.cycle_id,
+        "proposals_submitted": result.proposals_submitted,
+        "proposals_archived": result.proposals_archived,
+    }
+
+
+def build_evolution_observation(
+    result: CycleResult,
+    entries: Sequence[ArchiveEntry],
+    proposals: Sequence[Proposal],
+    *,
+    score_entry: ObservationScorer | None = None,
+    rv_observer: RVObserver | None = None,
+    discoveries_extractor: DiscoveriesExtractor | None = None,
+) -> EvolutionObservation:
+    """Construct a typed observation from one completed evolution cycle."""
+    captured_entries = [entry.model_copy(deep=True) for entry in entries]
+    captured_proposals = [proposal.model_copy(deep=True) for proposal in proposals]
+    scorer = score_entry or (lambda entry: float(entry.fitness.weighted()))
+    next_state = _select_next_state(result, captured_entries, score_entry=scorer)
+    selected_entry = next_state if isinstance(next_state, ArchiveEntry) else None
+    extractor = discoveries_extractor or _default_discoveries
+    return EvolutionObservation(
+        cycle_id=result.cycle_id,
+        next_state=next_state,
+        fitness=selected_entry.fitness if selected_entry else FitnessScore(),
+        rv=(
+            rv_observer(result, captured_entries, captured_proposals)
+            if rv_observer is not None
+            else None
+        ),
+        discoveries=extractor(result, captured_entries, captured_proposals),
+        archive_entry_id=selected_entry.id if selected_entry else None,
+        proposal_ids=[proposal.id for proposal in captured_proposals],
+        cycle_result=result.model_copy(deep=True),
+    )
+
+
 def normalize_observation(observation: EvolutionObservation) -> dict[str, Any]:
     """Project an observation into a behavior-only comparison shape."""
     next_state = observation.next_state
@@ -87,6 +228,14 @@ def normalize_observation(observation: EvolutionObservation) -> dict[str, Any]:
             "description": next_state.description,
             "status": next_state.status,
             "parent_id": next_state.parent_id,
+        }
+    elif isinstance(next_state, Proposal):
+        normalized_state = {
+            "component": next_state.component,
+            "change_type": next_state.change_type,
+            "description": next_state.description,
+            "parent_id": next_state.parent_id,
+            "status": next_state.status.value,
         }
     else:
         normalized_state = next_state
@@ -167,34 +316,18 @@ class EvolutionCoalgebra:
         result: CycleResult,
         entries: list[ArchiveEntry],
     ) -> ArchiveEntry | dict[str, Any]:
-        if entries:
-            return max(entries, key=self._score_entry)
-        return {
-            "kind": "empty_cycle",
-            "cycle_id": result.cycle_id,
-            "proposals_submitted": result.proposals_submitted,
-            "proposals_archived": result.proposals_archived,
-        }
+        return _select_next_state(result, entries, score_entry=self._score_entry)
 
     async def step(self, proposals: Sequence[Proposal]) -> EvolutionObservation:
         batch = [proposal.model_copy(deep=True) for proposal in proposals]
         result, new_entries = await self._capture_new_entries(batch)
-        next_state = self._select_next_state(result, new_entries)
-        selected_entry = next_state if isinstance(next_state, ArchiveEntry) else None
-        rv = (
-            self._rv_observer(result, new_entries, batch)
-            if self._rv_observer is not None
-            else None
-        )
-        return EvolutionObservation(
-            cycle_id=result.cycle_id,
-            next_state=next_state,
-            fitness=selected_entry.fitness if selected_entry else FitnessScore(),
-            rv=rv,
-            discoveries=self._discoveries_extractor(result, new_entries, batch),
-            archive_entry_id=selected_entry.id if selected_entry else None,
-            proposal_ids=[proposal.id for proposal in batch],
-            cycle_result=result,
+        return build_evolution_observation(
+            result,
+            new_entries,
+            batch,
+            score_entry=self._score_entry,
+            rv_observer=self._rv_observer,
+            discoveries_extractor=self._discoveries_extractor,
         )
 
     async def trajectory(
@@ -299,6 +432,7 @@ __all__ = [
     "EvolutionCoalgebra",
     "EvolutionObservation",
     "ObservationIntrospectionBuilder",
+    "build_evolution_observation",
     "RVObserver",
     "SelfObservedEvolution",
     "bisimilar",
