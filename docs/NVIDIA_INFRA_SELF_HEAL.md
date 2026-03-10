@@ -62,7 +62,7 @@ DGC_NVIDIA_INGEST_URL=http://127.0.0.1:8082/v1 \
 DGC_DATA_FLYWHEEL_URL=http://127.0.0.1:8000/api \
 ALLOUT_EXECUTE=1 \
 ALLOUT_ACTIONS_PER_CYCLE=20 \
-python3 scripts/strange_loop.py --hours 0.1 --poll-seconds 1 --max-cycles 1
+python3 scripts/thinkodynamic_director.py --hours 0.1 --poll-seconds 1 --max-cycles 1
 ```
 
 ## One-shot remote wiring + launch gate

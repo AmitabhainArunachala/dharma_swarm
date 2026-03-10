@@ -9,9 +9,44 @@ USE_CAFFEINATE="${USE_CAFFEINATE:-1}"
 CONTINUE_AFTER_4AM="${CONTINUE_AFTER_4AM:-0}"
 AUTONOMY_PROFILE="${AUTONOMY_PROFILE:-workspace_auto}"
 MISSION_PROFILE="${MISSION_PROFILE:-${AUTONOMY_PROFILE}}"
-RAG_URL="${DGC_NVIDIA_RAG_URL:-http://127.0.0.1:8081/v1}"
-INGEST_URL="${DGC_NVIDIA_INGEST_URL:-http://127.0.0.1:8082/v1}"
-FLYWHEEL_URL="${DGC_DATA_FLYWHEEL_URL:-http://127.0.0.1:8000/api}"
+NVIDIA_ENV_FILE="${DGC_NVIDIA_ENV_FILE:-${HOME}/.dharma/env/nvidia_remote.env}"
+
+if [[ -f "${NVIDIA_ENV_FILE}" ]]; then
+  incoming_rag="${DGC_NVIDIA_RAG_URL-}"
+  incoming_ingest="${DGC_NVIDIA_INGEST_URL-}"
+  incoming_flywheel="${DGC_DATA_FLYWHEEL_URL-}"
+  incoming_nim_key="${NVIDIA_NIM_API_KEY-}"
+  incoming_flywheel_key="${DGC_DATA_FLYWHEEL_API_KEY-}"
+  incoming_autonomy="${AUTONOMY_PROFILE-}"
+  incoming_mission="${MISSION_PROFILE-}"
+  # shellcheck disable=SC1090
+  source "${NVIDIA_ENV_FILE}"
+  [[ -n "${incoming_rag}" ]] && DGC_NVIDIA_RAG_URL="${incoming_rag}"
+  [[ -n "${incoming_ingest}" ]] && DGC_NVIDIA_INGEST_URL="${incoming_ingest}"
+  [[ -n "${incoming_flywheel}" ]] && DGC_DATA_FLYWHEEL_URL="${incoming_flywheel}"
+  [[ -n "${incoming_nim_key}" ]] && NVIDIA_NIM_API_KEY="${incoming_nim_key}"
+  [[ -n "${incoming_flywheel_key}" ]] && DGC_DATA_FLYWHEEL_API_KEY="${incoming_flywheel_key}"
+  [[ -n "${incoming_autonomy}" ]] && AUTONOMY_PROFILE="${incoming_autonomy}"
+  [[ -n "${incoming_mission}" ]] && MISSION_PROFILE="${incoming_mission}"
+fi
+
+ACCEL_MODE="${DGC_ACCELERATOR_MODE:-}"
+if [[ -z "${ACCEL_MODE}" ]]; then
+  if [[ -n "${DGC_NVIDIA_RAG_URL:-}" || -n "${DGC_NVIDIA_INGEST_URL:-}" || -n "${DGC_DATA_FLYWHEEL_URL:-}" ]]; then
+    ACCEL_MODE="enabled"
+  else
+    ACCEL_MODE="dormant"
+  fi
+fi
+if [[ "${ACCEL_MODE}" == "0" || "${ACCEL_MODE}" == "off" || "${ACCEL_MODE}" == "disabled" || "${ACCEL_MODE}" == "none" || "${ACCEL_MODE}" == "dormant" ]]; then
+  RAG_URL=""
+  INGEST_URL=""
+  FLYWHEEL_URL=""
+else
+  RAG_URL="${DGC_NVIDIA_RAG_URL:-http://127.0.0.1:8081/v1}"
+  INGEST_URL="${DGC_NVIDIA_INGEST_URL:-http://127.0.0.1:8082/v1}"
+  FLYWHEEL_URL="${DGC_DATA_FLYWHEEL_URL:-http://127.0.0.1:8000/api}"
+fi
 MISSION_PREFLIGHT="${MISSION_PREFLIGHT:-1}"
 MISSION_STRICT_CORE="${MISSION_STRICT_CORE:-1}"
 MISSION_REQUIRE_TRACKED="${MISSION_REQUIRE_TRACKED:-1}"
@@ -62,6 +97,7 @@ tmux_cmd="cd '${ROOT}' && \
 DGC_NVIDIA_RAG_URL='${RAG_URL}' \
 DGC_NVIDIA_INGEST_URL='${INGEST_URL}' \
 DGC_DATA_FLYWHEEL_URL='${FLYWHEEL_URL}' \
+DGC_ACCELERATOR_MODE='${ACCEL_MODE}' \
 DGC_TRUST_MODE='${DGC_TRUST_MODE}' \
 AUTONOMY_PROFILE='${MISSION_PROFILE}' \
 POLL_SECONDS='${POLL_SECONDS}' \
@@ -76,6 +112,7 @@ echo "Use caffeinate: ${USE_CAFFEINATE}"
 echo "Continue after 04:00: ${CONTINUE_AFTER_4AM}"
 echo "Autonomy profile: ${MISSION_PROFILE}"
 echo "Trust mode: ${DGC_TRUST_MODE}"
+echo "Accelerator mode: ${ACCEL_MODE}"
 echo "RAG URL: ${RAG_URL}"
 echo "INGEST URL: ${INGEST_URL}"
 echo "Flywheel URL: ${FLYWHEEL_URL}"

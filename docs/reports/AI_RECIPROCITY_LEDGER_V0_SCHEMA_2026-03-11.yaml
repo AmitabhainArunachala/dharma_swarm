@@ -1,0 +1,154 @@
+version: "0.1"
+name: "AI Reciprocity Ledger"
+purpose: >
+  Minimal claim and evidence schema for linking AI activity, restorative
+  obligations, funding flows, project outcomes, and audit status.
+entities:
+  ai_actor:
+    required:
+      - actor_id
+      - actor_name
+      - actor_type
+      - jurisdiction
+    fields:
+      actor_id: "string"
+      actor_name: "string"
+      actor_type: "lab|enterprise|cloud|research_org|other"
+      jurisdiction: "string"
+      disclosure_level: "none|partial|full"
+  activity_record:
+    required:
+      - activity_id
+      - actor_id
+      - period_start
+      - period_end
+      - exposure_class
+    fields:
+      activity_id: "string"
+      actor_id: "string"
+      workload_label: "string"
+      period_start: "date"
+      period_end: "date"
+      exposure_class: "training|inference|enterprise_ai|automation_program|other"
+      energy_mwh: "number|null"
+      emissions_tco2e: "number|null"
+      labor_transition_risk_class: "low|medium|high|unknown"
+      methodology_ref: "string"
+      confidence: "low|medium|high"
+  obligation_record:
+    required:
+      - obligation_id
+      - activity_id
+      - obligation_type
+      - obligation_basis
+      - status
+    fields:
+      obligation_id: "string"
+      activity_id: "string"
+      obligation_type: "ecology|livelihood|mixed"
+      obligation_basis: "formula|pledge|policy|pilot_rule"
+      obligation_quantity: "number"
+      obligation_unit: "usd|tco2e|points|mixed"
+      status: "proposed|active|fulfilled|disputed|retired"
+  project_record:
+    required:
+      - project_id
+      - project_name
+      - project_type
+      - location
+      - integrity_class
+    fields:
+      project_id: "string"
+      project_name: "string"
+      project_type: "carbon_removal|biodiversity|watershed|methane|resilience|livelihood_transition|mixed"
+      location: "string"
+      operator_name: "string"
+      integrity_class: "experimental|emerging|high_integrity"
+      indigenous_or_local_consent: "yes|no|unknown"
+      methodology_ref: "string"
+  routing_record:
+    required:
+      - routing_id
+      - obligation_id
+      - project_id
+      - routed_value
+      - routed_unit
+    fields:
+      routing_id: "string"
+      obligation_id: "string"
+      project_id: "string"
+      routed_value: "number"
+      routed_unit: "usd|tco2e|points|mixed"
+      routed_at: "datetime"
+      restrictions: "string|null"
+  livelihood_record:
+    required:
+      - livelihood_id
+      - project_id
+      - participant_count
+      - livelihood_mode
+    fields:
+      livelihood_id: "string"
+      project_id: "string"
+      participant_count: "integer"
+      livelihood_mode: "training|cooperative|contract_work|microenterprise|mutual_aid|mixed"
+      median_compensation_local: "number|null"
+      local_ownership_share: "number|null"
+      transition_target_group: "string"
+  evidence_record:
+    required:
+      - evidence_id
+      - subject_type
+      - subject_id
+      - evidence_type
+      - source_ref
+    fields:
+      evidence_id: "string"
+      subject_type: "activity|project|outcome|livelihood|audit"
+      subject_id: "string"
+      evidence_type: "metering|satellite|sensor|ground_audit|financial|survey|policy"
+      source_ref: "string"
+      captured_at: "datetime"
+      verifier: "string|null"
+      confidence: "low|medium|high"
+  outcome_record:
+    required:
+      - outcome_id
+      - project_id
+      - outcome_type
+      - quantity
+      - unit
+      - status
+    fields:
+      outcome_id: "string"
+      project_id: "string"
+      outcome_type: "carbon|biodiversity|watershed|methane|income|training|ownership|other"
+      quantity: "number"
+      unit: "string"
+      measured_at: "datetime"
+      status: "estimated|measured|verified|challenged|reversed"
+  audit_record:
+    required:
+      - audit_id
+      - scope
+      - scope_id
+      - audit_status
+    fields:
+      audit_id: "string"
+      scope: "activity|obligation|project|outcome|ledger_slice"
+      scope_id: "string"
+      audit_status: "pending|passed|qualified|failed|challenged"
+      auditor: "string"
+      issued_at: "datetime"
+      notes_ref: "string|null"
+invariants:
+  - "claimed outcomes must not exceed verified outcomes for the same scope"
+  - "a routing_record must reference an existing obligation_record and project_record"
+  - "projects with integrity_class=experimental cannot be reported as high-integrity claims"
+  - "no ecological claim is public-facing without at least one evidence_record and one audit_record"
+  - "livelihood claims require both participant_count and transition_target_group"
+open_questions:
+  - "how to normalize obligations across ecology and livelihood categories"
+  - "how to represent reversals, clawbacks, and claim retirement"
+  - "how to encode community consent and grievance workflows"
+  - "how to support partial disclosure without destroying auditability"

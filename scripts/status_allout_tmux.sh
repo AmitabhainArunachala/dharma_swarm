@@ -3,7 +3,7 @@ set -euo pipefail
 
 SESSION="${SESSION_NAME:-dgc_allout}"
 LOG_DIR="${HOME}/.dharma/logs/allout"
-HEARTBEAT_FILE="${HOME}/.dharma/allout_heartbeat.json"
+HEARTBEAT_FILE="${HOME}/.dharma/director_heartbeat.json"
 
 if tmux has-session -t "${SESSION}" 2>/dev/null; then
   echo "Session '${SESSION}': RUNNING"
@@ -17,7 +17,7 @@ if [[ -f "${HEARTBEAT_FILE}" ]]; then
   cat "${HEARTBEAT_FILE}"
 fi
 
-LATEST_LOG="$(find "${LOG_DIR}" -name allout.log -type f 2>/dev/null | sort | tail -n1 || true)"
+LATEST_LOG="$(find "${LOG_DIR}" -name director.log -type f 2>/dev/null | sort | tail -n1 || true)"
 if [[ -n "${LATEST_LOG}" ]]; then
   echo
   echo "Latest log: ${LATEST_LOG}"
