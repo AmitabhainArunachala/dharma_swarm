@@ -9,6 +9,7 @@ build/
 .dharma/
 *.db
 .venv/
+.env
 
 # Local runtime state (machine-specific)
 .claude-flow/
