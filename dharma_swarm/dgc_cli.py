@@ -36,7 +36,7 @@ Usage:
   dgc evolve propose COMP DESC  Run evolution pipeline
   dgc evolve trend [--component C]
   dgc rag health|search|chat    NVIDIA RAG integration endpoints
-  dgc flywheel jobs|start|...   NVIDIA Data Flywheel job lifecycle
+  dgc flywheel jobs|export|record|...  NVIDIA Data Flywheel job lifecycle
   dgc run [--interval N]        Run orchestration loop
   dgc setup                     Install dependencies
   dgc migrate                   Migrate old DGC memory
@@ -99,6 +99,20 @@ def _tail(path: Path, lines: int = 60) -> str:
         return "\n".join(text.splitlines()[-lines:])
     except Exception:
         return ""
+
+
+def _accelerator_mode() -> str:
+    configured = any(
+        os.getenv(key, "").strip()
+        for key in ("DGC_NVIDIA_RAG_URL", "DGC_NVIDIA_INGEST_URL", "DGC_DATA_FLYWHEEL_URL")
+    )
+    raw = os.getenv("DGC_ACCELERATOR_MODE", "enabled" if configured else "dormant")
+    mode = raw.strip().lower()
+    return mode or ("enabled" if configured else "dormant")
+
+
+def _accelerators_enabled() -> bool:
+    return _accelerator_mode() not in {"0", "off", "disabled", "none", "dormant"}
 
 
 # ---------------------------------------------------------------------------
@@ -373,6 +387,12 @@ def cmd_mission_status(
     oc = _read_openclaw_summary()
 
     async def _probe_accelerators() -> dict[str, str]:
+        if not _accelerators_enabled():
+            return {
+                "rag_health": "DORMANT",
+                "ingest_health": "DORMANT",
+                "flywheel_jobs": "DORMANT",
+            }
         from dharma_swarm.integrations import DataFlywheelClient, NvidiaRagClient
 
         out: dict[str, str] = {}
@@ -544,6 +564,16 @@ def cmd_canonical_status(*, as_json: bool = False) -> int:
         for warning in topo["warnings"]:
             print(f"  - {warning}")
 
+    merge_summary = topo.get("merge_summary") or {}
+    if merge_summary:
+        print("\nMerge ledger:")
+        bits = []
+        for key in ("snapshot", "branch", "head", "mission_exit", "tracked", "legacy_imported", "predictor_rows"):
+            if merge_summary.get(key):
+                bits.append(f"{key}={merge_summary[key]}")
+        if bits:
+            print(f"  - {' '.join(bits)}")
+
     answer = topo.get("operator_answer", {})
     print("\nOperator answer:")
     print(f"  - Use {answer.get('dgc_code_authority')} as DGC code authority")
@@ -569,9 +599,14 @@ def cmd_context(domain: str = "all") -> None:
 
 
 def cmd_memory() -> None:
-    """Show memory status and recent entries."""
+    """Show memory status, recent entries, and unresolved latent gold."""
     async def _show():
         from dharma_swarm.memory import StrangeLoopMemory
+        from dharma_swarm.context import read_latent_gold_overview
+        from dharma_swarm.routing_memory import (
+            RoutingMemoryStore,
+            default_routing_memory_db_path,
+        )
 
         mem = StrangeLoopMemory(db_path=DHARMA_STATE / "db" / "memory.db")
         await mem.init_db()
@@ -579,11 +614,64 @@ def cmd_memory() -> None:
         await mem.close()
         if not entries:
             print("Memory: empty")
-            return
-        print(f"=== Strange Loop Memory ({len(entries)} recent) ===\n")
-        for e in entries:
-            ts = e.timestamp.isoformat()[:19] if hasattr(e.timestamp, "isoformat") else str(e.timestamp)[:19]
-            print(f"  [{e.layer.value:>11}] {ts}  {e.content[:100]}")
+        else:
+            print(f"=== Strange Loop Memory ({len(entries)} recent) ===\n")
+            for e in entries:
+                ts = e.timestamp.isoformat()[:19] if hasattr(e.timestamp, "isoformat") else str(e.timestamp)[:19]
+                print(f"  [{e.layer.value:>11}] {ts}  {e.content[:100]}")
+
+        latent = read_latent_gold_overview(state_dir=DHARMA_STATE, limit=5)
+        if latent:
+            print("\n=== Latent Gold (unresolved high-salience ideas) ===\n")
+            for line in latent.splitlines():
+                print(line)
+
+        routing_db = default_routing_memory_db_path()
+        if routing_db.exists():
+            routing = RoutingMemoryStore(routing_db)
+            top_routes = routing.top_routes(limit=5)
+            if top_routes:
+                print("\n=== Routing Memory (top learned lanes) ===\n")
+                for lane in top_routes:
+                    print(
+                        "  "
+                        f"{lane.provider.value}:{lane.model} "
+                        f"[{lane.task_signature}] "
+                        f"score={lane.blended_score:.3f} "
+                        f"samples={lane.sample_count}"
+                    )
+
+        retrospective_path = Path(
+            os.environ.get(
+                "DGC_ROUTER_RETROSPECTIVE_LOG",
+                str(DHARMA_STATE / "logs" / "router" / "route_retrospectives.jsonl"),
+            )
+        )
+        if retrospective_path.exists():
+            recent: list[dict[str, Any]] = []
+            for line in retrospective_path.read_text(encoding="utf-8").splitlines()[-5:]:
+                try:
+                    recent.append(json.loads(line))
+                except json.JSONDecodeError:
+                    continue
+            if recent:
+                print("\n=== Route Retrospectives (recent high-confidence misses) ===\n")
+                for item in recent:
+                    record = item.get("route_record") or {}
+                    provider = str(record.get("selected_provider") or "?")
+                    action = str(record.get("action_name") or "?")
+                    quality = record.get("quality_score")
+                    severity = str(item.get("severity") or "review")
+                    quality_text = (
+                        f"{float(quality):.2f}"
+                        if isinstance(quality, (int, float))
+                        else "?"
+                    )
+                    print(
+                        "  "
+                        f"[{severity}] {action} -> {provider} "
+                        f"quality={quality_text}"
+                    )
 
     _run(_show())
 
@@ -1409,6 +1497,178 @@ def cmd_flywheel_jobs() -> None:
     _run(_jobs())
 
 
+async def _flywheel_export_payload(
+    *,
+    run_id: str,
+    workload_id: str,
+    client_id: str,
+    trace_id: str | None = None,
+    db_path: str | None = None,
+    event_log_dir: str | None = None,
+    export_root: str | None = None,
+    data_split_config: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    from dharma_swarm.flywheel_exporter import FlywheelExporter
+    from dharma_swarm.memory_lattice import MemoryLattice
+    from dharma_swarm.runtime_state import RuntimeStateStore
+
+    runtime_state = RuntimeStateStore(Path(db_path) if db_path else None)
+    memory_lattice = MemoryLattice(
+        db_path=runtime_state.db_path,
+        event_log_dir=Path(event_log_dir) if event_log_dir else None,
+    )
+    exporter = FlywheelExporter(
+        runtime_state=runtime_state,
+        memory_lattice=memory_lattice,
+        export_root=Path(export_root) if export_root else None,
+    )
+    try:
+        result = await exporter.export_run(
+            run_id=run_id,
+            workload_id=workload_id,
+            client_id=client_id,
+            trace_id=trace_id,
+            created_by="dgc_cli",
+            data_split_config=data_split_config,
+        )
+    finally:
+        await memory_lattice.close()
+    return {
+        "export_id": result.record.export_id,
+        "artifact_id": result.artifact.artifact_id,
+        "run_id": result.record.run_id,
+        "task_id": result.record.task_id,
+        "session_id": result.record.session_id,
+        "trace_id": result.record.trace_id,
+        "workload_id": result.record.workload_id,
+        "client_id": result.record.client_id,
+        "status": result.record.status,
+        "metrics": dict(result.record.metrics),
+        "job_request": dict(result.record.job_request),
+        "export_path": str(result.export_path),
+        "manifest_path": str(result.manifest_path),
+        "receipt_event_id": str(result.receipt.get("event_id", "")),
+    }
+
+
+def cmd_flywheel_export(
+    *,
+    run_id: str,
+    workload_id: str,
+    client_id: str,
+    trace_id: str | None = None,
+    db_path: str | None = None,
+    event_log_dir: str | None = None,
+    export_root: str | None = None,
+) -> None:
+    """Materialize a local canonical flywheel export artifact."""
+
+    payload = _run(
+        _flywheel_export_payload(
+            run_id=run_id,
+            workload_id=workload_id,
+            client_id=client_id,
+            trace_id=trace_id,
+            db_path=db_path,
+            event_log_dir=event_log_dir,
+            export_root=export_root,
+        )
+    )
+    print(json.dumps(payload, indent=2))
+
+
+async def _flywheel_record_payload(
+    *,
+    job_id: str,
+    workload_id: str | None = None,
+    client_id: str | None = None,
+    run_id: str | None = None,
+    session_id: str | None = None,
+    task_id: str | None = None,
+    trace_id: str | None = None,
+    db_path: str | None = None,
+    event_log_dir: str | None = None,
+    workspace_root: str | None = None,
+    provenance_root: str | None = None,
+) -> dict[str, Any]:
+    from dharma_swarm.evaluation_registry import EvaluationRegistry
+    from dharma_swarm.integrations import DataFlywheelClient
+    from dharma_swarm.memory_lattice import MemoryLattice
+    from dharma_swarm.runtime_state import RuntimeStateStore
+
+    client = DataFlywheelClient()
+    job = await client.get_job(job_id)
+    runtime_state = RuntimeStateStore(Path(db_path) if db_path else None)
+    memory_lattice = MemoryLattice(
+        db_path=runtime_state.db_path,
+        event_log_dir=Path(event_log_dir) if event_log_dir else None,
+    )
+    registry = EvaluationRegistry(
+        runtime_state=runtime_state,
+        memory_lattice=memory_lattice,
+        workspace_root=Path(workspace_root) if workspace_root else None,
+        provenance_root=Path(provenance_root) if provenance_root else None,
+    )
+    try:
+        result = await registry.record_flywheel_job(
+            job,
+            job_id=job_id,
+            workload_id=workload_id,
+            client_id=client_id,
+            run_id=run_id or "",
+            session_id=session_id or "",
+            task_id=task_id or "",
+            trace_id=trace_id,
+            created_by="dgc_cli",
+        )
+    finally:
+        await memory_lattice.close()
+    return {
+        "job": job,
+        "registry": {
+            "artifact_id": result.artifact.artifact_id,
+            "manifest_path": str(result.manifest_path),
+            "summary": dict(result.summary),
+            "fact_ids": [fact.fact_id for fact in result.facts],
+            "receipt_event_id": str(result.receipt.get("event_id", "")),
+        },
+    }
+
+
+def cmd_flywheel_record(
+    *,
+    job_id: str,
+    workload_id: str | None = None,
+    client_id: str | None = None,
+    run_id: str | None = None,
+    session_id: str | None = None,
+    task_id: str | None = None,
+    trace_id: str | None = None,
+    db_path: str | None = None,
+    event_log_dir: str | None = None,
+    workspace_root: str | None = None,
+    provenance_root: str | None = None,
+) -> None:
+    """Record a remote Flywheel job result into canonical DGC truth."""
+
+    payload = _run(
+        _flywheel_record_payload(
+            job_id=job_id,
+            workload_id=workload_id,
+            client_id=client_id,
+            run_id=run_id,
+            session_id=session_id,
+            task_id=task_id,
+            trace_id=trace_id,
+            db_path=db_path,
+            event_log_dir=event_log_dir,
+            workspace_root=workspace_root,
+            provenance_root=provenance_root,
+        )
+    )
+    print(json.dumps(payload, indent=2))
+
+
 def cmd_flywheel_start(
     workload_id: str,
     client_id: str,
@@ -1416,23 +1676,46 @@ def cmd_flywheel_start(
     val_ratio: float,
     min_total_records: int,
     limit: int,
+    run_id: str | None = None,
+    trace_id: str | None = None,
+    db_path: str | None = None,
+    event_log_dir: str | None = None,
+    export_root: str | None = None,
 ) -> None:
     """Start a Data Flywheel job."""
 
     async def _start():
         from dharma_swarm.integrations import DataFlywheelClient
 
+        local_export: dict[str, Any] | None = None
+        data_split_config = {
+            "eval_size": eval_size,
+            "val_ratio": val_ratio,
+            "min_total_records": min_total_records,
+            "limit": limit,
+        }
+        if run_id:
+            local_export = await _flywheel_export_payload(
+                run_id=run_id,
+                workload_id=workload_id,
+                client_id=client_id,
+                trace_id=trace_id,
+                db_path=db_path,
+                event_log_dir=event_log_dir,
+                export_root=export_root,
+                data_split_config=data_split_config,
+            )
         client = DataFlywheelClient()
         payload = await client.create_job(
             workload_id=workload_id,
             client_id=client_id,
-            data_split_config={
-                "eval_size": eval_size,
-                "val_ratio": val_ratio,
-                "min_total_records": min_total_records,
-                "limit": limit,
-            },
+            data_split_config=data_split_config,
         )
+        if local_export is not None:
+            payload = {
+                "local_export": local_export,
+                "job": payload,
+            }
         print(json.dumps(payload, indent=2))
 
     _run(_start())
@@ -1726,12 +2009,16 @@ def _build_chat_context_snapshot() -> str:
         pass
 
     try:
-        from dharma_swarm.context import read_memory_context
+        from dharma_swarm.context import read_latent_gold_overview, read_memory_context
 
         mem = read_memory_context()
         if mem and "No memory" not in mem:
             parts.append("Recent memory:")
             parts.append(mem)
+        latent = read_latent_gold_overview(state_dir=DHARMA_STATE, limit=3)
+        if latent:
+            parts.append("Latent gold:")
+            parts.append(latent)
     except Exception:
         pass
 
@@ -2212,6 +2499,28 @@ def _build_parser() -> argparse.ArgumentParser:
 
     fw_sub.add_parser("jobs", help="List flywheel jobs")
 
+    p_fwe = fw_sub.add_parser("export", help="Build a local canonical flywheel export")
+    p_fwe.add_argument("--run-id", required=True)
+    p_fwe.add_argument("--workload-id", required=True)
+    p_fwe.add_argument("--client-id", required=True)
+    p_fwe.add_argument("--trace-id", default=None)
+    p_fwe.add_argument("--db-path", default=None)
+    p_fwe.add_argument("--event-log-dir", default=None)
+    p_fwe.add_argument("--export-root", default=None)
+
+    p_fwr = fw_sub.add_parser("record", help="Record a flywheel job result into canonical runtime truth")
+    p_fwr.add_argument("job_id")
+    p_fwr.add_argument("--workload-id", default=None)
+    p_fwr.add_argument("--client-id", default=None)
+    p_fwr.add_argument("--run-id", default=None)
+    p_fwr.add_argument("--session-id", default=None)
+    p_fwr.add_argument("--task-id", default=None)
+    p_fwr.add_argument("--trace-id", default=None)
+    p_fwr.add_argument("--db-path", default=None)
+    p_fwr.add_argument("--event-log-dir", default=None)
+    p_fwr.add_argument("--workspace-root", default=None)
+    p_fwr.add_argument("--provenance-root", default=None)
+
     p_fws = fw_sub.add_parser("start", help="Start a flywheel job")
     p_fws.add_argument("--workload-id", required=True)
     p_fws.add_argument("--client-id", required=True)
@@ -2219,6 +2528,11 @@ def _build_parser() -> argparse.ArgumentParser:
     p_fws.add_argument("--val-ratio", type=float, default=0.1)
     p_fws.add_argument("--min-total-records", type=int, default=50)
     p_fws.add_argument("--limit", type=int, default=10000)
+    p_fws.add_argument("--run-id", default=None)
+    p_fws.add_argument("--trace-id", default=None)
+    p_fws.add_argument("--db-path", default=None)
+    p_fws.add_argument("--event-log-dir", default=None)
+    p_fws.add_argument("--export-root", default=None)
 
     p_fwg = fw_sub.add_parser("get", help="Get flywheel job details")
     p_fwg.add_argument("job_id")
@@ -2484,6 +2798,30 @@ def main() -> None:
                 match args.flywheel_cmd:
                     case "jobs":
                         cmd_flywheel_jobs()
+                    case "export":
+                        cmd_flywheel_export(
+                            run_id=args.run_id,
+                            workload_id=args.workload_id,
+                            client_id=args.client_id,
+                            trace_id=args.trace_id,
+                            db_path=args.db_path,
+                            event_log_dir=args.event_log_dir,
+                            export_root=args.export_root,
+                        )
+                    case "record":
+                        cmd_flywheel_record(
+                            job_id=args.job_id,
+                            workload_id=args.workload_id,
+                            client_id=args.client_id,
+                            run_id=args.run_id,
+                            session_id=args.session_id,
+                            task_id=args.task_id,
+                            trace_id=args.trace_id,
+                            db_path=args.db_path,
+                            event_log_dir=args.event_log_dir,
+                            workspace_root=args.workspace_root,
+                            provenance_root=args.provenance_root,
+                        )
                     case "start":
                         cmd_flywheel_start(
                             workload_id=args.workload_id,
@@ -2492,6 +2830,11 @@ def main() -> None:
                             val_ratio=args.val_ratio,
                             min_total_records=args.min_total_records,
                             limit=args.limit,
+                            run_id=args.run_id,
+                            trace_id=args.trace_id,
+                            db_path=args.db_path,
+                            event_log_dir=args.event_log_dir,
+                            export_root=args.export_root,
                         )
                     case "get":
                         cmd_flywheel_get(args.job_id)

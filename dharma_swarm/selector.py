@@ -48,7 +48,11 @@ async def _count_children(archive: EvolutionArchive) -> dict[str, int]:
     return counts
 
 
-def _novelty_weight(entry: ArchiveEntry, child_counts: dict[str, int]) -> float:
+def _novelty_weight(
+    entry: ArchiveEntry,
+    child_counts: dict[str, int],
+    weights: dict[str, float] | None = None,
+) -> float:
     """Compute DGM-style novelty-adjusted weight.
 
     Formula: fitness * (1.0 / (1.0 + n_children))
@@ -61,7 +65,7 @@ def _novelty_weight(entry: ArchiveEntry, child_counts: dict[str, int]) -> float:
     Returns:
         Novelty-adjusted weight (always >= 0).
     """
-    fitness = entry.fitness.weighted()
+    fitness = entry.fitness.weighted(weights=weights)
     n_children = child_counts.get(entry.id, 0)
     novelty = 1.0 / (1.0 + n_children)
     return fitness * novelty
@@ -73,7 +77,9 @@ def _novelty_weight(entry: ArchiveEntry, child_counts: dict[str, int]) -> float:
 
 
 async def tournament_select(
-    archive: EvolutionArchive, k: int = 3
+    archive: EvolutionArchive,
+    k: int = 3,
+    weights: dict[str, float] | None = None,
 ) -> ArchiveEntry | None:
     """Pick *k* random applied entries and return the fittest.
 
@@ -95,11 +101,12 @@ async def tournament_select(
     pool_size = min(k, len(candidates))
     pool = random.sample(candidates, pool_size)
     child_counts = await _count_children(archive)
-    return max(pool, key=lambda e: _novelty_weight(e, child_counts))
+    return max(pool, key=lambda e: _novelty_weight(e, child_counts, weights=weights))
 
 
 async def roulette_select(
     archive: EvolutionArchive,
+    weights: dict[str, float] | None = None,
 ) -> ArchiveEntry | None:
     """Fitness-proportional (roulette wheel) selection.
 
@@ -118,17 +125,20 @@ async def roulette_select(
         return None
 
     child_counts = await _count_children(archive)
-    weights = [_novelty_weight(e, child_counts) for e in candidates]
-    total = sum(weights)
+    candidate_weights = [
+        _novelty_weight(e, child_counts, weights=weights) for e in candidates
+    ]
+    total = sum(candidate_weights)
 
     if total == 0.0:
         return random.choice(candidates)
 
-    return random.choices(candidates, weights=weights, k=1)[0]
+    return random.choices(candidates, weights=candidate_weights, k=1)[0]
 
 
 async def rank_select(
     archive: EvolutionArchive,
+    weights: dict[str, float] | None = None,
 ) -> ArchiveEntry | None:
     """Rank-based selection.
 
@@ -149,14 +159,19 @@ async def rank_select(
 
     # Sort ascending so rank 1 = worst, rank N = best.
     child_counts = await _count_children(archive)
-    sorted_asc = sorted(candidates, key=lambda e: _novelty_weight(e, child_counts))
+    sorted_asc = sorted(
+        candidates,
+        key=lambda e: _novelty_weight(e, child_counts, weights=weights),
+    )
     rank_weights = list(range(1, len(sorted_asc) + 1))
 
     return random.choices(sorted_asc, weights=rank_weights, k=1)[0]
 
 
 async def elite_select(
-    archive: EvolutionArchive, n: int = 3
+    archive: EvolutionArchive,
+    n: int = 3,
+    weights: dict[str, float] | None = None,
 ) -> list[ArchiveEntry]:
     """Return the top *n* entries by weighted fitness.
 
@@ -171,7 +186,7 @@ async def elite_select(
         A list of up to *n* ``ArchiveEntry`` objects, sorted by
         descending fitness.  May be empty if no applied entries exist.
     """
-    return await archive.get_best(n=n)
+    return await archive.get_best(n=n, weights=weights)
 
 
 # ---------------------------------------------------------------------------

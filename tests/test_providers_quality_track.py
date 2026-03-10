@@ -16,6 +16,7 @@ from dharma_swarm.providers import (
     CodexProvider,
     ModelRouter,
     NVIDIANIMProvider,
+    OllamaProvider,
     OpenAIProvider,
     OpenRouterFreeProvider,
     OpenRouterProvider,
@@ -258,3 +259,130 @@ async def test_nvidia_nim_error_status_raises(monkeypatch):
     monkeypatch.setattr("dharma_swarm.providers.httpx.AsyncClient", lambda timeout: _Client())
     with pytest.raises(RuntimeError, match="NVIDIA NIM error 500"):
         await provider.complete(req)
+
+
+@pytest.mark.asyncio
+async def test_ollama_complete_uses_chat_api(monkeypatch):
+    provider = OllamaProvider(base_url="http://ollama.local", model="llama3.2")
+    req = LLMRequest(
+        model="llama3.2",
+        system="sys",
+        messages=[{"role": "user", "content": "hello"}],
+    )
+    captured = {}
+
+    class _Resp:
+        status_code = 200
+
+        @staticmethod
+        def json():
+            return {
+                "message": {"content": "hi there"},
+                "prompt_eval_count": 3,
+                "eval_count": 4,
+                "done_reason": "stop",
+            }
+
+    class _Client:
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, exc_type, exc, tb):
+            return False
+
+        async def post(self, url, json):
+            captured["url"] = url
+            captured["json"] = json
+            return _Resp()
+
+    monkeypatch.setattr("dharma_swarm.providers.httpx.AsyncClient", lambda timeout: _Client())
+    out = await provider.complete(req)
+    assert out.content == "hi there"
+    assert out.usage["total_tokens"] == 7
+    assert captured["url"].endswith("/api/chat")
+    assert captured["json"]["messages"][0]["role"] == "system"
+
+
+@pytest.mark.asyncio
+async def test_ollama_complete_falls_back_to_generate(monkeypatch):
+    provider = OllamaProvider(base_url="http://ollama.local", model="llama3.2")
+    req = LLMRequest(
+        model="llama3.2",
+        messages=[{"role": "user", "content": "hello"}],
+    )
+    calls = {"n": 0}
+
+    class _Resp404:
+        status_code = 404
+        text = "not found"
+
+        @staticmethod
+        def json():
+            return {}
+
+    class _Resp200:
+        status_code = 200
+
+        @staticmethod
+        def json():
+            return {
+                "response": "legacy path",
+                "prompt_eval_count": 2,
+                "eval_count": 2,
+            }
+
+    class _Client:
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, exc_type, exc, tb):
+            return False
+
+        async def post(self, url, json):
+            calls["n"] += 1
+            if calls["n"] == 1:
+                assert url.endswith("/api/chat")
+                return _Resp404()
+            assert url.endswith("/api/generate")
+            return _Resp200()
+
+    monkeypatch.setattr("dharma_swarm.providers.httpx.AsyncClient", lambda timeout: _Client())
+    out = await provider.complete(req)
+    assert out.content == "legacy path"
+    assert calls["n"] == 2
+
+
+@pytest.mark.asyncio
+async def test_ollama_stream_yields_chunks(monkeypatch):
+    provider = OllamaProvider(base_url="http://ollama.local", model="llama3.2")
+    req = LLMRequest(model="llama3.2", messages=[{"role": "user", "content": "hello"}])
+
+    class _StreamResp:
+        status_code = 200
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, exc_type, exc, tb):
+            return False
+
+        async def aiter_lines(self):
+            yield '{"message":{"content":"A"}}'
+            yield '{"message":{"content":"B"}}'
+            yield '{"done":true}'
+
+    class _Client:
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, exc_type, exc, tb):
+            return False
+
+        def stream(self, method, url, json):
+            assert method == "POST"
+            assert url.endswith("/api/chat")
+            return _StreamResp()
+
+    monkeypatch.setattr("dharma_swarm.providers.httpx.AsyncClient", lambda timeout: _Client())
+    chunks = [chunk async for chunk in provider.stream(req)]
+    assert chunks == ["A", "B"]

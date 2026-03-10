@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import sys
 from pathlib import Path
-from unittest.mock import patch
+from unittest.mock import AsyncMock, patch
 
 import pytest
 
@@ -176,6 +176,29 @@ def test_dgc_cli_memory_command():
             mock.assert_called_once()
 
 
+def test_build_chat_context_snapshot_includes_latent_gold(monkeypatch, tmp_path):
+    import dharma_swarm.dgc_cli as cli
+
+    monkeypatch.setattr(
+        "dharma_swarm.context.read_memory_context",
+        lambda **_: "  [retrieval:note] recent memory",
+        raising=True,
+    )
+    monkeypatch.setattr(
+        "dharma_swarm.context.read_latent_gold_overview",
+        lambda **_: "  [idea:orphaned] proposal | latent branch",
+        raising=True,
+    )
+    monkeypatch.setattr(cli, "HOME", tmp_path)
+    monkeypatch.setattr(cli, "DHARMA_STATE", tmp_path / ".dharma")
+
+    snapshot = cli._build_chat_context_snapshot()
+
+    assert "Recent memory:" in snapshot
+    assert "Latent gold:" in snapshot
+    assert "latent branch" in snapshot
+
+
 def test_cmd_swarm_status_alias_does_not_run_orchestrator():
     """`dgc swarm status` should not execute orchestrator run()."""
     from dharma_swarm.dgc_cli import cmd_swarm
@@ -236,6 +259,39 @@ def test_dgc_cli_flywheel_start_dispatch():
             mock_cmd.assert_called_once()
 
 
+def test_dgc_cli_flywheel_export_dispatch():
+    """main() dispatches flywheel export to cmd_flywheel_export."""
+    from dharma_swarm.dgc_cli import main
+
+    with patch(
+        "sys.argv",
+        [
+            "dgc",
+            "flywheel",
+            "export",
+            "--run-id",
+            "run-1",
+            "--workload-id",
+            "w1",
+            "--client-id",
+            "c1",
+        ],
+    ):
+        with patch("dharma_swarm.dgc_cli.cmd_flywheel_export") as mock_cmd:
+            main()
+            mock_cmd.assert_called_once()
+
+
+def test_dgc_cli_flywheel_record_dispatch():
+    """main() dispatches flywheel record to cmd_flywheel_record."""
+    from dharma_swarm.dgc_cli import main
+
+    with patch("sys.argv", ["dgc", "flywheel", "record", "job-1", "--run-id", "run-1"]):
+        with patch("dharma_swarm.dgc_cli.cmd_flywheel_record") as mock_cmd:
+            main()
+            mock_cmd.assert_called_once()
+
+
 def test_dgc_cli_rag_error_is_user_friendly(capsys):
     """RAG command failures should return concise CLI errors, not tracebacks."""
     from dharma_swarm.dgc_cli import main
@@ -258,6 +314,101 @@ def test_dgc_cli_flywheel_error_is_user_friendly(capsys):
                 main()
     assert exc.value.code == 2
     assert "Flywheel command failed: unreachable" in capsys.readouterr().out
+
+
+def test_cmd_flywheel_export_prints_canonical_export(capsys, monkeypatch):
+    """flywheel export should print the canonical local export payload."""
+    import dharma_swarm.dgc_cli as cli
+
+    async def _fake_export(**kwargs):
+        assert kwargs["run_id"] == "run-123"
+        assert kwargs["workload_id"] == "canonical"
+        return {
+            "export_id": "flyexp_run-123",
+            "artifact_id": "flyexp_run-123",
+            "run_id": "run-123",
+            "workload_id": "canonical",
+            "client_id": "operator",
+            "export_path": "/tmp/flyexp.json",
+        }
+
+    monkeypatch.setattr(cli, "_flywheel_export_payload", _fake_export)
+
+    cli.cmd_flywheel_export(
+        run_id="run-123",
+        workload_id="canonical",
+        client_id="operator",
+    )
+
+    out = capsys.readouterr().out
+    assert '"export_id": "flyexp_run-123"' in out
+    assert '"export_path": "/tmp/flyexp.json"' in out
+
+
+def test_cmd_flywheel_start_includes_local_export_when_run_id_provided(capsys, monkeypatch):
+    """flywheel start should create a canonical export first when run_id is provided."""
+    import dharma_swarm.dgc_cli as cli
+
+    export_mock = AsyncMock(
+        return_value={
+            "export_id": "flyexp_run-9",
+            "artifact_id": "flyexp_run-9",
+            "run_id": "run-9",
+            "workload_id": "canonical",
+            "client_id": "operator",
+            "export_path": "/tmp/flyexp_run-9.json",
+        }
+    )
+    monkeypatch.setattr(cli, "_flywheel_export_payload", export_mock)
+
+    class _FakeClient:
+        async def create_job(self, *, workload_id, client_id, data_split_config=None):
+            assert workload_id == "canonical"
+            assert client_id == "operator"
+            assert data_split_config["eval_size"] == 8
+            return {"id": "job-1", "status": "queued"}
+
+    monkeypatch.setattr("dharma_swarm.integrations.DataFlywheelClient", _FakeClient)
+
+    cli.cmd_flywheel_start(
+        workload_id="canonical",
+        client_id="operator",
+        eval_size=8,
+        val_ratio=0.2,
+        min_total_records=30,
+        limit=400,
+        run_id="run-9",
+    )
+
+    out = capsys.readouterr().out
+    export_mock.assert_awaited_once()
+    assert '"local_export"' in out
+    assert '"id": "job-1"' in out
+
+
+def test_cmd_flywheel_record_prints_registry_binding(capsys, monkeypatch):
+    """flywheel record should print fetched job data plus canonical registry binding."""
+    import dharma_swarm.dgc_cli as cli
+
+    async def _fake_record(**kwargs):
+        assert kwargs["job_id"] == "job-88"
+        assert kwargs["run_id"] == "run-88"
+        return {
+            "job": {"id": "job-88", "status": "completed"},
+            "registry": {
+                "artifact_id": "art-88",
+                "summary": {"job_id": "job-88"},
+                "fact_ids": ["fact-1", "fact-2"],
+            },
+        }
+
+    monkeypatch.setattr(cli, "_flywheel_record_payload", _fake_record)
+
+    cli.cmd_flywheel_record(job_id="job-88", run_id="run-88")
+
+    out = capsys.readouterr().out
+    assert '"job-88"' in out
+    assert '"artifact_id": "art-88"' in out
 
 
 def test_cmd_mission_status_formats_gap_report(capsys, monkeypatch):
@@ -370,6 +521,23 @@ def test_cmd_mission_status_profile_enables_strict_checks(monkeypatch, capsys):
     assert rc == 2
     out = capsys.readouterr().out
     assert "Autonomy profile: workspace_auto" in out
+
+
+def test_cmd_mission_status_marks_accelerators_dormant(monkeypatch, capsys):
+    """Dormant accelerator mode should skip live probes cleanly."""
+    import dharma_swarm.dgc_cli as cli
+
+    monkeypatch.setattr(cli, "_core_mission_checks", lambda: {"a": True})
+    monkeypatch.setattr(cli, "_tracked_paths", lambda _paths: {"x": True})
+    monkeypatch.setattr(cli, "_read_openclaw_summary", lambda: {"present": True, "readable": True})
+
+    with patch.dict("os.environ", {"DGC_ACCELERATOR_MODE": "dormant"}, clear=False):
+        rc = cli.cmd_mission_status(as_json=True)
+
+    assert rc == 0
+    out = capsys.readouterr().out
+    assert '"rag_health": "DORMANT"' in out
+    assert '"flywheel_jobs": "DORMANT"' in out
 
 
 def test_cmd_mission_status_unknown_profile_json(capsys):

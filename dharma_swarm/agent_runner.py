@@ -8,16 +8,20 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import os
+import time
 from datetime import datetime, timedelta, timezone
 from typing import Any, Protocol, runtime_checkable
 
 from dharma_swarm.models import (
     AgentConfig,
+    AgentRole,
     AgentState,
     AgentStatus,
     GateDecision,
     LLMRequest,
     LLMResponse,
+    ProviderType,
     Task,
     TaskPriority,
 )
@@ -41,6 +45,50 @@ _PRIORITY_SALIENCE = {
     TaskPriority.HIGH: 0.70,
     TaskPriority.URGENT: 0.90,
 }
+_TRUE_VALUES = {"1", "true", "yes", "on"}
+_FALSE_VALUES = {"0", "false", "no", "off"}
+_TOOLING_HINTS = (
+    "apply patch",
+    "bug",
+    "code",
+    "edit",
+    "file",
+    "fix",
+    "implement",
+    "module",
+    "patch",
+    "pytest",
+    "refactor",
+    "script",
+    "test",
+)
+_FRONTIER_HINTS = (
+    "analyze",
+    "architecture",
+    "compare",
+    "debug",
+    "design",
+    "evaluate",
+    "incident",
+    "investigate",
+    "prove",
+    "research",
+    "root cause",
+    "security",
+)
+_PRIVILEGED_HINTS = (
+    "credential",
+    "delete",
+    "deploy",
+    "drop table",
+    "kill ",
+    "launchctl",
+    "production",
+    "rm -rf",
+    "secret",
+    "ssh",
+    "sudo",
+)
 
 
 # ---------------------------------------------------------------------------
@@ -52,6 +100,33 @@ class CompletionProvider(Protocol):
     """Anything with an async ``complete`` method returning an LLMResponse."""
 
     async def complete(self, request: LLMRequest) -> LLMResponse: ...
+
+
+@runtime_checkable
+class RoutedCompletionProvider(Protocol):
+    """Router-capable provider that can choose a lane per task."""
+
+    async def complete_for_task(
+        self,
+        route_request: Any,
+        request: LLMRequest,
+        *,
+        available_provider_types: list[ProviderType] | None = None,
+    ) -> tuple[Any, LLMResponse]: ...
+
+    def record_task_feedback(
+        self,
+        *,
+        route_request: Any,
+        request: LLMRequest,
+        decision: Any,
+        quality_score: float,
+        total_tokens: int = 0,
+        latency_ms: float = 0.0,
+        success: bool | None = None,
+        model: str | None = None,
+        metadata: dict[str, Any] | None = None,
+    ) -> str: ...
 
 
 @runtime_checkable
@@ -67,6 +142,408 @@ class CodeSandbox(Protocol):
 
 def _utc_now() -> datetime:
     return datetime.now(timezone.utc)
+
+
+def _clamp01(value: float) -> float:
+    return max(0.0, min(1.0, float(value)))
+
+
+def _coerce_bool(value: Any) -> bool | None:
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, (int, float)):
+        return bool(value)
+    if isinstance(value, str):
+        normalized = value.strip().lower()
+        if normalized in _TRUE_VALUES:
+            return True
+        if normalized in _FALSE_VALUES:
+            return False
+    return None
+
+
+def _task_metadata(task: Task) -> dict[str, Any]:
+    return task.metadata if isinstance(task.metadata, dict) else {}
+
+
+def _task_text(task: Task) -> str:
+    return "\n".join(part for part in (task.title, task.description) if part).strip()
+
+
+def _task_action_name(task: Task) -> str:
+    raw = str(_task_metadata(task).get("action_name") or task.title or "task").strip().lower()
+    normalized = "".join(ch if ch.isalnum() else "_" for ch in raw)
+    while "__" in normalized:
+        normalized = normalized.replace("__", "_")
+    return normalized.strip("_") or "task"
+
+
+def _metadata_number(metadata: dict[str, Any], *keys: str) -> float | None:
+    for key in keys:
+        value = metadata.get(key)
+        if isinstance(value, bool):
+            continue
+        if isinstance(value, (int, float)):
+            return float(value)
+        if isinstance(value, str):
+            text = value.strip()
+            if not text:
+                continue
+            try:
+                return float(text)
+            except ValueError:
+                continue
+    return None
+
+
+def _metadata_bool(metadata: dict[str, Any], *keys: str) -> bool | None:
+    for key in keys:
+        if key not in metadata:
+            continue
+        value = _coerce_bool(metadata.get(key))
+        if value is not None:
+            return value
+    return None
+
+
+def _priority_score(priority: TaskPriority) -> float:
+    return {
+        TaskPriority.LOW: 0.18,
+        TaskPriority.NORMAL: 0.40,
+        TaskPriority.HIGH: 0.72,
+        TaskPriority.URGENT: 0.95,
+    }.get(priority, 0.40)
+
+
+def _supports_provider_method(provider: object | None, method_name: str) -> bool:
+    if provider is None:
+        return False
+    cls_attr = getattr(type(provider), method_name, None)
+    if callable(cls_attr):
+        return True
+    instance_dict = getattr(provider, "__dict__", {})
+    return callable(instance_dict.get(method_name))
+
+
+def _is_routed_provider(provider: object | None) -> bool:
+    return _supports_provider_method(provider, "complete_for_task") and _supports_provider_method(
+        provider, "record_task_feedback"
+    )
+
+
+def _requires_tooling(task: Task, config: AgentConfig) -> bool:
+    metadata = _task_metadata(task)
+    override = _metadata_bool(
+        metadata,
+        "requires_tooling",
+        "writes_files",
+        "code_task",
+    )
+    if override is not None:
+        return override
+    if metadata.get("modified"):
+        return True
+    if config.provider in {ProviderType.CLAUDE_CODE, ProviderType.CODEX}:
+        return True
+    if config.role in {AgentRole.CODER, AgentRole.TESTER, AgentRole.SURGEON}:
+        return True
+    lowered = _task_text(task).lower()
+    return any(marker in lowered for marker in _TOOLING_HINTS)
+
+
+def _requires_frontier_precision(task: Task, config: AgentConfig) -> bool:
+    metadata = _task_metadata(task)
+    override = _metadata_bool(
+        metadata,
+        "requires_frontier_precision",
+        "frontier_precision",
+    )
+    if override is not None:
+        return override
+    lowered = _task_text(task).lower()
+    if any(marker in lowered for marker in _FRONTIER_HINTS):
+        return True
+    return config.role in {
+        AgentRole.ARCHITECT,
+        AgentRole.RESEARCHER,
+        AgentRole.VALIDATOR,
+    } and task.priority in {TaskPriority.HIGH, TaskPriority.URGENT}
+
+
+def _is_privileged_action(task: Task) -> bool:
+    metadata = _task_metadata(task)
+    override = _metadata_bool(
+        metadata,
+        "privileged_action",
+        "requires_human_consent",
+    )
+    if override is not None:
+        return override
+    lowered = _task_text(task).lower()
+    return any(marker in lowered for marker in _PRIVILEGED_HINTS)
+
+
+def _allow_provider_routing(task: Task, config: AgentConfig) -> bool:
+    metadata = _task_metadata(task)
+    override = _metadata_bool(
+        metadata,
+        "allow_provider_routing",
+        "routed_execution",
+        "use_router",
+    )
+    if override is not None:
+        return override
+    override = _metadata_bool(
+        config.metadata,
+        "allow_provider_routing",
+        "routed_execution",
+        "use_router",
+    )
+    if override is not None:
+        return override
+    return (
+        os.environ.get("DGC_AGENT_ROUTED_EXECUTION", "").strip().lower() in _TRUE_VALUES
+    )
+
+
+def _parse_provider_types(value: Any) -> list[ProviderType]:
+    if value is None:
+        return []
+    if isinstance(value, (str, ProviderType)):
+        items = [value]
+    elif isinstance(value, list):
+        items = value
+    else:
+        return []
+    out: list[ProviderType] = []
+    for item in items:
+        provider: ProviderType | None = None
+        if isinstance(item, ProviderType):
+            provider = item
+        elif isinstance(item, str):
+            normalized = item.strip().lower()
+            provider = next(
+                (candidate for candidate in ProviderType if candidate.value == normalized),
+                None,
+            )
+        if provider is not None and provider not in out:
+            out.append(provider)
+    return out
+
+
+def _available_provider_types(
+    task: Task,
+    config: AgentConfig,
+) -> list[ProviderType] | None:
+    metadata = _task_metadata(task)
+    explicit = _parse_provider_types(
+        metadata.get("available_provider_types")
+        or metadata.get("provider_allowlist")
+        or config.metadata.get("available_provider_types")
+        or config.metadata.get("provider_allowlist")
+    )
+    if explicit:
+        return explicit
+    if _allow_provider_routing(task, config):
+        return None
+    return [config.provider]
+
+
+def _estimate_requested_tokens(request: LLMRequest, *, requires_tooling: bool) -> int:
+    text = "\n".join(
+        [request.system, *[msg.get("content", "") for msg in request.messages]]
+    ).strip()
+    if not text:
+        return 256
+    estimate = max(int(len(text) / 3.8), int(len(text.split()) * 1.3), 1)
+    if requires_tooling:
+        estimate = max(estimate, 1200)
+    return max(estimate, 256)
+
+
+def _build_route_request(
+    task: Task,
+    config: AgentConfig,
+    request: LLMRequest,
+    *,
+    available_provider_types: list[ProviderType] | None,
+) -> Any:
+    from dharma_swarm.provider_policy import ProviderRouteRequest
+
+    metadata = _task_metadata(task)
+    lowered = _task_text(task).lower()
+    requires_tooling = _requires_tooling(task, config)
+    requires_frontier = _requires_frontier_precision(task, config)
+    privileged_action = _is_privileged_action(task)
+
+    urgency = _metadata_number(metadata, "urgency", "urgency_score")
+    if urgency is None:
+        urgency = _priority_score(task.priority)
+
+    risk_score = _metadata_number(metadata, "risk_score")
+    if risk_score is None:
+        risk_score = 0.10
+        if requires_tooling:
+            risk_score = max(risk_score, 0.28)
+        if requires_frontier:
+            risk_score = max(risk_score, 0.40)
+        if privileged_action:
+            risk_score = max(risk_score, 0.78)
+        if task.priority in {TaskPriority.HIGH, TaskPriority.URGENT}:
+            risk_score = min(1.0, risk_score + 0.08)
+
+    uncertainty = _metadata_number(metadata, "uncertainty", "uncertainty_score")
+    if uncertainty is None:
+        uncertainty = 0.18
+        if any(
+            marker in lowered
+            for marker in ("analyze", "compare", "debug", "investigate", "research", "why")
+        ):
+            uncertainty = 0.42
+        if config.role in {AgentRole.ARCHITECT, AgentRole.RESEARCHER, AgentRole.VALIDATOR}:
+            uncertainty = max(uncertainty, 0.30)
+
+    novelty = _metadata_number(metadata, "novelty", "novelty_score")
+    if novelty is None:
+        novelty = 0.12
+        if any(
+            marker in lowered
+            for marker in ("architecture", "design", "explore", "new", "prototype", "research")
+        ):
+            novelty = 0.48
+
+    expected_impact = _metadata_number(metadata, "expected_impact", "impact_score")
+    if expected_impact is None:
+        expected_impact = max(
+            0.20,
+            urgency * 0.85 + (0.12 if requires_frontier else 0.0),
+        )
+
+    preferred_low_cost = _metadata_bool(
+        metadata,
+        "preferred_low_cost",
+        "prefer_low_cost",
+    )
+    if preferred_low_cost is None:
+        preferred_low_cost = not requires_frontier and not privileged_action and task.priority in {
+            TaskPriority.LOW,
+            TaskPriority.NORMAL,
+        }
+
+    requires_human_consent = _metadata_bool(
+        metadata,
+        "requires_human_consent",
+        "human_consent_required",
+    )
+    if requires_human_consent is None:
+        requires_human_consent = privileged_action and task.priority == TaskPriority.URGENT
+
+    estimated_latency_ms = int(
+        _metadata_number(metadata, "estimated_latency_ms") or (
+            2200 if requires_tooling or requires_frontier else 800
+        )
+    )
+    estimated_tokens = int(
+        _metadata_number(metadata, "estimated_tokens", "token_estimate")
+        or _estimate_requested_tokens(request, requires_tooling=requires_tooling)
+    )
+
+    route_context = metadata.get("route_context")
+    context = dict(route_context) if isinstance(route_context, dict) else {}
+    context.update(
+        {
+            "task_id": task.id,
+            "task_priority": task.priority.value,
+            "task_title": task.title,
+            "agent_id": config.id,
+            "agent_name": config.name,
+            "agent_role": config.role.value,
+            "preferred_provider": config.provider.value,
+            "session_id": str(
+                metadata.get("session_id")
+                or metadata.get("trace_id")
+                or config.metadata.get("session_id")
+                or f"task:{task.id}"
+            ),
+            "requires_tooling": requires_tooling,
+            "trace_id": metadata.get("trace_id"),
+            "source": metadata.get("source"),
+            "task_brief": task.description or task.title,
+        }
+    )
+    if available_provider_types is not None:
+        context["available_provider_types"] = [
+            provider.value for provider in available_provider_types
+        ]
+    context["preserve_requested_model"] = bool(
+        available_provider_types
+        and len(available_provider_types) == 1
+        and available_provider_types[0] == config.provider
+    )
+
+    return ProviderRouteRequest(
+        action_name=_task_action_name(task),
+        risk_score=_clamp01(risk_score),
+        uncertainty=_clamp01(uncertainty),
+        novelty=_clamp01(novelty),
+        urgency=_clamp01(urgency),
+        expected_impact=_clamp01(expected_impact),
+        estimated_latency_ms=max(200, estimated_latency_ms),
+        estimated_tokens=max(64, estimated_tokens),
+        preferred_low_cost=bool(preferred_low_cost),
+        requires_frontier_precision=requires_frontier,
+        privileged_action=privileged_action,
+        requires_human_consent=bool(requires_human_consent),
+        context=context,
+    )
+
+
+def _response_total_tokens(response: LLMResponse | None) -> int:
+    if response is None:
+        return 0
+    usage = response.usage or {}
+    return int(
+        usage.get("total_tokens")
+        or (usage.get("prompt_tokens", 0) + usage.get("completion_tokens", 0))
+        or 0
+    )
+
+
+def _feedback_quality_score(
+    task: Task,
+    config: AgentConfig,
+    *,
+    success: bool,
+    result_text: str,
+) -> float:
+    metadata = _task_metadata(task)
+    explicit = _metadata_number(
+        metadata,
+        "quality_score",
+        "judge_score",
+        "review_score",
+        "router_quality_score",
+        "result_quality",
+    )
+    if explicit is not None:
+        return _clamp01(explicit)
+    if not success:
+        return 0.0
+    text = result_text.strip()
+    score = 0.64
+    if len(text) >= 120:
+        score += 0.08
+    if len(text) >= 480:
+        score += 0.06
+    if len(text) < 60:
+        score -= 0.12
+    if _requires_tooling(task, config):
+        if any(marker in text for marker in ("```", ".py", ".md", "pytest", "`")):
+            score += 0.08
+    lowered = text.lower()
+    if any(marker in lowered for marker in ("i can't", "i cannot", "not sure", "todo")):
+        score -= 0.15
+    return _clamp01(score)
 
 
 def _state_from_config(config: AgentConfig) -> AgentState:
@@ -129,6 +606,38 @@ def _build_prompt(
     """
     system = _build_system_prompt(config)
     user_parts = [f"## Task: {task.title}\n\n{task.description}"]
+    metadata = task.metadata if isinstance(task.metadata, dict) else {}
+    metadata.pop("_memory_recall_consumer", None)
+    memory_query = "\n".join(
+        part.strip()
+        for part in (task.title, task.description)
+        if isinstance(part, str) and part.strip()
+    )
+    if memory_query:
+        try:
+            from dharma_swarm.context import read_memory_context
+            from dharma_swarm.context import read_latent_gold_context
+
+            memory_context = read_memory_context(
+                query=memory_query,
+                limit=3,
+                consumer="agent_runner.prompt",
+                task_id=task.id,
+            )
+            latent_gold = read_latent_gold_context(query=memory_query, limit=3)
+        except Exception:
+            memory_context = ""
+            latent_gold = ""
+        if (
+            memory_context
+            and not memory_context.startswith("No memory")
+            and not memory_context.startswith("Memory unavailable")
+            and not memory_context.startswith("Memory plane unavailable")
+        ):
+            user_parts.append(f"\n\n## Memory Recall\n{memory_context}")
+            metadata["_memory_recall_consumer"] = "agent_runner.prompt"
+        if latent_gold:
+            user_parts.append(f"\n\n## Latent Gold\n{latent_gold}")
     if plan_context:
         user_parts.append(f"\n\n{plan_context}")
     return LLMRequest(
@@ -218,7 +727,7 @@ class AgentRunner:
     def __init__(
         self,
         config: AgentConfig,
-        provider: CompletionProvider | None = None,
+        provider: CompletionProvider | RoutedCompletionProvider | None = None,
         sandbox: CodeSandbox | None = None,
         memory: AgentMemoryBank | None = None,
     ) -> None:
@@ -265,6 +774,12 @@ class AgentRunner:
             self._state.status = AgentStatus.BUSY
             self._state.current_task = task.id
 
+        request: LLMRequest | None = None
+        route_request: Any | None = None
+        route_decision: Any | None = None
+        response: LLMResponse | None = None
+        completion_latency_ms = 0.0
+
         try:
             meta = task.metadata if isinstance(task.metadata, dict) else {}
             spec_ref = str(meta.get("spec_ref", "")).strip() or None
@@ -304,6 +819,12 @@ class AgentRunner:
                     + "\n".join(f"  - {s}" for s in gate.suggestions)
                 )
             request = _build_prompt(task, self._config, plan_context=plan_context)
+            self._record_conversation_turn(
+                task,
+                role="user",
+                content=request.messages[0]["content"],
+                turn_index=1,
+            )
 
             # Inject agent self-editing memory into system prompt
             if self._memory is not None:
@@ -312,7 +833,23 @@ class AgentRunner:
                     request.system = request.system + "\n\n" + memory_ctx
 
             if self._provider is not None:
-                response = await self._provider.complete(request)
+                completion_started = time.monotonic()
+                if _is_routed_provider(self._provider):
+                    available_provider_types = _available_provider_types(task, self._config)
+                    route_request = _build_route_request(
+                        task,
+                        self._config,
+                        request,
+                        available_provider_types=available_provider_types,
+                    )
+                    route_decision, response = await self._provider.complete_for_task(
+                        route_request,
+                        request,
+                        available_provider_types=available_provider_types,
+                    )
+                else:
+                    response = await self._provider.complete(request)
+                completion_latency_ms = (time.monotonic() - completion_started) * 1000.0
                 result = response.content
                 if _looks_like_provider_failure(result):
                     raise RuntimeError(result or "Provider returned empty response")
@@ -320,6 +857,22 @@ class AgentRunner:
                 result = (
                     f"[mock] Agent {self._config.name} completed: {task.title}"
                 )
+            self._record_conversation_turn(
+                task,
+                role="assistant",
+                content=result,
+                turn_index=2,
+            )
+            self._record_router_feedback(
+                task=task,
+                request=request,
+                route_request=route_request,
+                route_decision=route_decision,
+                response=response,
+                latency_ms=completion_latency_ms,
+                success=True,
+                result_text=result,
+            )
 
             async with self._lock:
                 self._state.turns_used += 1
@@ -337,6 +890,11 @@ class AgentRunner:
 
             # Record task result in agent memory
             await self._record_task_memory(task, result)
+            self._record_idea_uptake(task, result)
+            self._record_follow_up_shard_outcome(task, outcome="success", evidence_text=result)
+            self._record_retrieval_citation_uptake(task, result)
+            self._mark_idea_outcome(task, outcome="success")
+            self._record_retrieval_outcome(task, outcome="success")
 
             logger.info(
                 "Agent %s finished task %s", self._config.name, task.id
@@ -344,6 +902,22 @@ class AgentRunner:
             return result
 
         except Exception as exc:
+            self._record_conversation_turn(
+                task,
+                role="assistant_error",
+                content=str(exc),
+                turn_index=2,
+            )
+            self._record_router_feedback(
+                task=task,
+                request=request,
+                route_request=route_request,
+                route_decision=route_decision,
+                response=response,
+                latency_ms=completion_latency_ms,
+                success=False,
+                result_text=str(exc),
+            )
             await _leave_task_mark(
                 agent_name=self._config.name,
                 task=task,
@@ -353,6 +927,9 @@ class AgentRunner:
 
             # Record failure as a learned lesson
             await self._record_failure_memory(task, exc)
+            self._record_follow_up_shard_outcome(task, outcome="failure", evidence_text=str(exc))
+            self._mark_idea_outcome(task, outcome="failure")
+            self._record_retrieval_outcome(task, outcome="failure")
 
             async with self._lock:
                 self._state.status = AgentStatus.IDLE
@@ -362,6 +939,62 @@ class AgentRunner:
                 "Agent %s failed task %s", self._config.name, task.id
             )
             raise
+
+    def _record_router_feedback(
+        self,
+        *,
+        task: Task,
+        request: LLMRequest | None,
+        route_request: Any,
+        route_decision: Any,
+        response: LLMResponse | None,
+        latency_ms: float,
+        success: bool,
+        result_text: str,
+    ) -> None:
+        if (
+            route_request is None
+            or route_decision is None
+            or request is None
+            or self._provider is None
+            or not _is_routed_provider(self._provider)
+        ):
+            return
+        metadata = _task_metadata(task)
+        feedback_metadata = {
+            "feedback_origin": "agent_runner",
+            "task_id": task.id,
+            "task_priority": task.priority.value,
+            "agent_name": self._config.name,
+            "agent_role": self._config.role.value,
+            "trace_id": metadata.get("trace_id"),
+            "stop_reason": response.stop_reason if response else None,
+        }
+        if not success:
+            feedback_metadata["error"] = result_text[:240]
+        try:
+            self._provider.record_task_feedback(
+                route_request=route_request,
+                request=request,
+                decision=route_decision,
+                quality_score=_feedback_quality_score(
+                    task,
+                    self._config,
+                    success=success,
+                    result_text=result_text,
+                ),
+                total_tokens=_response_total_tokens(response),
+                latency_ms=latency_ms,
+                success=success,
+                model=response.model if response else None,
+                metadata=feedback_metadata,
+            )
+        except Exception as exc:
+            logger.debug(
+                "Routing feedback record failed for %s: %s",
+                self._config.name,
+                exc,
+            )
 
     # -- memory helpers ---------------------------------------------------
 
@@ -410,6 +1043,154 @@ class AgentRunner:
                 "Memory lesson failed for %s: %s", self._config.name, mem_exc
             )
 
+    def _record_retrieval_outcome(self, task: Task, *, outcome: str) -> None:
+        """Persist eventual task outcome for any prompt-time retrievals."""
+        metadata = task.metadata if isinstance(task.metadata, dict) else {}
+        consumer = metadata.get("_memory_recall_consumer")
+        if not isinstance(consumer, str) or not consumer.strip():
+            return
+        try:
+            from dharma_swarm.engine.retrieval_feedback import RetrievalFeedbackStore
+
+            RetrievalFeedbackStore().record_outcome(
+                task.id,
+                outcome=outcome,
+                consumer=consumer,
+            )
+        except Exception as exc:
+            logger.debug(
+                "Retrieval feedback outcome record failed for %s: %s",
+                self._config.name,
+                exc,
+            )
+
+    def _record_retrieval_citation_uptake(self, task: Task, result: str) -> None:
+        """Mark which retrieved memory hits were actually reflected in the output."""
+        metadata = task.metadata if isinstance(task.metadata, dict) else {}
+        consumer = metadata.get("_memory_recall_consumer")
+        if not isinstance(consumer, str) or not consumer.strip():
+            return
+        try:
+            from dharma_swarm.engine.retrieval_feedback import RetrievalFeedbackStore
+
+            RetrievalFeedbackStore().record_citation_uptake(
+                task.id,
+                text=result,
+                consumer=consumer,
+            )
+        except Exception as exc:
+            logger.debug(
+                "Retrieval citation uptake record failed for %s: %s",
+                self._config.name,
+                exc,
+            )
+
+    def _record_conversation_turn(
+        self,
+        task: Task,
+        *,
+        role: str,
+        content: str,
+        turn_index: int,
+    ) -> None:
+        """Persist raw conversation turns for later harvesting."""
+        if not content.strip():
+            return
+        try:
+            from dharma_swarm.engine.conversation_memory import ConversationMemoryStore
+
+            ConversationMemoryStore(self._memory_plane_db_path(task)).record_turn(
+                session_id=self._conversation_session_id(task),
+                task_id=task.id,
+                role=role,
+                content=content,
+                turn_index=turn_index,
+                metadata={"agent_name": self._config.name, "role": self._config.role.value},
+                harvest=True,
+            )
+        except Exception as exc:
+            logger.debug(
+                "Conversation turn record failed for %s: %s",
+                self._config.name,
+                exc,
+            )
+
+    def _record_idea_uptake(self, task: Task, result: str) -> None:
+        """Mark which harvested task ideas survived into the final output."""
+        try:
+            from dharma_swarm.engine.conversation_memory import ConversationMemoryStore
+
+            ConversationMemoryStore(self._memory_plane_db_path(task)).record_uptake_from_text(
+                task_id=task.id,
+                text=result,
+                uptake_kind="implemented",
+            )
+        except Exception as exc:
+            logger.debug(
+                "Idea uptake record failed for %s: %s",
+                self._config.name,
+                exc,
+            )
+
+    def _record_follow_up_shard_outcome(
+        self,
+        task: Task,
+        *,
+        outcome: str,
+        evidence_text: str,
+    ) -> None:
+        """Close the loop for tasks explicitly reopened from latent gold."""
+        metadata = task.metadata if isinstance(task.metadata, dict) else {}
+        shard_id = metadata.get("latent_gold_shard_id")
+        if not isinstance(shard_id, str) or not shard_id.strip():
+            return
+        try:
+            from dharma_swarm.engine.conversation_memory import ConversationMemoryStore
+
+            ConversationMemoryStore(self._memory_plane_db_path(task)).record_follow_up_outcome(
+                shard_id=shard_id,
+                follow_up_task_id=task.id,
+                outcome=outcome,
+                evidence_text=evidence_text,
+            )
+        except Exception as exc:
+            logger.debug(
+                "Follow-up shard outcome record failed for %s: %s",
+                self._config.name,
+                exc,
+            )
+
+    def _mark_idea_outcome(self, task: Task, *, outcome: str) -> None:
+        """Keep unchosen but high-salience ideas alive after task completion."""
+        try:
+            from dharma_swarm.engine.conversation_memory import ConversationMemoryStore
+
+            ConversationMemoryStore(self._memory_plane_db_path(task)).mark_task_outcome(
+                task.id,
+                outcome=outcome,
+            )
+        except Exception as exc:
+            logger.debug(
+                "Idea outcome record failed for %s: %s",
+                self._config.name,
+                exc,
+            )
+
+    def _conversation_session_id(self, task: Task) -> str:
+        metadata = task.metadata if isinstance(task.metadata, dict) else {}
+        raw = (
+            metadata.get("session_id")
+            or metadata.get("trace_id")
+            or self._config.metadata.get("session_id")
+            or f"task:{task.id}"
+        )
+        return str(raw)
+
+    def _memory_plane_db_path(self, task: Task):
+        metadata = task.metadata if isinstance(task.metadata, dict) else {}
+        raw = metadata.get("memory_plane_db") or self._config.metadata.get("memory_plane_db")
+        return raw
+
     async def heartbeat(self) -> None:
         """Update the last_heartbeat timestamp."""
         async with self._lock:
@@ -451,7 +1232,7 @@ class AgentPool:
     async def spawn(
         self,
         config: AgentConfig,
-        provider: CompletionProvider | None = None,
+        provider: CompletionProvider | RoutedCompletionProvider | None = None,
         sandbox: CodeSandbox | None = None,
         memory: AgentMemoryBank | None = None,
     ) -> AgentRunner:

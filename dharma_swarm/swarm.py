@@ -287,8 +287,10 @@ class SwarmManager:
                 system_prompt=system_prompt + extra_prompt if system_prompt else extra_prompt,
                 thread=thread,
             )
-            provider = self._router.get_provider(provider_type)
-            runner = await self._agent_pool.spawn(config, provider=provider)
+            # Route through the shared ModelRouter so live agent tasks contribute
+            # to routing memory, retries, and audit trails while staying pinned
+            # to config.provider unless task metadata widens the lane set.
+            runner = await self._agent_pool.spawn(config, provider=self._router)
             await self._memory.remember(
                 f"Agent spawned: {name} ({role.value})"
                 + (f" [thread: {thread}]" if thread else ""),
@@ -430,6 +432,129 @@ class SwarmManager:
             # Batch create all tasks in single transaction
             return await self._task_board.create_batch(enriched)
 
+    @staticmethod
+    def _latent_gold_task_title(shard: Any) -> str:
+        prefix = {
+            "question": "Answer latent question",
+            "warning": "Resolve latent warning",
+            "todo": "Follow up latent todo",
+            "hypothesis": "Test latent hypothesis",
+            "insight": "Develop latent insight",
+            "proposal": "Reopen latent branch",
+        }.get(str(getattr(shard, "shard_kind", "")), "Reopen latent branch")
+        stem = str(getattr(shard, "text", "")).strip().rstrip(".")
+        return f"{prefix}: {stem[:72]}".strip()
+
+    @staticmethod
+    def _latent_gold_task_description(shard: Any) -> str:
+        return (
+            "This task was reopened automatically from a high-salience latent branch "
+            "captured during prior conversation flow.\n\n"
+            f"Original shard:\n{getattr(shard, 'text', '').strip()}\n\n"
+            f"State: {getattr(shard, 'state', 'unknown')}\n"
+            f"Kind: {getattr(shard, 'shard_kind', 'unknown')}\n"
+            f"Salience: {float(getattr(shard, 'salience', 0.0)):.2f}\n"
+            f"Source task: {getattr(shard, 'task_id', '') or 'n/a'}\n\n"
+            "Goal: decide whether this branch should be implemented, tested, "
+            "archived, or explicitly rejected. If you resolve it, mention the "
+            "originating latent branch in the result."
+        )
+
+    async def spawn_latent_gold_tasks(
+        self,
+        *,
+        limit: int = 2,
+        max_pending: int = 12,
+        min_salience: float = 0.72,
+    ) -> list[Task]:
+        """Promote unresolved high-salience latent branches into real tasks."""
+        if self._task_board is None:
+            return []
+
+        plane_path = self.state_dir / "db" / "memory_plane.db"
+        if not plane_path.exists():
+            return []
+
+        from dharma_swarm.engine.conversation_memory import ConversationMemoryStore
+
+        counts = await self._task_board.stats()
+        active = (
+            int(counts.get("pending", 0))
+            + int(counts.get("assigned", 0))
+            + int(counts.get("running", 0))
+        )
+        if active >= max_pending:
+            return []
+
+        existing = await self._task_board.list_tasks(limit=500)
+        claimed_shards = {
+            str(task.metadata.get("latent_gold_shard_id"))
+            for task in existing
+            if isinstance(task.metadata, dict)
+            and isinstance(task.metadata.get("latent_gold_shard_id"), str)
+            and str(task.metadata.get("latent_gold_shard_id")).strip()
+        }
+
+        store = ConversationMemoryStore(plane_path)
+        candidates = [
+            shard
+            for shard in store.latent_gold("", limit=200)
+            if shard.state in {"orphaned", "deferred"}
+            and float(shard.salience) >= min_salience
+            and shard.shard_id not in claimed_shards
+        ]
+        if not candidates:
+            return []
+
+        capacity = max(0, max_pending - active)
+        planned = candidates[: max(0, min(limit, capacity))]
+        if not planned:
+            return []
+
+        task_specs: list[dict[str, Any]] = []
+        for shard in planned:
+            priority = (
+                TaskPriority.HIGH
+                if float(shard.salience) >= 0.85
+                else TaskPriority.NORMAL
+            )
+            task_specs.append(
+                {
+                    "title": self._latent_gold_task_title(shard),
+                    "description": self._latent_gold_task_description(shard),
+                    "priority": priority,
+                    "metadata": {
+                        "memory_plane_db": str(plane_path),
+                        "latent_gold_reopened": True,
+                        "latent_gold_shard_id": shard.shard_id,
+                        "latent_gold_source_task_id": shard.task_id,
+                        "latent_gold_source_turn_id": shard.turn_id,
+                        "latent_gold_state": shard.state,
+                        "latent_gold_kind": shard.shard_kind,
+                        "latent_gold_salience": round(float(shard.salience), 6),
+                        "source": "swarm.latent_gold",
+                    },
+                }
+            )
+
+        created = await self.create_task_batch(task_specs)
+        for task in created:
+            shard_id = str(task.metadata.get("latent_gold_shard_id", "")).strip()
+            if shard_id:
+                store.record_follow_up_task(
+                    shard_id=shard_id,
+                    follow_up_task_id=task.id,
+                    title=task.title,
+                )
+
+        if created and self._memory is not None:
+            await self._memory.remember(
+                f"Latent gold reopened into {len(created)} follow-up task(s)",
+                layer=MemoryLayer.SESSION,
+                source="swarm",
+            )
+        return created
+
     async def list_tasks(
         self, status: TaskStatus | None = None
     ) -> list[Task]:
@@ -444,6 +569,7 @@ class SwarmManager:
 
     async def dispatch_next(self) -> int:
         """Run one orchestration tick. Returns number of tasks dispatched."""
+        await self.spawn_latent_gold_tasks()
         dispatches = await self._orchestrator.route_next()
         return len(dispatches)
 
@@ -485,6 +611,21 @@ class SwarmManager:
 
         return True
 
+    @staticmethod
+    def _tick_did_work(activity: Any) -> bool:
+        """Return True when an orchestration tick performed real work."""
+        if isinstance(activity, dict):
+            for key in ("dispatched", "settled", "recovered"):
+                try:
+                    if int(activity.get(key, 0) or 0) > 0:
+                        return True
+                except Exception:
+                    continue
+            return False
+        if isinstance(activity, (int, float)):
+            return activity > 0
+        return bool(activity)
+
     async def run(self, interval: float | None = None) -> None:
         """Run the orchestration loop with Garden Daemon parameters.
 
@@ -506,34 +647,41 @@ class SwarmManager:
                 if overrides["focus"] and self._thread_mgr:
                     self._thread_mgr._current_thread = overrides["focus"]
 
-                # Check quiet hours
-                if self._in_quiet_hours():
-                    logger.debug("In quiet hours, skipping tick")
-                    await asyncio.sleep(min(tick_interval, 300))
-                    continue
-
                 # Check circuit breaker
                 if self._daemon.circuit_breaker.is_broken:
                     logger.warning("Circuit breaker tripped, paused")
                     await asyncio.sleep(min(tick_interval, 300))
                     continue
 
-                # Check contribution rate limits
+                allow_autonomous_generation = True
+                if self._in_quiet_hours():
+                    logger.debug("In quiet hours, autonomous task generation paused")
+                    allow_autonomous_generation = False
                 if not self._contribution_allowed():
-                    logger.debug("Rate limit: contribution not allowed yet")
-                    await asyncio.sleep(min(tick_interval, 300))
-                    continue
+                    logger.debug("Rate limit: autonomous contribution not allowed yet")
+                    allow_autonomous_generation = False
+
+                reopened: list[Any] = []
+                if allow_autonomous_generation:
+                    reopened = await self.spawn_latent_gold_tasks()
+                    if reopened:
+                        logger.info(
+                            "Reopened %d latent-gold follow-up task(s)",
+                            len(reopened),
+                        )
 
                 # Run orchestration tick
-                await self._orchestrator.tick()
+                activity = await self._orchestrator.tick()
+                did_work = bool(reopened) or self._tick_did_work(activity)
 
-                # Record contribution
-                self._last_contribution = datetime.now()
-                self._daily_contributions += 1
-                self._daemon.circuit_breaker.record_success()
+                # Record contribution only when work actually occurred.
+                if did_work:
+                    self._last_contribution = datetime.now()
+                    self._daily_contributions += 1
+                    self._daemon.circuit_breaker.record_success()
 
-                if self._thread_mgr:
-                    self._thread_mgr.record_contribution()
+                    if self._thread_mgr:
+                        self._thread_mgr.record_contribution()
 
             except Exception as exc:
                 logger.exception("Tick failed: %s", exc)

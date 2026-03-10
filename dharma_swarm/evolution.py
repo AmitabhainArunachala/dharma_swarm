@@ -13,6 +13,8 @@ import asyncio
 from collections import defaultdict
 import logging
 import re
+import shutil
+from tempfile import TemporaryDirectory
 import time
 from enum import Enum
 from pathlib import Path
@@ -20,15 +22,33 @@ from typing import Any, Optional
 
 from pydantic import BaseModel, Field, field_validator
 
-from dharma_swarm.archive import ArchiveEntry, EvolutionArchive, FitnessScore
+from dharma_swarm.archive import (
+    ArchiveEntry,
+    EvolutionArchive,
+    FitnessScore,
+    normalize_fitness_weights,
+)
+from dharma_swarm.convergence import ConvergenceConfig, ConvergenceDetector
 from dharma_swarm.diff_applier import DiffApplier
 from dharma_swarm.elegance import evaluate_elegance
 from dharma_swarm.fitness_predictor import FitnessPredictor, ProposalFeatures
 from dharma_swarm.jikoku_instrumentation import jikoku_auto_span
+from dharma_swarm.landscape import FitnessLandscapeMapper, LandscapeProbe
 from dharma_swarm.models import GateDecision, GateResult, SandboxResult, _new_id, _utc_now
+from dharma_swarm.probe_targets import ProbeTargetRegistry, ResolvedProbeTarget
+from dharma_swarm.router_retrospective import (
+    DriftGuardDecision,
+    DriftGuardThresholds,
+    RouteOutcomeRecord,
+    RouteRetrospectiveArtifact,
+    build_route_policy_archive_entry,
+    build_route_retrospective,
+    evaluate_router_drift,
+)
 from dharma_swarm.selector import select_parent
 from dharma_swarm.telos_gates import check_with_reflective_reroute
 from dharma_swarm.traces import TraceEntry, TraceStore
+from dharma_swarm.ucb_selector import UCBConfig, UCBParentSelector
 
 logger = logging.getLogger(__name__)
 
@@ -99,6 +119,12 @@ class CycleResult(BaseModel):
     circuit_breakers_tripped: int = 0
     strategy_pivots: int = 0
     best_fitness: float = 0.0
+    exploration_ratio: float = 0.0
+    convergence_restart_triggered: bool = False
+    restart_cycles_remaining: int = 0
+    mutation_rate_applied: float = 0.0
+    landscape_basin: str | None = None
+    adaptive_strategy: str | None = None
     duration_seconds: float = 0.0
     reflection: str = ""
     lessons_learned: list[str] = Field(default_factory=list)
@@ -133,6 +159,8 @@ class DarwinEngine:
             ``~/.dharma/traces``.
         predictor_path: Path to the fitness predictor history file.
             Defaults to ``~/.dharma/evolution/predictor_data.jsonl``.
+        custom_fitness_weights: Optional custom weighting for fitness scoring.
+            Partial overrides are merged onto canonical defaults.
     """
 
     def __init__(
@@ -142,13 +170,388 @@ class DarwinEngine:
         predictor_path: Path | None = None,
         circuit_breaker_limit: int = 3,
         max_reflection_reroutes: int = 2,
+        custom_fitness_weights: dict[str, float] | None = None,
+        use_ucb: bool = False,
+        ucb_config: UCBConfig | None = None,
+        convergence_config: ConvergenceConfig | None = None,
+        mutation_rate: float = 0.1,
+        landscape_probe_interval: int = 5,
+        landscape_probe_workspace: Path | None = None,
+        landscape_probe_test_command: str = "python3 -m pytest tests/ -q --tb=short",
+        landscape_probe_timeout: float = 60.0,
+        probe_targets: ProbeTargetRegistry | list[dict[str, Any]] | None = None,
+        meta_evolution_interval: int = 0,
+        meta_archive_path: Path | None = None,
+        meta_poor_fitness_threshold: float = 0.5,
+        meta_auto_apply: bool = True,
+        router_drift_thresholds: DriftGuardThresholds | None = None,
     ) -> None:
         self.archive = EvolutionArchive(path=archive_path)
         self.traces = TraceStore(base_path=traces_path)
         self.predictor = FitnessPredictor(history_path=predictor_path)
         self._circuit_breaker_limit = max(1, int(circuit_breaker_limit))
         self._max_reflection_reroutes = max(0, int(max_reflection_reroutes))
+        self._fitness_weights = normalize_fitness_weights(custom_fitness_weights)
+        self.use_ucb = bool(use_ucb)
+        self.ucb_selector = UCBParentSelector(ucb_config)
+        self.convergence_detector = ConvergenceDetector(convergence_config)
+        self._base_mutation_rate = max(0.01, float(mutation_rate))
+        self._map_elites_n_bins = self.archive.grid.n_bins
+        self._landscape_probe_interval = max(1, int(landscape_probe_interval))
+        self._landscape_probe_workspace = (
+            Path(landscape_probe_workspace).resolve()
+            if landscape_probe_workspace is not None
+            else None
+        )
+        self._landscape_probe_test_command = landscape_probe_test_command
+        self._landscape_probe_timeout = float(landscape_probe_timeout)
+        self.probe_target_registry = ProbeTargetRegistry.from_configs(probe_targets)
+        self._meta_evolution_interval = max(0, int(meta_evolution_interval))
+        self.last_meta_evolution_result: Any | None = None
+        self._meta_evolution_engine: Any | None = None
+        if self._meta_evolution_interval > 0:
+            from dharma_swarm.meta_evolution import MetaEvolutionEngine
+
+            self._meta_evolution_engine = MetaEvolutionEngine(
+                self,
+                meta_archive_path=meta_archive_path,
+                n_object_cycles_per_meta=self._meta_evolution_interval,
+                poor_meta_fitness_threshold=meta_poor_fitness_threshold,
+                auto_apply=meta_auto_apply,
+            )
+        self._router_drift_thresholds = router_drift_thresholds or DriftGuardThresholds()
+        self._completed_cycles = 0
+        self._adaptive_strategy = "explore"
+        self.last_landscape_probe: LandscapeProbe | None = None
+        self.landscape_mapper = FitnessLandscapeMapper(self)
         self._initialized: bool = False
+
+    def get_fitness_weights(self) -> dict[str, float]:
+        """Return the active normalized fitness weights."""
+        return dict(self._fitness_weights)
+
+    def set_fitness_weights(
+        self,
+        weights: dict[str, float] | None = None,
+    ) -> dict[str, float]:
+        """Set active fitness weights, falling back to canonical defaults."""
+        self._fitness_weights = normalize_fitness_weights(weights)
+        return self.get_fitness_weights()
+
+    def score_fitness(self, fitness: FitnessScore | None) -> float:
+        """Score a fitness vector using the engine's active weights."""
+        if fitness is None:
+            return 0.0
+        return fitness.weighted(weights=self._fitness_weights)
+
+    def get_meta_parameter_state(self) -> dict[str, Any]:
+        """Export the engine knobs used by meta-evolution."""
+        return {
+            "fitness_weights": self.get_fitness_weights(),
+            "mutation_rate": self._base_mutation_rate,
+            "exploration_coeff": self.ucb_selector.state.exploration_coeff,
+            "circuit_breaker_limit": self._circuit_breaker_limit,
+            "map_elites_n_bins": self._map_elites_n_bins,
+        }
+
+    def apply_meta_parameters(self, meta_params: Any) -> dict[str, Any]:
+        """Apply a meta-parameter bundle onto the live engine."""
+        self.set_fitness_weights(getattr(meta_params, "fitness_weights", None))
+        self._base_mutation_rate = max(
+            0.01,
+            float(getattr(meta_params, "mutation_rate", self._base_mutation_rate)),
+        )
+        self._circuit_breaker_limit = max(
+            1,
+            int(
+                getattr(
+                    meta_params,
+                    "circuit_breaker_limit",
+                    self._circuit_breaker_limit,
+                )
+            ),
+        )
+        self._map_elites_n_bins = max(
+            3,
+            int(getattr(meta_params, "map_elites_n_bins", self._map_elites_n_bins)),
+        )
+        self.archive.reconfigure_grid(self._map_elites_n_bins)
+        self.ucb_selector.set_exploration_coeff(
+            float(
+                getattr(
+                    meta_params,
+                    "exploration_coeff",
+                    self.ucb_selector.state.exploration_coeff,
+                )
+            )
+        )
+        self._map_elites_n_bins = self.archive.grid.n_bins
+        return self.get_meta_parameter_state()
+
+    def get_active_mutation_rate(self) -> float:
+        """Return mutation rate after convergence restart adjustments."""
+        return self.convergence_detector.get_restart_mutation_rate(
+            self._base_mutation_rate
+        )
+
+    def register_probe_target(
+        self,
+        component_pattern: str,
+        *,
+        workspace: Path | str | None = None,
+        test_command: str | None = None,
+        timeout: float | None = None,
+        priority: int = 0,
+    ) -> ResolvedProbeTarget:
+        """Register a component-aware workspace probe target."""
+        target = self.probe_target_registry.register(
+            component_pattern,
+            workspace=workspace,
+            test_command=test_command,
+            timeout=timeout,
+            priority=priority,
+        )
+        return ResolvedProbeTarget(
+            component=component_pattern,
+            workspace=target.workspace,
+            test_command=target.test_command,
+            timeout=target.timeout,
+            matched_pattern=target.component_pattern,
+            priority=target.priority,
+        )
+
+    def resolve_probe_target(self, component: str) -> ResolvedProbeTarget:
+        """Resolve probe settings for a component with engine defaults overlaid."""
+        resolved = self.probe_target_registry.resolve(component)
+        return ResolvedProbeTarget(
+            component=component,
+            workspace=(
+                resolved.workspace
+                if resolved and resolved.workspace is not None
+                else self._landscape_probe_workspace
+            ),
+            test_command=(
+                resolved.test_command
+                if resolved and resolved.test_command is not None
+                else self._landscape_probe_test_command
+            ),
+            timeout=(
+                resolved.timeout
+                if resolved and resolved.timeout is not None
+                else self._landscape_probe_timeout
+            ),
+            matched_pattern=resolved.matched_pattern if resolved else None,
+            priority=resolved.priority if resolved else 0,
+        )
+
+    def get_mutation_budget_lines(self) -> int:
+        """Translate mutation rate into an LLM diff-size budget."""
+        return max(12, min(160, round(12 + (self.get_active_mutation_rate() * 160))))
+
+    def _current_adaptive_strategy(self) -> str:
+        """Return the current landscape-guided mutation mode."""
+        if self.convergence_detector.is_restart_active():
+            return "restart"
+        return self._adaptive_strategy
+
+    def _build_propose_system(self) -> str:
+        """Build the proposal-generation system prompt from live engine state."""
+        strategy = self._current_adaptive_strategy()
+        max_lines = self.get_mutation_budget_lines()
+        strategy_guidance = {
+            "exploit": "Bias toward small, local improvements near the current implementation.",
+            "explore": "Allow broader alternatives while staying coherent and file-local.",
+            "restart": "Bias toward bolder mutations that may escape a local optimum, while remaining reversible.",
+            "backtrack": "Favor simplifying or risk-reducing changes over ambitious rewrites.",
+        }
+        return (
+            "You are an expert Python engineer improving a codebase. "
+            "Given a source file, propose ONE focused improvement. "
+            "Respond in EXACTLY this format (no markdown fencing around the whole response):\n\n"
+            "COMPONENT: <module name>\n"
+            "CHANGE_TYPE: mutation\n"
+            "DESCRIPTION: <one-line summary>\n"
+            "THINK: <why this matters, 1-2 sentences>\n"
+            "DIFF:\n"
+            "```diff\n"
+            "<unified diff>\n"
+            "```\n\n"
+            "Rules:\n"
+            f"- Keep changes under {max_lines} changed lines\n"
+            f"- Current mutation mode: {strategy}. {strategy_guidance.get(strategy, strategy_guidance['explore'])}\n"
+            "- Only fix real issues: bugs, missing error handling, performance, clarity\n"
+            "- Do NOT add docstrings, type hints, or comments to code you didn't change\n"
+            "- Do NOT refactor working code for style\n"
+            "- The diff must be a valid unified diff (--- a/file, +++ b/file, @@ hunks)\n"
+            "- If the code is already good, say DESCRIPTION: no-op and leave DIFF empty"
+        )
+
+    async def _update_cycle_dynamics(self, result: CycleResult) -> None:
+        """Update convergence/UCB state after a completed cycle."""
+        result.exploration_ratio = (
+            self.ucb_selector.get_exploration_ratio() if self.use_ucb else 0.0
+        )
+        triggered = self.convergence_detector.update(result.best_fitness)
+        result.convergence_restart_triggered = triggered
+        result.restart_cycles_remaining = (
+            self.convergence_detector.state.restart_cycles_remaining
+        )
+        if triggered:
+            result.strategy_pivots += 1
+            logger.info(
+                "Convergence detected: variance=%.4f improvement=%.4f restart=%d",
+                self.convergence_detector.state.last_variance,
+                self.convergence_detector.state.last_improvement,
+                self.convergence_detector.state.restart_cycles_remaining,
+            )
+        await self._refresh_landscape_guidance(result)
+        result.mutation_rate_applied = self.get_active_mutation_rate()
+
+    async def _maybe_run_meta_evolution(self, result: CycleResult) -> None:
+        """Observe completed cycles and periodically adapt engine hyperparameters."""
+        if self._meta_evolution_engine is None:
+            return
+
+        meta_result = self._meta_evolution_engine.observe_cycle_result(result)
+        if meta_result is None:
+            return
+
+        self.last_meta_evolution_result = meta_result
+        if meta_result.applied_parameters:
+            result.strategy_pivots += 1
+
+        if self._initialized:
+            await self.traces.log_entry(
+                TraceEntry(
+                    agent="darwin_meta_engine",
+                    action="meta_evolution",
+                    state="applied" if meta_result.applied_parameters else "observed",
+                    metadata={
+                        "meta_result_id": meta_result.id,
+                        "trigger": meta_result.trigger,
+                        "meta_fitness": meta_result.meta_fitness,
+                        "avg_fitness_trend": meta_result.avg_fitness_trend,
+                        "improvement_over_baseline": meta_result.improvement_over_baseline,
+                        "evolved_parameters": meta_result.evolved_parameters,
+                        "applied_parameters": meta_result.applied_parameters,
+                        "source_cycle_ids": meta_result.source_cycle_ids,
+                        "meta_parameters": meta_result.meta_parameters.model_dump(),
+                    },
+                )
+            )
+
+    async def _refresh_landscape_guidance(self, result: CycleResult) -> None:
+        """Probe the archive landscape periodically and adjust mutation strategy."""
+        self._completed_cycles += 1
+        should_probe = (
+            self._completed_cycles % self._landscape_probe_interval == 0
+            or result.convergence_restart_triggered
+        )
+        if not should_probe:
+            return
+
+        parents = await self.archive.get_best(n=1, weights=self._fitness_weights)
+        if not parents:
+            return
+
+        target = self.resolve_probe_target(parents[0].component or "")
+        probe = await self.landscape_mapper.probe_landscape(
+            parents[0],
+            weights=self._fitness_weights,
+            workspace=target.workspace,
+            test_command=target.test_command or self._landscape_probe_test_command,
+            timeout=target.timeout or self._landscape_probe_timeout,
+        )
+        self.last_landscape_probe = probe
+        strategy = self.landscape_mapper.get_adaptive_strategy(probe.basin_type)
+        self._adaptive_strategy = strategy
+        result.landscape_basin = probe.basin_type.value
+        result.adaptive_strategy = strategy
+
+        if self._initialized:
+            await self.traces.log_entry(
+                TraceEntry(
+                    agent="darwin_engine",
+                    action="landscape_probe",
+                    state=probe.basin_type.value,
+                    metadata={
+                        "parent_id": probe.parent_id,
+                        "component": probe.parent_component,
+                        "matched_pattern": target.matched_pattern,
+                        "workspace": str(target.workspace) if target.workspace else None,
+                        "test_command": target.test_command,
+                        "timeout": target.timeout,
+                        "gradient": probe.gradient,
+                        "variance": probe.variance,
+                        "neighbor_fitness": probe.neighbor_fitness,
+                    },
+                )
+            )
+
+        if strategy == "exploit":
+            self._base_mutation_rate = max(0.01, self._base_mutation_rate * 0.85)
+        elif strategy == "explore":
+            self._base_mutation_rate = min(1.0, self._base_mutation_rate * 1.2)
+        elif strategy == "restart":
+            self._base_mutation_rate = min(1.0, self._base_mutation_rate * 1.5)
+            if self.convergence_detector.state.restart_cycles_remaining == 0:
+                self.convergence_detector.state.restart_cycles_remaining = (
+                    self.convergence_detector.config.restart_duration
+                )
+                result.convergence_restart_triggered = True
+                result.strategy_pivots += 1
+                result.restart_cycles_remaining = (
+                    self.convergence_detector.state.restart_cycles_remaining
+                )
+        elif strategy == "backtrack":
+            self._base_mutation_rate = max(0.01, self._base_mutation_rate * 0.7)
+
+    async def evaluate_probe_proposal(
+        self,
+        proposal: Proposal,
+        *,
+        workspace: Path,
+        test_command: str = "python3 -m pytest tests/ -q --tb=short",
+        timeout: float = 60.0,
+    ) -> Proposal:
+        """Evaluate a speculative probe against an isolated workspace snapshot."""
+        candidate = proposal.model_copy(deep=True)
+        await self.gate_check(candidate)
+        if candidate.status == EvolutionStatus.REJECTED:
+            await self.evaluate(candidate, test_results={"pass_rate": 0.0})
+            return candidate
+
+        workspace_path = Path(workspace).resolve()
+        with TemporaryDirectory(prefix="dharma_landscape_probe_") as tmpdir:
+            snapshot_root = Path(tmpdir) / "workspace"
+            shutil.copytree(
+                workspace_path,
+                snapshot_root,
+                ignore=shutil.ignore_patterns(
+                    ".git",
+                    "__pycache__",
+                    ".pytest_cache",
+                    ".mypy_cache",
+                ),
+            )
+            candidate, test_results = await self.apply_diff_and_test(
+                candidate,
+                test_command=test_command,
+                timeout=timeout,
+                workspace=snapshot_root,
+            )
+
+            code: str | None = None
+            target_path = (snapshot_root / candidate.component).resolve()
+            try:
+                target_path.relative_to(snapshot_root)
+            except ValueError:
+                target_path = snapshot_root / Path(candidate.component).name
+            if target_path.exists() and target_path.is_file():
+                code = target_path.read_text(encoding="utf-8")
+
+            await self.evaluate(candidate, test_results=test_results, code=code)
+            return candidate
 
     async def init(self) -> None:
         """Load archive, initialize traces, and load predictor history."""
@@ -448,11 +851,19 @@ class DarwinEngine:
             safety = 1.0 if proposal.status != EvolutionStatus.REJECTED else 0.0
 
             # JIKOKU performance metrics (NEW)
-            from dharma_swarm.jikoku_fitness import evaluate_jikoku_metrics
+            from dharma_swarm.jikoku_fitness import (
+                evaluate_economic_fitness_from_jikoku,
+                evaluate_jikoku_metrics,
+            )
+
             performance, utilization = await evaluate_jikoku_metrics(
                 proposal,
                 baseline_session_id=baseline_session_id,
                 test_session_id=test_session_id,
+            )
+            economic_value, _ = await evaluate_economic_fitness_from_jikoku(
+                baseline_session_id,
+                test_session_id,
             )
 
             # Safety floor: if safety == 0, the entire composite fitness is 0
@@ -465,6 +876,7 @@ class DarwinEngine:
                     dharmic_alignment=0.0,
                     performance=0.0,
                     utilization=0.0,
+                    economic_value=0.0,
                     efficiency=0.0,
                     safety=0.0,
                 )
@@ -475,6 +887,7 @@ class DarwinEngine:
                     dharmic_alignment=dharmic_alignment,
                     performance=performance,     # NEW - JIKOKU
                     utilization=utilization,     # NEW - JIKOKU
+                    economic_value=economic_value,
                     efficiency=efficiency,
                     safety=safety,
                 )
@@ -485,7 +898,7 @@ class DarwinEngine:
             logger.info(
                 "Proposal %s evaluated: weighted=%.3f",
                 proposal.id,
-                fitness.weighted(),
+                self.score_fitness(fitness),
             )
             return proposal
 
@@ -508,9 +921,10 @@ class DarwinEngine:
             intent=f"Archive proposal {proposal.id[:8]}",
             proposal_id=proposal.id,
             component=proposal.component,
-            fitness=proposal.actual_fitness.weighted() if proposal.actual_fitness else 0.0,
+            fitness=self.score_fitness(proposal.actual_fitness),
         ):
             fitness = proposal.actual_fitness or FitnessScore()
+            weighted_fitness = self.score_fitness(fitness)
 
             entry = ArchiveEntry(
                 component=proposal.component,
@@ -543,7 +957,7 @@ class DarwinEngine:
                 change_type=proposal.change_type,
                 diff_size=len(proposal.diff.splitlines()) if proposal.diff else 0,
             )
-            await self.predictor.record_outcome(features, fitness.weighted())
+            await self.predictor.record_outcome(features, weighted_fitness)
 
             # Log trace
             await self.traces.log_entry(
@@ -554,7 +968,7 @@ class DarwinEngine:
                 metadata={
                     "proposal_id": proposal.id,
                     "entry_id": entry_id,
-                    "weighted_fitness": fitness.weighted(),
+                    "weighted_fitness": weighted_fitness,
                     "spec_ref": proposal.spec_ref,
                     "requirement_refs": proposal.requirement_refs,
                 },
@@ -565,7 +979,7 @@ class DarwinEngine:
             "Proposal %s archived as %s (fitness=%.3f)",
             proposal.id,
             entry_id,
-            fitness.weighted(),
+            weighted_fitness,
         )
         return entry_id
 
@@ -617,27 +1031,30 @@ class DarwinEngine:
 
             # Track best
             if proposal.actual_fitness:
-                weighted = proposal.actual_fitness.weighted()
+                weighted = self.score_fitness(proposal.actual_fitness)
                 if weighted > best_fitness:
                     best_fitness = weighted
 
         result.best_fitness = best_fitness
+        await self._update_cycle_dynamics(result)
         result.duration_seconds = time.monotonic() - start
 
         logger.info(
             "Cycle %s complete: %d submitted, %d gated, %d archived, "
-            "best_fitness=%.3f, pivots=%d, duration=%.2fs",
+            "best_fitness=%.3f, pivots=%d, restart=%s, duration=%.2fs",
             result.cycle_id,
             result.proposals_submitted,
             result.proposals_gated,
             result.proposals_archived,
             result.best_fitness,
             result.strategy_pivots,
+            result.convergence_restart_triggered,
             result.duration_seconds,
         )
 
         # Verbal self-reflection (Reflexion pattern)
         await self.reflect_on_cycle(result, proposals)
+        await self._maybe_run_meta_evolution(result)
 
         return result
 
@@ -861,27 +1278,30 @@ class DarwinEngine:
 
             # Track best
             if proposal.actual_fitness:
-                weighted = proposal.actual_fitness.weighted()
+                weighted = self.score_fitness(proposal.actual_fitness)
                 if weighted > best_fitness:
                     best_fitness = weighted
 
         result.best_fitness = best_fitness
+        await self._update_cycle_dynamics(result)
         result.duration_seconds = time.monotonic() - start
 
         logger.info(
             "Sandbox cycle %s complete: %d submitted, %d gated, %d archived, "
-            "best_fitness=%.3f, pivots=%d, duration=%.2fs",
+            "best_fitness=%.3f, pivots=%d, restart=%s, duration=%.2fs",
             result.cycle_id,
             result.proposals_submitted,
             result.proposals_gated,
             result.proposals_archived,
             result.best_fitness,
             result.strategy_pivots,
+            result.convergence_restart_triggered,
             result.duration_seconds,
         )
 
         # Verbal self-reflection (Reflexion pattern)
         await self.reflect_on_cycle(result, proposals)
+        await self._maybe_run_meta_evolution(result)
 
         return result
 
@@ -896,14 +1316,22 @@ class DarwinEngine:
 
         Args:
             strategy: Selection strategy name (``"tournament"``,
-                ``"roulette"``, ``"rank"``, ``"elite"``).
+                ``"roulette"``, ``"rank"``, ``"elite"``, or ``"ucb"``).
             **kwargs: Forwarded to the strategy function.
 
         Returns:
             An ``ArchiveEntry``, or ``None`` if the archive is empty.
         """
+        if strategy == "ucb" or (self.use_ucb and strategy == "tournament"):
+            return await self.ucb_selector.select_parent(
+                self.archive,
+                weights=self._fitness_weights,
+            )
         return await select_parent(
-            self.archive, strategy=strategy, **kwargs
+            self.archive,
+            strategy=strategy,
+            weights=self._fitness_weights,
+            **kwargs,
         )
 
     # -- analytics -----------------------------------------------------------
@@ -922,8 +1350,104 @@ class DarwinEngine:
         Returns:
             List of ``(timestamp, weighted_fitness)`` pairs, oldest first.
         """
-        trajectory = self.archive.fitness_over_time(component=component)
+        trajectory = self.archive.fitness_over_time(
+            component=component,
+            weights=self._fitness_weights,
+        )
         return trajectory[-limit:]
+
+    async def create_router_retrospective(
+        self,
+        outcome: RouteOutcomeRecord | dict[str, Any],
+    ) -> RouteRetrospectiveArtifact | None:
+        """Convert a poor high-confidence route into a Darwin review artifact."""
+        record = (
+            outcome
+            if isinstance(outcome, RouteOutcomeRecord)
+            else RouteOutcomeRecord.model_validate(outcome)
+        )
+        artifact = build_route_retrospective(record)
+        if artifact is None:
+            return None
+
+        archive_entry = build_route_policy_archive_entry(artifact)
+        artifact.darwin_archive_entry_id = await self.archive.add_entry(archive_entry)
+
+        if self._initialized:
+            await self.traces.log_entry(
+                TraceEntry(
+                    agent="darwin_router_auditor",
+                    action="route_retrospective",
+                    state=artifact.severity,
+                    metadata={
+                        "artifact_id": artifact.id,
+                        "archive_entry_id": artifact.darwin_archive_entry_id,
+                        "action_name": record.action_name,
+                        "route_path": record.route_path,
+                        "selected_provider": record.selected_provider,
+                        "confidence": record.confidence,
+                        "quality_score": record.effective_quality,
+                    },
+                )
+            )
+        return artifact
+
+    async def audit_router_outcomes(
+        self,
+        outcomes: list[RouteOutcomeRecord | dict[str, Any]],
+    ) -> list[RouteRetrospectiveArtifact]:
+        """Scan routing outcomes and persist only the poor high-confidence cases."""
+        artifacts: list[RouteRetrospectiveArtifact] = []
+        for outcome in outcomes:
+            artifact = await self.create_router_retrospective(outcome)
+            if artifact is not None:
+                artifacts.append(artifact)
+        return artifacts
+
+    async def guard_router_promotion(
+        self,
+        *,
+        goal_drift_index: float,
+        constraint_preservation: float,
+        entry_id: str | None = None,
+    ) -> DriftGuardDecision:
+        """Apply drift thresholds before promoting a routing policy change."""
+        decision = evaluate_router_drift(
+            goal_drift_index=goal_drift_index,
+            constraint_preservation=constraint_preservation,
+            thresholds=self._router_drift_thresholds,
+        )
+        archive_status: str | None = None
+        if entry_id:
+            entry = await self.archive.get_entry(entry_id)
+            if entry is not None:
+                archive_status = (
+                    "promoted" if decision.allow_promotion else "promotion_blocked"
+                )
+                policy_entry = entry.test_results.get("policy_archive_entry")
+                if isinstance(policy_entry, dict):
+                    policy_entry["promotion_state"] = archive_status
+                await self.archive.update_status(
+                    entry_id,
+                    archive_status,
+                    None if decision.allow_promotion else "; ".join(decision.reasons),
+                )
+        if self._initialized:
+            await self.traces.log_entry(
+                TraceEntry(
+                    agent="darwin_router_guard",
+                    action="promotion_guard",
+                    state="allow" if decision.allow_promotion else "block",
+                    metadata={
+                        "entry_id": entry_id,
+                        "archive_status": archive_status,
+                        "goal_drift_index": decision.goal_drift_index,
+                        "constraint_preservation": decision.constraint_preservation,
+                        "reasons": decision.reasons,
+                    },
+                )
+            )
+        return decision
 
     async def reflect_on_cycle(
         self,
@@ -1001,27 +1525,6 @@ class DarwinEngine:
 
     # -- LLM-powered proposal generation ------------------------------------
 
-    _PROPOSE_SYSTEM = (
-        "You are an expert Python engineer improving a codebase. "
-        "Given a source file, propose ONE focused improvement. "
-        "Respond in EXACTLY this format (no markdown fencing around the whole response):\n\n"
-        "COMPONENT: <module name>\n"
-        "CHANGE_TYPE: mutation\n"
-        "DESCRIPTION: <one-line summary>\n"
-        "THINK: <why this matters, 1-2 sentences>\n"
-        "DIFF:\n"
-        "```diff\n"
-        "<unified diff>\n"
-        "```\n\n"
-        "Rules:\n"
-        "- Keep changes small and focused (under 50 lines)\n"
-        "- Only fix real issues: bugs, missing error handling, performance, clarity\n"
-        "- Do NOT add docstrings, type hints, or comments to code you didn't change\n"
-        "- Do NOT refactor working code for style\n"
-        "- The diff must be a valid unified diff (--- a/file, +++ b/file, @@ hunks)\n"
-        "- If the code is already good, say DESCRIPTION: no-op and leave DIFF empty"
-    )
-
     @staticmethod
     def _parse_llm_proposal(response: str) -> dict[str, str]:
         """Parse structured fields from an LLM proposal response."""
@@ -1069,16 +1572,25 @@ class DarwinEngine:
         if len(source) > 15_000:
             source = source[:15_000] + "\n# ... truncated ..."
 
-        user_msg = f"## File: {source_file.name}\n\n```python\n{source}\n```"
+        strategy = self._current_adaptive_strategy()
+        mutation_rate = self.get_active_mutation_rate()
+        mutation_budget = self.get_mutation_budget_lines()
+        user_msg = (
+            "## Mutation Envelope\n"
+            f"- mutation_rate: {mutation_rate:.3f}\n"
+            f"- diff_budget_lines: {mutation_budget}\n"
+            f"- adaptive_strategy: {strategy}\n\n"
+            f"## File: {source_file.name}\n\n```python\n{source}\n```"
+        )
         if context:
             user_msg = f"## Context\n{context}\n\n{user_msg}"
 
         request = LLMRequest(
             model=model,
             messages=[{"role": "user", "content": user_msg}],
-            system=self._PROPOSE_SYSTEM,
+            system=self._build_propose_system(),
             max_tokens=2048,
-            temperature=0.7,
+            temperature=min(1.0, max(0.3, 0.4 + mutation_rate)),
         )
 
         try:
@@ -1118,6 +1630,9 @@ class DarwinEngine:
                     "model": model,
                     "description": desc[:200],
                     "diff_lines": len(diff.splitlines()),
+                    "mutation_rate": mutation_rate,
+                    "mutation_budget": mutation_budget,
+                    "adaptive_strategy": strategy,
                 },
             )
         )
@@ -1200,7 +1715,8 @@ class DarwinEngine:
         """
         if proposal.actual_fitness is None:
             return None
-        if proposal.actual_fitness.weighted() < fitness_threshold:
+        weighted_fitness = self.score_fitness(proposal.actual_fitness)
+        if weighted_fitness < fitness_threshold:
             return None
         if not proposal.diff.strip():
             return None
@@ -1208,7 +1724,7 @@ class DarwinEngine:
         ws = workspace or (Path.home() / "dharma_swarm")
         msg = (
             f"[darwin] {proposal.component}: {proposal.description}\n\n"
-            f"Fitness: {proposal.actual_fitness.weighted():.3f}\n"
+            f"Fitness: {weighted_fitness:.3f}\n"
             f"Proposal: {proposal.id}\n"
             f"Change-type: {proposal.change_type}"
         )
@@ -1252,7 +1768,7 @@ class DarwinEngine:
         commit_hash = stdout.decode().strip()
         logger.info(
             "Committed proposal %s as %s (fitness=%.3f)",
-            proposal.id[:8], commit_hash, proposal.actual_fitness.weighted(),
+            proposal.id[:8], commit_hash, weighted_fitness,
         )
         return commit_hash
 
@@ -1324,7 +1840,7 @@ class DarwinEngine:
             for entry in last_entries:
                 context_parts.append(
                     f"Recent: {entry.component} ({entry.change_type}) "
-                    f"fitness={entry.fitness.weighted():.3f}"
+                    f"fitness={self.score_fitness(entry.fitness):.3f}"
                 )
 
             context = "\n".join(context_parts)
@@ -1347,7 +1863,7 @@ class DarwinEngine:
                 committed = 0
                 recent = await self.archive.get_latest(result.proposals_archived)
                 for entry in recent:
-                    if entry.fitness.weighted() >= fitness_threshold:
+                    if self.score_fitness(entry.fitness) >= fitness_threshold:
                         # Re-create a minimal proposal for commit
                         p = Proposal(
                             component=entry.component,

@@ -74,10 +74,214 @@ def test_build_prompt_formats_title_and_description(monkeypatch):
     cfg = AgentConfig(name="a", role=AgentRole.CODER)
     task = Task(title="Title", description="Desc")
     monkeypatch.setattr(ar, "_build_system_prompt", lambda _cfg: "SYS")
+    monkeypatch.setattr(
+        "dharma_swarm.context.read_memory_context",
+        lambda **_: "",
+        raising=True,
+    )
     req = ar._build_prompt(task, cfg)
     assert req.system == "SYS"
     assert "## Task: Title" in req.messages[0]["content"]
     assert "Desc" in req.messages[0]["content"]
+
+
+def test_build_prompt_appends_memory_recall(monkeypatch):
+    cfg = AgentConfig(name="a", role=AgentRole.CODER)
+    task = Task(title="Title", description="Desc")
+    monkeypatch.setattr(ar, "_build_system_prompt", lambda _cfg: "SYS")
+    monkeypatch.setattr(
+        "dharma_swarm.context.read_memory_context",
+        lambda **_: "  [retrieval:note] prior memory",
+        raising=True,
+    )
+    monkeypatch.setattr(
+        "dharma_swarm.context.read_latent_gold_context",
+        lambda **_: "",
+        raising=True,
+    )
+
+    req = ar._build_prompt(task, cfg)
+
+    assert "## Memory Recall" in req.messages[0]["content"]
+    assert "prior memory" in req.messages[0]["content"]
+
+
+def test_build_prompt_appends_latent_gold(monkeypatch):
+    cfg = AgentConfig(name="a", role=AgentRole.CODER)
+    task = Task(title="Title", description="Desc")
+    monkeypatch.setattr(ar, "_build_system_prompt", lambda _cfg: "SYS")
+    monkeypatch.setattr(
+        "dharma_swarm.context.read_memory_context",
+        lambda **_: "",
+        raising=True,
+    )
+    monkeypatch.setattr(
+        "dharma_swarm.context.read_latent_gold_context",
+        lambda **_: "  [idea:orphaned] proposal | latent branch",
+        raising=True,
+    )
+
+    req = ar._build_prompt(task, cfg)
+
+    assert "## Latent Gold" in req.messages[0]["content"]
+    assert "latent branch" in req.messages[0]["content"]
+
+
+@pytest.mark.asyncio
+async def test_run_task_records_retrieval_success_outcome(monkeypatch):
+    cfg = AgentConfig(name="a", role=AgentRole.CODER)
+    provider = AsyncMock()
+    provider.complete = AsyncMock(return_value=LLMResponse(content="done", model="m"))
+    monkeypatch.setattr(
+        "dharma_swarm.context.read_memory_context",
+        lambda **_: "  [retrieval:note] prior memory",
+        raising=True,
+    )
+    monkeypatch.setattr(
+        "dharma_swarm.context.read_latent_gold_context",
+        lambda **_: "",
+        raising=True,
+    )
+    calls: list[tuple[str, str, str | None]] = []
+    conversation_calls: list[tuple[str, str]] = []
+
+    class _FakeStore:
+        def record_citation_uptake(self, task_id, *, text, consumer=None):
+            calls.append((task_id, f"uptake:{text}", consumer))
+            return 1
+
+        def record_outcome(self, task_id, *, outcome, consumer=None):
+            calls.append((task_id, outcome, consumer))
+            return 1
+
+    class _FakeConversationStore:
+        def record_turn(self, **kwargs):
+            conversation_calls.append((kwargs["role"], kwargs["content"]))
+            return "turn-x"
+
+        def record_uptake_from_text(self, **kwargs):
+            conversation_calls.append(("uptake", kwargs["text"]))
+            return 1
+
+        def record_follow_up_outcome(self, **kwargs):
+            conversation_calls.append(("follow_up", kwargs["outcome"]))
+            return True
+
+        def mark_task_outcome(self, task_id, *, outcome):
+            conversation_calls.append(("outcome", outcome))
+            return 1
+
+    monkeypatch.setattr(
+        "dharma_swarm.engine.retrieval_feedback.RetrievalFeedbackStore",
+        lambda *args, **kwargs: _FakeStore(),
+        raising=True,
+    )
+    monkeypatch.setattr(
+        "dharma_swarm.engine.conversation_memory.ConversationMemoryStore",
+        lambda *args, **kwargs: _FakeConversationStore(),
+        raising=True,
+    )
+
+    runner = ar.AgentRunner(cfg, provider=provider)
+    await runner.start()
+    await runner.run_task(
+        Task(
+            id="task-1",
+            title="Title",
+            description="Desc",
+            metadata={
+                "latent_gold_shard_id": "shd-1",
+                "memory_plane_db": "/tmp/test-memory-plane.db",
+            },
+        )
+    )
+
+    assert calls == [
+        ("task-1", "uptake:done", "agent_runner.prompt"),
+        ("task-1", "success", "agent_runner.prompt"),
+    ]
+    assert conversation_calls[0][0] == "user"
+    assert conversation_calls[1][0] == "assistant"
+    assert conversation_calls[2][0] == "uptake"
+    assert conversation_calls[3] == ("follow_up", "success")
+    assert conversation_calls[4] == ("outcome", "success")
+
+
+@pytest.mark.asyncio
+async def test_run_task_records_retrieval_failure_outcome(monkeypatch):
+    cfg = AgentConfig(name="a", role=AgentRole.CODER)
+    provider = AsyncMock()
+    provider.complete = AsyncMock(return_value=LLMResponse(content="", model="m"))
+    monkeypatch.setattr(
+        "dharma_swarm.context.read_memory_context",
+        lambda **_: "  [retrieval:note] prior memory",
+        raising=True,
+    )
+    monkeypatch.setattr(
+        "dharma_swarm.context.read_latent_gold_context",
+        lambda **_: "",
+        raising=True,
+    )
+    calls: list[tuple[str, str, str | None]] = []
+    conversation_calls: list[tuple[str, str]] = []
+
+    class _FakeStore:
+        def record_citation_uptake(self, task_id, *, text, consumer=None):
+            calls.append((task_id, f"uptake:{text}", consumer))
+            return 1
+
+        def record_outcome(self, task_id, *, outcome, consumer=None):
+            calls.append((task_id, outcome, consumer))
+            return 1
+
+    class _FakeConversationStore:
+        def record_turn(self, **kwargs):
+            conversation_calls.append((kwargs["role"], kwargs["content"]))
+            return "turn-x"
+
+        def record_uptake_from_text(self, **kwargs):
+            conversation_calls.append(("uptake", kwargs["text"]))
+            return 1
+
+        def record_follow_up_outcome(self, **kwargs):
+            conversation_calls.append(("follow_up", kwargs["outcome"]))
+            return True
+
+        def mark_task_outcome(self, task_id, *, outcome):
+            conversation_calls.append(("outcome", outcome))
+            return 1
+
+    monkeypatch.setattr(
+        "dharma_swarm.engine.retrieval_feedback.RetrievalFeedbackStore",
+        lambda *args, **kwargs: _FakeStore(),
+        raising=True,
+    )
+    monkeypatch.setattr(
+        "dharma_swarm.engine.conversation_memory.ConversationMemoryStore",
+        lambda *args, **kwargs: _FakeConversationStore(),
+        raising=True,
+    )
+
+    runner = ar.AgentRunner(cfg, provider=provider)
+    await runner.start()
+    with pytest.raises(RuntimeError):
+        await runner.run_task(
+            Task(
+                id="task-2",
+                title="Title",
+                description="Desc",
+                metadata={
+                    "latent_gold_shard_id": "shd-2",
+                    "memory_plane_db": "/tmp/test-memory-plane.db",
+                },
+            )
+        )
+
+    assert calls == [("task-2", "failure", "agent_runner.prompt")]
+    assert conversation_calls[0][0] == "user"
+    assert conversation_calls[1][0] == "assistant_error"
+    assert conversation_calls[2] == ("follow_up", "failure")
+    assert conversation_calls[3] == ("outcome", "failure")
 
 
 def test_looks_like_provider_failure_prefixes_and_empty():
