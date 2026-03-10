@@ -208,6 +208,59 @@ def test_cmd_swarm_status_alias_does_not_run_orchestrator():
         mock_run.assert_not_called()
 
 
+def test_cmd_swarm_codex_night_start_dispatches_tmux_script():
+    """`dgc swarm codex-night start` should invoke the Codex tmux launcher."""
+    from dharma_swarm.dgc_cli import cmd_swarm
+
+    with patch("dharma_swarm.dgc_cli.subprocess.run") as mock_run:
+        mock_run.return_value.returncode = 0
+        mock_run.return_value.stdout = "Started session"
+        mock_run.return_value.stderr = ""
+
+        cmd_swarm(["codex-night", "start", "2"])
+
+    cmd = mock_run.call_args.args[0]
+    assert cmd[0] == "bash"
+    assert Path(cmd[1]).name == "start_codex_overnight_tmux.sh"
+    assert cmd[2] == "2"
+
+
+def test_cmd_swarm_codex_night_status_dispatches_status_script():
+    """`dgc swarm codex-night status` should invoke the status helper."""
+    from dharma_swarm.dgc_cli import cmd_swarm
+
+    with patch("dharma_swarm.dgc_cli.subprocess.run") as mock_run:
+        mock_run.return_value.returncode = 0
+        mock_run.return_value.stdout = "Session running"
+        mock_run.return_value.stderr = ""
+
+        cmd_swarm(["codex-night", "status"])
+
+    cmd = mock_run.call_args.args[0]
+    assert cmd[0] == "bash"
+    assert Path(cmd[1]).name == "status_codex_overnight_tmux.sh"
+
+
+def test_cmd_swarm_codex_night_report_reads_run_artifacts(tmp_path, capsys):
+    """`dgc swarm codex-night report` should show report and latest summary."""
+    import dharma_swarm.dgc_cli as cli
+
+    run_dir = tmp_path / "logs" / "codex_overnight" / "run-1"
+    run_dir.mkdir(parents=True)
+    (run_dir / "report.md").write_text("# report\ncycle ok\n", encoding="utf-8")
+    (run_dir / "latest_last_message.txt").write_text("RESULT: done\n", encoding="utf-8")
+    run_file = tmp_path / "codex_overnight_run_dir.txt"
+    run_file.write_text(str(run_dir), encoding="utf-8")
+
+    with patch.object(cli, "DHARMA_STATE", tmp_path):
+        cli.cmd_swarm(["codex-night", "report"])
+
+    out = capsys.readouterr().out
+    assert "run_dir:" in out
+    assert "cycle ok" in out
+    assert "RESULT: done" in out
+
+
 def test_dgc_cli_rag_health_dispatch():
     """main() dispatches rag health to cmd_rag_health."""
     from dharma_swarm.dgc_cli import main
@@ -425,7 +478,7 @@ def test_cmd_mission_status_formats_gap_report(capsys, monkeypatch):
         "_tracked_paths",
         lambda _paths: {
             "dharma_swarm/integrations/nvidia_rag.py": True,
-            "scripts/allout_autopilot.py": False,
+            "scripts/thinkodynamic_director.py": False,
         },
     )
     monkeypatch.setattr(
@@ -451,7 +504,7 @@ def test_cmd_mission_status_formats_gap_report(capsys, monkeypatch):
     out = capsys.readouterr().out
     assert "=== DGC MISSION STATUS ===" in out
     assert "Core intelligence lane: 1/2 wired" in out
-    assert "[LOCAL-ONLY] scripts/allout_autopilot.py" in out
+    assert "[LOCAL-ONLY] scripts/thinkodynamic_director.py" in out
     assert "[rag_health] PASS" in out
 
 

@@ -91,10 +91,22 @@ class ClaudeAdapter(ProviderAdapter):
                 display_name="Claude Sonnet 4.5",
                 capabilities=CLAUDE_CAPABILITIES,
             ),
+            "claude-sonnet-4-6": ModelProfile(
+                provider_id=self.provider_id,
+                model_id="claude-sonnet-4-6",
+                display_name="Claude Sonnet 4.6",
+                capabilities=CLAUDE_CAPABILITIES,
+            ),
             "claude-opus-4": ModelProfile(
                 provider_id=self.provider_id,
                 model_id="claude-opus-4",
                 display_name="Claude Opus 4",
+                capabilities=CLAUDE_CAPABILITIES,
+            ),
+            "claude-opus-4-6": ModelProfile(
+                provider_id=self.provider_id,
+                model_id="claude-opus-4-6",
+                display_name="Claude Opus 4.6",
                 capabilities=CLAUDE_CAPABILITIES,
             ),
             "claude-haiku-4-5": ModelProfile(

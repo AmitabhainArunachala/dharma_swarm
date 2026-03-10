@@ -2,15 +2,19 @@
 
 Uses RichLog (append-only) rather than Markdown (full re-render) because:
 1. Append-only is O(1) per token; Markdown re-render is O(n).
-2. RichLog auto-scrolls to bottom.
-3. RichLog supports mixed Rich renderables (Markdown + Syntax + Panel).
+2. RichLog supports mixed Rich renderables (Markdown + Syntax + Panel).
 
 The widget accumulates streaming deltas in a buffer and flushes at ~15 fps
 via a timer, batching rapid token arrivals into single render calls.
+
+Scroll behaviour: auto-scroll is paused when the user scrolls up (so they
+can read while output streams). Re-engages when they scroll back to the
+bottom or press End.
 """
 
 from __future__ import annotations
 
+from textual import events
 from textual.timer import Timer
 from textual.widgets import RichLog
 from rich.markdown import Markdown
@@ -36,6 +40,10 @@ from dharma_swarm.tui.engine.events import (
     UsageReport as CanonicalUsageReport,
 )
 
+# Threshold in virtual pixels — if user is within this distance of the
+# bottom edge, we treat them as "at the bottom" and keep auto-scroll on.
+_SCROLL_SNAP_THRESHOLD = 5
+
 
 class StreamOutput(RichLog):
     """Main output widget — renders Claude's streaming response.
@@ -46,6 +54,9 @@ class StreamOutput(RichLog):
     - ToolResult: tool execution results with success/error styling
     - ToolProgress: periodic heartbeat while tools run
     - ResultMessage: session completion summary
+
+    Scroll lock: auto_scroll is toggled off when the user scrolls away
+    from the bottom, and re-engaged when they return to the bottom.
     """
 
     DEFAULT_CSS = """
@@ -64,6 +75,7 @@ class StreamOutput(RichLog):
         self._text_buffer: str = ""
         self._thinking_buffer: str = ""
         self._flush_timer: Timer | None = None
+        self._user_scrolled_up: bool = False
 
     def on_mount(self) -> None:
         """Start the buffer flush timer at ~15 fps."""
@@ -76,6 +88,39 @@ class StreamOutput(RichLog):
         if self._flush_timer is not None:
             self._flush_timer.stop()
             self._flush_timer = None
+
+    # ── Scroll-lock logic ──────────────────────────────────────────────
+
+    def _is_near_bottom(self) -> bool:
+        """Return True if the scroll position is at or near the bottom."""
+        return (
+            self.max_scroll_y - self.scroll_y
+        ) <= _SCROLL_SNAP_THRESHOLD
+
+    def on_scroll_y(self) -> None:
+        """Called by Textual whenever the vertical scroll offset changes."""
+        if self._is_near_bottom():
+            if self._user_scrolled_up:
+                self._user_scrolled_up = False
+                self.auto_scroll = True
+        else:
+            if not self._user_scrolled_up:
+                self._user_scrolled_up = True
+                self.auto_scroll = False
+
+    async def _on_key(self, event: events.Key) -> None:
+        """Re-engage auto-scroll on End key."""
+        if event.key == "end":
+            self._user_scrolled_up = False
+            self.auto_scroll = True
+            self.scroll_end(animate=False)
+        await super()._on_key(event)
+
+    def scroll_to_bottom(self) -> None:
+        """Public API: force scroll to bottom and re-enable auto-scroll."""
+        self._user_scrolled_up = False
+        self.auto_scroll = True
+        self.scroll_end(animate=False)
 
     # ── Event handlers ────────────────────────────────────────────────
 
@@ -102,7 +147,7 @@ class StreamOutput(RichLog):
                 tool_panel = Panel(
                     Syntax(tool_input, "json", theme="monokai", word_wrap=True),
                     title=f"[bold]Tool: {block.get('name', 'unknown')}[/bold]",
-                    border_style="yellow",
+                    border_style="#C2956B",
                     subtitle=f"id: {block.get('id', '?')[:12]}...",
                 )
                 self.write(tool_panel)
@@ -112,7 +157,7 @@ class StreamOutput(RichLog):
                     Panel(
                         Text(block.get("thinking", ""), style="dim"),
                         title="[dim]Thinking[/dim]",
-                        border_style="blue",
+                        border_style="#8B7BA8",
                         expand=False,
                     )
                 )
@@ -120,7 +165,7 @@ class StreamOutput(RichLog):
     def handle_tool_result(self, result: ToolResult) -> None:
         """Render a tool execution result with success/error styling."""
         self._flush_buffer()
-        style = "red" if result.is_error else "green"
+        style = "#B5564E" if result.is_error else "#6E8B74"
         icon = "\u2717" if result.is_error else "\u2713"
         duration = f" ({result.duration_ms}ms)" if result.duration_ms else ""
         content = result.content
@@ -141,7 +186,7 @@ class StreamOutput(RichLog):
             Text(
                 f"  \u23f3 {progress.tool_name} running... "
                 f"({progress.elapsed_seconds:.1f}s)",
-                style="dim yellow",
+                style="dim #C2956B",
             )
         )
 
@@ -155,7 +200,7 @@ class StreamOutput(RichLog):
             self.write(
                 Text(
                     f"\n\u2717 Error: {result.subtype} -- {error_detail}",
-                    style="bold red",
+                    style="bold #B5564E",
                 )
             )
         else:
@@ -164,7 +209,7 @@ class StreamOutput(RichLog):
                     f"\n\u2713 Done -- {result.num_turns} turns, "
                     f"${result.total_cost_usd:.4f}, "
                     f"{result.duration_ms / 1000:.1f}s",
-                    style="dim green",
+                    style="dim #6E8B74",
                 )
             )
 
@@ -188,7 +233,7 @@ class StreamOutput(RichLog):
                 Panel(
                     Text("[redacted thinking]", style="dim"),
                     title=title,
-                    border_style="blue",
+                    border_style="#8B7BA8",
                     expand=False,
                 )
             )
@@ -197,7 +242,7 @@ class StreamOutput(RichLog):
             Panel(
                 Text(msg.content, style="dim"),
                 title=title,
-                border_style="blue",
+                border_style="#8B7BA8",
                 expand=False,
             )
         )
@@ -214,14 +259,14 @@ class StreamOutput(RichLog):
             Panel(
                 Syntax(args, "json", theme="monokai", word_wrap=True),
                 title=f"[bold]Tool: {tool_call.tool_name or 'unknown'}[/bold]",
-                border_style="yellow",
+                border_style="#C2956B",
                 subtitle=subtitle,
             )
         )
 
     def handle_tool_result_canonical(self, result: CanonicalToolResult) -> None:
         self._flush_buffer()
-        style = "red" if result.is_error else "green"
+        style = "#B5564E" if result.is_error else "#6E8B74"
         icon = "\u2717" if result.is_error else "\u2713"
         duration = f" ({result.duration_ms}ms)" if result.duration_ms else ""
         content = result.content
@@ -241,7 +286,7 @@ class StreamOutput(RichLog):
             Text(
                 f"  \u23f3 {progress.tool_name} running... "
                 f"({progress.elapsed_seconds:.1f}s)",
-                style="dim yellow",
+                style="dim #C2956B",
             )
         )
 
@@ -253,7 +298,7 @@ class StreamOutput(RichLog):
             Text(
                 f"  [usage] in={usage.input_tokens} out={usage.output_tokens} "
                 f"cost=${usage.total_cost_usd:.4f}",
-                style="dim green",
+                style="dim #6E8B74",
             )
         )
 

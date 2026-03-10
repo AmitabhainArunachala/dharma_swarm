@@ -22,6 +22,8 @@ Usage:
   dgc swarm live [N]            Persistent tmux swarm (N agents)
   dgc swarm overnight start [H] [--aggressive]
   dgc swarm overnight stop|status|report
+  dgc swarm codex-night start [H]
+  dgc swarm codex-night stop|status|report
   dgc swarm yolo                Aggressive overnight (10h)
   dgc context [domain]          Load context (research/content/ops/all)
   dgc memory                    Show memory status
@@ -30,6 +32,7 @@ Usage:
   dgc gates "action"            Run telos gates on an action
   dgc health                    Ecosystem file health
   dgc health-check              Monitor-based system health (v0.2.0)
+  dgc doctor                    Deep runtime diagnostics + fix guidance
   dgc spawn --name X --role Y   Spawn a new agent
   dgc task create "title"       Create a task
   dgc task list [--status S]    List tasks
@@ -62,6 +65,44 @@ HOME = Path.home()
 DHARMA_STATE = HOME / ".dharma"
 DHARMA_SWARM = HOME / "dharma_swarm"
 DGC_CORE = HOME / "dgc-core"
+
+
+def _load_env_file(path: Path) -> None:
+    if not path.exists():
+        return
+    try:
+        lines = path.read_text(errors="ignore").splitlines()
+    except Exception:
+        return
+
+    for raw_line in lines:
+        line = raw_line.strip()
+        if not line or line.startswith("#"):
+            continue
+        if line.startswith("export "):
+            line = line[len("export "):].strip()
+        if "=" not in line:
+            continue
+        key, value = line.split("=", 1)
+        key = key.strip()
+        value = value.strip()
+        if not key:
+            continue
+        if (
+            len(value) >= 2
+            and ((value[0] == value[-1] == '"') or (value[0] == value[-1] == "'"))
+        ):
+            value = value[1:-1]
+        os.environ.setdefault(key, value)
+
+
+def _bootstrap_env() -> None:
+    # Load dharma_swarm defaults and optional local runtime overrides.
+    _load_env_file(HOME / "dharma_swarm" / ".env")
+    _load_env_file(HOME / ".dharma" / "env" / "nvidia_remote.env")
+
+
+_bootstrap_env()
 
 
 # ---------------------------------------------------------------------------
@@ -374,7 +415,7 @@ def cmd_mission_status(
             "dharma_swarm/integrations/nvidia_rag.py",
             "dharma_swarm/integrations/data_flywheel.py",
             "scripts/caffeine_until_jst.sh",
-            "scripts/allout_autopilot.py",
+            "scripts/thinkodynamic_director.py",
             "docs/NVIDIA_INFRA_SELF_HEAL.md",
             "tests/test_integrations_nvidia_rag.py",
             "tests/test_integrations_data_flywheel.py",
@@ -761,6 +802,24 @@ def cmd_health_check() -> None:
     _run(_check())
 
 
+def cmd_doctor(
+    *,
+    as_json: bool = False,
+    strict: bool = False,
+    quick: bool = False,
+    timeout: float = 1.5,
+) -> int:
+    """Deep readiness diagnostics for runtime, routing, and providers."""
+    from dharma_swarm.doctor import doctor_exit_code, render_doctor_report, run_doctor
+
+    report = run_doctor(timeout_seconds=timeout, quick=quick)
+    if as_json:
+        print(json.dumps(report, indent=2))
+    else:
+        print(render_doctor_report(report))
+    return doctor_exit_code(report, strict=strict)
+
+
 def cmd_pulse() -> None:
     """Run one heartbeat pulse."""
     from dharma_swarm.pulse import pulse
@@ -873,7 +932,11 @@ def cmd_swarm(extra_args: list[str]) -> None:
     scripts = DHARMA_SWARM / "scripts"
     start_script = scripts / "start_overnight.sh"
     stop_script = scripts / "stop_overnight.sh"
+    codex_start_script = scripts / "start_codex_overnight_tmux.sh"
+    codex_status_script = scripts / "status_codex_overnight_tmux.sh"
+    codex_stop_script = scripts / "stop_codex_overnight_tmux.sh"
     run_file = DHARMA_STATE / "overnight_run_dir.txt"
+    codex_run_file = DHARMA_STATE / "codex_overnight_run_dir.txt"
     pid_files = {
         "overnight": DHARMA_STATE / "overnight.pid",
         "daemon": DHARMA_STATE / "daemon.pid",
@@ -988,10 +1051,94 @@ def cmd_swarm(extra_args: list[str]) -> None:
             "  dgc swarm overnight report\n"
         )
 
+    def _codex_night(args: list[str]) -> None:
+        action = args[0] if args else "status"
+
+        if action == "start":
+            hours = "8"
+            for a in args[1:]:
+                if a == "forever":
+                    hours = a
+                    continue
+                try:
+                    float(a)
+                    hours = a
+                except ValueError:
+                    pass
+            proc = subprocess.run(
+                ["bash", str(codex_start_script), hours],
+                capture_output=True,
+                text=True,
+                env=os.environ.copy(),
+            )
+            if proc.stdout:
+                print(proc.stdout.strip())
+            if proc.stderr:
+                print(proc.stderr.strip(), file=sys.stderr)
+            if proc.returncode != 0:
+                sys.exit(proc.returncode)
+            return
+
+        if action == "stop":
+            proc = subprocess.run(
+                ["bash", str(codex_stop_script)],
+                capture_output=True,
+                text=True,
+            )
+            if proc.stdout:
+                print(proc.stdout.strip())
+            if proc.stderr:
+                print(proc.stderr.strip(), file=sys.stderr)
+            if proc.returncode != 0:
+                sys.exit(proc.returncode)
+            return
+
+        if action in ("status", "state"):
+            proc = subprocess.run(
+                ["bash", str(codex_status_script)],
+                capture_output=True,
+                text=True,
+            )
+            if proc.stdout:
+                print(proc.stdout.strip())
+            if proc.stderr:
+                print(proc.stderr.strip(), file=sys.stderr)
+            if proc.returncode != 0:
+                sys.exit(proc.returncode)
+            return
+
+        if action in ("report", "logs"):
+            if not codex_run_file.exists():
+                print("No Codex overnight run metadata found.")
+                return
+            run_dir = Path(codex_run_file.read_text().strip())
+            report = run_dir / "report.md"
+            latest_output = run_dir / "latest_last_message.txt"
+            print(f"run_dir: {run_dir}\n")
+            if report.exists():
+                print("--- report tail ---")
+                print(_tail(report, lines=80))
+            if latest_output.exists():
+                print("\n--- latest last message ---")
+                print(_tail(latest_output, lines=80))
+            return
+
+        print(
+            "Usage:\n"
+            "  dgc swarm codex-night start [HOURS]\n"
+            "  dgc swarm codex-night stop\n"
+            "  dgc swarm codex-night status\n"
+            "  dgc swarm codex-night report\n"
+        )
+
     # --- Dispatch subcommands ---
 
     if extra_args and extra_args[0] == "yolo":
         _overnight(["start", "10", "--aggressive"])
+        return
+
+    if extra_args and extra_args[0] in ("codex-night", "codex-overnight"):
+        _codex_night(extra_args[1:])
         return
 
     if extra_args and extra_args[0] in ("overnight", "autopilot"):
@@ -2376,6 +2523,13 @@ def _build_parser() -> argparse.ArgumentParser:
     # -- health-check (v0.2.0 monitor) --
     sub.add_parser("health-check", help="Monitor-based system health check")
 
+    # -- doctor --
+    p_doc = sub.add_parser("doctor", help="Deep runtime diagnostics and fix guidance")
+    p_doc.add_argument("--json", action="store_true", help="Emit machine-readable JSON")
+    p_doc.add_argument("--strict", action="store_true", help="Exit non-zero on WARN")
+    p_doc.add_argument("--quick", action="store_true", help="Skip deep network/package probes")
+    p_doc.add_argument("--timeout", type=float, default=1.5, help="Probe timeout seconds")
+
     # -- setup --
     sub.add_parser("setup", help="Install dependencies")
 
@@ -2731,6 +2885,15 @@ def main() -> None:
             cmd_health()
         case "health-check":
             cmd_health_check()
+        case "doctor":
+            rc = cmd_doctor(
+                as_json=args.json,
+                strict=args.strict,
+                quick=args.quick,
+                timeout=args.timeout,
+            )
+            if rc != 0:
+                raise SystemExit(rc)
         case "setup":
             cmd_setup()
         case "migrate":

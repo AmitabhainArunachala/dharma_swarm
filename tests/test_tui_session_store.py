@@ -2,8 +2,11 @@
 
 from __future__ import annotations
 
+import json
 from pathlib import Path
 
+from dharma_swarm.runtime_contract import validate_envelope
+from dharma_swarm.tui.engine.events import TextComplete
 from dharma_swarm.tui.engine.session_store import SessionStore
 
 
@@ -110,3 +113,47 @@ def test_session_store_latest_matches_path_equivalence(tmp_path):
     latest = store.latest_session(cwd=alias, provider_id="claude")
     assert latest is not None
     assert latest["session_id"] == "s1"
+
+
+def test_session_store_emits_runtime_events_and_verified_snapshots(tmp_path):
+    store = SessionStore(root=tmp_path)
+    store.create_session(
+        session_id="s1",
+        provider_id="claude",
+        model_id="claude-sonnet-4-5",
+        cwd="/repo/a",
+        provider_session_id="prov-1",
+    )
+    store.append_event(
+        "s1",
+        TextComplete(
+            provider_id="claude",
+            session_id="s1",
+            content=(
+                "Assistant response with enough substance to count as a "
+                "significant runtime interaction."
+            ),
+            role="assistant",
+        ),
+    )
+    store.finalize_session(
+        "s1",
+        status="completed",
+        total_turns=1,
+        total_input_tokens=10,
+        total_output_tokens=20,
+        total_cost_usd=0.12,
+        provider_session_id="prov-1",
+    )
+
+    runtime_rows = [
+        validate_envelope(json.loads(line))
+        for line in (tmp_path / "s1" / "runtime.jsonl").read_text().splitlines()
+        if line.strip()
+    ]
+    assert len(runtime_rows) >= 3
+    assert all(ok is True and errors == [] for ok, errors in runtime_rows)
+
+    ok, errors = store.verify_session_replay("s1")
+    assert ok is True
+    assert errors == []

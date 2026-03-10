@@ -9,6 +9,9 @@ import secrets
 from pathlib import Path
 from typing import Any
 
+from dharma_swarm.continuity_harness import append_snapshot, verify_replay_integrity
+from dharma_swarm.session_event_bridge import SessionEventBridge
+
 from .events import CanonicalEvent
 
 HOME = Path.home()
@@ -45,6 +48,7 @@ class SessionStore:
         self.root = root or DEFAULT_ROOT
         self.root.mkdir(parents=True, exist_ok=True)
         self._index_path = self.root / "index.json"
+        self._bridges: dict[str, SessionEventBridge] = {}
         if not self._index_path.exists():
             self._index_path.write_text(json.dumps({"schema_version": 1, "sessions": []}))
 
@@ -88,6 +92,8 @@ class SessionStore:
         (sp / "meta.json").write_text(json.dumps(meta, indent=2))
         (sp / "transcript.jsonl").touch(exist_ok=True)
         (sp / "audit.jsonl").touch(exist_ok=True)
+        (sp / "runtime.jsonl").touch(exist_ok=True)
+        (sp / "snapshots.jsonl").touch(exist_ok=True)
 
         index = self._read_index()
         sessions = index.get("sessions", [])
@@ -106,6 +112,20 @@ class SessionStore:
         )
         index["sessions"] = sessions
         self._write_index(index)
+        try:
+            self._bridge_for(sid).session_start(
+                sid,
+                {
+                    "provider_id": provider_id,
+                    "model_id": model_id,
+                    "cwd": cwd,
+                    "title": meta["title"],
+                    "provider_session_id": provider_session_id or "",
+                },
+            )
+            self._append_session_snapshot(sid, reason="session_created", meta=meta)
+        except Exception:
+            pass
         return sid
 
     def append_event(self, session_id: str, event: CanonicalEvent, *, strip_raw: bool = True) -> None:
@@ -116,6 +136,11 @@ class SessionStore:
         tp = sp / "transcript.jsonl"
         with open(tp, "a") as f:
             f.write(json.dumps(payload, ensure_ascii=True) + "\n")
+        try:
+            bridge = self._bridge_for(session_id)
+            bridge.record_canonical_event(event)
+        except Exception:
+            pass
         self._touch_session(session_id)
 
     def append_audit(self, session_id: str, entry: dict[str, Any]) -> None:
@@ -162,6 +187,18 @@ class SessionStore:
                 "total_turns": meta.get("total_turns", 0),
             },
         )
+        try:
+            self._bridge_for(session_id).session_end(
+                session_id,
+                outcome=status,
+                summary=(
+                    f"status={status}; turns={meta.get('total_turns', 0)}; "
+                    f"cost={meta.get('total_cost_usd', 0.0)}"
+                ),
+            )
+            self._append_session_snapshot(session_id, reason="session_finalized", meta=meta)
+        except Exception:
+            pass
 
     def load_meta(self, session_id: str) -> dict[str, Any]:
         return json.loads((self.root / session_id / "meta.json").read_text())
@@ -172,6 +209,14 @@ class SessionStore:
         meta["updated_at"] = _now_iso()
         self._write_meta(session_id, meta)
         self._upsert_index_entry(session_id, {"updated_at": meta["updated_at"]})
+        try:
+            self._append_session_snapshot(
+                session_id,
+                reason="provider_session_bound",
+                meta=meta,
+            )
+        except Exception:
+            pass
 
     def _touch_session(self, session_id: str) -> None:
         meta = self.load_meta(session_id)
@@ -244,3 +289,43 @@ class SessionStore:
                 latest_key = key
                 latest_meta = meta
         return latest_meta
+
+    def verify_session_replay(self, session_id: str) -> tuple[bool, list[str]]:
+        return verify_replay_integrity(self.root / session_id / "snapshots.jsonl")
+
+    def _bridge_for(self, session_id: str) -> SessionEventBridge:
+        bridge = self._bridges.get(session_id)
+        if bridge is not None:
+            return bridge
+        bridge = SessionEventBridge(
+            runtime_log_path=self.root / session_id / "runtime.jsonl",
+        )
+        self._bridges[session_id] = bridge
+        return bridge
+
+    def _append_session_snapshot(
+        self,
+        session_id: str,
+        *,
+        reason: str,
+        meta: dict[str, Any] | None = None,
+    ) -> None:
+        state = self._snapshot_state(meta or self.load_meta(session_id), reason=reason)
+        append_snapshot(self.root / session_id / "snapshots.jsonl", state)
+
+    @staticmethod
+    def _snapshot_state(meta: dict[str, Any], *, reason: str) -> dict[str, Any]:
+        return {
+            "snapshot_reason": reason,
+            "session_id": str(meta.get("session_id", "")),
+            "provider_id": str(meta.get("provider_id", "")),
+            "model_id": str(meta.get("model_id", "")),
+            "provider_session_id": str(meta.get("provider_session_id", "")),
+            "cwd": str(meta.get("cwd", "")),
+            "status": str(meta.get("status", "")),
+            "total_turns": int(meta.get("total_turns", 0) or 0),
+            "total_input_tokens": int(meta.get("total_input_tokens", 0) or 0),
+            "total_output_tokens": int(meta.get("total_output_tokens", 0) or 0),
+            "total_cost_usd": float(meta.get("total_cost_usd", 0.0) or 0.0),
+            "updated_at": str(meta.get("updated_at", "")),
+        }

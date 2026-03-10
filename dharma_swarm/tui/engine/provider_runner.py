@@ -12,7 +12,7 @@ from textual.message import Message
 from textual.widget import Widget
 from textual.worker import get_current_worker
 
-from .adapters import ClaudeAdapter, CompletionRequest
+from .adapters import ClaudeAdapter, CompletionRequest, OpenRouterAdapter
 from .events import CanonicalEventType, ErrorEvent
 from .governance import GovernanceFilter, GovernancePolicy
 from .session_store import SessionStore
@@ -42,7 +42,10 @@ class ProviderRunner(Widget):
 
     def __init__(self, **kwargs: object) -> None:
         super().__init__(**kwargs)
-        self._adapter = ClaudeAdapter(workdir=DEFAULT_CWD)
+        self._adapters = {
+            "claude": ClaudeAdapter(workdir=DEFAULT_CWD),
+            "openrouter": OpenRouterAdapter(),
+        }
         self._active_task = False
         self._cancel_requested = False
         self._store = SessionStore()
@@ -87,7 +90,8 @@ class ProviderRunner(Widget):
         provider_id: str = "claude",
     ) -> None:
         """Execute one provider stream round and emit canonical events."""
-        if provider_id != "claude":
+        adapter = self._adapters.get(provider_id)
+        if adapter is None:
             self.post_message(
                 self.AgentEvent(
                     ErrorEvent(
@@ -102,7 +106,7 @@ class ProviderRunner(Widget):
             return
 
         worker = get_current_worker()
-        profile = self._adapter.get_profile(request.model)
+        profile = adapter.get_profile(request.model)
         self._ensure_session(
             session_id=session_id,
             provider_id=provider_id,
@@ -130,9 +134,9 @@ class ProviderRunner(Widget):
 
         try:
             async def _run() -> None:
-                async for event in self._adapter.stream(request, session_id=session_id):
+                async for event in adapter.stream(request, session_id=session_id):
                     if worker.is_cancelled:
-                        await self._adapter.cancel()
+                        await adapter.cancel()
                         break
 
                     try:
@@ -215,7 +219,7 @@ class ProviderRunner(Widget):
             self._active_task = False
             self._cancel_requested = False
             with contextlib.suppress(Exception):
-                asyncio.run(self._adapter.close())
+                asyncio.run(adapter.close())
 
     def cancel(self) -> None:
         """Cancel active provider stream and worker."""
@@ -226,8 +230,10 @@ class ProviderRunner(Widget):
         # because Textual's event loop is already running.
         try:
             loop = asyncio.get_running_loop()
-            loop.create_task(self._adapter.cancel())
+            for adapter in self._adapters.values():
+                loop.create_task(adapter.cancel())
         except RuntimeError:
             # No running loop (e.g. called from a plain thread) — fallback
             with contextlib.suppress(Exception):
-                asyncio.run(self._adapter.cancel())
+                for adapter in self._adapters.values():
+                    asyncio.run(adapter.cancel())

@@ -101,6 +101,8 @@ class SystemCommandHandler:
             return self._handle_net(arg), None
         elif cmd == "plan":
             return self._handle_plan(arg)
+        elif cmd == "model":
+            return self._handle_model(arg)
         elif cmd == "thread":
             return self._handle_thread(arg), None
         elif cmd == "notes":
@@ -137,7 +139,7 @@ class SystemCommandHandler:
             "  [cyan]/self[/cyan]            System self-map (modules, tests, state)\n"
             "  [cyan]/context[/cyan] [role]  Show agent context layers\n"
             "\n[bold cyan]--- Memory & Witness ---[/bold cyan]\n"
-            "  [cyan]/memory[/cyan]          Strange loop memory\n"
+            "  [cyan]/memory[/cyan]          Strange loop memory + latent gold\n"
             "  [cyan]/witness[/cyan] <msg>   Record observation\n"
             "  [cyan]/notes[/cyan]           Shared agent notes\n"
             "  [cyan]/archive[/cyan]         Evolution archive (last 10)\n"
@@ -162,6 +164,7 @@ class SystemCommandHandler:
             "  [cyan]/thread[/cyan] [name]   Show/set research thread\n"
             "  [cyan]/net[/cyan] [on|off]    Internet mode for Claude\n"
             "  [cyan]/plan[/cyan] [on|off]   Enforce plan-first mode policy\n"
+            "  [cyan]/model[/cyan] [op]      Model routing: status | list | set <alias|index> | auto on|off|responsive|cost|genius | metrics | cooldown status|clear\n"
             "  [cyan]/chat[/cyan] [continue] Launch full Claude Code UI\n"
             "  [cyan]/cancel[/cyan]          Cancel active Claude run\n"
             "  [cyan]/reset[/cyan]           Reset conversation memory\n"
@@ -215,6 +218,44 @@ class SystemCommandHandler:
             self.internet_enabled = False
             return "[yellow]Internet mode disabled.[/yellow]"
         return "[red]Usage: /net [on|off|status][/red]"
+
+    def _handle_model(self, arg: str) -> tuple[str, str | None]:
+        raw = arg.strip()
+        if not raw or raw.lower() in {"status", "s"}:
+            return "", "model:status"
+        if raw.lower() in {"list", "ls"}:
+            return "", "model:list"
+        if raw.lower() in {"metrics", "health"}:
+            return "", "model:metrics"
+        if raw.lower().startswith("cooldown "):
+            mode = raw[9:].strip().lower()
+            if mode in {"status", "clear"}:
+                return "", f"model:cooldown {mode}"
+            return "[red]Usage: /model cooldown [status|clear][/red]", None
+        if raw.lower() in {"reset", "clear-cooldowns", "clear"}:
+            return "", "model:cooldown clear"
+        if raw.lower().startswith("set "):
+            target = raw[4:].strip()
+            if not target:
+                return "[red]Usage: /model set <alias|index>[/red]", None
+            return "", f"model:set {target}"
+        if raw.lower().startswith("auto "):
+            mode = raw[5:].strip().lower()
+            if mode in {"on", "off", "status", "responsive", "cost", "genius"}:
+                return "", f"model:auto {mode}"
+            return (
+                "[red]Usage: /model auto [on|off|status|responsive|cost|genius][/red]",
+                None,
+            )
+        if raw.lower().startswith("strategy "):
+            mode = raw[9:].strip().lower()
+            if mode in {"responsive", "cost", "genius"}:
+                return "", f"model:auto {mode}"
+            return "[red]Usage: /model strategy [responsive|cost|genius][/red]", None
+        if raw.lower() in {"responsive", "cost", "genius"}:
+            return "", f"model:auto {raw.lower()}"
+        # Shortcut: /model opus
+        return "", f"model:set {raw}"
 
     def _handle_thread(self, arg: str) -> str:
         if not arg:
