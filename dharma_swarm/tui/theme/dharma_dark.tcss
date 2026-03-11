@@ -1,24 +1,24 @@
-/* DGC Warm Dark Theme — dharma_dark.tcss */
+/* DGC Hokusai Theme — mineral pigment palette (ukiyo-e / nihonga) */
 
 /* === App-level === */
 Screen {
-    background: #111008;
-    color: #f0e8d8;
+    background: #121110;
+    color: #D8D2C4;
 }
 
 /* === Status Bar === */
 StatusBar {
     dock: top;
     height: 1;
-    background: #252018;
-    color: #a89880;
+    background: #1C1B1A;
+    color: #9B9284;
 }
 
 /* === Sidebar === */
 #sidebar {
     width: 28;
-    background: #1c1810;
-    border-right: tall #8A6A1A;
+    background: #161614;
+    border-right: tall #3A4F5A;
 }
 
 #sidebar.hidden {
@@ -27,12 +27,12 @@ StatusBar {
 
 /* === Stream Output === */
 StreamOutput {
-    background: #111008;
+    background: #121110;
     padding: 0 1;
-    scrollbar-background: #252018;
-    scrollbar-color: #5a5040;
-    scrollbar-color-hover: #a89880;
-    scrollbar-color-active: #8A6A1A;
+    scrollbar-background: #1C1B1A;
+    scrollbar-color: #5C5650;
+    scrollbar-color-hover: #9B9284;
+    scrollbar-color-active: #5B7F95;
 }
 
 /* === Prompt Input === */
@@ -42,19 +42,19 @@ PromptInput {
     min-height: 3;
     max-height: 12;
     margin: 0 1;
-    border: tall #8A6A1A;
-    background: #252018;
+    border: tall #3A4F5A;
+    background: #1C1B1A;
 }
 
 PromptInput:focus {
-    border: tall #D4A017;
+    border: tall #5B7F95;
 }
 
 /* === Bottom Drawer === */
 #drawer {
     height: 16;
-    border-top: tall #8A6A1A;
-    background: #1c1810;
+    border-top: tall #3A4F5A;
+    background: #161614;
 }
 
 #drawer.hidden {
@@ -68,44 +68,44 @@ ToolCallCard {
 }
 
 ToolCallCard.-running {
-    border-left: thick #D4A017;
+    border-left: thick #C2956B;
 }
 
 ToolCallCard.-success {
-    border-left: thick #4CAF72;
+    border-left: thick #6E8B74;
 }
 
 ToolCallCard.-error {
-    border-left: thick #E05050;
+    border-left: thick #B5564E;
 }
 
 /* === Thinking Panel === */
 ThinkingPanel {
-    color: #7B68EE;
+    color: #8B7BA8;
     margin: 0 4 0 0;
     padding: 0 1;
 }
 
 /* === Mode-specific prompt border === */
 .mode-normal PromptInput {
-    border: tall #4CAF72;
+    border: tall #6E8B74;
 }
 
 .mode-auto PromptInput {
-    border: tall #D4A017;
+    border: tall #C2956B;
 }
 
 .mode-plan PromptInput {
-    border: tall #5090D8;
+    border: tall #7B9DAD;
 }
 
 .mode-sage PromptInput {
-    border: tall #7B68EE;
+    border: tall #8B7BA8;
 }
 
 /* === Footer === */
 Footer {
-    background: #252018;
+    background: #1C1B1A;
 }
 
 /* === Scrollbars global === */
@@ -115,25 +115,25 @@ Footer {
 
 /* === Modal Screens === */
 ModalScreen {
-    background: #111008 80%;
+    background: #121110 80%;
 }
 
 ModalScreen > * {
-    background: #252018;
-    border: thick #D4A017;
+    background: #1C1B1A;
+    border: thick #5B7F95;
     margin: 4 8;
 }
 
 /* === Header === */
 Header {
-    background: #1c1810;
-    color: #D4A017;
+    background: #161614;
+    color: #7B9DAD;
 }
 
 /* === Splash Screen === */
 #splash-container {
     align: center middle;
-    background: #111008;
+    background: #121110;
 }
 
 #splash-art {
@@ -141,7 +141,7 @@ Header {
     content-align: center middle;
     text-align: center;
     padding: 1;
-    color: #D4A017;
+    color: #7B9DAD;
 }
 
 #splash-prompt {
@@ -149,6 +149,6 @@ Header {
     height: 3;
     content-align: center middle;
     text-align: center;
-    background: #1c1810;
-    color: #a89880;
+    background: #161614;
+    color: #9B9284;
 }

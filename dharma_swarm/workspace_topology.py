@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import subprocess
 from pathlib import Path
+import re
 from typing import Any
 
 
@@ -103,6 +104,27 @@ def _inspect_repo(repo: Path) -> dict[str, Any]:
     return info
 
 
+def _read_merge_summary(root: Path) -> dict[str, Any] | None:
+    ledger = root / "dharma_swarm" / "docs" / "merge" / "MERGE_LEDGER.md"
+    if not ledger.exists():
+        return None
+    try:
+        lines = ledger.read_text(errors="ignore").splitlines()
+    except Exception:
+        return None
+
+    for line in reversed(lines):
+        if "snapshot=" not in line:
+            continue
+        summary: dict[str, Any] = {"raw": line.strip()}
+        for key in ("snapshot", "branch", "head", "mission_exit", "tracked", "legacy_imported", "predictor_rows"):
+            match = re.search(rf"{key}=([^\s]+)", line)
+            if match:
+                summary[key] = match.group(1)
+        return summary
+    return None
+
+
 def build_workspace_topology(home: Path | None = None) -> dict[str, Any]:
     root = Path(home or Path.home())
     domains: dict[str, dict[str, Any]] = {}
@@ -151,6 +173,7 @@ def build_workspace_topology(home: Path | None = None) -> dict[str, Any]:
         "dgc": dgc_block,
         "sab": sab_block,
         "warnings": warnings,
+        "merge_summary": _read_merge_summary(root),
         "operator_answer": {
             "dgc_code_authority": str(root / "dharma_swarm"),
             "sab_runtime_authority": str(root / "agni-workspace" / "dharmic-agora"),

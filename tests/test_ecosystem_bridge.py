@@ -65,6 +65,23 @@ def test_manifest_roundtrip(tmp_path, monkeypatch):
     assert "_source" in loaded
 
 
+def test_update_manifest_supports_explicit_manifest_path(tmp_path, monkeypatch):
+    manifest_path = tmp_path / "nested" / "manifest.json"
+    test_file = tmp_path / "artifact.md"
+    test_file.write_text("hello")
+    monkeypatch.setattr(
+        "dharma_swarm.ecosystem_bridge.ECOSYSTEM_PATHS",
+        {"artifact": test_file},
+    )
+
+    result = update_manifest(manifest_path=manifest_path)
+
+    assert manifest_path.exists()
+    assert result["ecosystem"]["artifact"]["exists"] is True
+    on_disk = json.loads(manifest_path.read_text())
+    assert on_disk["ecosystem"]["artifact"]["exists"] is True
+
+
 # ---------------------------------------------------------------------------
 # get_system_prompt_from_v7 tests
 # ---------------------------------------------------------------------------

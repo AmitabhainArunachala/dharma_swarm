@@ -47,24 +47,31 @@ class _FakeSwarm:
         return list(specs)
 
 
+def _effective_crew() -> list[dict]:
+    """Return the crew that spawn_default_crew would actually use."""
+    return sc._crew_from_skills() or sc.DEFAULT_CREW
+
+
 @pytest.mark.asyncio
 async def test_spawn_default_crew_spawns_all_when_none_exist():
     swarm = _FakeSwarm(existing_names=[])
     spawned = await sc.spawn_default_crew(swarm)
+    expected = len(_effective_crew())
 
-    assert len(spawned) == len(sc.DEFAULT_CREW)
-    assert len(swarm.spawn_calls) == len(sc.DEFAULT_CREW)
+    assert len(spawned) == expected
+    assert len(swarm.spawn_calls) == expected
 
 
 @pytest.mark.asyncio
 async def test_spawn_default_crew_skips_existing_names():
-    existing = [sc.DEFAULT_CREW[0]["name"], sc.DEFAULT_CREW[2]["name"]]
+    crew = _effective_crew()
+    existing = [crew[0]["name"], crew[2]["name"]]
     swarm = _FakeSwarm(existing_names=existing)
 
     await sc.spawn_default_crew(swarm)
     spawned_names = {c["name"] for c in swarm.spawn_calls}
     assert not spawned_names.intersection(existing)
-    assert len(swarm.spawn_calls) == len(sc.DEFAULT_CREW) - len(existing)
+    assert len(swarm.spawn_calls) == len(crew) - len(existing)
 
 
 @pytest.mark.asyncio

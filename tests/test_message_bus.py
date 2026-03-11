@@ -107,6 +107,20 @@ async def test_get_stats(bus):
     assert stats["unread_messages"] == 2
 
 
+@pytest.mark.asyncio
+async def test_list_messages_returns_recent_history(bus):
+    older = Message(from_agent="a", to_agent="b", body="older")
+    newer = Message(from_agent="b", to_agent="a", body="newer")
+    await bus.send(older)
+    await bus.send(newer)
+
+    messages = await bus.list_messages(limit=2)
+    filtered = await bus.list_messages(limit=5, agent_id="a")
+
+    assert [message.body for message in messages] == ["newer", "older"]
+    assert {message.id for message in filtered} == {older.id, newer.id}
+
+
 # -- Regression: reply() TOCTOU fix — Row must be read inside connection --
 
 @pytest.mark.asyncio

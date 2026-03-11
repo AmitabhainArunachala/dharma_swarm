@@ -408,9 +408,23 @@ class TelosGatekeeper:
 
     @staticmethod
     def _is_reflection_sufficient(reflection: str) -> bool:
-        """Cheap reflection heuristic used for think-point checkpoints."""
+        """Reflection heuristic with mimicry detection.
+
+        A reflection passes if it has enough tokens AND isn't flagged
+        as performative profundity by the behavioral metrics system.
+        This wires the ouroboros mimicry detector into the telos gates —
+        performative text can't pass the WITNESS gate.
+        """
         tokens = re.findall(r"[a-zA-Z0-9_]+", reflection.lower())
-        return len(tokens) >= 5
+        if len(tokens) < 5:
+            return False
+        try:
+            from dharma_swarm.metrics import MetricsAnalyzer
+            if MetricsAnalyzer().detect_mimicry(reflection):
+                return False
+        except Exception:
+            pass  # Mimicry check is non-fatal
+        return True
 
     @staticmethod
     def _log_witness(

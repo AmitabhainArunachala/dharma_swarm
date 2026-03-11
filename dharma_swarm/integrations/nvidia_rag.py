@@ -67,20 +67,26 @@ class NvidiaRagClient:
         params: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
         url = f"{base_url.rstrip('/')}/{path.lstrip('/')}"
-        async with httpx.AsyncClient(
-            timeout=self.config.timeout_sec,
-            transport=self._transport,
-        ) as client:
-            resp = await client.request(
-                method=method,
-                url=url,
-                headers=self._headers(),
-                json=json_body,
-                params=params,
-            )
+        try:
+            async with httpx.AsyncClient(
+                timeout=self.config.timeout_sec,
+                transport=self._transport,
+            ) as client:
+                resp = await client.request(
+                    method=method,
+                    url=url,
+                    headers=self._headers(),
+                    json=json_body,
+                    params=params,
+                )
+        except httpx.RequestError as exc:
+            raise NvidiaRagError(f"{method} {url} failed: {exc}") from exc
         if resp.status_code >= 400:
             raise NvidiaRagError(f"{method} {url} failed: {resp.status_code} {resp.text[:300]}")
-        data = resp.json()
+        try:
+            data = resp.json()
+        except ValueError as exc:
+            raise NvidiaRagError(f"{method} {url} returned invalid JSON: {exc}") from exc
         if isinstance(data, dict):
             return data
         return {"data": data}
@@ -171,4 +177,3 @@ class NvidiaRagClient:
             self.config.ingest_base_url,
             f"/documents/{task_id}",
         )
-

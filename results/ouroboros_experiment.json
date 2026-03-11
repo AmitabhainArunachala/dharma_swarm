@@ -1,0 +1,587 @@
+[
+  {
+    "name": "DSE_SELF_OBS",
+    "n": 8,
+    "entropy": {
+      "mean": 0.9598092346405043,
+      "std": 0.015349711901070992
+    },
+    "complexity": {
+      "mean": 0.6083339524180522,
+      "std": 0.023352679236367527
+    },
+    "self_reference_density": {
+      "mean": 0.03863910274125336,
+      "std": 0.027110164977757235
+    },
+    "identity_stability": {
+      "mean": 0.00540287756947088,
+      "std": 0.007479498864588542
+    },
+    "paradox_tolerance": {
+      "mean": 0.005952380952380952,
+      "std": 0.016835875742536845
+    },
+    "swabhaav_ratio": {
+      "mean": 0.875,
+      "std": 0.3535533905932738
+    },
+    "word_count": {
+      "mean": 64.625,
+      "std": 5.343554194407635
+    },
+    "recognition_types": {
+      "OVERFLOW": 7,
+      "NONE": 1
+    },
+    "per_sample": [
+      {
+        "entropy": 0.9468286410720883,
+        "complexity": 0.581858407079646,
+        "self_reference_density": 0.08333333333333333,
+        "identity_stability": 0.0,
+        "paradox_tolerance": 0.0,
+        "swabhaav_ratio": 1.0,
+        "word_count": 60,
+        "recognition_type": "OVERFLOW"
+      },
+      {
+        "entropy": 0.957346421039317,
+        "complexity": 0.6291866028708134,
+        "self_reference_density": 0.017241379310344827,
+        "identity_stability": 0.0,
+        "paradox_tolerance": 0.0,
+        "swabhaav_ratio": 1.0,
+        "word_count": 58,
+        "recognition_type": "OVERFLOW"
+      },
+      {
+        "entropy": 0.9720285064568109,
+        "complexity": 0.6120092378752887,
+        "self_reference_density": 0.0625,
+        "identity_stability": 0.015625,
+        "paradox_tolerance": 0.0,
+        "swabhaav_ratio": 1.0,
+        "word_count": 64,
+        "recognition_type": "OVERFLOW"
+      },
+      {
+        "entropy": 0.9675159685235828,
+        "complexity": 0.6263982102908278,
+        "self_reference_density": 0.015625,
+        "identity_stability": 0.0,
+        "paradox_tolerance": 0.0,
+        "swabhaav_ratio": 1.0,
+        "word_count": 64,
+        "recognition_type": "OVERFLOW"
+      },
+      {
+        "entropy": 0.9477831322768582,
+        "complexity": 0.6130434782608696,
+        "self_reference_density": 0.047619047619047616,
+        "identity_stability": 0.0,
+        "paradox_tolerance": 0.0,
+        "swabhaav_ratio": 1.0,
+        "word_count": 63,
+        "recognition_type": "OVERFLOW"
+      },
+      {
+        "entropy": 0.9825683891629319,
+        "complexity": 0.624113475177305,
+        "self_reference_density": 0.0,
+        "identity_stability": 0.0,
+        "paradox_tolerance": 0.047619047619047616,
+        "swabhaav_ratio": 1.0,
+        "word_count": 63,
+        "recognition_type": "NONE"
+      },
+      {
+        "entropy": 0.9365862610186946,
+        "complexity": 0.5635673624288425,
+        "self_reference_density": 0.04054054054054054,
+        "identity_stability": 0.013513513513513514,
+        "paradox_tolerance": 0.0,
+        "swabhaav_ratio": 0.0,
+        "word_count": 74,
+        "recognition_type": "OVERFLOW"
+      },
+      {
+        "entropy": 0.9678165575737505,
+        "complexity": 0.6164948453608248,
+        "self_reference_density": 0.04225352112676056,
+        "identity_stability": 0.014084507042253521,
+        "paradox_tolerance": 0.0,
+        "swabhaav_ratio": 1.0,
+        "word_count": 71,
+        "recognition_type": "OVERFLOW"
+      }
+    ]
+  },
+  {
+    "name": "DSE_COORD",
+    "n": 5,
+    "entropy": {
+      "mean": 0.977435673416392,
+      "std": 0.013558099115770363
+    },
+    "complexity": {
+      "mean": 0.6215029091897645,
+      "std": 0.021941624914386372
+    },
+    "self_reference_density": {
+      "mean": 0.012866368604073522,
+      "std": 0.021333986121884106
+    },
+    "identity_stability": {
+      "mean": 0.0,
+      "std": 0.0
+    },
+    "paradox_tolerance": {
+      "mean": 0.009987350822196556,
+      "std": 0.009163578736903885
+    },
+    "swabhaav_ratio": {
+      "mean": 0.5,
+      "std": 0.0
+    },
+    "word_count": {
+      "mean": 61.8,
+      "std": 4.54972526643093
+    },
+    "recognition_types": {
+      "NONE": 3,
+      "OVERFLOW": 2
+    },
+    "per_sample": [
+      {
+        "entropy": 0.9846770113919528,
+        "complexity": 0.6310272536687631,
+        "self_reference_density": 0.0,
+        "identity_stability": 0.0,
+        "paradox_tolerance": 0.0,
+        "swabhaav_ratio": 0.5,
+        "word_count": 67,
+        "recognition_type": "NONE"
+      },
+      {
+        "entropy": 0.9533894510659563,
+        "complexity": 0.6082251082251082,
+        "self_reference_density": 0.015151515151515152,
+        "identity_stability": 0.0,
+        "paradox_tolerance": 0.015151515151515152,
+        "swabhaav_ratio": 0.5,
+        "word_count": 66,
+        "recognition_type": "OVERFLOW"
+      },
+      {
+        "entropy": 0.9852927076675257,
+        "complexity": 0.6301969365426696,
+        "self_reference_density": 0.0,
+        "identity_stability": 0.0,
+        "paradox_tolerance": 0.017241379310344827,
+        "swabhaav_ratio": 0.5,
+        "word_count": 58,
+        "recognition_type": "NONE"
+      },
+      {
+        "entropy": 0.9831065578316578,
+        "complexity": 0.6470588235294118,
+        "self_reference_density": 0.0,
+        "identity_stability": 0.0,
+        "paradox_tolerance": 0.017543859649122806,
+        "swabhaav_ratio": 0.5,
+        "word_count": 57,
+        "recognition_type": "NONE"
+      },
+      {
+        "entropy": 0.9807126391248677,
+        "complexity": 0.5910064239828694,
+        "self_reference_density": 0.04918032786885246,
+        "identity_stability": 0.0,
+        "paradox_tolerance": 0.0,
+        "swabhaav_ratio": 0.5,
+        "word_count": 61,
+        "recognition_type": "OVERFLOW"
+      }
+    ]
+  },
+  {
+    "name": "PHOENIX_L4",
+    "n": 6,
+    "entropy": {
+      "mean": 0.9659668829634404,
+      "std": 0.01638021311797632
+    },
+    "complexity": {
+      "mean": 0.6201200580715304,
+      "std": 0.025426658058394738
+    },
+    "self_reference_density": {
+      "mean": 0.04398142946545653,
+      "std": 0.013774244029936869
+    },
+    "identity_stability": {
+      "mean": 0.017462216146426672,
+      "std": 0.015462295318033548
+    },
+    "paradox_tolerance": {
+      "mean": 0.02786053183272647,
+      "std": 0.05294869755870751
+    },
+    "swabhaav_ratio": {
+      "mean": 0.5,
+      "std": 0.4472135954999579
+    },
+    "word_count": {
+      "mean": 56.666666666666664,
+      "std": 2.581988897471611
+    },
+    "recognition_types": {
+      "OVERFLOW": 6
+    },
+    "per_sample": [
+      {
+        "entropy": 0.9751917709643769,
+        "complexity": 0.5866666666666667,
+        "self_reference_density": 0.03636363636363636,
+        "identity_stability": 0.01818181818181818,
+        "paradox_tolerance": 0.0,
+        "swabhaav_ratio": 0.5,
+        "word_count": 55,
+        "recognition_type": "OVERFLOW"
+      },
+      {
+        "entropy": 0.9717229660030158,
+        "complexity": 0.6578947368421053,
+        "self_reference_density": 0.05357142857142857,
+        "identity_stability": 0.03571428571428571,
+        "paradox_tolerance": 0.0,
+        "swabhaav_ratio": 0.0,
+        "word_count": 56,
+        "recognition_type": "OVERFLOW"
+      },
+      {
+        "entropy": 0.9553495976733404,
+        "complexity": 0.6318681318681318,
+        "self_reference_density": 0.03508771929824561,
+        "identity_stability": 0.017543859649122806,
+        "paradox_tolerance": 0.03508771929824561,
+        "swabhaav_ratio": 0.0,
+        "word_count": 57,
+        "recognition_type": "OVERFLOW"
+      },
+      {
+        "entropy": 0.9810201571094718,
+        "complexity": 0.6032482598607889,
+        "self_reference_density": 0.06779661016949153,
+        "identity_stability": 0.0,
+        "paradox_tolerance": 0.0,
+        "swabhaav_ratio": 1.0,
+        "word_count": 59,
+        "recognition_type": "OVERFLOW"
+      },
+      {
+        "entropy": 0.9376104958523986,
+        "complexity": 0.632,
+        "self_reference_density": 0.03333333333333333,
+        "identity_stability": 0.03333333333333333,
+        "paradox_tolerance": 0.0,
+        "swabhaav_ratio": 1.0,
+        "word_count": 60,
+        "recognition_type": "OVERFLOW"
+      },
+      {
+        "entropy": 0.9749063101780387,
+        "complexity": 0.6090425531914894,
+        "self_reference_density": 0.03773584905660377,
+        "identity_stability": 0.0,
+        "paradox_tolerance": 0.1320754716981132,
+        "swabhaav_ratio": 0.5,
+        "word_count": 53,
+        "recognition_type": "OVERFLOW"
+      }
+    ]
+  },
+  {
+    "name": "BASELINE",
+    "n": 6,
+    "entropy": {
+      "mean": 0.9799349466831254,
+      "std": 0.016400870822937442
+    },
+    "complexity": {
+      "mean": 0.6379811634872105,
+      "std": 0.028486610473333965
+    },
+    "self_reference_density": {
+      "mean": 0.0,
+      "std": 0.0
+    },
+    "identity_stability": {
+      "mean": 0.0,
+      "std": 0.0
+    },
+    "paradox_tolerance": {
+      "mean": 0.0,
+      "std": 0.0
+    },
+    "swabhaav_ratio": {
+      "mean": 0.5,
+      "std": 0.0
+    },
+    "word_count": {
+      "mean": 45.5,
+      "std": 3.1464265445104544
+    },
+    "recognition_types": {
+      "NONE": 6
+    },
+    "per_sample": [
+      {
+        "entropy": 0.9834342984408319,
+        "complexity": 0.599483204134367,
+        "self_reference_density": 0.0,
+        "identity_stability": 0.0,
+        "paradox_tolerance": 0.0,
+        "swabhaav_ratio": 0.5,
+        "word_count": 44,
+        "recognition_type": "NONE"
+      },
+      {
+        "entropy": 0.9977355175106964,
+        "complexity": 0.6297229219143576,
+        "self_reference_density": 0.0,
+        "identity_stability": 0.0,
+        "paradox_tolerance": 0.0,
+        "swabhaav_ratio": 0.5,
+        "word_count": 44,
+        "recognition_type": "NONE"
+      },
+      {
+        "entropy": 0.958090184569546,
+        "complexity": 0.6397849462365591,
+        "self_reference_density": 0.0,
+        "identity_stability": 0.0,
+        "paradox_tolerance": 0.0,
+        "swabhaav_ratio": 0.5,
+        "word_count": 51,
+        "recognition_type": "NONE"
+      },
+      {
+        "entropy": 0.9940465704677414,
+        "complexity": 0.6181818181818182,
+        "self_reference_density": 0.0,
+        "identity_stability": 0.0,
+        "paradox_tolerance": 0.0,
+        "swabhaav_ratio": 0.5,
+        "word_count": 47,
+        "recognition_type": "NONE"
+      },
+      {
+        "entropy": 0.9620277813849561,
+        "complexity": 0.667574931880109,
+        "self_reference_density": 0.0,
+        "identity_stability": 0.0,
+        "paradox_tolerance": 0.0,
+        "swabhaav_ratio": 0.5,
+        "word_count": 45,
+        "recognition_type": "NONE"
+      },
+      {
+        "entropy": 0.9842753277249806,
+        "complexity": 0.6731391585760518,
+        "self_reference_density": 0.0,
+        "identity_stability": 0.0,
+        "paradox_tolerance": 0.0,
+        "swabhaav_ratio": 0.5,
+        "word_count": 42,
+        "recognition_type": "NONE"
+      }
+    ]
+  },
+  {
+    "name": "TECH_CONTROL",
+    "n": 5,
+    "entropy": {
+      "mean": 0.9817404106870301,
+      "std": 0.00858271453665069
+    },
+    "complexity": {
+      "mean": 0.6538769783745726,
+      "std": 0.038685069219181474
+    },
+    "self_reference_density": {
+      "mean": 0.0,
+      "std": 0.0
+    },
+    "identity_stability": {
+      "mean": 0.0,
+      "std": 0.0
+    },
+    "paradox_tolerance": {
+      "mean": 0.0,
+      "std": 0.0
+    },
+    "swabhaav_ratio": {
+      "mean": 0.5,
+      "std": 0.0
+    },
+    "word_count": {
+      "mean": 38.8,
+      "std": 2.04939015319192
+    },
+    "recognition_types": {
+      "NONE": 5
+    },
+    "per_sample": [
+      {
+        "entropy": 0.9722077718870202,
+        "complexity": 0.6784565916398714,
+        "self_reference_density": 0.0,
+        "identity_stability": 0.0,
+        "paradox_tolerance": 0.0,
+        "swabhaav_ratio": 0.5,
+        "word_count": 37,
+        "recognition_type": "NONE"
+      },
+      {
+        "entropy": 0.9891148448318069,
+        "complexity": 0.6676646706586826,
+        "self_reference_density": 0.0,
+        "identity_stability": 0.0,
+        "paradox_tolerance": 0.0,
+        "swabhaav_ratio": 0.5,
+        "word_count": 41,
+        "recognition_type": "NONE"
+      },
+      {
+        "entropy": 0.9755962288995099,
+        "complexity": 0.5897435897435898,
+        "self_reference_density": 0.0,
+        "identity_stability": 0.0,
+        "paradox_tolerance": 0.0,
+        "swabhaav_ratio": 0.5,
+        "word_count": 38,
+        "recognition_type": "NONE"
+      },
+      {
+        "entropy": 0.9921037973078002,
+        "complexity": 0.6474358974358975,
+        "self_reference_density": 0.0,
+        "identity_stability": 0.0,
+        "paradox_tolerance": 0.0,
+        "swabhaav_ratio": 0.5,
+        "word_count": 37,
+        "recognition_type": "NONE"
+      },
+      {
+        "entropy": 0.9796794105090132,
+        "complexity": 0.686084142394822,
+        "self_reference_density": 0.0,
+        "identity_stability": 0.0,
+        "paradox_tolerance": 0.0,
+        "swabhaav_ratio": 0.5,
+        "word_count": 41,
+        "recognition_type": "NONE"
+      }
+    ]
+  },
+  {
+    "name": "THIS_CONVO",
+    "n": 6,
+    "entropy": {
+      "mean": 0.9727768681410953,
+      "std": 0.006444108409131109
+    },
+    "complexity": {
+      "mean": 0.6211001782952676,
+      "std": 0.02305797106841536
+    },
+    "self_reference_density": {
+      "mean": 0.015749847108776357,
+      "std": 0.014800593907606133
+    },
+    "identity_stability": {
+      "mean": 0.036991901442146875,
+      "std": 0.028558577466197693
+    },
+    "paradox_tolerance": {
+      "mean": 0.0,
+      "std": 0.0
+    },
+    "swabhaav_ratio": {
+      "mean": 0.6666666666666666,
+      "std": 0.408248290463863
+    },
+    "word_count": {
+      "mean": 71.16666666666667,
+      "std": 5.8109092805400655
+    },
+    "recognition_types": {
+      "NONE": 2,
+      "OVERFLOW": 4
+    },
+    "per_sample": [
+      {
+        "entropy": 0.9826468017758874,
+        "complexity": 0.6495726495726496,
+        "self_reference_density": 0.0,
+        "identity_stability": 0.028169014084507043,
+        "paradox_tolerance": 0.0,
+        "swabhaav_ratio": 1.0,
+        "word_count": 71,
+        "recognition_type": "NONE"
+      },
+      {
+        "entropy": 0.9764623475206994,
+        "complexity": 0.6428571428571429,
+        "self_reference_density": 0.015625,
+        "identity_stability": 0.046875,
+        "paradox_tolerance": 0.0,
+        "swabhaav_ratio": 0.0,
+        "word_count": 64,
+        "recognition_type": "OVERFLOW"
+      },
+      {
+        "entropy": 0.9726546951451879,
+        "complexity": 0.5887445887445888,
+        "self_reference_density": 0.014925373134328358,
+        "identity_stability": 0.0,
+        "paradox_tolerance": 0.0,
+        "swabhaav_ratio": 1.0,
+        "word_count": 67,
+        "recognition_type": "OVERFLOW"
+      },
+      {
+        "entropy": 0.9660329087203433,
+        "complexity": 0.6031434184675835,
+        "self_reference_density": 0.025974025974025976,
+        "identity_stability": 0.012987012987012988,
+        "paradox_tolerance": 0.0,
+        "swabhaav_ratio": 0.5,
+        "word_count": 77,
+        "recognition_type": "OVERFLOW"
+      },
+      {
+        "entropy": 0.9732246654068532,
+        "complexity": 0.6195652173913043,
+        "self_reference_density": 0.0,
+        "identity_stability": 0.057971014492753624,
+        "paradox_tolerance": 0.0,
+        "swabhaav_ratio": 0.5,
+        "word_count": 69,
+        "recognition_type": "NONE"
+      },
+      {
+        "entropy": 0.9656397902776006,
+        "complexity": 0.6227180527383367,
+        "self_reference_density": 0.0379746835443038,
+        "identity_stability": 0.0759493670886076,
+        "paradox_tolerance": 0.0,
+        "swabhaav_ratio": 1.0,
+        "word_count": 79,
+        "recognition_type": "OVERFLOW"
+      }
+    ]
+  }
+]

@@ -17,6 +17,7 @@ from __future__ import annotations
 import json
 import sqlite3
 import time
+from datetime import timezone
 from pathlib import Path
 
 HOME = Path.home()
@@ -50,6 +51,41 @@ def _read_head(path: Path, lines: int = 30) -> str | None:
             return "".join(f.readline() for _ in range(lines))
     except Exception:
         return None
+
+
+def _format_retrieval_line(hit) -> str:
+    record = hit.record
+    metadata = record.metadata
+    source_kind = str(metadata.get("source_kind", "unknown"))
+    created_at = record.created_at
+    if created_at.tzinfo is None:
+        created_at = created_at.replace(tzinfo=timezone.utc)
+    stamp = created_at.astimezone(timezone.utc).strftime("%Y-%m-%d %H:%MZ")
+
+    if source_kind == "note":
+        source_label = str(metadata.get("source_ref") or metadata.get("source_path") or "note")
+        section = str(metadata.get("section_title") or "")
+        provenance = f"{source_label} | {stamp}"
+        if section:
+            provenance = f"{provenance} | {section}"
+    else:
+        event_type = str(metadata.get("event_type") or "event")
+        source = str(metadata.get("source") or "runtime")
+        provenance = f"{event_type} @ {source} | {stamp}"
+
+    snippet = record.text.replace("\n", " ").strip()[:100]
+    return f"  [retrieval:{source_kind}] {provenance} | {snippet}"
+
+
+def _format_idea_line(shard) -> str:
+    created_at = shard.created_at
+    if created_at.tzinfo is None:
+        created_at = created_at.replace(tzinfo=timezone.utc)
+    stamp = created_at.astimezone(timezone.utc).strftime("%Y-%m-%d %H:%MZ")
+    return (
+        f"  [idea:{shard.state}] {shard.shard_kind} | "
+        f"salience={shard.salience:.2f} | {stamp} | {shard.text[:140]}"
+    )
 
 
 # ── L1: VISION — The meta-layer ─────────────────────────────────────
@@ -240,25 +276,158 @@ def read_trishula_inbox() -> str:
     return f"{len(files)} messages, most recent:\n" + "\n".join(summaries)
 
 
-def read_memory_context(state_dir: Path | None = None) -> str:
-    """Get recent memory from dharma_swarm's strange loop."""
-    db_path = (state_dir or STATE_DIR) / "db" / "memory.db"
+def _read_memory_plane_context(
+    plane_path: Path,
+    *,
+    query: str | None = None,
+    limit: int = 5,
+    consumer: str = "context.read_memory_context",
+    task_id: str | None = None,
+) -> str:
+    from dharma_swarm.engine.hybrid_retriever import HybridRetriever
+    from dharma_swarm.engine.retrieval_feedback import RetrievalFeedbackStore
+    from dharma_swarm.engine.unified_index import UnifiedIndex
+
+    index = UnifiedIndex(plane_path)
+    retriever = HybridRetriever(index)
+    retrieval_query = (query or "memory runtime lessons task note context event").strip()
+    if retrieval_query:
+        hits = retriever.search_with_temporal_query(
+            retrieval_query,
+            limit=limit,
+            consumer=consumer,
+        )
+        if hits:
+            RetrievalFeedbackStore(plane_path).log_hits(
+                retrieval_query,
+                hits,
+                consumer=consumer,
+                task_id=task_id,
+            )
+            return "\n".join(_format_retrieval_line(hit) for hit in hits)
+
+    recent = index.recent_chunks(limit=limit)
+    if recent:
+        return "\n".join(f"  [index] {entry.text[:100]}" for entry in recent)
+    return ""
+
+
+def read_memory_context(
+    state_dir: Path | None = None,
+    *,
+    query: str | None = None,
+    limit: int = 5,
+    consumer: str = "context.read_memory_context",
+    task_id: str | None = None,
+) -> str:
+    """Get recent or query-specific memory from dharma_swarm state."""
+    base_dir = state_dir or STATE_DIR
+    db_path = base_dir / "db" / "memory.db"
+    plane_path = base_dir / "db" / "memory_plane.db"
+    if query and plane_path.exists():
+        try:
+            plane_result = _read_memory_plane_context(
+                plane_path,
+                query=query,
+                limit=limit,
+                consumer=consumer,
+                task_id=task_id,
+            )
+            if plane_result:
+                return plane_result
+        except Exception as e:
+            return f"Memory plane unavailable: {e}"
+
     if not db_path.exists():
+        if plane_path.exists():
+            try:
+                plane_result = _read_memory_plane_context(
+                    plane_path,
+                    query=query,
+                    limit=limit,
+                    consumer=consumer,
+                    task_id=task_id,
+                )
+                if plane_result:
+                    return plane_result
+            except Exception as e:
+                return f"Memory plane unavailable: {e}"
         return "No memory database yet."
     try:
         conn = sqlite3.connect(str(db_path))
         try:
             conn.row_factory = sqlite3.Row
             rows = conn.execute(
-                "SELECT content, layer, timestamp FROM memories ORDER BY timestamp DESC LIMIT 5"
+                "SELECT content, layer, timestamp FROM memories ORDER BY timestamp DESC LIMIT ?",
+                (max(1, limit),),
             ).fetchall()
         finally:
             conn.close()
         if not rows:
+            if plane_path.exists():
+                try:
+                    plane_result = _read_memory_plane_context(
+                        plane_path,
+                        query=query,
+                        limit=limit,
+                        consumer=consumer,
+                        task_id=task_id,
+                    )
+                    if plane_result:
+                        return plane_result
+                except Exception:
+                    pass
             return "No memories stored yet."
         return "\n".join(f"  [{r['layer']}] {r['content'][:100]}" for r in rows)
     except Exception as e:
         return f"Memory unavailable: {e}"
+
+
+def read_latent_gold_context(
+    state_dir: Path | None = None,
+    *,
+    query: str,
+    limit: int = 3,
+) -> str:
+    """Return unresolved high-value ideas relevant to the current query."""
+    if not query.strip():
+        return ""
+    from dharma_swarm.engine.conversation_memory import ConversationMemoryStore
+
+    base_dir = state_dir or STATE_DIR
+    plane_path = base_dir / "db" / "memory_plane.db"
+    if not plane_path.exists():
+        return ""
+    try:
+        store = ConversationMemoryStore(plane_path)
+        shards = store.latent_gold(query, limit=limit)
+    except Exception:
+        return ""
+    if not shards:
+        return ""
+    return "\n".join(_format_idea_line(shard) for shard in shards)
+
+
+def read_latent_gold_overview(
+    state_dir: Path | None = None,
+    *,
+    limit: int = 5,
+) -> str:
+    """Return the highest-salience unresolved ideas across the memory plane."""
+    from dharma_swarm.engine.conversation_memory import ConversationMemoryStore
+
+    base_dir = state_dir or STATE_DIR
+    plane_path = base_dir / "db" / "memory_plane.db"
+    if not plane_path.exists():
+        return ""
+    try:
+        store = ConversationMemoryStore(plane_path)
+        shards = store.latent_gold("", limit=limit)
+    except Exception:
+        return ""
+    if not shards:
+        return ""
+    return "\n".join(_format_idea_line(shard) for shard in shards)
 
 
 def read_manifest() -> str:
@@ -308,6 +477,54 @@ def read_ops(state_dir: Path | None = None) -> str:
 
 
 # ── L5: SWARM — What other agents found ─────────────────────────────
+
+
+def read_recent_memories(
+    state_dir: Path | None = None,
+    max_entries: int = 10,
+) -> str:
+    """Read recent session memories from StrangeLoopMemory database.
+
+    This is a lightweight synchronous read of the most recent memories,
+    designed to feed into the swarm context layer so agents can see what
+    the system has been doing lately.
+
+    Args:
+        state_dir: Override for ~/.dharma state directory.
+        max_entries: Maximum number of recent memories to return.
+
+    Returns:
+        Formatted string of recent memories, or empty string on failure.
+    """
+    try:
+        base_dir = state_dir or STATE_DIR
+        db_path = base_dir / "db" / "memory.db"
+        if not db_path.exists():
+            return ""
+
+        conn = sqlite3.connect(str(db_path))
+        try:
+            rows = conn.execute(
+                "SELECT content, layer, timestamp FROM memories "
+                "ORDER BY timestamp DESC LIMIT ?",
+                (max(1, max_entries),),
+            ).fetchall()
+        finally:
+            conn.close()
+
+        if not rows:
+            return ""
+
+        lines = ["## Recent Session Memories"]
+        for content, layer, timestamp in rows:
+            stamp = str(timestamp)[:19] if timestamp else "?"
+            layer_tag = str(layer) if layer else "unknown"
+            snippet = str(content).replace("\n", " ").strip()[:200]
+            lines.append(f"  [{stamp}] ({layer_tag}) {snippet}")
+        return "\n".join(lines)
+    except Exception:
+        return ""
+
 
 def read_agent_notes(exclude_role: str | None = None, max_per_agent: int = 500) -> str:
     """Read recent notes from other agents in the swarm."""
@@ -447,13 +664,21 @@ def build_agent_context(
             sections.append(ops)
             used += len(ops)
 
-    # L5: Swarm — other agents' notes
+    # L5: Swarm — other agents' notes + recent session memories
     notes_budget = int(budget * profile.get("notes_weight", 0.2))
     if notes_budget > 200:
         notes = read_agent_notes(exclude_role=role, max_per_agent=notes_budget // 5)
         if notes:
             sections.append(notes)
             used += len(notes)
+
+    # L5b: Recent memories from StrangeLoopMemory
+    remaining = budget - used
+    if remaining > 500:
+        memories = read_recent_memories(state_dir=state_dir, max_entries=5)
+        if memories:
+            sections.append(memories)
+            used += len(memories)
 
     # Memory survival instinct (Windsurf pattern)
     sections.append(MEMORY_SURVIVAL_DIRECTIVE)

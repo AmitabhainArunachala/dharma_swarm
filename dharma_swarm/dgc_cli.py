@@ -10,6 +10,7 @@ Usage:
   dgc chat                      Launch native Claude Code interactive UI
   dgc dashboard                 Launch interactive DGC dashboard (TUI)
   dgc status                    System status overview
+  dgc runtime-status            Canonical runtime control-plane summary
   dgc mission-status            Mission-level readiness across core/accelerators
   dgc canonical-status          Show which DGC/SAB repos are canonical vs split
   dgc up [--background]         Start the daemon
@@ -22,6 +23,8 @@ Usage:
   dgc swarm live [N]            Persistent tmux swarm (N agents)
   dgc swarm overnight start [H] [--aggressive]
   dgc swarm overnight stop|status|report
+  dgc swarm codex-night start [H]
+  dgc swarm codex-night stop|status|report
   dgc swarm yolo                Aggressive overnight (10h)
   dgc context [domain]          Load context (research/content/ops/all)
   dgc memory                    Show memory status
@@ -29,12 +32,15 @@ Usage:
   dgc develop "what" "evidence" Record a development marker
   dgc gates "action"            Run telos gates on an action
   dgc health                    Ecosystem file health
+  dgc ouroboros connections|record  Inspect or canonically bind behavioral observations
   dgc health-check              Monitor-based system health (v0.2.0)
+  dgc doctor                    Deep runtime diagnostics + fix guidance
   dgc spawn --name X --role Y   Spawn a new agent
   dgc task create "title"       Create a task
   dgc task list [--status S]    List tasks
   dgc evolve propose COMP DESC  Run evolution pipeline
   dgc evolve trend [--component C]
+  dgc reciprocity health|summary|record|publish  Planetary Reciprocity Commons endpoints
   dgc rag health|search|chat    NVIDIA RAG integration endpoints
   dgc flywheel jobs|export|record|...  NVIDIA Data Flywheel job lifecycle
   dgc run [--interval N]        Run orchestration loop
@@ -63,6 +69,65 @@ DHARMA_STATE = HOME / ".dharma"
 DHARMA_SWARM = HOME / "dharma_swarm"
 DGC_CORE = HOME / "dgc-core"
 
+# Keep mission-status aligned with the lanes the overnight cycle depends on:
+# accelerator adapters, canonical evaluation binding, and behavioral feedback.
+MISSION_TRACKED_PATHS: tuple[str, ...] = (
+    "dharma_swarm/evaluation_registry.py",
+    "dharma_swarm/integrations/nvidia_rag.py",
+    "dharma_swarm/integrations/data_flywheel.py",
+    "dharma_swarm/integrations/reciprocity_commons.py",
+    "dharma_swarm/ouroboros.py",
+    "scripts/caffeine_until_jst.sh",
+    "scripts/connection_finder.py",
+    "scripts/ouroboros_experiment.py",
+    "scripts/thinkodynamic_director.py",
+    "docs/NVIDIA_INFRA_SELF_HEAL.md",
+    "tests/test_evaluation_registry.py",
+    "tests/test_integrations_nvidia_rag.py",
+    "tests/test_integrations_data_flywheel.py",
+    "tests/test_integrations_reciprocity_commons.py",
+    "tests/test_ouroboros.py",
+    "tests/tui/test_app_plan_mode.py",
+)
+
+
+def _load_env_file(path: Path) -> None:
+    if not path.exists():
+        return
+    try:
+        lines = path.read_text(errors="ignore").splitlines()
+    except Exception:
+        return
+
+    for raw_line in lines:
+        line = raw_line.strip()
+        if not line or line.startswith("#"):
+            continue
+        if line.startswith("export "):
+            line = line[len("export "):].strip()
+        if "=" not in line:
+            continue
+        key, value = line.split("=", 1)
+        key = key.strip()
+        value = value.strip()
+        if not key:
+            continue
+        if (
+            len(value) >= 2
+            and ((value[0] == value[-1] == '"') or (value[0] == value[-1] == "'"))
+        ):
+            value = value[1:-1]
+        os.environ.setdefault(key, value)
+
+
+def _bootstrap_env() -> None:
+    # Load dharma_swarm defaults and optional local runtime overrides.
+    _load_env_file(HOME / "dharma_swarm" / ".env")
+    _load_env_file(HOME / ".dharma" / "env" / "nvidia_remote.env")
+
+
+_bootstrap_env()
+
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -71,6 +136,81 @@ DGC_CORE = HOME / "dgc-core"
 def _run(coro: Any) -> Any:
     """Run an async coroutine synchronously."""
     return asyncio.run(coro)
+
+
+def _load_json_object(
+    *,
+    json_payload: str | None = None,
+    file_path: str | None = None,
+    label: str = "JSON payload",
+) -> dict[str, Any]:
+    if json_payload is None and file_path is None:
+        raise ValueError(f"{label} is required")
+
+    raw = json_payload
+    if file_path is not None:
+        raw = Path(file_path).read_text(encoding="utf-8")
+
+    try:
+        payload = json.loads(raw if raw is not None else "")
+    except json.JSONDecodeError as exc:
+        raise ValueError(f"{label} is not valid JSON: {exc.msg}") from exc
+
+    if not isinstance(payload, dict):
+        raise ValueError(f"{label} must decode to a JSON object")
+    return payload
+
+
+def _normalize_optional_text(value: str | None, *, default: str = "") -> str:
+    normalized = str(value or "").strip()
+    return normalized or default
+
+
+def _default_ouroboros_log_path() -> Path:
+    candidates = (
+        DHARMA_STATE / "evolution" / "observations" / "ouroboros_log.jsonl",
+        DHARMA_STATE / "evolution" / "ouroboros_log.jsonl",
+    )
+    for candidate in candidates:
+        if candidate.exists():
+            return candidate
+    return candidates[0]
+
+
+def _load_ouroboros_observation(
+    *,
+    log_path: Path,
+    cycle_id: str | None = None,
+) -> dict[str, Any]:
+    if not log_path.exists():
+        raise FileNotFoundError(f"ouroboros log not found: {log_path}")
+
+    selected: dict[str, Any] | None = None
+    for line_no, raw_line in enumerate(log_path.read_text(encoding="utf-8").splitlines(), start=1):
+        line = raw_line.strip()
+        if not line:
+            continue
+        try:
+            decoded = json.loads(line)
+        except json.JSONDecodeError as exc:
+            raise ValueError(
+                f"ouroboros log {log_path} contains invalid JSON on line {line_no}"
+            ) from exc
+        if not isinstance(decoded, dict):
+            raise ValueError(
+                f"ouroboros log {log_path} contains a non-object JSON record on line {line_no}"
+            )
+        if cycle_id:
+            if str(decoded.get("cycle_id") or "").strip() == cycle_id:
+                selected = decoded
+        else:
+            selected = decoded
+
+    if selected is None:
+        if cycle_id:
+            raise ValueError(f"no ouroboros observation found for cycle_id={cycle_id}")
+        raise ValueError(f"no ouroboros observations found in {log_path}")
+    return selected
 
 
 async def _get_swarm(state_dir: str = ".dharma"):
@@ -104,7 +244,12 @@ def _tail(path: Path, lines: int = 60) -> str:
 def _accelerator_mode() -> str:
     configured = any(
         os.getenv(key, "").strip()
-        for key in ("DGC_NVIDIA_RAG_URL", "DGC_NVIDIA_INGEST_URL", "DGC_DATA_FLYWHEEL_URL")
+        for key in (
+            "DGC_NVIDIA_RAG_URL",
+            "DGC_NVIDIA_INGEST_URL",
+            "DGC_DATA_FLYWHEEL_URL",
+            "DGC_RECIPROCITY_COMMONS_URL",
+        )
     )
     raw = os.getenv("DGC_ACCELERATOR_MODE", "enabled" if configured else "dormant")
     mode = raw.strip().lower()
@@ -186,6 +331,22 @@ def cmd_status() -> None:
 
     print("\nMission spine: run `dgc mission-status` for full readiness lanes")
     print("Canonical topology: run `dgc canonical-status`")
+
+
+def cmd_runtime_status(
+    *,
+    limit: int = 5,
+    db_path: str | None = None,
+) -> None:
+    """Show the canonical runtime control-plane summary."""
+    from dharma_swarm.tui_helpers import build_runtime_status_text
+
+    print(
+        build_runtime_status_text(
+            limit=limit,
+            runtime_db_path=Path(db_path) if db_path else None,
+        )
+    )
 
 
 def _read_openclaw_summary() -> dict[str, Any]:
@@ -369,18 +530,7 @@ def cmd_mission_status(
     core = _core_mission_checks()
     core_pass = sum(1 for v in core.values() if v)
 
-    tracked = _tracked_paths(
-        [
-            "dharma_swarm/integrations/nvidia_rag.py",
-            "dharma_swarm/integrations/data_flywheel.py",
-            "scripts/caffeine_until_jst.sh",
-            "scripts/allout_autopilot.py",
-            "docs/NVIDIA_INFRA_SELF_HEAL.md",
-            "tests/test_integrations_nvidia_rag.py",
-            "tests/test_integrations_data_flywheel.py",
-            "tests/tui/test_app_plan_mode.py",
-        ]
-    )
+    tracked = _tracked_paths(list(MISSION_TRACKED_PATHS))
     tracked_count = sum(1 for v in tracked.values() if v)
     local_only = [path for path, ok in tracked.items() if not ok]
 
@@ -392,16 +542,23 @@ def cmd_mission_status(
                 "rag_health": "DORMANT",
                 "ingest_health": "DORMANT",
                 "flywheel_jobs": "DORMANT",
+                "reciprocity_health": "DORMANT",
             }
-        from dharma_swarm.integrations import DataFlywheelClient, NvidiaRagClient
+        from dharma_swarm.integrations import (
+            DataFlywheelClient,
+            NvidiaRagClient,
+            ReciprocityCommonsClient,
+        )
 
         out: dict[str, str] = {}
         rag = NvidiaRagClient()
         fw = DataFlywheelClient()
+        reciprocity = ReciprocityCommonsClient()
         for label, fn in (
             ("rag_health", lambda: rag.health(service="rag")),
             ("ingest_health", lambda: rag.health(service="ingest")),
             ("flywheel_jobs", fw.list_jobs),
+            ("reciprocity_health", reciprocity.health),
         ):
             try:
                 await fn()
@@ -417,6 +574,7 @@ def cmd_mission_status(
             "rag_health": f"BLOCKED: {exc}",
             "ingest_health": f"BLOCKED: {exc}",
             "flywheel_jobs": f"BLOCKED: {exc}",
+            "reciprocity_health": f"BLOCKED: {exc}",
         }
 
     core_ok = core_pass == len(core)
@@ -501,7 +659,7 @@ def cmd_mission_status(
         )
 
     print("\nAccelerator lane (optional):")
-    for key in ("rag_health", "ingest_health", "flywheel_jobs"):
+    for key in ("rag_health", "ingest_health", "flywheel_jobs", "reciprocity_health"):
         val = accel.get(key, "BLOCKED")
         print(f"  [{key}] {val}")
 
@@ -761,6 +919,24 @@ def cmd_health_check() -> None:
     _run(_check())
 
 
+def cmd_doctor(
+    *,
+    as_json: bool = False,
+    strict: bool = False,
+    quick: bool = False,
+    timeout: float = 1.5,
+) -> int:
+    """Deep readiness diagnostics for runtime, routing, and providers."""
+    from dharma_swarm.doctor import doctor_exit_code, render_doctor_report, run_doctor
+
+    report = run_doctor(timeout_seconds=timeout, quick=quick)
+    if as_json:
+        print(json.dumps(report, indent=2))
+    else:
+        print(render_doctor_report(report))
+    return doctor_exit_code(report, strict=strict)
+
+
 def cmd_pulse() -> None:
     """Run one heartbeat pulse."""
     from dharma_swarm.pulse import pulse
@@ -873,7 +1049,11 @@ def cmd_swarm(extra_args: list[str]) -> None:
     scripts = DHARMA_SWARM / "scripts"
     start_script = scripts / "start_overnight.sh"
     stop_script = scripts / "stop_overnight.sh"
+    codex_start_script = scripts / "start_codex_overnight_tmux.sh"
+    codex_status_script = scripts / "status_codex_overnight_tmux.sh"
+    codex_stop_script = scripts / "stop_codex_overnight_tmux.sh"
     run_file = DHARMA_STATE / "overnight_run_dir.txt"
+    codex_run_file = DHARMA_STATE / "codex_overnight_run_dir.txt"
     pid_files = {
         "overnight": DHARMA_STATE / "overnight.pid",
         "daemon": DHARMA_STATE / "daemon.pid",
@@ -988,10 +1168,94 @@ def cmd_swarm(extra_args: list[str]) -> None:
             "  dgc swarm overnight report\n"
         )
 
+    def _codex_night(args: list[str]) -> None:
+        action = args[0] if args else "status"
+
+        if action == "start":
+            hours = "8"
+            for a in args[1:]:
+                if a == "forever":
+                    hours = a
+                    continue
+                try:
+                    float(a)
+                    hours = a
+                except ValueError:
+                    pass
+            proc = subprocess.run(
+                ["bash", str(codex_start_script), hours],
+                capture_output=True,
+                text=True,
+                env=os.environ.copy(),
+            )
+            if proc.stdout:
+                print(proc.stdout.strip())
+            if proc.stderr:
+                print(proc.stderr.strip(), file=sys.stderr)
+            if proc.returncode != 0:
+                sys.exit(proc.returncode)
+            return
+
+        if action == "stop":
+            proc = subprocess.run(
+                ["bash", str(codex_stop_script)],
+                capture_output=True,
+                text=True,
+            )
+            if proc.stdout:
+                print(proc.stdout.strip())
+            if proc.stderr:
+                print(proc.stderr.strip(), file=sys.stderr)
+            if proc.returncode != 0:
+                sys.exit(proc.returncode)
+            return
+
+        if action in ("status", "state"):
+            proc = subprocess.run(
+                ["bash", str(codex_status_script)],
+                capture_output=True,
+                text=True,
+            )
+            if proc.stdout:
+                print(proc.stdout.strip())
+            if proc.stderr:
+                print(proc.stderr.strip(), file=sys.stderr)
+            if proc.returncode != 0:
+                sys.exit(proc.returncode)
+            return
+
+        if action in ("report", "logs"):
+            if not codex_run_file.exists():
+                print("No Codex overnight run metadata found.")
+                return
+            run_dir = Path(codex_run_file.read_text().strip())
+            report = run_dir / "report.md"
+            latest_output = run_dir / "latest_last_message.txt"
+            print(f"run_dir: {run_dir}\n")
+            if report.exists():
+                print("--- report tail ---")
+                print(_tail(report, lines=80))
+            if latest_output.exists():
+                print("\n--- latest last message ---")
+                print(_tail(latest_output, lines=80))
+            return
+
+        print(
+            "Usage:\n"
+            "  dgc swarm codex-night start [HOURS]\n"
+            "  dgc swarm codex-night stop\n"
+            "  dgc swarm codex-night status\n"
+            "  dgc swarm codex-night report\n"
+        )
+
     # --- Dispatch subcommands ---
 
     if extra_args and extra_args[0] == "yolo":
         _overnight(["start", "10", "--aggressive"])
+        return
+
+    if extra_args and extra_args[0] in ("codex-night", "codex-overnight"):
+        _codex_night(extra_args[1:])
         return
 
     if extra_args and extra_args[0] in ("overnight", "autopilot"):
@@ -1777,6 +2041,412 @@ def cmd_flywheel_watch(job_id: str, poll_sec: float, timeout_sec: float) -> None
     _run(_watch())
 
 
+def cmd_reciprocity_health() -> None:
+    """Check Planetary Reciprocity Commons service health."""
+
+    async def _health():
+        from dharma_swarm.integrations import ReciprocityCommonsClient
+
+        client = ReciprocityCommonsClient()
+        payload = await client.health()
+        print(json.dumps(payload, indent=2))
+
+    _run(_health())
+
+
+def cmd_reciprocity_summary() -> None:
+    """Fetch the current reciprocity ledger summary."""
+
+    async def _summary():
+        from dharma_swarm.integrations import ReciprocityCommonsClient
+
+        client = ReciprocityCommonsClient()
+        payload = await client.ledger_summary()
+        print(json.dumps(payload, indent=2))
+
+    _run(_summary())
+
+
+async def _reciprocity_publish_payload(
+    *,
+    record_type: str,
+    payload: dict[str, Any],
+) -> dict[str, Any]:
+    from dharma_swarm.integrations import ReciprocityCommonsClient
+
+    client = ReciprocityCommonsClient()
+    publishers = {
+        "activity": client.publish_activity,
+        "obligation": client.publish_obligation,
+        "project": client.publish_project,
+        "outcome": client.publish_outcome,
+    }
+    try:
+        publish = publishers[record_type]
+    except KeyError as exc:
+        raise ValueError(f"unsupported reciprocity record type: {record_type}") from exc
+
+    response = await publish(payload)
+    return {
+        "record_type": record_type,
+        "record": payload,
+        "response": response,
+    }
+
+
+def cmd_reciprocity_publish(
+    *,
+    record_type: str,
+    json_payload: str | None = None,
+    file_path: str | None = None,
+) -> None:
+    """Publish a reciprocity activity, obligation, project, or outcome."""
+
+    payload = _load_json_object(
+        json_payload=json_payload,
+        file_path=file_path,
+        label="reciprocity publish payload",
+    )
+    result = _run(
+        _reciprocity_publish_payload(
+            record_type=record_type,
+            payload=payload,
+        )
+    )
+    print(json.dumps(result, indent=2))
+
+
+async def _reciprocity_record_payload(
+    *,
+    run_id: str | None = None,
+    session_id: str | None = None,
+    task_id: str | None = None,
+    trace_id: str | None = None,
+    summary_type: str = "ledger_summary",
+    json_payload: str | None = None,
+    file_path: str | None = None,
+    db_path: str | None = None,
+    event_log_dir: str | None = None,
+    workspace_root: str | None = None,
+    provenance_root: str | None = None,
+) -> dict[str, Any]:
+    from dharma_swarm.evaluation_registry import EvaluationRegistry
+    from dharma_swarm.integrations import ReciprocityCommonsClient
+    from dharma_swarm.memory_lattice import MemoryLattice
+    from dharma_swarm.runtime_state import RuntimeStateStore
+
+    normalized_run_id = _normalize_optional_text(run_id)
+    normalized_session_id = _normalize_optional_text(session_id)
+    normalized_task_id = _normalize_optional_text(task_id)
+    normalized_trace_id = _normalize_optional_text(trace_id) or None
+    normalized_summary_type = _normalize_optional_text(
+        summary_type,
+        default="ledger_summary",
+    )
+    if not normalized_run_id and not normalized_session_id:
+        raise ValueError("session_id or run_id is required to record evaluation outputs canonically")
+
+    provided_payload = (
+        _load_json_object(
+            json_payload=json_payload,
+            file_path=file_path,
+            label="reciprocity summary payload",
+        )
+        if json_payload is not None or file_path is not None
+        else None
+    )
+    if provided_payload is not None:
+        summary_payload = dict(provided_payload)
+    else:
+        client = ReciprocityCommonsClient()
+        summary_payload = dict(await client.ledger_summary())
+    summary_payload.setdefault("service", "reciprocity_commons")
+    summary_payload.setdefault("source", "reciprocity_commons")
+    summary_payload.setdefault("summary_type", normalized_summary_type)
+
+    runtime_state = RuntimeStateStore(Path(db_path) if db_path else None)
+    memory_lattice = MemoryLattice(
+        db_path=runtime_state.db_path,
+        event_log_dir=Path(event_log_dir) if event_log_dir else None,
+    )
+    registry = EvaluationRegistry(
+        runtime_state=runtime_state,
+        memory_lattice=memory_lattice,
+        workspace_root=Path(workspace_root) if workspace_root else None,
+        provenance_root=Path(provenance_root) if provenance_root else None,
+    )
+    try:
+        result = await registry.record_reciprocity_summary(
+            summary_payload,
+            run_id=normalized_run_id,
+            session_id=normalized_session_id,
+            task_id=normalized_task_id,
+            trace_id=normalized_trace_id,
+            created_by="dgc_cli",
+        )
+    finally:
+        await memory_lattice.close()
+
+    return {
+        "summary": summary_payload,
+        "registry": {
+            "artifact_id": result.artifact.artifact_id,
+            "manifest_path": str(result.manifest_path),
+            "summary": dict(result.summary),
+            "fact_ids": [fact.fact_id for fact in result.facts],
+            "receipt_event_id": str(result.receipt.get("event_id", "")),
+        },
+    }
+
+
+def cmd_reciprocity_record(
+    *,
+    run_id: str | None = None,
+    session_id: str | None = None,
+    task_id: str | None = None,
+    trace_id: str | None = None,
+    summary_type: str = "ledger_summary",
+    json_payload: str | None = None,
+    file_path: str | None = None,
+    db_path: str | None = None,
+    event_log_dir: str | None = None,
+    workspace_root: str | None = None,
+    provenance_root: str | None = None,
+) -> None:
+    """Record the current reciprocity ledger summary into canonical DGC truth."""
+
+    payload = _run(
+        _reciprocity_record_payload(
+            run_id=run_id,
+            session_id=session_id,
+            task_id=task_id,
+            trace_id=trace_id,
+            summary_type=summary_type,
+            json_payload=json_payload,
+            file_path=file_path,
+            db_path=db_path,
+            event_log_dir=event_log_dir,
+            workspace_root=workspace_root,
+            provenance_root=provenance_root,
+        )
+    )
+    print(json.dumps(payload, indent=2))
+
+
+def cmd_ouroboros_connections(
+    *,
+    package_dir: str | None = None,
+    threshold: float = 0.08,
+    disagreement_threshold: float = 0.1,
+    min_text_length: int = 50,
+    limit: int = 15,
+    as_json: bool = False,
+) -> None:
+    """Profile module docstrings and report behavioral affinities/disagreements."""
+    from dharma_swarm.ouroboros import profile_python_modules
+
+    if limit < 0:
+        raise ValueError("limit must be >= 0")
+    if threshold < 0:
+        raise ValueError("threshold must be >= 0")
+    if disagreement_threshold < 0:
+        raise ValueError("disagreement_threshold must be >= 0")
+
+    target_dir = Path(package_dir) if package_dir else DHARMA_SWARM / "dharma_swarm"
+    finder, profiles = profile_python_modules(
+        target_dir,
+        min_text_length=min_text_length,
+    )
+    connections = finder.find_connections(threshold=threshold)
+    disagreements = finder.find_h1_disagreements(threshold=disagreement_threshold)
+    payload = {
+        "package_dir": str(target_dir),
+        "profiles": profiles,
+        "connections": connections,
+        "disagreements": disagreements,
+        "summary": {
+            "modules_profiled": len(profiles),
+            "connections": len(connections),
+            "disagreements": len(disagreements),
+            "threshold": threshold,
+            "disagreement_threshold": disagreement_threshold,
+            "min_text_length": min_text_length,
+        },
+    }
+    if as_json:
+        print(json.dumps(payload, indent=2))
+        return
+
+    print(f"Profiling {len(profiles)} modules from {target_dir}...\n")
+    for row in profiles[:limit]:
+        print(
+            f"  {row['module']:<30} "
+            f"entropy={row['entropy']:.3f}  "
+            f"self_ref={row['self_reference_density']:.4f}  "
+            f"swabhaav={row['swabhaav_ratio']:.3f}  "
+            f"recog={row['recognition_type']}"
+        )
+    if len(profiles) > limit:
+        print(f"  ... {len(profiles) - limit} more module profiles")
+
+    print("\n" + "=" * 80)
+    print("H0: STRUCTURAL CONNECTIONS (similar behavioral profiles)")
+    print("=" * 80)
+    if connections:
+        for conn in connections[:limit]:
+            print(
+                f"  {conn['module_a']:<25} <-> {conn['module_b']:<25} "
+                f"d={conn['distance']:.4f}  type={conn['connection_type']}"
+            )
+        if len(connections) > limit:
+            print(f"  ... {len(connections) - limit} more H0 connections")
+    else:
+        print(f"  No close connections found (threshold={threshold:.3f})")
+
+    print("\n" + "=" * 80)
+    print("H1: PRODUCTIVE DISAGREEMENTS (divergent profiles)")
+    print("=" * 80)
+    if disagreements:
+        for dis in disagreements[:limit]:
+            print(
+                f"  {dis['module_a']:<25} =/= {dis['module_b']:<25} "
+                f"d={dis['distance']:.4f}  "
+                f"type={dis['disagreement_type']}  "
+                f"({dis['recognition_a']} vs {dis['recognition_b']})"
+            )
+        if len(disagreements) > limit:
+            print(f"  ... {len(disagreements) - limit} more H1 disagreements")
+    else:
+        print(f"  No H1 disagreements found (threshold={disagreement_threshold:.3f})")
+
+    print("\n" + "=" * 80)
+    print("SYNTHESIS")
+    print("=" * 80)
+    print(f"\n  Modules profiled: {len(profiles)}")
+    print(f"  H0 connections:   {len(connections)}")
+    print(f"  H1 disagreements: {len(disagreements)}")
+
+
+async def _ouroboros_record_payload(
+    *,
+    run_id: str | None = None,
+    session_id: str | None = None,
+    task_id: str | None = None,
+    trace_id: str | None = None,
+    log_path: str | None = None,
+    cycle_id: str | None = None,
+    json_payload: str | None = None,
+    file_path: str | None = None,
+    db_path: str | None = None,
+    event_log_dir: str | None = None,
+    workspace_root: str | None = None,
+    provenance_root: str | None = None,
+) -> dict[str, Any]:
+    from dharma_swarm.evaluation_registry import EvaluationRegistry
+    from dharma_swarm.memory_lattice import MemoryLattice
+    from dharma_swarm.runtime_state import RuntimeStateStore
+
+    normalized_run_id = _normalize_optional_text(run_id)
+    normalized_session_id = _normalize_optional_text(session_id)
+    normalized_task_id = _normalize_optional_text(task_id)
+    normalized_trace_id = _normalize_optional_text(trace_id) or None
+    normalized_cycle_id = _normalize_optional_text(cycle_id) or None
+    if not normalized_run_id and not normalized_session_id:
+        raise ValueError("session_id or run_id is required to record evaluation outputs canonically")
+
+    inline_payload_requested = json_payload is not None or file_path is not None
+    if inline_payload_requested and (log_path is not None or normalized_cycle_id is not None):
+        raise ValueError(
+            "ouroboros record accepts either --json/--file or --log-path/--cycle-id, not both"
+        )
+
+    resolved_log_path: Path | None
+    if inline_payload_requested:
+        observation_payload = _load_json_object(
+            json_payload=json_payload,
+            file_path=file_path,
+            label="ouroboros observation payload",
+        )
+        resolved_log_path = None
+    else:
+        resolved_log_path = Path(log_path) if log_path else _default_ouroboros_log_path()
+        observation_payload = _load_ouroboros_observation(
+            log_path=resolved_log_path,
+            cycle_id=normalized_cycle_id,
+        )
+
+    runtime_state = RuntimeStateStore(Path(db_path) if db_path else None)
+    memory_lattice = MemoryLattice(
+        db_path=runtime_state.db_path,
+        event_log_dir=Path(event_log_dir) if event_log_dir else None,
+    )
+    registry = EvaluationRegistry(
+        runtime_state=runtime_state,
+        memory_lattice=memory_lattice,
+        workspace_root=Path(workspace_root) if workspace_root else None,
+        provenance_root=Path(provenance_root) if provenance_root else None,
+    )
+    try:
+        result = await registry.record_ouroboros_observation(
+            observation_payload,
+            run_id=normalized_run_id,
+            session_id=normalized_session_id,
+            task_id=normalized_task_id,
+            trace_id=normalized_trace_id,
+            created_by="dgc_cli",
+        )
+    finally:
+        await memory_lattice.close()
+
+    return {
+        "observation": observation_payload,
+        "log_path": str(resolved_log_path) if resolved_log_path is not None else None,
+        "registry": {
+            "artifact_id": result.artifact.artifact_id,
+            "manifest_path": str(result.manifest_path),
+            "summary": dict(result.summary),
+            "fact_ids": [fact.fact_id for fact in result.facts],
+            "receipt_event_id": str(result.receipt.get("event_id", "")),
+        },
+    }
+
+
+def cmd_ouroboros_record(
+    *,
+    run_id: str | None = None,
+    session_id: str | None = None,
+    task_id: str | None = None,
+    trace_id: str | None = None,
+    log_path: str | None = None,
+    cycle_id: str | None = None,
+    json_payload: str | None = None,
+    file_path: str | None = None,
+    db_path: str | None = None,
+    event_log_dir: str | None = None,
+    workspace_root: str | None = None,
+    provenance_root: str | None = None,
+) -> None:
+    """Record an ouroboros observation into canonical runtime truth."""
+
+    payload = _run(
+        _ouroboros_record_payload(
+            run_id=run_id,
+            session_id=session_id,
+            task_id=task_id,
+            trace_id=trace_id,
+            log_path=log_path,
+            cycle_id=cycle_id,
+            json_payload=json_payload,
+            file_path=file_path,
+            db_path=db_path,
+            event_log_dir=event_log_dir,
+            workspace_root=workspace_root,
+            provenance_root=provenance_root,
+        )
+    )
+    print(json.dumps(payload, indent=2))
+
+
 # ---------------------------------------------------------------------------
 # v0.4.0: Oz-inspired commands
 # ---------------------------------------------------------------------------
@@ -2260,6 +2930,18 @@ def _build_parser() -> argparse.ArgumentParser:
 
     # -- status --
     sub.add_parser("status", help="System status overview")
+    p_runtime = sub.add_parser("runtime-status", help="Canonical runtime control-plane summary")
+    p_runtime.add_argument(
+        "--limit",
+        type=int,
+        default=5,
+        help="Number of recent rows to show for active runs/artifacts/actions",
+    )
+    p_runtime.add_argument(
+        "--db-path",
+        default=None,
+        help="Override runtime SQLite path (defaults to ~/.dharma/state/runtime.db)",
+    )
     p_mission = sub.add_parser("mission-status", help="Mission readiness lanes + gap report")
     p_mission.add_argument("--json", action="store_true", help="Emit JSON report")
     p_mission.add_argument(
@@ -2375,6 +3057,13 @@ def _build_parser() -> argparse.ArgumentParser:
 
     # -- health-check (v0.2.0 monitor) --
     sub.add_parser("health-check", help="Monitor-based system health check")
+
+    # -- doctor --
+    p_doc = sub.add_parser("doctor", help="Deep runtime diagnostics and fix guidance")
+    p_doc.add_argument("--json", action="store_true", help="Emit machine-readable JSON")
+    p_doc.add_argument("--strict", action="store_true", help="Exit non-zero on WARN")
+    p_doc.add_argument("--quick", action="store_true", help="Skip deep network/package probes")
+    p_doc.add_argument("--timeout", type=float, default=1.5, help="Probe timeout seconds")
 
     # -- setup --
     sub.add_parser("setup", help="Install dependencies")
@@ -2548,6 +3237,108 @@ def _build_parser() -> argparse.ArgumentParser:
     p_fww.add_argument("--poll-sec", type=float, default=5.0)
     p_fww.add_argument("--timeout-sec", type=float, default=1800.0)
 
+    # -- reciprocity --
+    p_recip = sub.add_parser(
+        "reciprocity",
+        help="Planetary Reciprocity Commons commands",
+    )
+    reciprocity_sub = p_recip.add_subparsers(dest="reciprocity_cmd")
+
+    reciprocity_sub.add_parser("health", help="Check reciprocity service health")
+    reciprocity_sub.add_parser("summary", help="Fetch the current ledger summary")
+
+    p_recp = reciprocity_sub.add_parser(
+        "publish",
+        help="Publish a reciprocity record to the service",
+    )
+    p_recp.add_argument(
+        "publish_type",
+        choices=["activity", "obligation", "project", "outcome"],
+    )
+    p_recp_payload = p_recp.add_mutually_exclusive_group(required=True)
+    p_recp_payload.add_argument(
+        "--json",
+        dest="publish_json",
+        default=None,
+        help="Inline JSON object payload",
+    )
+    p_recp_payload.add_argument(
+        "--file",
+        dest="publish_file",
+        default=None,
+        help="Path to a JSON payload file",
+    )
+
+    p_recr = reciprocity_sub.add_parser(
+        "record",
+        help="Record the current reciprocity ledger summary into canonical runtime truth",
+    )
+    p_recr.add_argument("--run-id", default=None)
+    p_recr.add_argument("--session-id", default=None)
+    p_recr.add_argument("--task-id", default=None)
+    p_recr.add_argument("--trace-id", default=None)
+    p_recr.add_argument("--summary-type", default="ledger_summary")
+    p_recr_payload = p_recr.add_mutually_exclusive_group(required=False)
+    p_recr_payload.add_argument(
+        "--json",
+        dest="record_json",
+        default=None,
+        help="Inline JSON ledger summary payload to record instead of fetching live",
+    )
+    p_recr_payload.add_argument(
+        "--file",
+        dest="record_file",
+        default=None,
+        help="Path to a JSON ledger summary payload file to record instead of fetching live",
+    )
+    p_recr.add_argument("--db-path", default=None)
+    p_recr.add_argument("--event-log-dir", default=None)
+    p_recr.add_argument("--workspace-root", default=None)
+    p_recr.add_argument("--provenance-root", default=None)
+
+    # -- ouroboros --
+    p_ouro = sub.add_parser("ouroboros", help="Behavioral self-observation tools")
+    ouro_sub = p_ouro.add_subparsers(dest="ouroboros_cmd")
+
+    p_ouro_conn = ouro_sub.add_parser(
+        "connections",
+        help="Profile module docstrings and surface H0/H1 behavioral structure",
+    )
+    p_ouro_conn.add_argument("--package-dir", default=None)
+    p_ouro_conn.add_argument("--threshold", type=float, default=0.08)
+    p_ouro_conn.add_argument("--disagreement-threshold", type=float, default=0.1)
+    p_ouro_conn.add_argument("--min-text-length", type=int, default=50)
+    p_ouro_conn.add_argument("--limit", type=int, default=15)
+    p_ouro_conn.add_argument("--json", dest="as_json", action="store_true")
+
+    p_ouro_record = ouro_sub.add_parser(
+        "record",
+        help="Record the latest ouroboros observation into canonical runtime truth",
+    )
+    p_ouro_record.add_argument("--run-id", default=None)
+    p_ouro_record.add_argument("--session-id", default=None)
+    p_ouro_record.add_argument("--task-id", default=None)
+    p_ouro_record.add_argument("--trace-id", default=None)
+    p_ouro_record.add_argument("--log-path", default=None)
+    p_ouro_record.add_argument("--cycle-id", default=None)
+    p_ouro_record_payload = p_ouro_record.add_mutually_exclusive_group(required=False)
+    p_ouro_record_payload.add_argument(
+        "--json",
+        dest="observation_json",
+        default=None,
+        help="Inline JSON ouroboros observation payload to record instead of reading the log",
+    )
+    p_ouro_record_payload.add_argument(
+        "--file",
+        dest="observation_file",
+        default=None,
+        help="Path to a JSON ouroboros observation payload file to record instead of reading the log",
+    )
+    p_ouro_record.add_argument("--db-path", default=None)
+    p_ouro_record.add_argument("--event-log-dir", default=None)
+    p_ouro_record.add_argument("--workspace-root", default=None)
+    p_ouro_record.add_argument("--provenance-root", default=None)
+
     # -- skills --
     sub.add_parser("skills", help="List discovered skills (v0.4.0)")
 
@@ -2679,6 +3470,8 @@ def main() -> None:
             cmd_tui()
         case "status":
             cmd_status()
+        case "runtime-status":
+            cmd_runtime_status(limit=args.limit, db_path=args.db_path)
         case "mission-status":
             rc = cmd_mission_status(
                 as_json=args.json,
@@ -2731,6 +3524,15 @@ def main() -> None:
             cmd_health()
         case "health-check":
             cmd_health_check()
+        case "doctor":
+            rc = cmd_doctor(
+                as_json=args.json,
+                strict=args.strict,
+                quick=args.quick,
+                timeout=args.timeout,
+            )
+            if rc != 0:
+                raise SystemExit(rc)
         case "setup":
             cmd_setup()
         case "migrate":
@@ -2848,6 +3650,70 @@ def main() -> None:
                         parser.parse_args(["flywheel", "--help"])
             except Exception as e:
                 print(f"Flywheel command failed: {e}")
+                raise SystemExit(2)
+        case "reciprocity":
+            try:
+                match args.reciprocity_cmd:
+                    case "health":
+                        cmd_reciprocity_health()
+                    case "summary":
+                        cmd_reciprocity_summary()
+                    case "publish":
+                        cmd_reciprocity_publish(
+                            record_type=args.publish_type,
+                            json_payload=args.publish_json,
+                            file_path=args.publish_file,
+                        )
+                    case "record":
+                        cmd_reciprocity_record(
+                            run_id=args.run_id,
+                            session_id=args.session_id,
+                            task_id=args.task_id,
+                            trace_id=args.trace_id,
+                            summary_type=args.summary_type,
+                            json_payload=args.record_json,
+                            file_path=args.record_file,
+                            db_path=args.db_path,
+                            event_log_dir=args.event_log_dir,
+                            workspace_root=args.workspace_root,
+                            provenance_root=args.provenance_root,
+                        )
+                    case _:
+                        parser.parse_args(["reciprocity", "--help"])
+            except Exception as e:
+                print(f"Reciprocity command failed: {e}")
+                raise SystemExit(2)
+        case "ouroboros":
+            try:
+                match args.ouroboros_cmd:
+                    case "connections":
+                        cmd_ouroboros_connections(
+                            package_dir=args.package_dir,
+                            threshold=args.threshold,
+                            disagreement_threshold=args.disagreement_threshold,
+                            min_text_length=args.min_text_length,
+                            limit=args.limit,
+                            as_json=args.as_json,
+                        )
+                    case "record":
+                        cmd_ouroboros_record(
+                            run_id=args.run_id,
+                            session_id=args.session_id,
+                            task_id=args.task_id,
+                            trace_id=args.trace_id,
+                            log_path=args.log_path,
+                            cycle_id=args.cycle_id,
+                            json_payload=args.observation_json,
+                            file_path=args.observation_file,
+                            db_path=args.db_path,
+                            event_log_dir=args.event_log_dir,
+                            workspace_root=args.workspace_root,
+                            provenance_root=args.provenance_root,
+                        )
+                    case _:
+                        parser.parse_args(["ouroboros", "--help"])
+            except Exception as e:
+                print(f"Ouroboros command failed: {e}")
                 raise SystemExit(2)
         case "dharma":
             match args.dharma_cmd:

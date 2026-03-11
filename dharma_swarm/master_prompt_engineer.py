@@ -667,7 +667,7 @@ def record_cycle(
 ) -> None:
     """Record a cycle's results for history tracking.
 
-    Called by allout_autopilot after each cycle to build the history
+    Called by thinkodynamic_director after each cycle to build the history
     that feeds the META and QUALITY layers.
 
     Args:

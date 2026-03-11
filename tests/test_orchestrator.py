@@ -9,6 +9,7 @@ from dharma_swarm.models import (
     AgentRole,
     AgentState,
     AgentStatus,
+    Message,
     Task,
     TaskStatus,
     TopologyType,
@@ -45,6 +46,12 @@ class MockTaskBoard:
                 return task
         return None
 
+    async def list_tasks(self, status=None, limit=100):
+        tasks = list(self.tasks)
+        if status is not None:
+            tasks = [task for task in tasks if task.status == status]
+        return tasks[:limit]
+
 
 class MockAgentPool:
     def __init__(self, agents=None):
@@ -52,6 +59,9 @@ class MockAgentPool:
         self._results = {}
         self._assignments = []
         self._runners = {}
+
+    async def list_agents(self):
+        return list(self._agents)
 
     async def get_idle_agents(self):
         return self._agents
@@ -73,6 +83,14 @@ class MockAgentPool:
 
     def set_runner(self, agent_id, runner):
         self._runners[agent_id] = runner
+
+
+class MockEventMemory:
+    def __init__(self):
+        self.envelopes = []
+
+    async def ingest_envelope(self, envelope):
+        self.envelopes.append(envelope)
 
 
 @pytest.fixture
@@ -134,6 +152,44 @@ async def test_route_next_limited_agents(tasks):
 
 
 @pytest.mark.asyncio
+async def test_route_next_prefers_reviewer_for_uncertain_coordination_task():
+    board = MockTaskBoard()
+    board.tasks = [
+        Task(
+            id="t-review",
+            title="Resolve disagreement",
+            metadata={
+                "coordination_claim_key": "route-policy",
+                "coordination_route": "synthesis_review",
+                "coordination_preferred_roles": ["reviewer", "researcher"],
+            },
+        )
+    ]
+    pool = MockAgentPool(
+        [
+            AgentState(
+                id="a-general",
+                name="agent-general",
+                role=AgentRole.GENERAL,
+                status=AgentStatus.IDLE,
+            ),
+            AgentState(
+                id="a-review",
+                name="agent-review",
+                role=AgentRole.REVIEWER,
+                status=AgentStatus.IDLE,
+            ),
+        ]
+    )
+    orch = Orchestrator(task_board=board, agent_pool=pool)
+
+    dispatches = await orch.route_next()
+
+    assert len(dispatches) == 1
+    assert dispatches[0].agent_id == "a-review"
+
+
+@pytest.mark.asyncio
 async def test_fan_in(agents):
     pool = MockAgentPool(agents)
     pool.set_result("a1", "result from agent 1")
@@ -157,9 +213,49 @@ async def test_tick(agents, tasks):
     pool = MockAgentPool(agents)
     orch = Orchestrator(task_board=board, agent_pool=pool)
 
-    await orch.tick()
+    activity = await orch.tick()
     # Should have dispatched
     assert len(pool._assignments) > 0
+    assert activity["dispatched"] == 2
+
+
+@pytest.mark.asyncio
+async def test_tick_emits_runtime_event_with_coordination_summary(agents, tasks, monkeypatch):
+    board = MockTaskBoard()
+    board.tasks = [tasks[0]]
+    pool = MockAgentPool([agents[0]])
+    event_memory = MockEventMemory()
+    orch = Orchestrator(
+        task_board=board,
+        agent_pool=pool,
+        event_memory=event_memory,
+        session_id="sess-tick",
+    )
+
+    async def fake_refresh():
+        return {"global_truths": 3, "productive_disagreements": 1}
+
+    monkeypatch.setattr(orch, "_refresh_coordination_state", fake_refresh)
+
+    activity = await orch.tick()
+
+    assert activity["dispatched"] == 1
+    assert activity["coordination_global_truths"] == 3
+    assert activity["coordination_disagreements"] == 1
+    tick_events = [
+        envelope
+        for envelope in event_memory.envelopes
+        if envelope.payload.get("action_name") == "tick_summary"
+    ]
+    assert len(tick_events) == 1
+    envelope = tick_events[0]
+    assert envelope.source == "orchestrator.tick"
+    assert envelope.session_id == "sess-tick"
+    assert envelope.payload["action_name"] == "tick_summary"
+    assert envelope.payload["dispatched_count"] == 1
+    assert envelope.payload["dispatched_task_ids"] == ["t1"]
+    assert envelope.payload["coordination_global_truths"] == 3
+    assert envelope.payload["coordination_disagreements"] == 1
 
 
 @pytest.mark.asyncio
@@ -187,14 +283,30 @@ class MockMessageBus:
     def __init__(self):
         self.sent: list = []
         self.published: list = []
+        self._messages: list[Message] = []
 
     async def send(self, message):
         self.sent.append(message)
+        self._messages.append(message)
         return message.id
 
     async def publish(self, topic, message):
         self.published.append((topic, message))
+        self._messages.append(message)
         return [message.id]
+
+    async def list_messages(self, limit=200, agent_id=None):
+        messages = list(self._messages)
+        if agent_id:
+            messages = [
+                message
+                for message in messages
+                if message.from_agent == agent_id or message.to_agent == agent_id
+            ]
+        return messages[-limit:]
+
+    def seed_message(self, message: Message) -> None:
+        self._messages.append(message)
 
 
 class DummyRunner:
@@ -453,8 +565,12 @@ async def test_orchestrator_failure_records_signature(tmp_path):
     progress_path = tmp_path / "sess_fail" / "progress_ledger.jsonl"
     assert progress_path.exists()
     rows = [json.loads(line) for line in progress_path.read_text().splitlines() if line.strip()]
-    failed = [r for r in rows if r.get("event") == "task_failed"]
-    assert failed, "Expected task_failed event in progress ledger"
+    failed = [
+        r
+        for r in rows
+        if r.get("event") in {"task_failed", "task_retry_scheduled"}
+    ]
+    assert failed, "Expected failure or retry event in progress ledger"
     sig = failed[0].get("failure_signature", "")
     assert "timeout while reading provider stream" in sig
     assert "<id>" in sig
@@ -540,6 +656,207 @@ async def test_orchestrator_timeout_requeues_with_retry_budget(tmp_path):
     )
     assert failed_seen
     assert pending_seen
+
+
+@pytest.mark.asyncio
+async def test_orchestrator_connection_error_auto_requeues_transient_failure(tmp_path):
+    board = MockTaskBoard()
+    board.tasks = [
+        Task(
+            id="t-conn-retry",
+            title="Transient provider failure",
+            description="safe",
+        )
+    ]
+    pool = MockAgentPool(
+        [AgentState(id="a1", name="agent-1", role=AgentRole.GENERAL, status=AgentStatus.IDLE)]
+    )
+    pool.set_runner("a1", DummyRunner(error=RuntimeError("Connection error.")))
+
+    orch = Orchestrator(
+        task_board=board,
+        agent_pool=pool,
+        ledger_dir=tmp_path,
+        session_id="sess_conn_retry",
+    )
+
+    await orch.route_next()
+    for _ in range(80):
+        if not orch._running_tasks:
+            break
+        await orch._collect_completed()
+        await asyncio.sleep(0.01)
+    await orch._collect_completed()
+
+    assert any(
+        task_id == "t-conn-retry" and fields.get("status") == TaskStatus.PENDING
+        for task_id, fields in board.updates
+    )
+    task = await board.get("t-conn-retry")
+    assert task is not None
+    assert task.metadata["retry_count"] == 1
+    assert task.metadata["max_retries"] >= 2
+    assert task.metadata["last_failure_class"] == "connection_transient"
+    assert task.metadata["retry_backoff_seconds"] >= 30.0
+
+
+@pytest.mark.asyncio
+async def test_orchestrator_long_timeout_auto_requeues_and_expands_timeout(tmp_path):
+    board = MockTaskBoard()
+    board.tasks = [
+        Task(
+            id="t-long-timeout",
+            title="Long timeout task",
+            description="safe",
+            metadata={"timeout_seconds": 0.01},
+        )
+    ]
+    pool = MockAgentPool(
+        [AgentState(id="a1", name="agent-1", role=AgentRole.GENERAL, status=AgentStatus.IDLE)]
+    )
+    pool.set_runner("a1", DummyRunner(result="late", delay_seconds=0.05))
+
+    orch = Orchestrator(
+        task_board=board,
+        agent_pool=pool,
+        ledger_dir=tmp_path,
+        session_id="sess_long_timeout_retry",
+    )
+    orch._long_timeout_retry_threshold_seconds = 0.0
+
+    await orch.route_next()
+    for _ in range(80):
+        if not orch._running_tasks:
+            break
+        await orch._collect_completed()
+        await asyncio.sleep(0.01)
+    await orch._collect_completed()
+
+    assert any(
+        task_id == "t-long-timeout" and fields.get("status") == TaskStatus.PENDING
+        for task_id, fields in board.updates
+    )
+    task = await board.get("t-long-timeout")
+    assert task is not None
+    assert task.metadata["retry_count"] == 1
+    assert task.metadata["max_retries"] >= 1
+    assert task.metadata["last_failure_class"] == "long_timeout"
+    assert float(task.metadata["timeout_seconds"]) > 0.01
+    assert task.metadata["retry_backoff_seconds"] >= 15.0
+
+
+@pytest.mark.asyncio
+async def test_orchestrator_coordination_summary_detects_global_truth(tmp_path):
+    agents = [
+        AgentState(id="a1", name="agent-1", role=AgentRole.GENERAL, status=AgentStatus.IDLE),
+        AgentState(id="a2", name="agent-2", role=AgentRole.RESEARCHER, status=AgentStatus.IDLE),
+    ]
+    board = MockTaskBoard()
+    pool = MockAgentPool(agents)
+    bus = MockMessageBus()
+    orch = Orchestrator(
+        task_board=board,
+        agent_pool=pool,
+        message_bus=bus,
+        ledger_dir=tmp_path,
+        session_id="sess_coord_truth",
+    )
+    bus.seed_message(
+        Message(
+            id="m1",
+            from_agent="a1",
+            to_agent="a2",
+            subject="route-policy",
+            body="Mechanism, witness, ecosystem all agree.",
+            metadata={"topic": "route-policy"},
+        )
+    )
+    bus.seed_message(
+        Message(
+            id="m2",
+            from_agent="a2",
+            to_agent="a1",
+            subject="route-policy",
+            body="Mechanism, witness, ecosystem all agree.",
+            metadata={"topic": "route-policy"},
+        )
+    )
+
+    summary = await orch.get_coordination_summary(refresh=True)
+
+    assert summary["agent_count"] == 2
+    assert summary["message_count"] == 2
+    assert summary["global_truths"] == 1
+    assert summary["productive_disagreements"] == 0
+    assert summary["is_globally_coherent"] is True
+    assert summary["global_truth_claim_keys"] == ["route-policy"]
+
+    progress_path = tmp_path / "sess_coord_truth" / "progress_ledger.jsonl"
+    rows = [json.loads(line) for line in progress_path.read_text().splitlines() if line.strip()]
+    assert any(row.get("event") == "coordination_snapshot" for row in rows)
+
+
+@pytest.mark.asyncio
+async def test_orchestrator_coordination_summary_detects_productive_disagreement(tmp_path):
+    agents = [
+        AgentState(id="a1", name="agent-1", role=AgentRole.GENERAL, status=AgentStatus.IDLE),
+        AgentState(id="a2", name="agent-2", role=AgentRole.RESEARCHER, status=AgentStatus.IDLE),
+    ]
+    board = MockTaskBoard()
+    board.tasks = [
+        Task(
+            id="t-route",
+            title="route-policy",
+            assigned_to="a1",
+            status=TaskStatus.ASSIGNED,
+            metadata={"coordination_claim_key": "route-policy"},
+        )
+    ]
+    pool = MockAgentPool(agents)
+    bus = MockMessageBus()
+    orch = Orchestrator(
+        task_board=board,
+        agent_pool=pool,
+        message_bus=bus,
+        ledger_dir=tmp_path,
+        session_id="sess_coord_conflict",
+    )
+    bus.seed_message(
+        Message(
+            id="m1",
+            from_agent="a1",
+            to_agent="a2",
+            subject="route-policy",
+            body="Mechanism and architecture dominate this route.",
+            metadata={"topic": "route-policy"},
+        )
+    )
+    bus.seed_message(
+        Message(
+            id="m2",
+            from_agent="a2",
+            to_agent="a1",
+            subject="route-policy",
+            body="Witness awareness and introspection dominate this route.",
+            metadata={"topic": "route-policy"},
+        )
+    )
+
+    summary = await orch.get_coordination_summary(refresh=True)
+
+    assert summary["global_truths"] == 0
+    assert summary["productive_disagreements"] == 1
+    assert summary["is_globally_coherent"] is False
+    assert summary["productive_disagreement_claim_keys"] == ["route-policy"]
+    updated = await board.get("t-route")
+    assert updated is not None
+    assert updated.metadata["coordination_state"] == "uncertain"
+    assert updated.metadata["coordination_review_required"] is True
+    assert updated.metadata["coordination_route"] == "synthesis_review"
+
+    progress_path = tmp_path / "sess_coord_conflict" / "progress_ledger.jsonl"
+    rows = [json.loads(line) for line in progress_path.read_text().splitlines() if line.strip()]
+    assert any(row.get("event") == "coordination_disagreement" for row in rows)
 
 
 @pytest.mark.asyncio

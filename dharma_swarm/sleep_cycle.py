@@ -52,6 +52,10 @@ class SleepReport(BaseModel):
     hot_paths_found: list[str] = Field(default_factory=list)
     high_salience_observations: list[str] = Field(default_factory=list)
     errors: list[str] = Field(default_factory=list)
+    # Colony-level R_V: dimensional contraction through sleep
+    colony_rv: float | None = None
+    density_before: int = 0
+    density_after: int = 0
 
 
 # ---------------------------------------------------------------------------
@@ -85,8 +89,21 @@ class SleepCycle:
     # -- public API ----------------------------------------------------------
 
     async def run_full_cycle(self) -> SleepReport:
-        """Run all sleep phases in order: LIGHT -> DEEP -> REM -> WAKE."""
+        """Run all sleep phases in order: LIGHT -> DEEP -> REM -> WAKE.
+
+        Also computes colony-level R_V: the geometric contraction of
+        stigmergic memory through the sleep cycle. density_before / density_after
+        maps directly to PR_early / PR_late — the colony's participation ratio.
+        """
         report = SleepReport(started_at=datetime.now(timezone.utc))
+
+        # Measure colony dimensionality BEFORE sleep
+        try:
+            if self._stigmergy is not None:
+                d = self._stigmergy.density()
+                report.density_before = int(d) if isinstance(d, (int, float)) else 0
+        except Exception:
+            pass
 
         for phase in (SleepPhase.LIGHT, SleepPhase.DEEP, SleepPhase.REM):
             try:
@@ -97,6 +114,16 @@ class SleepCycle:
                 msg = f"{phase.value}: {exc}"
                 logger.warning("Sleep phase %s failed: %s", phase.value, exc)
                 report.errors.append(msg)
+
+        # Measure colony dimensionality AFTER sleep
+        try:
+            if self._stigmergy is not None:
+                d = self._stigmergy.density()
+                report.density_after = int(d) if isinstance(d, (int, float)) else 0
+                if report.density_before > 0 and report.density_after >= 0:
+                    report.colony_rv = report.density_after / report.density_before
+        except Exception:
+            pass
 
         # WAKE always runs (writes the report itself)
         try:

@@ -15,7 +15,16 @@ from .adapters.base import (
     ProviderAdapter,
     ProviderConfig,
 )
+from .chunker import Chunk, chunk_markdown
+from .conversation_memory import ConversationMemoryStore, ConversationTurn, IdeaShard
+from .event_memory import EventMemoryStore
 from .events import CanonicalEvent, EventType
+from .hybrid_retriever import (
+    HybridRetriever,
+    RetrievalHit,
+    TemporalQuery,
+    infer_temporal_query,
+)
 from .knowledge_store import (
     InMemoryKnowledgeStore,
     KnowledgeRecord,
@@ -25,16 +34,24 @@ from .knowledge_store import (
 )
 from .provider_runner import ProviderRunResult, ProviderRunner
 from .provenance import ProvenanceEntry, ProvenanceLogger
+from .retrieval_feedback import FeedbackProfile, RetrievalFeedbackStore
 from .settings import EngineSettings
+from .unified_index import UnifiedIndex
 
 __all__ = [
     "ArtifactRef",
     "ArtifactStore",
     "Capability",
     "CanonicalEvent",
+    "Chunk",
     "CompletionRequest",
+    "ConversationMemoryStore",
+    "ConversationTurn",
+    "EventMemoryStore",
     "EventType",
+    "HybridRetriever",
     "InMemoryKnowledgeStore",
+    "IdeaShard",
     "KnowledgeStore",
     "KnowledgeRecord",
     "ModelProfile",
@@ -45,6 +62,13 @@ __all__ = [
     "ProviderRunResult",
     "ProviderRunner",
     "QdrantKnowledgeStore",
+    "FeedbackProfile",
+    "RetrievalFeedbackStore",
+    "RetrievalHit",
+    "TemporalQuery",
     "EngineSettings",
+    "UnifiedIndex",
+    "chunk_markdown",
     "create_knowledge_store",
+    "infer_temporal_query",
 ]

@@ -1,5 +1,8 @@
 """Tests for dharma_swarm.evolution -- DarwinEngine orchestration loop."""
 
+import sys
+import types
+
 import pytest
 
 from dharma_swarm.archive import ArchiveEntry, EvolutionArchive, FitnessScore
@@ -13,7 +16,8 @@ from dharma_swarm.evolution import (
 )
 from dharma_swarm.landscape import BasinType, LandscapeProbe
 from dharma_swarm.meta_evolution import MetaParameters
-from dharma_swarm.models import GateDecision, LLMResponse
+from dharma_swarm.experiment_log import ExperimentRecord
+from dharma_swarm.models import GateDecision, LLMResponse, SandboxResult
 from dharma_swarm.router_retrospective import RouteOutcomeRecord
 from dharma_swarm.ucb_selector import UCBConfig
 
@@ -279,6 +283,146 @@ async def test_generate_proposal_uses_mutation_envelope(engine_paths, tmp_path):
     assert provider.request.temperature == pytest.approx(0.7)
 
 
+async def test_generate_proposal_includes_experiment_memory_guidance(
+    engine_paths,
+    tmp_path,
+):
+    class DummyProvider:
+        def __init__(self):
+            self.request = None
+
+        async def complete(self, request):
+            self.request = request
+            return LLMResponse(
+                content=(
+                    "COMPONENT: sample.py\n"
+                    "CHANGE_TYPE: mutation\n"
+                    "DESCRIPTION: tighten error handling\n"
+                    "THINK: keeps failures local.\n"
+                    "DIFF:\n"
+                    "```diff\n"
+                    "--- a/sample.py\n"
+                    "+++ b/sample.py\n"
+                    "@@\n"
+                    "-    return value\n"
+                    "+    return value or 0\n"
+                    "```\n"
+                ),
+                model=request.model,
+            )
+
+    eng = DarwinEngine(**engine_paths)
+    await eng.init()
+    await eng.experiment_log.append(
+        ExperimentRecord(
+            component="fragile.py",
+            execution_profile="local_default",
+            promotion_state="candidate",
+            evidence_tier="local",
+            pass_rate=0.0,
+            weighted_fitness=0.1,
+        )
+    )
+    await eng.experiment_log.append(
+        ExperimentRecord(
+            component="strong.py",
+            execution_profile="pkg_profile",
+            promotion_state="component_pass",
+            evidence_tier="component",
+            pass_rate=1.0,
+            weighted_fitness=0.9,
+        )
+    )
+    await eng.refresh_experiment_memory()
+    source_file = tmp_path / "sample.py"
+    source_file.write_text("def sample(value):\n    return value\n", encoding="utf-8")
+    provider = DummyProvider()
+
+    proposal = await eng.generate_proposal(provider, source_file=source_file)
+
+    assert proposal is not None
+    assert provider.request is not None
+    assert "Recent experiment memory:" in provider.request.system
+    assert "Profile pkg_profile is strongest recently" in provider.request.system
+
+
+async def test_generate_proposal_uses_component_specific_mutation_guidance(
+    engine_paths,
+    tmp_path,
+):
+    class DummyProvider:
+        def __init__(self):
+            self.request = None
+
+        async def complete(self, request):
+            self.request = request
+            return LLMResponse(
+                content=(
+                    "COMPONENT: sample.py\n"
+                    "CHANGE_TYPE: mutation\n"
+                    "DESCRIPTION: tighten error handling\n"
+                    "THINK: keep the change small and reversible.\n"
+                    "DIFF:\n"
+                    "```diff\n"
+                    "--- a/sample.py\n"
+                    "+++ b/sample.py\n"
+                    "@@\n"
+                    "-    return value\n"
+                    "+    return value or 0\n"
+                    "```\n"
+                ),
+                model=request.model,
+            )
+
+    eng = DarwinEngine(**engine_paths, mutation_rate=0.4)
+    await eng.init()
+    await eng.experiment_log.append(
+        ExperimentRecord(
+            component="sample.py",
+            execution_profile="llm_default",
+            promotion_state="candidate",
+            evidence_tier="local",
+            pass_rate=0.0,
+            weighted_fitness=0.1,
+            failure_class="rollback",
+            failure_signature="rollback:apply_or_test",
+        )
+    )
+    await eng.experiment_log.append(
+        ExperimentRecord(
+            component="sample.py",
+            execution_profile="llm_default",
+            promotion_state="candidate",
+            evidence_tier="local",
+            pass_rate=0.0,
+            weighted_fitness=0.1,
+            failure_class="rollback",
+            failure_signature="rollback:apply_or_test",
+        )
+    )
+    await eng.refresh_experiment_memory()
+    source_file = tmp_path / "sample.py"
+    source_file.write_text("def sample(value):\n    return value\n", encoding="utf-8")
+    provider = DummyProvider()
+
+    proposal = await eng.generate_proposal(provider, source_file=source_file)
+
+    assert proposal is not None
+    assert provider.request is not None
+    expected_rate = eng.get_contextual_mutation_rate(
+        component="sample.py",
+        profile_name="llm_default",
+    )
+    expected_budget = eng.get_mutation_budget_lines(
+        component="sample.py",
+        profile_name="llm_default",
+    )
+    assert f"mutation_rate: {expected_rate:.3f}" in provider.request.messages[0]["content"]
+    assert f"under {expected_budget} changed lines" in provider.request.system
+    assert "Target-specific guidance:" in provider.request.system
+    assert "Avoid repeating rollback / apply_or_test" in provider.request.system
+
+
 # ---------------------------------------------------------------------------
 # DarwinEngine -- propose
 # ---------------------------------------------------------------------------
@@ -477,6 +621,95 @@ async def test_evaluate_sets_neutral_economic_value_without_sessions(engine):
     assert result.actual_fitness.economic_value == pytest.approx(0.5)
 
 
+async def test_evaluate_applies_ouroboros_modifiers_for_substantial_text(
+    engine,
+    monkeypatch,
+):
+    p = _safe_proposal(
+        description=" ".join(["witness"] * 101),
+        think_notes="brief reflection",
+    )
+    await engine.gate_check(p)
+
+    calls: dict[str, object] = {}
+
+    def fake_score(text: str):
+        calls["text"] = text
+        return None, {
+            "quality": 0.25,
+            "mimicry_penalty": 0.5,
+            "recognition_bonus": 1.2,
+            "witness_score": 0.8,
+        }
+
+    def fake_apply(fitness: FitnessScore, modifiers: dict[str, float]) -> FitnessScore:
+        calls["fitness"] = fitness
+        calls["modifiers"] = modifiers
+        return FitnessScore(
+            correctness=fitness.correctness,
+            elegance=0.11,
+            dharmic_alignment=0.66,
+            performance=fitness.performance,
+            utilization=fitness.utilization,
+            economic_value=fitness.economic_value,
+            efficiency=fitness.efficiency,
+            safety=0.22,
+        )
+
+    fake_module = types.ModuleType("dharma_swarm.ouroboros")
+    fake_module.score_behavioral_fitness = fake_score
+    fake_module.apply_behavioral_modifiers = fake_apply
+    monkeypatch.setitem(sys.modules, "dharma_swarm.ouroboros", fake_module)
+
+    result = await engine.evaluate(p, test_results={"pass_rate": 0.9})
+
+    assert calls["text"] == p.description
+    assert isinstance(calls["fitness"], FitnessScore)
+    assert calls["modifiers"] == {
+        "quality": 0.25,
+        "mimicry_penalty": 0.5,
+        "recognition_bonus": 1.2,
+        "witness_score": 0.8,
+    }
+    assert result.actual_fitness is not None
+    assert result.actual_fitness.correctness == pytest.approx(0.9)
+    assert result.actual_fitness.elegance == pytest.approx(0.11)
+    assert result.actual_fitness.dharmic_alignment == pytest.approx(0.66)
+    assert result.actual_fitness.safety == pytest.approx(0.22)
+
+
+async def test_evaluate_skips_ouroboros_modifiers_for_short_text(engine, monkeypatch):
+    p = _safe_proposal(
+        description="Short safety fix",
+        think_notes=" ".join(["reflection"] * 150),
+    )
+    await engine.gate_check(p)
+
+    calls = {"score": 0, "apply": 0}
+
+    def fake_score(text: str):
+        del text
+        calls["score"] += 1
+        return None, {}
+
+    def fake_apply(fitness: FitnessScore, modifiers: dict[str, float]) -> FitnessScore:
+        del fitness, modifiers
+        calls["apply"] += 1
+        return FitnessScore()
+
+    fake_module = types.ModuleType("dharma_swarm.ouroboros")
+    fake_module.score_behavioral_fitness = fake_score
+    fake_module.apply_behavioral_modifiers = fake_apply
+    monkeypatch.setitem(sys.modules, "dharma_swarm.ouroboros", fake_module)
+
+    result = await engine.evaluate(p, test_results={"pass_rate": 0.75})
+
+    assert calls == {"score": 0, "apply": 0}
+    assert result.actual_fitness is not None
+    assert result.actual_fitness.correctness == pytest.approx(0.75)
+    assert result.actual_fitness.elegance == pytest.approx(0.5)
+
+
 async def test_score_fitness_uses_engine_weights(engine_paths):
     eng = DarwinEngine(
         **engine_paths,
@@ -526,6 +759,37 @@ async def test_archive_result_stores_entry(engine):
     assert stored.component == "module.py"
     assert stored.status == "applied"
     assert stored.fitness.correctness == pytest.approx(0.8)
+    assert stored.promotion_state == "candidate"
+    assert stored.evidence_tier == "unvalidated"
+    assert stored.experiment_id is not None
+
+
+async def test_archive_result_records_experiment_metadata(engine_paths):
+    eng = DarwinEngine(**engine_paths)
+    await eng.init()
+    target = eng.resolve_execution_target(
+        "pkg/example.py",
+        fallback_test_command="python3 -m pytest tests/ -q",
+        fallback_timeout=5.0,
+        fallback_evidence_tier="component",
+        fallback_profile_name="pkg-profile",
+    )
+    p = _safe_proposal(component="pkg/example.py", description="profiled")
+    eng._stage_execution_context(p, target, cycle_id="cycle-1")
+    await eng.gate_check(p)
+    await eng.evaluate(p, test_results={"pass_rate": 1.0})
+    entry_id = await eng.archive_result(p)
+
+    stored = await eng.archive.get_entry(entry_id)
+    recent = await eng.experiment_log.get_recent(limit=5)
+
+    assert stored is not None
+    assert stored.execution_profile == "pkg-profile"
+    assert stored.promotion_state == "component_pass"
+    assert stored.test_results["execution_target"]["profile_name"] == "pkg-profile"
+    assert recent[0].archive_entry_id == entry_id
+    assert recent[0].cycle_id == "cycle-1"
+    assert recent[0].promotion_state == "component_pass"
 
 
 async def test_archive_result_logs_trace(engine):
@@ -825,6 +1089,162 @@ async def test_run_cycle_triggers_periodic_meta_evolution(engine_paths, monkeypa
     assert eng.get_meta_parameter_state()["mutation_rate"] > baseline["mutation_rate"]
 
 
+async def test_run_cycle_with_sandbox_uses_component_targets_for_execution(
+    engine_paths,
+    tmp_path,
+    monkeypatch,
+):
+    target_root = tmp_path / "pkg_workspace"
+    target_root.mkdir()
+    eng = DarwinEngine(
+        **engine_paths,
+        probe_targets=[
+            {
+                "component_pattern": "pkg/*.py",
+                "workspace": target_root,
+                "test_command": "python3 -m pytest tests/test_pkg.py -q",
+                "timeout": 7.0,
+            }
+        ],
+    )
+    await eng.init()
+    calls: list[tuple[str, str, float, str | None]] = []
+
+    async def fake_apply_diff_and_test(
+        proposal,
+        test_command="python3 -m pytest tests/ -q --tb=short",
+        timeout=120.0,
+        workspace=None,
+    ):
+        calls.append(
+            (
+                "diff",
+                test_command,
+                float(timeout),
+                str(workspace) if workspace is not None else None,
+            )
+        )
+        proposal.status = EvolutionStatus.TESTING
+        return proposal, {"pass_rate": 1.0}
+
+    async def fake_apply_in_sandbox(
+        proposal,
+        test_command="python3 -m pytest tests/ -q --tb=short",
+        timeout=60.0,
+        workspace=None,
+    ):
+        calls.append(
+            (
+                "sandbox",
+                test_command,
+                float(timeout),
+                str(workspace) if workspace is not None else None,
+            )
+        )
+        proposal.status = EvolutionStatus.TESTING
+        return proposal, SandboxResult(
+            exit_code=0,
+            stdout="1 passed in 0.1s",
+            stderr="",
+        )
+
+    monkeypatch.setattr(eng, "apply_diff_and_test", fake_apply_diff_and_test)
+    monkeypatch.setattr(eng, "apply_in_sandbox", fake_apply_in_sandbox)
+
+    result = await eng.run_cycle_with_sandbox(
+        [
+            _safe_proposal(component="pkg/with_diff.py", description="pkg diff"),
+            _safe_proposal(
+                component="misc/no_diff.py",
+                description="misc no diff",
+                diff="",
+            ),
+        ],
+        test_command="echo 'global passed'",
+        timeout=9.0,
+    )
+
+    assert result.proposals_submitted == 2
+    assert result.proposals_archived == 2
+    assert calls == [
+        (
+            "diff",
+            "python3 -m pytest tests/test_pkg.py -q",
+            7.0,
+            str(target_root.resolve()),
+        ),
+        ("sandbox", "echo 'global passed'", 9.0, None),
+    ]
+
+
+async def test_auto_evolve_routes_through_sandbox_cycle(engine_paths, tmp_path, monkeypatch):
+    eng = DarwinEngine(
+        **engine_paths,
+        probe_targets=[
+            {
+                "component_pattern": "pkg/*.py",
+                "workspace": tmp_path / "pkg_workspace",
+                "test_command": "python3 -m pytest tests/test_pkg.py -q",
+                "timeout": 7.0,
+            }
+        ],
+    )
+    await eng.init()
+
+    class DummyProvider:
+        async def complete(self, request):
+            del request
+            raise AssertionError("generate_proposal is monkeypatched in this test")
+
+    source_a = tmp_path / "pkg_file.py"
+    source_b = tmp_path / "misc_file.py"
+    source_a.write_text("def a():\n    return 1\n", encoding="utf-8")
+    source_b.write_text("def b():\n    return 2\n", encoding="utf-8")
+
+    async def fake_generate(provider, source_file, context="", model="meta-llama/llama-3.3-70b-instruct"):
+        del provider, context, model
+        if source_file == source_a:
+            return _safe_proposal(component="pkg/generated.py", description="pkg")
+        return _safe_proposal(component="misc/generated.py", description="misc", diff="")
+
+    async def fake_run_cycle_with_sandbox(proposals, test_command="python3 -m pytest tests/ -q --tb=short", timeout=60.0):
+        assert [proposal.component for proposal in proposals] == [
+            "pkg/generated.py",
+            "misc/generated.py",
+        ]
+        pkg_target = eng.resolve_execution_target(
+            "pkg/generated.py",
+            fallback_test_command=test_command,
+            fallback_timeout=timeout,
+        )
+        misc_target = eng.resolve_execution_target(
+            "misc/generated.py",
+            fallback_test_command=test_command,
+            fallback_timeout=timeout,
+        )
+        assert pkg_target.test_command == "python3 -m pytest tests/test_pkg.py -q"
+        assert pkg_target.timeout == pytest.approx(7.0)
+        assert misc_target.test_command == "echo 'global passed'"
+        assert misc_target.timeout == pytest.approx(9.0)
+        return CycleResult(
+            proposals_submitted=len(proposals),
+            proposals_archived=len(proposals),
+        )
+
+    monkeypatch.setattr(eng, "generate_proposal", fake_generate)
+    monkeypatch.setattr(eng, "run_cycle_with_sandbox", fake_run_cycle_with_sandbox)
+
+    result = await eng.auto_evolve(
+        DummyProvider(),
+        [source_a, source_b],
+        test_command="echo 'global passed'",
+        timeout=9.0,
+    )
+
+    assert result.proposals_submitted == 2
+    assert result.proposals_archived == 2
+
+
 async def test_run_cycle_circuit_breaker_after_repeated_failures(engine):
     proposals = [
         _harmful_proposal(component="danger.py", description="rm -rf everything"),
@@ -941,6 +1361,74 @@ async def test_select_next_parent_uses_ucb_when_enabled(engine_paths):
     assert parent.component == "elegant.py"
 
 
+async def test_select_next_parent_uses_experiment_memory_bias(engine_paths):
+    eng = DarwinEngine(**engine_paths)
+    await eng.init()
+    weaker_history = ArchiveEntry(
+        id="parent-a",
+        component="fragile.py",
+        fitness=FitnessScore(correctness=0.95, safety=1.0),
+        status="applied",
+    )
+    stronger_history = ArchiveEntry(
+        id="parent-b",
+        component="strong.py",
+        fitness=FitnessScore(correctness=0.85, safety=1.0),
+        status="applied",
+    )
+    await eng.archive.add_entry(weaker_history)
+    await eng.archive.add_entry(stronger_history)
+    await eng.experiment_log.append(
+        ExperimentRecord(
+            parent_id="parent-a",
+            component="fragile.py",
+            execution_profile="local_default",
+            promotion_state="candidate",
+            evidence_tier="local",
+            pass_rate=0.0,
+            weighted_fitness=0.1,
+        )
+    )
+    await eng.experiment_log.append(
+        ExperimentRecord(
+            parent_id="parent-a",
+            component="fragile.py",
+            execution_profile="local_default",
+            promotion_state="candidate",
+            evidence_tier="local",
+            pass_rate=0.0,
+            weighted_fitness=0.1,
+        )
+    )
+    await eng.experiment_log.append(
+        ExperimentRecord(
+            parent_id="parent-b",
+            component="strong.py",
+            execution_profile="pkg_profile",
+            promotion_state="component_pass",
+            evidence_tier="component",
+            pass_rate=1.0,
+            weighted_fitness=0.8,
+        )
+    )
+    await eng.experiment_log.append(
+        ExperimentRecord(
+            parent_id="parent-b",
+            component="strong.py",
+            execution_profile="pkg_profile",
+            promotion_state="component_pass",
+            evidence_tier="component",
+            pass_rate=1.0,
+            weighted_fitness=0.8,
+        )
+    )
+
+    parent = await eng.select_next_parent(strategy="elite")
+
+    assert parent is not None
+    assert parent.component == "strong.py"
+
+
 # ---------------------------------------------------------------------------
 # DarwinEngine -- get_fitness_trend
 # ---------------------------------------------------------------------------
@@ -1033,6 +1521,21 @@ async def test_archive_result_persists_traceability(engine):
     assert stored is not None
     assert stored.spec_ref == "specs/demo.md#REQ-9"
     assert stored.requirement_refs == ["REQ-9", "REQ-9.2"]
+
+
+async def test_archive_result_records_failure_classification(engine_paths):
+    eng = DarwinEngine(**engine_paths)
+    await eng.init()
+    proposal = _safe_proposal(component="fragile.py")
+    await eng.gate_check(proposal)
+    await eng.evaluate(proposal, test_results={"pass_rate": 0.2, "exit_code": 1})
+
+    await eng.archive_result(proposal)
+    recent = await eng.experiment_log.get_recent(limit=1)
+
+    assert recent
+    assert recent[0].failure_class == "test_failure"
+    assert recent[0].failure_signature == "test_failure:exit_1"
 
 
 async def test_proposal_status_transitions(engine):
@@ -1156,6 +1659,8 @@ async def test_run_cycle_with_sandbox(engine):
     )
     assert result.proposals_submitted == 2
     assert result.proposals_archived >= 1
+    latest = await engine.archive.get_latest(n=2)
+    assert all(entry.promotion_state == "local_pass" for entry in latest)
 
 
 def test_parse_sandbox_passed_failed_error():
@@ -1429,3 +1934,144 @@ async def test_router_promotion_guard_allows_safe_improvement(engine):
     assert stored is not None
     assert stored.status == "promoted"
     assert stored.test_results["policy_archive_entry"]["promotion_state"] == "promoted"
+
+
+async def test_emit_coalgebra_observation_refreshes_context_every_cycle(engine_paths):
+    eng = DarwinEngine(**engine_paths)
+    await eng.init()
+
+    class _FakeIntegrator:
+        def __init__(self) -> None:
+            self.context: dict[str, object] = {
+                "reciprocity_warning": "Reciprocity integrity pressure: chain_valid=False",
+                "reciprocity_health": {
+                    "chain_valid": False,
+                    "invariant_issues": 1,
+                    "challenged_claims": 0,
+                    "issue_codes": ["routing_missing_project"],
+                    "stale": False,
+                },
+            }
+            self.calls = 0
+
+        async def after_cycle(self, result, proposals, new_entries):
+            del result, proposals, new_entries
+            self.calls += 1
+            return None
+
+        def get_coordination_context(self) -> dict[str, object]:
+            return dict(self.context)
+
+        def get_coordination_summary(self) -> dict[str, object]:
+            return {}
+
+    eng._dse_integrator = _FakeIntegrator()
+    result = CycleResult(
+        cycle_id="cycle-dse-context",
+        proposals_submitted=1,
+        proposals_archived=1,
+        best_fitness=0.4,
+    )
+    proposal = _safe_proposal(component="child.py", description="tighten context refresh")
+    entry = ArchiveEntry(
+        component="child.py",
+        change_type="mutation",
+        description="tighten context refresh",
+        diff="- old\n+ new\n",
+        fitness=FitnessScore(correctness=0.4, dharmic_alignment=1.0, safety=1.0),
+        status="applied",
+    )
+
+    await eng._emit_coalgebra_observation(result, [proposal], [entry])
+
+    assert eng._dse_integrator.calls == 1
+    assert eng.last_coordination_summary == {
+        "reciprocity_warning": "Reciprocity integrity pressure: chain_valid=False",
+        "reciprocity_health": {
+            "chain_valid": False,
+            "invariant_issues": 1,
+            "challenged_claims": 0,
+            "issue_codes": ["routing_missing_project"],
+            "stale": False,
+        },
+    }
+
+    eng._dse_integrator.context = {}
+    eng.last_coordination_summary = {"stale": "old-context"}
+
+    await eng._emit_coalgebra_observation(result, [proposal], [entry])
+
+    assert eng._dse_integrator.calls == 2
+    assert eng.last_coordination_summary == {}
+
+
+async def test_emit_coalgebra_observation_forwards_dse_summary_to_meta_evolution(
+    engine_paths,
+):
+    eng = DarwinEngine(**engine_paths)
+    await eng.init()
+
+    class _FakeIntegrator:
+        def __init__(self) -> None:
+            self.context = {
+                "reciprocity_warning": "Reciprocity integrity pressure: chain_valid=False",
+            }
+            self.summary = {
+                "observed_at": "2026-03-11T00:00:00+00:00",
+                "global_truths": 0,
+                "productive_disagreements": 2,
+                "cohomological_dimension": 1,
+                "is_globally_coherent": False,
+                "productive_disagreement_claim_keys": ["route-policy"],
+            }
+
+        async def after_cycle(self, result, proposals, new_entries):
+            del result, proposals, new_entries
+            return None
+
+        def get_coordination_context(self) -> dict[str, object]:
+            return dict(self.context)
+
+        def get_coordination_summary(self) -> dict[str, object]:
+            return dict(self.summary)
+
+    class _FakeMetaEvolution:
+        def __init__(self) -> None:
+            self.observed: list[dict[str, object]] = []
+
+        def observe_coordination_summary(self, summary: dict[str, object]) -> None:
+            self.observed.append(dict(summary))
+
+    eng._dse_integrator = _FakeIntegrator()
+    eng._meta_evolution_engine = _FakeMetaEvolution()
+    result = CycleResult(
+        cycle_id="cycle-dse-meta-summary",
+        proposals_submitted=1,
+        proposals_archived=1,
+        best_fitness=0.4,
+    )
+    proposal = _safe_proposal(component="child.py", description="forward dse summary")
+    entry = ArchiveEntry(
+        component="child.py",
+        change_type="mutation",
+        description="forward dse summary",
+        diff="- old\n+ new\n",
+        fitness=FitnessScore(correctness=0.4, dharmic_alignment=1.0, safety=1.0),
+        status="applied",
+    )
+
+    await eng._emit_coalgebra_observation(result, [proposal], [entry])
+
+    assert eng.last_coordination_summary == {
+        "reciprocity_warning": "Reciprocity integrity pressure: chain_valid=False",
+    }
+    assert eng._meta_evolution_engine.observed == [
+        {
+            "observed_at": "2026-03-11T00:00:00+00:00",
+            "global_truths": 0,
+            "productive_disagreements": 2,
+            "cohomological_dimension": 1,
+            "is_globally_coherent": False,
+            "productive_disagreement_claim_keys": ["route-policy"],
+        }
+    ]

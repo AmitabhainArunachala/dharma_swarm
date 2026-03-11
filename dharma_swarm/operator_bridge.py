@@ -19,10 +19,19 @@ import aiosqlite
 
 from dharma_swarm.message_bus import MessageBus
 from dharma_swarm.models import Message, MessagePriority, _new_id
+from dharma_swarm.runtime_state import (
+    ArtifactRecord,
+    DelegationRun,
+    OperatorAction,
+    RuntimeStateStore,
+    SessionState,
+    TaskClaim,
+)
 from dharma_swarm.session_ledger import SessionLedger
 
 BRIDGE_STATUS_QUEUED = "queued"
 BRIDGE_STATUS_IN_PROGRESS = "in_progress"
+BRIDGE_STATUS_ACKNOWLEDGED = "acknowledged"
 DEFAULT_CLAIM_TIMEOUT_SECONDS = 30 * 60
 
 _TASKS_DDL = """
@@ -212,12 +221,14 @@ class OperatorBridge:
         session_id: str | None = None,
         bridge_agent_id: str = "operator_bridge",
         lifecycle_topic: str = "operator.bridge.lifecycle",
+        runtime_state: RuntimeStateStore | None = None,
     ) -> None:
         self._bus = message_bus
         self._ledger = ledger or SessionLedger(
             base_dir=ledger_dir,
             session_id=session_id,
         )
+        self._runtime_state = runtime_state
         self.bridge_agent_id = bridge_agent_id
         self.lifecycle_topic = lifecycle_topic
         self._initialized = False
@@ -231,6 +242,17 @@ class OperatorBridge:
             for index in _INDEXES:
                 await db.execute(index)
             await db.commit()
+        if self._runtime_state is not None:
+            await self._runtime_state.init_db()
+            await self._runtime_state.upsert_session(
+                SessionState(
+                    session_id=self._ledger.session_id,
+                    operator_id="operator",
+                    status="active",
+                    current_task_id="",
+                    metadata={"bridge_agent_id": self.bridge_agent_id},
+                )
+            )
         self._initialized = True
 
     async def enqueue_task(
@@ -309,6 +331,8 @@ class OperatorBridge:
         if request_message_id is not None:
             await self._set_request_message_id(record_id, request_message_id)
             task_record.request_message_id = request_message_id
+
+        await self._mirror_runtime_enqueued(task_record)
 
         self._record_task_event(
             "bridge_task_enqueued",
@@ -435,6 +459,7 @@ class OperatorBridge:
             await db.commit()
 
         claimed_task = _row_to_task(claimed_row)
+        claimed_task = await self._mirror_runtime_claimed(claimed_task)
         self._record_task_event(
             "bridge_task_claimed",
             task_id=claimed_task.id,
@@ -447,6 +472,181 @@ class OperatorBridge:
             extra={"claimed_by": claimed_by},
         )
         return claimed_task
+
+    async def acknowledge_task_claim(
+        self,
+        *,
+        task_id: str,
+        acknowledged_by: str,
+        note: str = "",
+        metadata: dict[str, Any] | None = None,
+    ) -> OperatorBridgeTask:
+        """Record that a claimed worker parsed and accepted the work order."""
+        await self.init_db()
+        existing = await self.get_task(task_id)
+        if existing is None:
+            raise KeyError(f"Bridge task {task_id} not found")
+        if existing.status != BRIDGE_STATUS_IN_PROGRESS:
+            raise ValueError(f"Bridge task {task_id} is not in progress")
+        if existing.claimed_by and existing.claimed_by != acknowledged_by:
+            raise ValueError(
+                f"Bridge task {task_id} claimed by {existing.claimed_by}, not {acknowledged_by}"
+            )
+
+        claim_ack = {
+            "acknowledged_by": acknowledged_by,
+            "acknowledged_at": _utc_now_iso(),
+            "note": note,
+            **dict(metadata or {}),
+        }
+        task_metadata = dict(existing.metadata)
+        task_metadata["claim_ack"] = claim_ack
+        await self._set_metadata(task_id, task_metadata)
+
+        updated = await self.get_task(task_id)
+        assert updated is not None
+        await self._mirror_runtime_acknowledged(updated, acknowledged_by=acknowledged_by, note=note)
+        self._record_task_event(
+            "bridge_task_acknowledged",
+            task_id=task_id,
+            acknowledged_by=acknowledged_by,
+        )
+        self._record_progress_event(
+            "bridge_task_acknowledged",
+            task_id=task_id,
+            acknowledged_by=acknowledged_by,
+        )
+        await self._publish_lifecycle(
+            "bridge_task_acknowledged",
+            updated,
+            extra={"acknowledged_by": acknowledged_by},
+        )
+        return updated
+
+    async def heartbeat_task(
+        self,
+        *,
+        task_id: str,
+        heartbeat_by: str,
+        summary: str = "",
+        progress: float | None = None,
+        current_artifact_id: str | None = None,
+        metadata: dict[str, Any] | None = None,
+    ) -> OperatorBridgeTask:
+        """Emit an explicit bridge heartbeat/progress checkpoint."""
+        await self.init_db()
+        existing = await self.get_task(task_id)
+        if existing is None:
+            raise KeyError(f"Bridge task {task_id} not found")
+        if existing.status != BRIDGE_STATUS_IN_PROGRESS:
+            raise ValueError(f"Bridge task {task_id} is not in progress")
+        if existing.claimed_by and existing.claimed_by != heartbeat_by:
+            raise ValueError(
+                f"Bridge task {task_id} claimed by {existing.claimed_by}, not {heartbeat_by}"
+            )
+
+        beat = {
+            "heartbeat_by": heartbeat_by,
+            "heartbeat_at": _utc_now_iso(),
+            "summary": summary,
+            "progress": progress,
+            "current_artifact_id": current_artifact_id,
+            **dict(metadata or {}),
+        }
+        task_metadata = dict(existing.metadata)
+        history = list(task_metadata.get("progress_log", []))
+        history.append(beat)
+        task_metadata["progress_log"] = history[-10:]
+        task_metadata["last_heartbeat"] = beat
+        if current_artifact_id:
+            task_metadata["current_artifact_id"] = current_artifact_id
+        await self._set_metadata(task_id, task_metadata)
+
+        updated = await self.get_task(task_id)
+        assert updated is not None
+        await self._mirror_runtime_heartbeat(
+            updated,
+            heartbeat_by=heartbeat_by,
+            summary=summary,
+            progress=progress,
+            current_artifact_id=current_artifact_id,
+        )
+        self._record_progress_event(
+            "bridge_task_heartbeat",
+            task_id=task_id,
+            heartbeat_by=heartbeat_by,
+            summary=summary,
+            progress=progress,
+        )
+        await self._publish_lifecycle(
+            "bridge_task_heartbeat",
+            updated,
+            extra={
+                "heartbeat_by": heartbeat_by,
+                "summary": summary,
+                "progress": progress,
+            },
+        )
+        return updated
+
+    async def record_partial_artifact(
+        self,
+        *,
+        task_id: str,
+        artifact_kind: str,
+        path: str,
+        summary: str = "",
+        checksum: str = "",
+        promotion_state: str = "ephemeral",
+        metadata: dict[str, Any] | None = None,
+    ) -> OperatorBridgeTask:
+        """Record a checkpoint artifact before task completion."""
+        await self.init_db()
+        existing = await self.get_task(task_id)
+        if existing is None:
+            raise KeyError(f"Bridge task {task_id} not found")
+
+        artifact_entry = {
+            "artifact_kind": artifact_kind,
+            "path": path,
+            "summary": summary,
+            "checksum": checksum,
+            "promotion_state": promotion_state,
+            "recorded_at": _utc_now_iso(),
+            **dict(metadata or {}),
+        }
+        task_metadata = dict(existing.metadata)
+        partials = list(task_metadata.get("partial_artifacts", []))
+        partials.append(artifact_entry)
+        task_metadata["partial_artifacts"] = partials[-12:]
+        await self._set_metadata(task_id, task_metadata)
+
+        updated = await self.get_task(task_id)
+        assert updated is not None
+        updated = await self._mirror_runtime_partial_artifact(
+            updated,
+            artifact_kind=artifact_kind,
+            path=path,
+            summary=summary,
+            checksum=checksum,
+            promotion_state=promotion_state,
+            metadata=dict(metadata or {}),
+        )
+        self._record_progress_event(
+            "bridge_partial_artifact_recorded",
+            task_id=task_id,
+            artifact_kind=artifact_kind,
+            path=path,
+        )
+        await self._publish_lifecycle(
+            "bridge_partial_artifact_recorded",
+            updated,
+            extra={
+                "artifact_kind": artifact_kind,
+                "path": path,
+            },
+        )
+        return updated
 
     async def recover_stale_tasks(
         self,
@@ -501,6 +701,7 @@ class OperatorBridge:
 
         recovered = [task for task_id in recovered_ids if (task := await self.get_task(task_id))]
         for task_record in recovered:
+            await self._mirror_runtime_recovered(task_record)
             self._record_task_event(
                 "bridge_task_recovered",
                 task_id=task_record.id,
@@ -625,6 +826,7 @@ class OperatorBridge:
 
         updated = await self.get_task(task_id)
         assert updated is not None
+        await self._mirror_runtime_responded(updated)
 
         self._record_task_event(
             "bridge_task_responded",
@@ -677,6 +879,7 @@ class OperatorBridge:
 
         updated = await self.get_task(task_id)
         assert updated is not None
+        await self._mirror_runtime_response_ack(updated, acknowledged_by=acknowledged_by, note=note)
         self._record_task_event(
             "bridge_response_acknowledged",
             task_id=task_id,
@@ -739,6 +942,552 @@ class OperatorBridge:
                 (_json_dump(response.as_dict()), _utc_now_iso(), task_id),
             )
             await db.commit()
+
+    async def _set_metadata(self, task_id: str, metadata: dict[str, Any]) -> None:
+        async with aiosqlite.connect(self._bus.db_path) as db:
+            await db.execute(
+                "UPDATE operator_bridge_tasks SET metadata = ?, updated_at = ? WHERE id = ?",
+                (_json_dump(metadata), _utc_now_iso(), task_id),
+            )
+            await db.commit()
+
+    async def _mirror_runtime_enqueued(self, task: OperatorBridgeTask) -> None:
+        if self._runtime_state is None:
+            return
+        await self._upsert_runtime_session(current_task_id="")
+        await self._record_runtime_action(
+            task=task,
+            action_name="bridge_task_enqueued",
+            actor=task.sender,
+            payload={
+                "scope": list(task.scope),
+                "output": list(task.output),
+                "constraints": list(task.constraints),
+            },
+        )
+
+    async def _mirror_runtime_claimed(self, task: OperatorBridgeTask) -> OperatorBridgeTask:
+        if self._runtime_state is None:
+            return task
+
+        metadata = dict(task.metadata)
+        changed = False
+        claim_id = str(metadata.get("runtime_claim_id", "") or "")
+        if not claim_id:
+            claim_id = self._runtime_state.new_claim_id()
+            metadata["runtime_claim_id"] = claim_id
+            changed = True
+        run_id = str(metadata.get("runtime_run_id", "") or "")
+        if not run_id:
+            run_id = self._runtime_state.new_run_id()
+            metadata["runtime_run_id"] = run_id
+            changed = True
+        if changed:
+            await self._set_metadata(task.id, metadata)
+            refreshed = await self.get_task(task.id)
+            if refreshed is not None:
+                task = refreshed
+
+        claimed_at = task.claimed_at or _utc_now()
+        stale_after = claimed_at + timedelta(seconds=task.claim_timeout_seconds)
+        await self._runtime_state.record_task_claim(
+            TaskClaim(
+                claim_id=claim_id,
+                task_id=task.id,
+                session_id=self._ledger.session_id,
+                agent_id=task.claimed_by or self.bridge_agent_id,
+                status="claimed",
+                claimed_at=claimed_at,
+                stale_after=stale_after,
+                metadata={
+                    "bridge_task_id": task.id,
+                    "sender": task.sender,
+                    "scope": list(task.scope),
+                    "output": list(task.output),
+                    "constraints": list(task.constraints),
+                },
+            )
+        )
+        existing_run = await self._runtime_state.get_delegation_run(run_id)
+        await self._runtime_state.record_delegation_run(
+            DelegationRun(
+                run_id=run_id,
+                session_id=self._ledger.session_id,
+                task_id=task.id,
+                claim_id=claim_id,
+                parent_run_id=existing_run.parent_run_id if existing_run else "",
+                assigned_by=task.sender,
+                assigned_to=task.claimed_by or self.bridge_agent_id,
+                requested_output=list(task.output),
+                current_artifact_id=str(task.metadata.get("current_artifact_id", "") or ""),
+                status="claimed",
+                started_at=existing_run.started_at if existing_run else claimed_at,
+                completed_at=existing_run.completed_at if existing_run else None,
+                failure_code=existing_run.failure_code if existing_run else "",
+                metadata={
+                    **(existing_run.metadata if existing_run else {}),
+                    "bridge_task_id": task.id,
+                    "scope": list(task.scope),
+                    "constraints": list(task.constraints),
+                },
+            )
+        )
+        await self._upsert_runtime_session(current_task_id=task.id)
+        await self._record_runtime_action(
+            task=task,
+            action_name="bridge_task_claimed",
+            actor=task.claimed_by or self.bridge_agent_id,
+            payload={"claim_id": claim_id, "run_id": run_id},
+        )
+        return task
+
+    async def _mirror_runtime_acknowledged(
+        self,
+        task: OperatorBridgeTask,
+        *,
+        acknowledged_by: str,
+        note: str,
+    ) -> None:
+        if self._runtime_state is None:
+            return
+        claim_id, run_id = self._runtime_ids(task)
+        if claim_id:
+            await self._runtime_state.acknowledge_task_claim(
+                claim_id,
+                status=BRIDGE_STATUS_ACKNOWLEDGED,
+                metadata={"note": note, "acknowledged_by": acknowledged_by},
+            )
+        if run_id:
+            existing_run = await self._runtime_state.get_delegation_run(run_id)
+            if existing_run is not None:
+                await self._runtime_state.record_delegation_run(
+                    DelegationRun(
+                        run_id=existing_run.run_id,
+                        session_id=existing_run.session_id,
+                        task_id=existing_run.task_id,
+                        claim_id=existing_run.claim_id,
+                        parent_run_id=existing_run.parent_run_id,
+                        assigned_by=existing_run.assigned_by,
+                        assigned_to=existing_run.assigned_to,
+                        requested_output=existing_run.requested_output,
+                        current_artifact_id=existing_run.current_artifact_id,
+                        status=BRIDGE_STATUS_ACKNOWLEDGED,
+                        started_at=existing_run.started_at,
+                        completed_at=existing_run.completed_at,
+                        failure_code=existing_run.failure_code,
+                        metadata={
+                            **existing_run.metadata,
+                            "claim_ack": task.metadata.get("claim_ack", {}),
+                        },
+                    )
+                )
+        await self._record_runtime_action(
+            task=task,
+            action_name="bridge_task_acknowledged",
+            actor=acknowledged_by,
+            payload={"note": note},
+        )
+
+    async def _mirror_runtime_heartbeat(
+        self,
+        task: OperatorBridgeTask,
+        *,
+        heartbeat_by: str,
+        summary: str,
+        progress: float | None,
+        current_artifact_id: str | None,
+    ) -> None:
+        if self._runtime_state is None:
+            return
+        claim_id, run_id = self._runtime_ids(task)
+        heartbeat_payload = {
+            "summary": summary,
+            "progress": progress,
+            "current_artifact_id": current_artifact_id,
+        }
+        if claim_id:
+            existing_claim = await self._runtime_state.get_task_claim(claim_id)
+            status = (
+                BRIDGE_STATUS_ACKNOWLEDGED
+                if task.metadata.get("claim_ack")
+                else (existing_claim.status if existing_claim is not None else BRIDGE_STATUS_IN_PROGRESS)
+            )
+            await self._runtime_state.heartbeat_task_claim(
+                claim_id,
+                status=status,
+                metadata={
+                    **(existing_claim.metadata if existing_claim is not None else {}),
+                    **heartbeat_payload,
+                    "heartbeat_by": heartbeat_by,
+                },
+            )
+        if run_id:
+            existing_run = await self._runtime_state.get_delegation_run(run_id)
+            if existing_run is not None:
+                await self._runtime_state.record_delegation_run(
+                    DelegationRun(
+                        run_id=existing_run.run_id,
+                        session_id=existing_run.session_id,
+                        task_id=existing_run.task_id,
+                        claim_id=existing_run.claim_id,
+                        parent_run_id=existing_run.parent_run_id,
+                        assigned_by=existing_run.assigned_by,
+                        assigned_to=existing_run.assigned_to,
+                        requested_output=existing_run.requested_output,
+                        current_artifact_id=current_artifact_id or existing_run.current_artifact_id,
+                        status=BRIDGE_STATUS_IN_PROGRESS,
+                        started_at=existing_run.started_at,
+                        completed_at=existing_run.completed_at,
+                        failure_code=existing_run.failure_code,
+                        metadata={
+                            **existing_run.metadata,
+                            "last_heartbeat": {
+                                **heartbeat_payload,
+                                "heartbeat_by": heartbeat_by,
+                                "heartbeat_at": _utc_now_iso(),
+                            },
+                        },
+                    )
+                )
+        await self._record_runtime_action(
+            task=task,
+            action_name="bridge_task_heartbeat",
+            actor=heartbeat_by,
+            payload=heartbeat_payload,
+        )
+
+    async def _mirror_runtime_partial_artifact(
+        self,
+        task: OperatorBridgeTask,
+        *,
+        artifact_kind: str,
+        path: str,
+        summary: str,
+        checksum: str,
+        promotion_state: str,
+        metadata: dict[str, Any],
+    ) -> OperatorBridgeTask:
+        if self._runtime_state is None:
+            return task
+        _claim_id, run_id = self._runtime_ids(task)
+        artifact_id = self._runtime_state.new_artifact_id()
+        await self._runtime_state.record_artifact(
+            ArtifactRecord(
+                artifact_id=artifact_id,
+                artifact_kind=artifact_kind,
+                session_id=self._ledger.session_id,
+                task_id=task.id,
+                run_id=run_id,
+                payload_path=path,
+                checksum=checksum,
+                promotion_state=promotion_state,
+                metadata={
+                    **metadata,
+                    "bridge_task_id": task.id,
+                    "summary": summary,
+                },
+            )
+        )
+        task_metadata = dict(task.metadata)
+        task_metadata["current_artifact_id"] = artifact_id
+        partial_ids = list(task_metadata.get("runtime_partial_artifact_ids", []))
+        partial_ids.append(artifact_id)
+        task_metadata["runtime_partial_artifact_ids"] = partial_ids[-12:]
+        await self._set_metadata(task.id, task_metadata)
+        refreshed = await self.get_task(task.id)
+        if refreshed is not None:
+            task = refreshed
+        if run_id:
+            existing_run = await self._runtime_state.get_delegation_run(run_id)
+            if existing_run is not None:
+                await self._runtime_state.record_delegation_run(
+                    DelegationRun(
+                        run_id=existing_run.run_id,
+                        session_id=existing_run.session_id,
+                        task_id=existing_run.task_id,
+                        claim_id=existing_run.claim_id,
+                        parent_run_id=existing_run.parent_run_id,
+                        assigned_by=existing_run.assigned_by,
+                        assigned_to=existing_run.assigned_to,
+                        requested_output=existing_run.requested_output,
+                        current_artifact_id=artifact_id,
+                        status=existing_run.status,
+                        started_at=existing_run.started_at,
+                        completed_at=existing_run.completed_at,
+                        failure_code=existing_run.failure_code,
+                        metadata={
+                            **existing_run.metadata,
+                            "last_partial_artifact_id": artifact_id,
+                        },
+                    )
+                )
+        await self._record_runtime_action(
+            task=task,
+            action_name="bridge_partial_artifact_recorded",
+            actor=task.claimed_by or self.bridge_agent_id,
+            payload={
+                "artifact_id": artifact_id,
+                "artifact_kind": artifact_kind,
+                "path": path,
+                "promotion_state": promotion_state,
+            },
+        )
+        return task
+
+    async def _mirror_runtime_recovered(self, task: OperatorBridgeTask) -> None:
+        if self._runtime_state is None:
+            return
+        claim_id, run_id = self._runtime_ids(task)
+        if claim_id:
+            existing_claim = await self._runtime_state.get_task_claim(claim_id)
+            if existing_claim is not None:
+                await self._runtime_state.record_task_claim(
+                    TaskClaim(
+                        claim_id=existing_claim.claim_id,
+                        task_id=existing_claim.task_id,
+                        session_id=existing_claim.session_id,
+                        agent_id=existing_claim.agent_id,
+                        status="recovered",
+                        claimed_at=existing_claim.claimed_at,
+                        acked_at=existing_claim.acked_at,
+                        heartbeat_at=existing_claim.heartbeat_at,
+                        stale_after=existing_claim.stale_after,
+                        recovered_at=task.recovered_at or _utc_now(),
+                        retry_count=task.retry_count,
+                        metadata={
+                            **existing_claim.metadata,
+                            "recovery_reason": task.recovery_reason or "",
+                        },
+                    )
+                )
+        if run_id:
+            existing_run = await self._runtime_state.get_delegation_run(run_id)
+            if existing_run is not None:
+                await self._runtime_state.record_delegation_run(
+                    DelegationRun(
+                        run_id=existing_run.run_id,
+                        session_id=existing_run.session_id,
+                        task_id=existing_run.task_id,
+                        claim_id=existing_run.claim_id,
+                        parent_run_id=existing_run.parent_run_id,
+                        assigned_by=existing_run.assigned_by,
+                        assigned_to=existing_run.assigned_to,
+                        requested_output=existing_run.requested_output,
+                        current_artifact_id=existing_run.current_artifact_id,
+                        status="stale_recovered",
+                        started_at=existing_run.started_at,
+                        completed_at=existing_run.completed_at,
+                        failure_code=existing_run.failure_code,
+                        metadata={
+                            **existing_run.metadata,
+                            "recovery_reason": task.recovery_reason or "",
+                            "retry_count": task.retry_count,
+                        },
+                    )
+                )
+        await self._record_runtime_action(
+            task=task,
+            action_name="bridge_task_recovered",
+            actor=self.bridge_agent_id,
+            payload={"recovery_reason": task.recovery_reason or "", "retry_count": task.retry_count},
+        )
+
+    async def _mirror_runtime_responded(self, task: OperatorBridgeTask) -> None:
+        if self._runtime_state is None:
+            return
+        claim_id, run_id = self._runtime_ids(task)
+        completed_at = task.completed_at or _utc_now()
+        response_status = self._runtime_completion_status(task)
+        if claim_id:
+            existing_claim = await self._runtime_state.get_task_claim(claim_id)
+            if existing_claim is not None:
+                await self._runtime_state.record_task_claim(
+                    TaskClaim(
+                        claim_id=existing_claim.claim_id,
+                        task_id=existing_claim.task_id,
+                        session_id=existing_claim.session_id,
+                        agent_id=existing_claim.agent_id,
+                        status=response_status,
+                        claimed_at=existing_claim.claimed_at,
+                        acked_at=existing_claim.acked_at,
+                        heartbeat_at=completed_at,
+                        stale_after=existing_claim.stale_after,
+                        recovered_at=existing_claim.recovered_at,
+                        retry_count=existing_claim.retry_count,
+                        metadata={
+                            **existing_claim.metadata,
+                            "bridge_status": task.status,
+                        },
+                    )
+                )
+        if run_id:
+            existing_run = await self._runtime_state.get_delegation_run(run_id)
+            if existing_run is not None:
+                await self._runtime_state.record_delegation_run(
+                    DelegationRun(
+                        run_id=existing_run.run_id,
+                        session_id=existing_run.session_id,
+                        task_id=existing_run.task_id,
+                        claim_id=existing_run.claim_id,
+                        parent_run_id=existing_run.parent_run_id,
+                        assigned_by=existing_run.assigned_by,
+                        assigned_to=existing_run.assigned_to,
+                        requested_output=existing_run.requested_output,
+                        current_artifact_id=str(task.metadata.get("current_artifact_id", "") or existing_run.current_artifact_id),
+                        status=response_status,
+                        started_at=existing_run.started_at,
+                        completed_at=completed_at,
+                        failure_code=task.response.error if task.response and task.response.error else "",
+                        metadata={
+                            **existing_run.metadata,
+                            "bridge_status": task.status,
+                            "response_summary": task.response.summary if task.response else "",
+                        },
+                    )
+                )
+        if task.response is not None:
+            artifact_paths = [
+                ("report", task.response.report_path),
+                ("patch", task.response.patch_path),
+            ]
+            promotion_state = "published" if response_status == "completed" else "ephemeral"
+            for artifact_kind, artifact_path in artifact_paths:
+                if not artifact_path:
+                    continue
+                await self._runtime_state.record_artifact(
+                    ArtifactRecord(
+                        artifact_id=self._runtime_state.new_artifact_id(),
+                        artifact_kind=artifact_kind,
+                        session_id=self._ledger.session_id,
+                        task_id=task.id,
+                        run_id=run_id,
+                        payload_path=artifact_path,
+                        promotion_state=promotion_state,
+                        metadata={
+                            "bridge_task_id": task.id,
+                            "response_status": task.status,
+                            "summary": task.response.summary,
+                        },
+                    )
+                )
+        await self._record_runtime_action(
+            task=task,
+            action_name="bridge_task_responded",
+            actor=(task.response.metadata.get("responded_by") if task.response else None) or task.claimed_by or self.bridge_agent_id,
+            payload={"bridge_status": task.status},
+        )
+        if response_status in {"completed", "failed"}:
+            await self._upsert_runtime_session(current_task_id="")
+
+    async def _mirror_runtime_response_ack(
+        self,
+        task: OperatorBridgeTask,
+        *,
+        acknowledged_by: str,
+        note: str,
+    ) -> None:
+        if self._runtime_state is None:
+            return
+        claim_id, run_id = self._runtime_ids(task)
+        if run_id:
+            existing_run = await self._runtime_state.get_delegation_run(run_id)
+            if existing_run is not None:
+                await self._runtime_state.record_delegation_run(
+                    DelegationRun(
+                        run_id=existing_run.run_id,
+                        session_id=existing_run.session_id,
+                        task_id=existing_run.task_id,
+                        claim_id=existing_run.claim_id,
+                        parent_run_id=existing_run.parent_run_id,
+                        assigned_by=existing_run.assigned_by,
+                        assigned_to=existing_run.assigned_to,
+                        requested_output=existing_run.requested_output,
+                        current_artifact_id=existing_run.current_artifact_id,
+                        status=existing_run.status,
+                        started_at=existing_run.started_at,
+                        completed_at=existing_run.completed_at,
+                        failure_code=existing_run.failure_code,
+                        metadata={
+                            **existing_run.metadata,
+                            "delivery_ack": task.metadata.get("delivery_ack", {}),
+                        },
+                    )
+                )
+        await self._record_runtime_action(
+            task=task,
+            action_name="bridge_response_acknowledged",
+            actor=acknowledged_by,
+            payload={"note": note, "claim_id": claim_id, "run_id": run_id},
+        )
+
+    async def _upsert_runtime_session(self, *, current_task_id: str) -> None:
+        if self._runtime_state is None:
+            return
+        existing = await self._runtime_state.get_session(self._ledger.session_id)
+        if existing is None:
+            await self._runtime_state.upsert_session(
+                SessionState(
+                    session_id=self._ledger.session_id,
+                    operator_id="operator",
+                    status="active",
+                    current_task_id=current_task_id,
+                    metadata={"bridge_agent_id": self.bridge_agent_id},
+                )
+            )
+            return
+        await self._runtime_state.upsert_session(
+            SessionState(
+                session_id=existing.session_id,
+                operator_id=existing.operator_id,
+                status=existing.status,
+                current_task_id=current_task_id,
+                active_bundle_id=existing.active_bundle_id,
+                metadata=existing.metadata,
+                created_at=existing.created_at,
+                updated_at=_utc_now(),
+            )
+        )
+
+    async def _record_runtime_action(
+        self,
+        *,
+        task: OperatorBridgeTask,
+        action_name: str,
+        actor: str | None,
+        payload: dict[str, Any],
+    ) -> None:
+        if self._runtime_state is None:
+            return
+        _claim_id, run_id = self._runtime_ids(task)
+        await self._runtime_state.record_operator_action(
+            OperatorAction(
+                action_id=self._runtime_state.new_action_id(),
+                session_id=self._ledger.session_id,
+                task_id=task.id,
+                run_id=run_id,
+                action_name=action_name,
+                actor=actor or self.bridge_agent_id,
+                payload=payload,
+            )
+        )
+
+    @staticmethod
+    def _runtime_ids(task: OperatorBridgeTask) -> tuple[str, str]:
+        metadata = task.metadata if isinstance(task.metadata, dict) else {}
+        claim_id = str(metadata.get("runtime_claim_id", "") or "")
+        run_id = str(metadata.get("runtime_run_id", "") or "")
+        return (claim_id, run_id)
+
+    @staticmethod
+    def _runtime_completion_status(task: OperatorBridgeTask) -> str:
+        status = str(task.status or "").strip().lower()
+        if status in {"done", "completed", "success"}:
+            return "completed"
+        if status in {"failed", "fail", "error", "cancelled", "canceled"}:
+            return "failed"
+        if task.response is not None and task.response.error:
+            return "failed"
+        return status or "completed"
 
     def _record_task_event(self, event: str, **payload: Any) -> None:
         self._ledger.task_event(event, **payload)

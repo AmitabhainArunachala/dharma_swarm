@@ -87,3 +87,35 @@ async def test_rag_error_raises():
     )
     with pytest.raises(NvidiaRagError, match="failed: 500"):
         await client.health()
+
+
+@pytest.mark.asyncio
+async def test_rag_invalid_json_raises_domain_error():
+    def _handler(_: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, text="not-json")
+
+    client = NvidiaRagClient(
+        config=NvidiaRagConfig(
+            rag_base_url="http://rag.local/v1",
+            ingest_base_url="http://ingest.local/v1",
+        ),
+        transport=httpx.MockTransport(_handler),
+    )
+    with pytest.raises(NvidiaRagError, match="returned invalid JSON"):
+        await client.health()
+
+
+@pytest.mark.asyncio
+async def test_rag_transport_error_raises_domain_error():
+    def _handler(request: httpx.Request) -> httpx.Response:
+        raise httpx.ConnectError("offline", request=request)
+
+    client = NvidiaRagClient(
+        config=NvidiaRagConfig(
+            rag_base_url="http://rag.local/v1",
+            ingest_base_url="http://ingest.local/v1",
+        ),
+        transport=httpx.MockTransport(_handler),
+    )
+    with pytest.raises(NvidiaRagError, match="failed: offline"):
+        await client.health()

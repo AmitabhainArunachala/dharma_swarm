@@ -22,6 +22,7 @@ import logging
 import re
 import time
 from datetime import datetime, timezone
+from itertools import combinations
 from pathlib import Path
 from typing import Any, Protocol, runtime_checkable
 
@@ -36,6 +37,13 @@ from dharma_swarm.models import (
 )
 from dharma_swarm.runtime_contract import RuntimeEnvelope, RuntimeEventType
 from dharma_swarm.session_ledger import SessionLedger
+from dharma_swarm.sheaf import (
+    CoordinationProtocol,
+    CoordinationResult,
+    Discovery,
+    InformationChannel,
+    NoosphereSite,
+)
 from dharma_swarm.telos_gates import check_with_reflective_reroute
 
 logger = logging.getLogger(__name__)
@@ -88,6 +96,16 @@ class Orchestrator:
         self._default_claim_timeout_seconds = 420.0
         self._default_max_retries = 0
         self._default_retry_backoff_seconds = 0.0
+        self._transient_failure_retry_limit = 2
+        self._transient_failure_backoff_seconds = 30.0
+        self._long_timeout_retry_limit = 1
+        self._long_timeout_backoff_seconds = 15.0
+        self._long_timeout_retry_threshold_seconds = 120.0
+        self._timeout_retry_growth_factor = 1.5
+        self._max_timeout_retry_seconds = 900.0
+        self._last_coordination_result: CoordinationResult | None = None
+        self._last_coordination_summary: dict[str, Any] = self._empty_coordination_summary()
+        self._last_coordination_signature = ""
 
     async def dispatch(
         self,
@@ -106,9 +124,12 @@ class Orchestrator:
             return await self.fan_out(task, idle)
 
         # PIPELINE / FAN_IN: single agent per step
+        selected = self._select_idle_agent(task, list(idle))
+        if selected is None:
+            return []
         td = TaskDispatch(
             task_id=task.id,
-            agent_id=idle[0].id,
+            agent_id=selected.id,
             topology=topology,
             timeout_seconds=self._resolve_timeout_seconds(task, self._default_timeout_seconds),
         )
@@ -163,7 +184,11 @@ class Orchestrator:
         ready = [t for t in ready if self._is_retry_window_open(t)]
 
         dispatches: list[TaskDispatch] = []
-        for task, agent in zip(ready, idle):
+        available = list(idle)
+        for task in ready:
+            agent = self._select_idle_agent(task, available)
+            if agent is None:
+                break
             td = TaskDispatch(
                 task_id=task.id,
                 agent_id=agent.id,
@@ -176,10 +201,57 @@ class Orchestrator:
             dispatches.append(td)
         return dispatches
 
-    async def tick(self) -> None:
+    async def tick(self) -> dict[str, int]:
         """One orchestration cycle: collect completed, then route pending."""
-        await self._collect_completed()
-        await self.route_next()
+        settled, recovered = await self._collect_completed()
+        dispatches = await self.route_next()
+        coordination = self._empty_coordination_summary()
+        try:
+            coordination = await self._refresh_coordination_state()
+        except Exception as exc:
+            logger.debug("Coordination refresh failed (non-critical): %s", exc)
+
+        summary = {
+            "settled": settled,
+            "recovered": recovered,
+            "dispatched": len(dispatches),
+            "coordination_global_truths": int(coordination.get("global_truths", 0) or 0),
+            "coordination_disagreements": int(
+                coordination.get("productive_disagreements", 0) or 0
+            ),
+        }
+
+        # Emit a tick-level runtime event when work happened
+        if (settled or recovered or dispatches) and self._event_memory is not None:
+            try:
+                dispatch_ids = [td.task_id for td in dispatches]
+                envelope = RuntimeEnvelope.create(
+                    event_type=RuntimeEventType.ACTION_EVENT,
+                    source="orchestrator.tick",
+                    agent_id="orchestrator",
+                    session_id=self._ledger.session_id,
+                    trace_id=f"tick:{self._ledger.session_id}",
+                    payload={
+                        "action_name": "tick_summary",
+                        "decision": "recorded",
+                        "confidence": 1.0,
+                        "settled": settled,
+                        "recovered": recovered,
+                        "dispatched_count": len(dispatches),
+                        "dispatched_task_ids": dispatch_ids[:20],
+                        "coordination_global_truths": summary["coordination_global_truths"],
+                        "coordination_disagreements": summary["coordination_disagreements"],
+                    },
+                )
+                ingest = getattr(self._event_memory, "ingest_envelope", None)
+                if ingest:
+                    result = ingest(envelope)
+                    if inspect.isawaitable(result):
+                        await result
+            except Exception:
+                pass  # Tick event emission is non-fatal
+
+        return summary
 
     async def run(self, interval: float = 1.0) -> None:
         """Continuous loop calling tick() until stop() is called."""
@@ -277,6 +349,43 @@ class Orchestrator:
         return lowered[:200]
 
     @staticmethod
+    def _is_transient_connection_failure(signature: str) -> bool:
+        patterns = (
+            "connection error",
+            "api connection error",
+            "connecterror",
+            "nodename nor servname provided",
+            "temporary failure in name resolution",
+            "dns",
+            "service unavailable",
+            "server disconnected",
+            "timeout while reading provider stream",
+            "rate limit",
+            "429",
+            "too many requests",
+        )
+        return any(pattern in signature for pattern in patterns)
+
+    def _classify_failure(
+        self,
+        *,
+        error: str,
+        source: str,
+        task: Task | None,
+    ) -> str:
+        signature = self._failure_signature(error)
+        if source in {"claim_timeout", "dispatch_dropoff"}:
+            return source
+        if source == "timeout":
+            timeout_seconds = self._resolve_timeout_seconds(task, self._default_timeout_seconds)
+            if timeout_seconds >= self._long_timeout_retry_threshold_seconds:
+                return "long_timeout"
+            return "timeout"
+        if source == "execution_error" and self._is_transient_connection_failure(signature):
+            return "connection_transient"
+        return source
+
+    @staticmethod
     def _coerce_float(value: Any, default: float) -> float:
         try:
             return float(value)
@@ -329,6 +438,39 @@ class Orchestrator:
         )
         return retry_count, max_retries, backoff
 
+    def _apply_failure_retry_defaults(
+        self,
+        *,
+        task: Task | None,
+        meta: dict[str, Any],
+        failure_class: str,
+        max_retries: int,
+        backoff: float,
+    ) -> tuple[int, float]:
+        if failure_class in {"claim_timeout", "dispatch_dropoff"}:
+            return (max(max_retries, 1), backoff)
+        if failure_class == "connection_transient":
+            updated_max = max(max_retries, self._transient_failure_retry_limit)
+            updated_backoff = max(backoff, self._transient_failure_backoff_seconds)
+            meta["retry_backoff_seconds"] = updated_backoff
+            return (updated_max, updated_backoff)
+        if failure_class == "long_timeout":
+            updated_max = max(max_retries, self._long_timeout_retry_limit)
+            updated_backoff = max(backoff, self._long_timeout_backoff_seconds)
+            current_timeout = self._resolve_timeout_seconds(task, self._default_timeout_seconds)
+            grown_timeout = min(
+                max(
+                    current_timeout * self._timeout_retry_growth_factor,
+                    current_timeout + 60.0,
+                ),
+                self._max_timeout_retry_seconds,
+            )
+            meta["timeout_seconds"] = round(grown_timeout, 3)
+            meta["retry_backoff_seconds"] = updated_backoff
+            meta["timeout_retry_growth_applied"] = round(grown_timeout, 3)
+            return (updated_max, updated_backoff)
+        return (max_retries, backoff)
+
     def _is_retry_window_open(self, task: Task) -> bool:
         meta = self._task_meta(task)
         not_before_raw = meta.get("retry_not_before_epoch")
@@ -370,6 +512,650 @@ class Orchestrator:
         td.metadata["max_retries"] = max_retries
         return meta
 
+    def _memory_plane_db_path(self, task: Task | None) -> Path | None:
+        meta = self._task_meta(task)
+        raw = meta.get("memory_plane_db")
+        if isinstance(raw, str) and raw.strip():
+            return Path(raw)
+        event_path = getattr(self._event_memory, "db_path", None)
+        if event_path:
+            return Path(event_path)
+        return None
+
+    def _latent_gold_query(self, task: Task | None) -> str:
+        if task is None:
+            return ""
+        return "\n".join(
+            part.strip()
+            for part in (task.title, task.description)
+            if isinstance(part, str) and part.strip()
+        )
+
+    def _attach_latent_gold(self, task: Task | None, meta: dict[str, Any]) -> dict[str, Any]:
+        plane_path = self._memory_plane_db_path(task)
+        query = self._latent_gold_query(task)
+        if task is None or plane_path is None or not query:
+            return meta
+        try:
+            from dharma_swarm.engine.conversation_memory import ConversationMemoryStore
+
+            shards = ConversationMemoryStore(plane_path).latent_gold(query, limit=3)
+        except Exception as exc:
+            logger.debug("Latent gold lookup failed for %s: %s", getattr(task, "id", "?"), exc)
+            return meta
+        if not shards:
+            meta.pop("latent_gold", None)
+            meta["latent_gold_count"] = 0
+            return meta
+
+        meta["latent_gold"] = [
+            {
+                "shard_id": shard.shard_id,
+                "kind": shard.shard_kind,
+                "state": shard.state,
+                "salience": round(float(shard.salience), 6),
+                "text": shard.text[:220],
+                "created_at": shard.created_at.isoformat(),
+            }
+            for shard in shards
+        ]
+        meta["latent_gold_count"] = len(shards)
+        meta["latent_gold_query"] = query[:280]
+        meta["latent_gold_refreshed_at"] = datetime.now(timezone.utc).isoformat()
+        return meta
+
+    @staticmethod
+    def _dedupe_strings(values: list[str]) -> list[str]:
+        ordered: list[str] = []
+        seen: set[str] = set()
+        for value in values:
+            item = str(value).strip()
+            if not item or item in seen:
+                continue
+            seen.add(item)
+            ordered.append(item)
+        return ordered
+
+    @staticmethod
+    def _coerce_string_list(value: Any) -> list[str]:
+        if isinstance(value, str):
+            values = [part.strip() for part in value.split(",")]
+        elif isinstance(value, (list, tuple, set)):
+            values = [str(part).strip() for part in value]
+        else:
+            return []
+        return [item for item in values if item]
+
+    def _task_preferred_roles(self, task: Task | None) -> list[str]:
+        meta = self._task_meta(task)
+        raw = meta.get("coordination_preferred_roles")
+        if raw is None:
+            raw = meta.get("preferred_roles")
+        roles = self._dedupe_strings(
+            [role.lower() for role in self._coerce_string_list(raw)]
+        )
+        if roles:
+            return roles
+        if (
+            str(meta.get("coordination_route", "")).strip().lower()
+            == "synthesis_review"
+            or bool(meta.get("coordination_review_required"))
+        ):
+            return ["reviewer", "researcher", "general"]
+        return []
+
+    def _select_idle_agent(
+        self,
+        task: Task | None,
+        idle_agents: list[AgentState],
+    ) -> AgentState | None:
+        if not idle_agents:
+            return None
+        preferred_roles = self._task_preferred_roles(task)
+        for preferred in preferred_roles:
+            for index, agent in enumerate(idle_agents):
+                role_value = str(getattr(agent.role, "value", agent.role)).lower()
+                if role_value == preferred:
+                    return idle_agents.pop(index)
+        return idle_agents.pop(0)
+
+    @staticmethod
+    def _empty_coordination_summary() -> dict[str, Any]:
+        return {
+            "observed_at": datetime.now(timezone.utc).isoformat(),
+            "agent_count": 0,
+            "message_count": 0,
+            "task_count": 0,
+            "overlap_pairs": 0,
+            "published_agents": [],
+            "global_truths": 0,
+            "productive_disagreements": 0,
+            "cohomological_dimension": 0,
+            "is_globally_coherent": True,
+            "global_truth_claim_keys": [],
+            "productive_disagreement_claim_keys": [],
+        }
+
+    @classmethod
+    def _merge_coordination_context(
+        cls,
+        existing: Any,
+        additions: list[str],
+    ) -> list[str]:
+        base = cls._coerce_string_list(existing)
+        return cls._dedupe_strings([*base, *additions])
+
+    @classmethod
+    def _coordination_signature_payload(cls, summary: dict[str, Any]) -> dict[str, Any]:
+        return {
+            "agent_count": int(summary.get("agent_count", 0) or 0),
+            "message_count": int(summary.get("message_count", 0) or 0),
+            "task_count": int(summary.get("task_count", 0) or 0),
+            "overlap_pairs": int(summary.get("overlap_pairs", 0) or 0),
+            "published_agents": cls._dedupe_strings(
+                list(summary.get("published_agents", []))
+            ),
+            "global_truths": int(summary.get("global_truths", 0) or 0),
+            "productive_disagreements": int(
+                summary.get("productive_disagreements", 0) or 0
+            ),
+            "cohomological_dimension": int(
+                summary.get("cohomological_dimension", 0) or 0
+            ),
+            "is_globally_coherent": bool(
+                summary.get("is_globally_coherent", True)
+            ),
+            "global_truth_claim_keys": cls._dedupe_strings(
+                list(summary.get("global_truth_claim_keys", []))
+            ),
+            "productive_disagreement_claim_keys": cls._dedupe_strings(
+                list(summary.get("productive_disagreement_claim_keys", []))
+            ),
+        }
+
+    @staticmethod
+    def _coordination_confidence(value: Any, default: float) -> float:
+        try:
+            return max(0.0, min(1.0, float(value)))
+        except Exception:
+            return max(0.0, min(1.0, float(default)))
+
+    async def _list_coordination_agents(self) -> list[AgentState]:
+        if self._pool is None:
+            return []
+        list_agents = getattr(self._pool, "list_agents", None)
+        if list_agents:
+            result = list_agents()
+            if inspect.isawaitable(result):
+                result = await result
+            if isinstance(result, list):
+                return [agent for agent in result if isinstance(agent, AgentState)]
+        idle_agents = await self._pool.get_idle_agents()
+        return [agent for agent in idle_agents if isinstance(agent, AgentState)]
+
+    async def _list_coordination_tasks(self) -> list[Task]:
+        if self._board is None:
+            return []
+        list_tasks = getattr(self._board, "list_tasks", None)
+        if list_tasks:
+            try:
+                result = list_tasks(limit=500)
+            except TypeError:
+                result = list_tasks()
+            if inspect.isawaitable(result):
+                result = await result
+            if isinstance(result, list):
+                return [task for task in result if isinstance(task, Task)]
+        task_items = getattr(self._board, "tasks", None)
+        if isinstance(task_items, list):
+            return [
+                task.model_copy(deep=True)
+                for task in task_items
+                if isinstance(task, Task)
+            ]
+        return []
+
+    async def _list_coordination_messages(self, *, limit: int = 200) -> list[Message]:
+        if self._bus is None:
+            return []
+
+        list_messages = getattr(self._bus, "list_messages", None)
+        if list_messages:
+            result = list_messages(limit=limit)
+            if inspect.isawaitable(result):
+                result = await result
+            messages = result if isinstance(result, list) else []
+        else:
+            messages = []
+            sent = getattr(self._bus, "sent", None)
+            if isinstance(sent, list):
+                messages.extend(
+                    message
+                    for message in sent
+                    if isinstance(message, Message)
+                )
+            published = getattr(self._bus, "published", None)
+            if isinstance(published, list):
+                messages.extend(
+                    message
+                    for _, message in published
+                    if isinstance(message, Message)
+                )
+
+        unique: dict[str, Message] = {}
+        for message in messages:
+            if isinstance(message, Message):
+                unique[message.id] = message
+        return sorted(unique.values(), key=lambda message: message.created_at)
+
+    @classmethod
+    def _coordination_claim_key_from_message(cls, message: Message) -> str:
+        metadata = message.metadata if isinstance(message.metadata, dict) else {}
+        for key in ("coordination_claim_key", "claim_key", "topic"):
+            value = str(metadata.get(key, "")).strip()
+            if value:
+                return value
+        if message.subject and message.subject.strip():
+            return message.subject.strip()
+        body = (message.body or "").strip()
+        return body[:120] if body else message.id
+
+    @classmethod
+    def _coordination_claim_key_from_task(cls, task: Task) -> str:
+        metadata = cls._task_meta(task)
+        for key in (
+            "coordination_claim_key",
+            "claim_key",
+            "coordination_topic",
+            "topic",
+            "parent_task",
+            "task_group",
+        ):
+            value = str(metadata.get(key, "")).strip()
+            if value:
+                return value
+        title = (task.title or "").strip()
+        return title or task.id
+
+    @classmethod
+    def _coordination_task_agent_id(cls, task: Task) -> str:
+        metadata = cls._task_meta(task)
+        for key in ("coordination_agent_id", "assigned_agent_id", "last_agent_id"):
+            value = str(metadata.get(key, "")).strip()
+            if value:
+                return value
+        return str(task.assigned_to or "").strip()
+
+    @classmethod
+    def _coordination_task_metadata(
+        cls,
+        task: Task,
+        summary: dict[str, Any],
+    ) -> dict[str, Any] | None:
+        claim_key = cls._coordination_claim_key_from_task(task)
+        if not claim_key:
+            return None
+
+        meta = cls._task_meta(task)
+        updated = dict(meta)
+        changed = False
+
+        def assign(key: str, value: Any) -> None:
+            nonlocal changed
+            if updated.get(key) != value:
+                updated[key] = value
+                changed = True
+
+        def remove(key: str) -> None:
+            nonlocal changed
+            if key in updated:
+                updated.pop(key, None)
+                changed = True
+
+        assign("coordination_claim_key", claim_key)
+        if not str(updated.get("coordination_topic", "")).strip():
+            assign("coordination_topic", claim_key)
+
+        global_truths = set(summary.get("global_truth_claim_keys", []))
+        disagreements = set(summary.get("productive_disagreement_claim_keys", []))
+
+        if claim_key in global_truths:
+            assign("coordination_state", "coherent")
+            assign(
+                "coordination_uncertainty",
+                min(
+                    cls._coordination_confidence(
+                        updated.get("coordination_uncertainty"),
+                        1.0,
+                    ),
+                    0.15,
+                ),
+            )
+            assign("coordination_global_truth", True)
+            assign("coordination_review_required", False)
+            assign("coordination_route", "default")
+            assign(
+                "coordination_shared_context",
+                cls._merge_coordination_context(
+                    updated.get("coordination_shared_context"),
+                    [f"Global truth established for claim '{claim_key}'."],
+                ),
+            )
+            remove("coordination_preferred_roles")
+        elif claim_key in disagreements:
+            assign("coordination_state", "uncertain")
+            assign(
+                "coordination_uncertainty",
+                max(
+                    cls._coordination_confidence(
+                        updated.get("coordination_uncertainty"),
+                        0.0,
+                    ),
+                    0.85,
+                ),
+            )
+            assign("coordination_global_truth", False)
+            assign("coordination_review_required", True)
+            assign("coordination_route", "synthesis_review")
+            assign(
+                "coordination_preferred_roles",
+                ["reviewer", "researcher", "general"],
+            )
+            assign(
+                "coordination_shared_context",
+                cls._merge_coordination_context(
+                    updated.get("coordination_shared_context"),
+                    [
+                        (
+                            f"Productive disagreement detected for claim '{claim_key}'. "
+                            "Prefer synthesis and review over unilateral execution."
+                        )
+                    ],
+                ),
+            )
+        else:
+            return None
+
+        if changed:
+            updated["coordination_last_observed_at"] = str(
+                summary.get("observed_at", datetime.now(timezone.utc).isoformat())
+            )
+            return updated
+        return None
+
+    async def _apply_coordination_task_policy(
+        self,
+        tasks: list[Task],
+        summary: dict[str, Any],
+    ) -> int:
+        updated_tasks = 0
+        for task in tasks:
+            if task.status not in {
+                TaskStatus.PENDING,
+                TaskStatus.ASSIGNED,
+                TaskStatus.RUNNING,
+            }:
+                continue
+            metadata = self._coordination_task_metadata(task, summary)
+            if metadata is None:
+                continue
+            await self._safe_update_task(task.id, metadata=metadata)
+            updated_tasks += 1
+
+        if updated_tasks:
+            self._record_progress_event(
+                "coordination_task_policy",
+                updated_tasks=updated_tasks,
+                global_truth_claim_keys=self._dedupe_strings(
+                    list(summary.get("global_truth_claim_keys", []))
+                ),
+                productive_disagreement_claim_keys=self._dedupe_strings(
+                    list(summary.get("productive_disagreement_claim_keys", []))
+                ),
+            )
+        return updated_tasks
+
+    @classmethod
+    def _task_discovery(
+        cls,
+        task: Task,
+        *,
+        agent_ids: set[str],
+    ) -> Discovery | None:
+        agent_id = cls._coordination_task_agent_id(task)
+        if not agent_id or agent_id not in agent_ids:
+            return None
+        metadata = cls._task_meta(task)
+        content = str(
+            metadata.get("coordination_content")
+            or task.result
+            or task.description
+            or task.title
+        ).strip()
+        if not content:
+            return None
+        confidence_by_status = {
+            TaskStatus.PENDING: 0.45,
+            TaskStatus.ASSIGNED: 0.55,
+            TaskStatus.RUNNING: 0.70,
+            TaskStatus.COMPLETED: 0.95,
+            TaskStatus.FAILED: 0.35,
+            TaskStatus.CANCELLED: 0.25,
+        }
+        return Discovery(
+            agent_id=agent_id,
+            claim_key=cls._coordination_claim_key_from_task(task),
+            content=content,
+            confidence=cls._coordination_confidence(
+                metadata.get("coordination_confidence"),
+                confidence_by_status.get(task.status, 0.50),
+            ),
+            evidence=[f"task:{task.id}"],
+            perspective=f"task:{task.status.value}",
+            metadata={
+                "source": "task_board",
+                "task_id": task.id,
+                "task_status": task.status.value,
+            },
+        )
+
+    @classmethod
+    def _message_discovery(
+        cls,
+        message: Message,
+        *,
+        agent_ids: set[str],
+    ) -> Discovery | None:
+        if message.from_agent not in agent_ids or message.to_agent not in agent_ids:
+            return None
+        metadata = message.metadata if isinstance(message.metadata, dict) else {}
+        content = str(message.body or message.subject or "").strip()
+        if not content:
+            return None
+        return Discovery(
+            agent_id=message.from_agent,
+            claim_key=cls._coordination_claim_key_from_message(message),
+            content=content,
+            confidence=cls._coordination_confidence(
+                metadata.get("confidence"),
+                0.65,
+            ),
+            evidence=[message.id],
+            perspective=f"message:{message.from_agent}->{message.to_agent}",
+            metadata={
+                "source": "message_bus",
+                "message_id": message.id,
+                "topic": str(metadata.get("topic", "")).strip(),
+                "subject": str(message.subject or ""),
+            },
+        )
+
+    @classmethod
+    def _task_overlap_channels(
+        cls,
+        tasks: list[Task],
+        *,
+        agent_ids: set[str],
+    ) -> dict[tuple[str, str], InformationChannel]:
+        claim_participants: dict[str, set[str]] = {}
+        for task in tasks:
+            agent_id = cls._coordination_task_agent_id(task)
+            if not agent_id or agent_id not in agent_ids:
+                continue
+            claim_key = cls._coordination_claim_key_from_task(task)
+            claim_participants.setdefault(claim_key, set()).add(agent_id)
+
+        channels: dict[tuple[str, str], InformationChannel] = {}
+        for claim_key, participants in claim_participants.items():
+            if len(participants) < 2:
+                continue
+            for left, right in combinations(sorted(participants), 2):
+                for source, target in ((left, right), (right, left)):
+                    key = (source, target)
+                    existing = channels.get(key)
+                    if existing is None:
+                        existing = InformationChannel(
+                            source_agent=source,
+                            target_agent=target,
+                            weight=0.0,
+                            metadata={
+                                "source": "task_overlap",
+                                "claim_keys": [],
+                            },
+                        )
+                        channels[key] = existing
+                    existing.weight += 1.0
+                    existing.topics = cls._dedupe_strings(
+                        [*existing.topics, claim_key]
+                    )
+                    claim_keys = existing.metadata.setdefault("claim_keys", [])
+                    if isinstance(claim_keys, list):
+                        existing.metadata["claim_keys"] = cls._dedupe_strings(
+                            [*claim_keys, claim_key]
+                        )
+        return channels
+
+    @classmethod
+    def _merge_coordination_channels(
+        cls,
+        base: dict[tuple[str, str], InformationChannel],
+        extra: dict[tuple[str, str], InformationChannel],
+    ) -> dict[tuple[str, str], InformationChannel]:
+        merged = {
+            key: channel.model_copy(deep=True)
+            for key, channel in base.items()
+        }
+        for key, channel in extra.items():
+            existing = merged.get(key)
+            if existing is None:
+                merged[key] = channel.model_copy(deep=True)
+                continue
+            existing.topics = cls._dedupe_strings([*existing.topics, *channel.topics])
+            existing.message_ids = cls._dedupe_strings(
+                [*existing.message_ids, *channel.message_ids]
+            )
+            existing.weight = float(existing.weight) + float(channel.weight)
+            existing.metadata["coordination_sources"] = cls._dedupe_strings(
+                [
+                    str(existing.metadata.get("source", "")).strip(),
+                    str(channel.metadata.get("source", "")).strip(),
+                    *list(existing.metadata.get("coordination_sources", [])),
+                ]
+            )
+            existing.metadata["claim_keys"] = cls._dedupe_strings(
+                [
+                    *list(existing.metadata.get("claim_keys", [])),
+                    *list(channel.metadata.get("claim_keys", [])),
+                ]
+            )
+        return merged
+
+    async def _refresh_coordination_state(self) -> dict[str, Any]:
+        agents = await self._list_coordination_agents()
+        tasks = await self._list_coordination_tasks()
+        messages = await self._list_coordination_messages(limit=500)
+        agent_ids = {agent.id for agent in agents}
+
+        relevant_messages = [
+            message
+            for message in messages
+            if message.from_agent in agent_ids and message.to_agent in agent_ids
+        ]
+        base_site = NoosphereSite.from_messages(agents, relevant_messages)
+        channels = self._merge_coordination_channels(
+            base_site.channels,
+            self._task_overlap_channels(tasks, agent_ids=agent_ids),
+        )
+        site = NoosphereSite(agents, channels=channels)
+        protocol = CoordinationProtocol(site)
+
+        for message in relevant_messages:
+            discovery = self._message_discovery(message, agent_ids=agent_ids)
+            if discovery is not None:
+                protocol.publish(discovery.agent_id, [discovery])
+        for task in tasks:
+            discovery = self._task_discovery(task, agent_ids=agent_ids)
+            if discovery is not None:
+                protocol.publish(discovery.agent_id, [discovery])
+
+        result = protocol.coordinate()
+        self._last_coordination_result = result.model_copy(deep=True)
+        summary = {
+            "observed_at": datetime.now(timezone.utc).isoformat(),
+            "agent_count": len(agents),
+            "message_count": len(relevant_messages),
+            "task_count": len(tasks),
+            "overlap_pairs": len(site.overlap_pairs()),
+            "published_agents": self._dedupe_strings(
+                list(result.descent_data.published_agents)
+            ),
+            "global_truths": len(result.global_truths),
+            "productive_disagreements": len(result.productive_disagreements),
+            "cohomological_dimension": result.cohomological_dimension,
+            "is_globally_coherent": result.is_globally_coherent,
+            "global_truth_claim_keys": self._dedupe_strings(
+                [
+                    discovery.claim_key or discovery.canonical_claim_key
+                    for discovery in result.global_truths
+                ]
+            ),
+            "productive_disagreement_claim_keys": self._dedupe_strings(
+                [
+                    obstruction.claim_key
+                    for obstruction in result.productive_disagreements
+                ]
+            ),
+        }
+        summary["policy_tasks_updated"] = await self._apply_coordination_task_policy(
+            tasks,
+            summary,
+        )
+        signature_payload = self._coordination_signature_payload(summary)
+        signature = json.dumps(
+            signature_payload,
+            ensure_ascii=True,
+            sort_keys=True,
+        )
+        if signature != self._last_coordination_signature:
+            self._record_progress_event(
+                "coordination_snapshot",
+                **signature_payload,
+            )
+            if summary["productive_disagreements"] > 0:
+                self._record_progress_event(
+                    "coordination_disagreement",
+                    productive_disagreements=summary["productive_disagreements"],
+                    claim_keys=summary["productive_disagreement_claim_keys"],
+                )
+            self._last_coordination_signature = signature
+        self._last_coordination_summary = dict(summary)
+        return dict(summary)
+
+    async def get_coordination_summary(self, *, refresh: bool = True) -> dict[str, Any]:
+        if refresh:
+            return await self._refresh_coordination_state()
+        return dict(self._last_coordination_summary)
+
     async def _safe_get_task(self, task_id: str) -> Task | None:
         board_get = getattr(self._board, "get", None)
         if not board_get:
@@ -397,12 +1183,18 @@ class Orchestrator:
     ) -> None:
         failure_signature = self._failure_signature(error)
         retry_count, max_retries, backoff = self._resolve_retry_policy(task)
-        if source in {"claim_timeout", "dispatch_dropoff"}:
-            max_retries = max(max_retries, 1)
-
         meta = self._task_meta(task)
+        failure_class = self._classify_failure(error=error, source=source, task=task)
+        max_retries, backoff = self._apply_failure_retry_defaults(
+            task=task,
+            meta=meta,
+            failure_class=failure_class,
+            max_retries=max_retries,
+            backoff=backoff,
+        )
         meta.pop("active_claim", None)
         meta["last_error"] = error
+        meta["last_failure_class"] = failure_class
         meta["last_failure_signature"] = failure_signature
         meta["last_failure_source"] = source
         meta["last_failed_agent"] = td.agent_id
@@ -438,6 +1230,7 @@ class Orchestrator:
                 retry_count=next_retry,
                 max_retries=max_retries,
                 source=source,
+                failure_class=failure_class,
                 failure_signature=failure_signature,
             )
             self._record_progress_event(
@@ -447,6 +1240,7 @@ class Orchestrator:
                 retry_count=next_retry,
                 max_retries=max_retries,
                 source=source,
+                failure_class=failure_class,
                 failure_signature=failure_signature,
             )
             await self._emit_lifecycle_event(
@@ -457,6 +1251,7 @@ class Orchestrator:
                     "retry_count": next_retry,
                     "max_retries": max_retries,
                     "source": source,
+                    "failure_class": failure_class,
                 },
             )
             return
@@ -475,6 +1270,7 @@ class Orchestrator:
             failure_signature=failure_signature,
             error=error,
             source=source,
+            failure_class=failure_class,
             retry_count=retry_count,
             max_retries=max_retries,
         )
@@ -485,6 +1281,7 @@ class Orchestrator:
             extra={
                 "failure_signature": failure_signature,
                 "source": source,
+                "failure_class": failure_class,
                 "retry_count": retry_count,
                 "max_retries": max_retries,
             },
@@ -551,6 +1348,9 @@ class Orchestrator:
             td.metadata["witness_reroutes"] = gate.attempts
 
         claim_meta = self._prepare_claim(task_for_gate, td)
+        claim_meta = self._attach_latent_gold(task_for_gate, claim_meta)
+        if task_for_gate is not None:
+            task_for_gate.metadata = dict(claim_meta)
 
         if self._pool is not None:
             await self._pool.assign(td.agent_id, td.task_id)
@@ -575,6 +1375,34 @@ class Orchestrator:
             topology=td.topology.value,
             witness_reroutes=td.metadata.get("witness_reroutes", 0),
         )
+        latent_gold_count = int(claim_meta.get("latent_gold_count", 0) or 0)
+        if latent_gold_count > 0:
+            td.metadata["latent_gold_count"] = latent_gold_count
+            self._record_task_event(
+                "latent_gold_attached",
+                task_id=td.task_id,
+                agent_id=td.agent_id,
+                latent_gold_count=latent_gold_count,
+            )
+            self._record_progress_event(
+                "latent_gold_attached",
+                task_id=td.task_id,
+                agent_id=td.agent_id,
+                latent_gold_count=latent_gold_count,
+            )
+            await self._emit_lifecycle_event(
+                "latent_gold_attached",
+                task_id=td.task_id,
+                agent_id=td.agent_id,
+                extra={
+                    "latent_gold_count": latent_gold_count,
+                    "latent_gold_states": [
+                        str(item.get("state", "unknown"))
+                        for item in claim_meta.get("latent_gold", [])
+                        if isinstance(item, dict)
+                    ],
+                },
+            )
         await self._emit_lifecycle_event(
             "dispatch_assigned",
             task_id=td.task_id,
@@ -816,7 +1644,7 @@ class Orchestrator:
         except Exception as exc:
             logger.debug("Stigmergy mark failed (non-critical): %s", exc)
 
-    async def _collect_completed(self) -> None:
+    async def _collect_completed(self) -> tuple[int, int]:
         """Clean up finished background tasks and stale dispatches."""
         # Clean up any asyncio tasks that finished (with exceptions we missed)
         done_tasks: list[str] = []
@@ -869,3 +1697,4 @@ class Orchestrator:
                 error=reason,
                 source="claim_timeout",
             )
+        return len(done_tasks), len(stale)

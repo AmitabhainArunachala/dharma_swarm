@@ -1,4 +1,13 @@
-"""DGC warm dark theme — amber/gold palette on deep warm black.
+"""DGC Hokusai theme — mineral pigment palette inspired by ukiyo-e woodblocks
+and Kyoto nihonga (日本画) pigment shops.
+
+Colours drawn from traditional Japanese mineral pigments:
+  - Ai-iro (藍色): deep indigo-blue, Hokusai's Prussian blue
+  - Bengara (弁柄): earthy red-ochre from iron oxide
+  - Uguisu (鶯): muted olive-celadon
+  - Sumi (墨): ink-wash greys
+  - Torinoko (鳥の子): aged paper cream
+  - Wasurenagusa (勿忘草): pale forget-me-not blue
 
 Built for Textual 8.x Theme API. Register with ``app.register_theme(DharmaDarkTheme)``
 and activate with ``app.theme = "dharma-dark"``.
@@ -10,27 +19,27 @@ from textual.theme import Theme
 
 DharmaDarkTheme = Theme(
     name="dharma-dark",
-    primary="#D4A017",
-    secondary="#8A6A1A",
-    accent="#D4A017",
-    warning="#E06020",
-    error="#E05050",
-    success="#4CAF72",
-    surface="#252018",
-    panel="#1c1810",
+    primary="#5B7F95",       # Ai-nezu — faded indigo-grey (Hokusai wave crest)
+    secondary="#8A7263",     # Kitsune-iro — fox brown, warm muted earth
+    accent="#6E8B74",        # Rokusho — verdigris green (copper patina)
+    warning="#C2956B",       # Kitsurubami — persimmon-tan, gentle warmth
+    error="#B5564E",         # Bengara — iron oxide red-ochre, not neon
+    success="#6E8B74",       # Rokusho — same verdigris for harmony
+    surface="#1C1B1A",       # Sumi-iro — deep charcoal ink
+    panel="#161614",         # Kuro-cha — blackened tea
     dark=True,
     variables={
-        "bg-base": "#111008",
-        "bg-elevated": "#1c1810",
-        "bg-surface": "#252018",
-        "bg-overlay": "#2e2820",
-        "text-primary": "#f0e8d8",
-        "text-secondary": "#a89880",
-        "text-disabled": "#5a5040",
-        "accent-bright": "#D4A017",
-        "accent-dim": "#8A6A1A",
-        "accent-subtle": "#4A3B18",
-        "thinking": "#7B68EE",
-        "info": "#5090D8",
+        "bg-base": "#121110",       # Ro-iro — lacquer black with warm undertone
+        "bg-elevated": "#1C1B1A",   # Sumi-iro — ink wash
+        "bg-surface": "#232220",    # Hai-iro — ash grey surface
+        "bg-overlay": "#2A2927",    # Nezumi — mouse grey
+        "text-primary": "#D8D2C4",  # Torinoko — aged paper cream
+        "text-secondary": "#9B9284",  # Usuzumi — dilute ink
+        "text-disabled": "#5C5650", # Nibi-iro — dull grey
+        "accent-bright": "#7B9DAD", # Hanada — washed indigo
+        "accent-dim": "#5B7F95",    # Ai-nezu — faded indigo
+        "accent-subtle": "#3A4F5A", # Kachi — dark victory indigo
+        "thinking": "#8B7BA8",      # Fuji-iro — wisteria purple, soft
+        "info": "#7B9DAD",          # Hanada — washed indigo
     },
 )

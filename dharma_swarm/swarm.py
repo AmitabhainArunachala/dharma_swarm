@@ -17,6 +17,8 @@ from pathlib import Path
 from typing import Any
 from uuid import uuid4
 
+from pydantic import BaseModel, Field
+
 from dharma_swarm.daemon_config import DaemonConfig, THREAD_PROMPTS
 from dharma_swarm.jikoku_instrumentation import jikoku_auto_span
 from dharma_swarm.models import (
@@ -39,6 +41,23 @@ logger = logging.getLogger(__name__)
 
 def _make_trace_id() -> str:
     return f"trc_{uuid4().hex}"
+
+
+class SwarmCoordinationState(BaseModel):
+    """Compact runtime summary of sheaf-based swarm coordination."""
+
+    observed_at: str = Field(default_factory=lambda: datetime.now(timezone.utc).isoformat())
+    agent_count: int = 0
+    message_count: int = 0
+    task_count: int = 0
+    overlap_pairs: int = 0
+    published_agents: list[str] = Field(default_factory=list)
+    global_truths: int = 0
+    productive_disagreements: int = 0
+    cohomological_dimension: int = 0
+    is_globally_coherent: bool = True
+    global_truth_claim_keys: list[str] = Field(default_factory=list)
+    productive_disagreement_claim_keys: list[str] = Field(default_factory=list)
 
 
 class SwarmManager:
@@ -92,10 +111,19 @@ class SwarmManager:
         self._handoff: Any = None         # HandoffProtocol
         self._agent_memories: dict[str, Any] = {}  # name -> AgentMemoryBank
 
+        # v0.5.0: Thinkodynamic Director
+        self._director: Any = None               # ThinkodynamicDirector
+        self._director_interval_ticks: int = 10  # Run director every N ticks
+        self._tick_count: int = 0
+
         # Daemon state
         self._last_contribution: datetime | None = None
         self._daily_contributions: int = 0
         self._daily_reset: datetime | None = None
+        self._last_auto_rescue_scan: datetime | None = None
+        self._auto_rescue_scan_interval_seconds = 300.0
+        self._auto_rescue_max_age = timedelta(hours=24)
+        self._auto_rescue_max_attempts = 1
 
     async def init(self) -> None:
         """Initialize all subsystems."""
@@ -138,8 +166,18 @@ class SwarmManager:
         self._running = True
 
         # Load ecosystem awareness on every init
-        from dharma_swarm.ecosystem_bridge import update_manifest
-        self._manifest = update_manifest()
+        from dharma_swarm.ecosystem_bridge import MANIFEST_PATH, update_manifest
+
+        fallback_manifest_path = self.state_dir / "ecosystem_manifest.json"
+        try:
+            self._manifest = update_manifest()
+        except PermissionError:
+            logger.debug(
+                "Global ecosystem manifest %s not writable; using state-local manifest %s",
+                MANIFEST_PATH,
+                fallback_manifest_path,
+            )
+            self._manifest = update_manifest(manifest_path=fallback_manifest_path)
 
         # Spawn default crew and seed tasks if this is a fresh start
         from dharma_swarm.startup_crew import spawn_default_crew, create_seed_tasks
@@ -250,6 +288,18 @@ class SwarmManager:
         except Exception as e:
             logger.debug("v0.4.0 systems init failed (non-fatal): %s", e)
 
+        # v0.5.0: Thinkodynamic Director
+        try:
+            from dharma_swarm.thinkodynamic_director import ThinkodynamicDirector
+
+            self._director = ThinkodynamicDirector(
+                state_dir=self.state_dir,
+            )
+            await self._director.init()
+            logger.info("ThinkodynamicDirector initialized")
+        except Exception as e:
+            logger.debug("ThinkodynamicDirector init failed (non-fatal): %s", e)
+
     # --- Agent Operations ---
 
     async def spawn_agent(
@@ -336,6 +386,108 @@ class SwarmManager:
         )
         return has_heartbeat and self_referential
 
+    @staticmethod
+    def _dedupe_strings(values: list[str]) -> list[str]:
+        seen: set[str] = set()
+        ordered: list[str] = []
+        for value in values:
+            item = str(value).strip()
+            if not item or item in seen:
+                continue
+            seen.add(item)
+            ordered.append(item)
+        return ordered
+
+    @classmethod
+    def _coerce_string_list(cls, value: Any) -> list[str]:
+        if isinstance(value, str):
+            values = [part.strip() for part in value.split(",")]
+        elif isinstance(value, (list, tuple, set)):
+            values = [str(part).strip() for part in value]
+        else:
+            return []
+        return cls._dedupe_strings([item for item in values if item])
+
+    @staticmethod
+    def _coordination_claim_key(metadata: dict[str, Any], title: str = "") -> str:
+        for key in (
+            "coordination_claim_key",
+            "claim_key",
+            "coordination_topic",
+            "topic",
+            "task_group",
+        ):
+            value = str(metadata.get(key, "")).strip()
+            if value:
+                return value
+        return title.strip()
+
+    @staticmethod
+    def _clamp_coordination_uncertainty(value: Any) -> float | None:
+        try:
+            return max(0.0, min(1.0, float(value)))
+        except Exception:
+            return None
+
+    @classmethod
+    def _normalize_coordination_metadata(
+        cls,
+        metadata: dict[str, Any],
+        *,
+        title: str = "",
+    ) -> dict[str, Any]:
+        normalized = dict(metadata)
+        claim_key = cls._coordination_claim_key(normalized, title)
+        if claim_key:
+            normalized["coordination_claim_key"] = claim_key
+            normalized.setdefault("coordination_topic", claim_key)
+
+        context = cls._coerce_string_list(
+            normalized.get("coordination_shared_context")
+        )
+        if context:
+            normalized["coordination_shared_context"] = context
+
+        preferred_roles = cls._coerce_string_list(
+            normalized.get("coordination_preferred_roles")
+            or normalized.get("preferred_roles")
+        )
+        if preferred_roles:
+            normalized["coordination_preferred_roles"] = [
+                role.lower() for role in preferred_roles
+            ]
+
+        uncertainty = cls._clamp_coordination_uncertainty(
+            normalized.get("coordination_uncertainty", normalized.get("uncertainty"))
+        )
+        if uncertainty is not None:
+            normalized["coordination_uncertainty"] = uncertainty
+
+        state = str(normalized.get("coordination_state", "")).strip().lower()
+        if not state and claim_key:
+            if uncertainty is not None and uncertainty >= 0.5:
+                state = "uncertain"
+            elif bool(normalized.get("coordination_review_required")):
+                state = "uncertain"
+            else:
+                state = "local"
+        if state:
+            normalized["coordination_state"] = state
+
+        route = str(normalized.get("coordination_route", "")).strip().lower()
+        if (
+            route == "synthesis_review"
+            or bool(normalized.get("coordination_review_required"))
+            or state == "uncertain"
+        ):
+            normalized["coordination_review_required"] = True
+            normalized["coordination_route"] = "synthesis_review"
+            normalized.setdefault(
+                "coordination_preferred_roles",
+                ["reviewer", "researcher", "general"],
+            )
+        return normalized
+
     async def create_task(
         self,
         title: str,
@@ -349,6 +501,7 @@ class SwarmManager:
             incoming["trace_id"] = _make_trace_id()
         incoming.setdefault("created_via", "swarm.create_task")
         incoming.setdefault("created_at", datetime.now(timezone.utc).isoformat())
+        incoming = self._normalize_coordination_metadata(incoming, title=title)
 
         async with jikoku_auto_span(
             category="execute.task_create",
@@ -408,6 +561,10 @@ class SwarmManager:
                 meta.setdefault("batch_id", batch_id)
                 meta.setdefault("created_via", "swarm.create_task_batch")
                 meta.setdefault("created_at", datetime.now(timezone.utc).isoformat())
+                meta = self._normalize_coordination_metadata(
+                    meta,
+                    title=str(spec_copy.get("title", "")),
+                )
                 spec_copy["metadata"] = meta
 
                 if self._is_self_referential_heartbeat_task(
@@ -565,12 +722,117 @@ class SwarmManager:
         """Get a specific task."""
         return await self._task_board.get(task_id)
 
+    @staticmethod
+    def _coordination_synthesis_title(claim_key: str) -> str:
+        return f"Synthesize disagreement: {claim_key[:72]}".strip()
+
+    @staticmethod
+    def _coordination_synthesis_description(claim_key: str) -> str:
+        return (
+            "The sheaf coordination layer detected a productive disagreement.\n\n"
+            f"Claim: {claim_key}\n\n"
+            "Produce a synthesis that:\n"
+            "1. names the competing local positions,\n"
+            "2. identifies evidence for each,\n"
+            "3. distinguishes resolvable uncertainty from durable pluralism,\n"
+            "4. recommends the safest next action for the swarm.\n\n"
+            "Do not force a fake consensus. Preserve uncertainty explicitly when needed."
+        )
+
+    async def spawn_coordination_tasks(
+        self,
+        *,
+        coordination: SwarmCoordinationState | None = None,
+        limit: int = 2,
+        max_pending: int = 12,
+    ) -> list[Task]:
+        """Spawn bounded synthesis tasks for active productive disagreements."""
+        if self._task_board is None:
+            return []
+
+        state = coordination or await self.coordination_status(refresh=False)
+        if state.productive_disagreements <= 0:
+            return []
+
+        counts = await self._task_board.stats()
+        active = (
+            int(counts.get("pending", 0))
+            + int(counts.get("assigned", 0))
+            + int(counts.get("running", 0))
+        )
+        if active >= max_pending:
+            return []
+
+        existing = await self._task_board.list_tasks(limit=500)
+        active_claims = {
+            str(task.metadata.get("coordination_claim_key", "")).strip()
+            for task in existing
+            if task.status in {TaskStatus.PENDING, TaskStatus.ASSIGNED, TaskStatus.RUNNING}
+            and isinstance(task.metadata, dict)
+            and str(task.metadata.get("coordination_origin", "")).strip()
+            == "sheaf_disagreement"
+            and str(task.metadata.get("coordination_claim_key", "")).strip()
+        }
+
+        task_specs: list[dict[str, Any]] = []
+        capacity = max(0, max_pending - active)
+        planned_limit = max(0, min(limit, capacity))
+        for claim_key in state.productive_disagreement_claim_keys:
+            if len(task_specs) >= planned_limit:
+                break
+            if claim_key in active_claims:
+                continue
+            task_specs.append(
+                {
+                    "title": self._coordination_synthesis_title(claim_key),
+                    "description": self._coordination_synthesis_description(claim_key),
+                    "priority": TaskPriority.HIGH,
+                    "metadata": {
+                        "source": "swarm.coordination_synthesis",
+                        "coordination_origin": "sheaf_disagreement",
+                        "coordination_claim_key": claim_key,
+                        "coordination_topic": claim_key,
+                        "coordination_state": "uncertain",
+                        "coordination_uncertainty": 1.0,
+                        "coordination_review_required": True,
+                        "coordination_route": "synthesis_review",
+                        "coordination_preferred_roles": [
+                            "reviewer",
+                            "researcher",
+                            "general",
+                        ],
+                        "coordination_shared_context": [
+                            (
+                                f"Productive disagreement remains active for claim "
+                                f"'{claim_key}'."
+                            )
+                        ],
+                        "task_group": f"coordination:{claim_key}",
+                        "coordination_triggered_at": state.observed_at,
+                    },
+                }
+            )
+
+        if not task_specs:
+            return []
+
+        created = await self.create_task_batch(task_specs)
+        if created and self._memory is not None:
+            await self._memory.remember(
+                f"Spawned {len(created)} coordination synthesis task(s)",
+                layer=MemoryLayer.SESSION,
+                source="swarm.coordination_synthesis",
+            )
+        return created
+
     # --- Orchestration ---
 
     async def dispatch_next(self) -> int:
         """Run one orchestration tick. Returns number of tasks dispatched."""
         await self.spawn_latent_gold_tasks()
         dispatches = await self._orchestrator.route_next()
+        coordination = await self.coordination_status(refresh=True)
+        await self.spawn_coordination_tasks(coordination=coordination)
         return len(dispatches)
 
     def _check_human_overrides(self) -> dict[str, Any]:
@@ -626,6 +888,176 @@ class SwarmManager:
             return activity > 0
         return bool(activity)
 
+    def _derive_failure_source(self, task: Task) -> str:
+        meta = dict(task.metadata or {})
+        source = str(meta.get("last_failure_source", "")).strip()
+        if source:
+            return source
+        result = str(task.result or "").lower()
+        if "timed out" in result or result.startswith("timeout:"):
+            return "timeout"
+        return "execution_error"
+
+    async def rescue_recent_failures(
+        self,
+        *,
+        limit: int = 4,
+        max_age: timedelta | None = None,
+    ) -> list[Task]:
+        """Requeue recent transient failures once under the current retry policy."""
+        if self._task_board is None or self._orchestrator is None:
+            return []
+
+        failed = await self._task_board.list_tasks(status=TaskStatus.FAILED, limit=200)
+        if not failed:
+            return []
+
+        active_titles: set[str] = set()
+        for status in (TaskStatus.PENDING, TaskStatus.ASSIGNED, TaskStatus.RUNNING):
+            tasks = await self._task_board.list_tasks(status=status, limit=500)
+            for item in tasks:
+                title = item.title.strip().lower()
+                if title:
+                    active_titles.add(title)
+
+        now = datetime.now(timezone.utc)
+        age_limit = max_age or self._auto_rescue_max_age
+        rescued: list[Task] = []
+
+        for task in sorted(failed, key=lambda item: item.updated_at, reverse=True):
+            if len(rescued) >= limit:
+                break
+            if now - task.updated_at > age_limit:
+                continue
+
+            meta = dict(task.metadata or {})
+            rescue_count = int(meta.get("auto_rescue_count", 0) or 0)
+            if rescue_count >= self._auto_rescue_max_attempts:
+                continue
+            if meta.get("auto_rescue_disabled"):
+                continue
+
+            title_key = task.title.strip().lower()
+            if title_key and title_key in active_titles:
+                continue
+
+            source = self._derive_failure_source(task)
+            failure_class = self._orchestrator._classify_failure(
+                error=str(task.result or ""),
+                source=source,
+                task=task,
+            )
+            if failure_class not in {"connection_transient", "long_timeout"}:
+                continue
+
+            retry_count, max_retries, backoff = self._orchestrator._resolve_retry_policy(task)
+            max_retries, backoff = self._orchestrator._apply_failure_retry_defaults(
+                task=task,
+                meta=meta,
+                failure_class=failure_class,
+                max_retries=max_retries,
+                backoff=backoff,
+            )
+
+            meta["retry_count"] = 0
+            meta["max_retries"] = max_retries
+            meta["retry_backoff_seconds"] = backoff
+            meta.pop("retry_not_before_epoch", None)
+            meta.pop("active_claim", None)
+            meta["last_failure_class"] = failure_class
+            meta["auto_rescue_count"] = rescue_count + 1
+            meta["auto_rescued_at"] = now.isoformat()
+            meta["auto_rescue_reason"] = "daemon.failure_rescue_sweep"
+
+            await self._task_board.requeue(
+                task.id,
+                reason="Requeued by automatic failure rescue sweep",
+                metadata=meta,
+            )
+            refreshed = await self._task_board.get(task.id)
+            if refreshed is not None:
+                rescued.append(refreshed)
+                if title_key:
+                    active_titles.add(title_key)
+
+        if rescued and self._memory is not None:
+            await self._memory.remember(
+                f"Automatic rescue sweep requeued {len(rescued)} failed task(s)",
+                layer=MemoryLayer.SESSION,
+                source="swarm.failure_rescue",
+            )
+        return rescued
+
+    async def _director_pulse(self) -> list[Task]:
+        """Run one ThinkodynamicDirector vision pulse.
+
+        Uses the lightweight ``sense()`` path (ecosystem signal ranking and
+        opportunity detection) to avoid shelling out to an LLM on every tick.
+        Tasks are enqueued via the director's own ``enqueue_workflow`` which
+        writes to the shared task-board database.
+
+        Returns:
+            List of tasks created by the director, possibly empty.
+        """
+        if self._director is None:
+            return []
+
+        try:
+            # Saturation guard: skip if the director already has plenty in-flight
+            active_count = await self._director.active_director_task_count()
+            if active_count >= self._director.max_active_tasks:
+                logger.debug(
+                    "Director pulse skipped: director tasks saturated (%d active)",
+                    active_count,
+                )
+                return []
+
+            # STRATOSPHERE: lightweight ecosystem sensing (no LLM call)
+            sense_result = self._director.sense()
+            opportunities = sense_result.get("opportunities", [])
+            if not opportunities:
+                logger.debug("Director pulse: no opportunities detected")
+                return []
+
+            # GROUND: compile a workflow from the top opportunity
+            import time as _time
+
+            cycle_id = f"swarm-{int(_time.time())}"
+            # Build a minimal vision stub so compile_workflow_from_vision
+            # falls through to the opportunity-based planner.
+            vision_stub: dict[str, Any] = {
+                "proposed_tasks": [],
+                "vision_text": "",
+                "vision_success": False,
+                "seeds": [],
+                "ecosystem": sense_result.get("signals", {}),
+            }
+            workflow = self._director.compile_workflow_from_vision(
+                vision_stub, sense_result, cycle_id=cycle_id,
+            )
+
+            # DELEGATE: enqueue into the shared task board
+            created = await self._director.enqueue_workflow(workflow)
+
+            if created and self._memory is not None:
+                primary = sense_result.get("primary")
+                label = primary.title if primary else "ecosystem signal"
+                await self._memory.remember(
+                    f"Director pulse: {len(created)} task(s) from '{label}'",
+                    layer=MemoryLayer.SESSION,
+                    source="thinkodynamic_director",
+                )
+                logger.info(
+                    "Director pulse created %d task(s) for '%s'",
+                    len(created),
+                    label,
+                )
+            return created
+
+        except Exception as exc:
+            logger.debug("Director pulse error: %s", exc)
+            return []
+
     async def run(self, interval: float | None = None) -> None:
         """Run the orchestration loop with Garden Daemon parameters.
 
@@ -661,6 +1093,21 @@ class SwarmManager:
                     logger.debug("Rate limit: autonomous contribution not allowed yet")
                     allow_autonomous_generation = False
 
+                rescued: list[Task] = []
+                now = datetime.now(timezone.utc)
+                if (
+                    self._last_auto_rescue_scan is None
+                    or (now - self._last_auto_rescue_scan).total_seconds()
+                    >= self._auto_rescue_scan_interval_seconds
+                ):
+                    rescued = await self.rescue_recent_failures()
+                    self._last_auto_rescue_scan = now
+                    if rescued:
+                        logger.info(
+                            "Rescued %d failed task(s) into pending",
+                            len(rescued),
+                        )
+
                 reopened: list[Any] = []
                 if allow_autonomous_generation:
                     reopened = await self.spawn_latent_gold_tasks()
@@ -672,7 +1119,36 @@ class SwarmManager:
 
                 # Run orchestration tick
                 activity = await self._orchestrator.tick()
-                did_work = bool(reopened) or self._tick_did_work(activity)
+                coordination = await self.coordination_status(refresh=False)
+                synthesized = await self.spawn_coordination_tasks(
+                    coordination=coordination
+                )
+                if synthesized:
+                    logger.info(
+                        "Spawned %d coordination synthesis task(s)",
+                        len(synthesized),
+                    )
+
+                # Thinkodynamic Director: periodic vision pulse
+                director_proposals: list[Task] = []
+                self._tick_count += 1
+                if (
+                    allow_autonomous_generation
+                    and self._director is not None
+                    and self._tick_count % self._director_interval_ticks == 0
+                ):
+                    try:
+                        director_proposals = await self._director_pulse()
+                    except Exception as exc:
+                        logger.debug("Director pulse failed (non-fatal): %s", exc)
+
+                did_work = (
+                    bool(reopened)
+                    or bool(rescued)
+                    or bool(synthesized)
+                    or bool(director_proposals)
+                    or self._tick_did_work(activity)
+                )
 
                 # Record contribution only when work actually occurred.
                 if did_work:
@@ -717,6 +1193,29 @@ class SwarmManager:
             tasks_failed=task_stats.get("failed", 0),
             uptime_seconds=time.monotonic() - self._start_time,
         )
+
+    async def coordination_status(
+        self,
+        *,
+        refresh: bool = True,
+    ) -> SwarmCoordinationState:
+        """Return a compact sheaf-based coordination snapshot."""
+        if self._orchestrator is None:
+            return SwarmCoordinationState()
+        getter = getattr(self._orchestrator, "get_coordination_summary", None)
+        if getter is None:
+            return SwarmCoordinationState()
+        payload = getter(refresh=refresh)
+        if asyncio.iscoroutine(payload):
+            payload = await payload
+        if not isinstance(payload, dict):
+            return SwarmCoordinationState()
+        state = SwarmCoordinationState.model_validate(payload)
+        if refresh and self._engine is not None:
+            observer = getattr(self._engine, "observe_coordination_summary", None)
+            if callable(observer):
+                observer(state.model_dump())
+        return state
 
     # --- Thread ---
 
@@ -824,6 +1323,34 @@ class SwarmManager:
             result["stigmergy"] = True
             result["stigmergy_density"] = self._stigmergy.density()
         return result
+
+    async def gaia_health(self) -> dict:
+        """Return GAIA ecological subsystem health."""
+        try:
+            from dharma_swarm.gaia_ledger import GaiaLedger
+            from dharma_swarm.gaia_fitness import (
+                EcologicalFitness,
+                detect_goodhart_drift,
+            )
+
+            ledger_dir = self.state_dir / "gaia_ledger"
+            if not ledger_dir.exists():
+                return {"status": "no_ledger", "message": "No GAIA ledger found"}
+
+            ledger = GaiaLedger(data_dir=ledger_dir)
+            ledger.load()
+            eco = EcologicalFitness()
+            drift = detect_goodhart_drift(ledger)
+
+            return {
+                "status": "active",
+                "weighted_fitness": eco.weighted_score(ledger),
+                "is_drifting": drift["is_drifting"],
+                "verification_ratio": drift["verification_ratio"],
+                "diagnosis": drift["diagnosis"],
+            }
+        except Exception as e:
+            return {"status": "error", "message": str(e)}
 
     async def propose_claim(
         self, statement: str, category: str = "operational", **kwargs: Any

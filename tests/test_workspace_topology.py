@@ -69,6 +69,7 @@ def test_build_workspace_topology_flags_split_repos(monkeypatch):
     assert topo["dgc"]["fully_merged"] is False
     assert topo["sab"]["fully_merged"] is False
     assert topo["operator_answer"]["dgc_code_authority"] == "/home/test/dharma_swarm"
+    assert topo["merge_summary"] is None
     assert "legacy_dgc_repo_still_mutating" in topo["warnings"]
     assert "dgc_core_wrapper_dirty" in topo["warnings"]
     assert "sab_strategy_repo_separate_from_runtime" in topo["warnings"]
@@ -115,6 +116,11 @@ def test_cmd_canonical_status_prints_operator_answer(monkeypatch, capsys):
             ],
         },
         "warnings": ["legacy_dgc_repo_still_mutating"],
+        "merge_summary": {
+            "snapshot": "20260308T233449Z",
+            "legacy_imported": "786",
+            "tracked": "8/8",
+        },
         "operator_answer": {
             "dgc_code_authority": "/tmp/dharma_swarm",
             "sab_runtime_authority": "/tmp/dharmic-agora",
@@ -133,6 +139,7 @@ def test_cmd_canonical_status_prints_operator_answer(monkeypatch, capsys):
     out = capsys.readouterr().out
     assert "Use /tmp/dharma_swarm as DGC code authority" in out
     assert "legacy_dgc_repo_still_mutating" in out
+    assert "legacy_imported=786" in out
 
 
 def test_cmd_canonical_status_json(monkeypatch, capsys):
@@ -142,6 +149,7 @@ def test_cmd_canonical_status_json(monkeypatch, capsys):
         "dgc": {"canonical_repo": "/tmp/dharma_swarm", "fully_merged": True, "repos": []},
         "sab": {"canonical_repo": "/tmp/dharmic-agora", "fully_merged": True, "repos": []},
         "warnings": [],
+        "merge_summary": None,
         "operator_answer": {
             "dgc_code_authority": "/tmp/dharma_swarm",
             "sab_runtime_authority": "/tmp/dharmic-agora",

@@ -5,6 +5,7 @@ from __future__ import annotations
 import sqlite3
 import pytest
 
+from dharma_swarm.engine.conversation_memory import ConversationMemoryStore
 from dharma_swarm.engine.event_memory import EventMemoryStore
 from dharma_swarm.engine.retrieval_feedback import RetrievalFeedbackStore
 from dharma_swarm.engine.unified_index import UnifiedIndex
@@ -82,6 +83,60 @@ async def test_orchestrator_lifecycle_ingests_event_memory(tmp_path) -> None:
 
 
 @pytest.mark.asyncio
+async def test_orchestrator_attaches_latent_gold_metadata_and_event(tmp_path) -> None:
+    db_path = tmp_path / "memory_plane.db"
+    store = EventMemoryStore(db_path)
+    await store.init_db()
+    convo = ConversationMemoryStore(db_path)
+    convo.record_turn(
+        session_id="sess-gold",
+        task_id="task-seed",
+        role="user",
+        content=(
+            "We could build a memory palace index for task recall.\n"
+            "Maybe preserve abandoned branches from the conversation."
+        ),
+        turn_index=1,
+    )
+
+    board = _Board()
+    board.tasks = [
+        Task(
+            id="task-1",
+            title="Build memory palace index",
+            description="Preserve abandoned branches in task recall.",
+        )
+    ]
+    orch = Orchestrator(
+        task_board=board,
+        agent_pool=_Pool(),
+        event_memory=store,
+        ledger_dir=tmp_path,
+        session_id="sess-gold",
+    )
+
+    await orch._assign_dispatch(TaskDispatch(task_id="task-1", agent_id="a1"))
+
+    updates = [
+        fields["metadata"]
+        for task_id, fields in board.updates
+        if task_id == "task-1"
+        and isinstance(fields.get("metadata"), dict)
+        and fields["metadata"].get("latent_gold_count", 0) > 0
+    ]
+    assert updates
+    assert any(
+        "memory palace index" in item.get("text", "").lower()
+        for item in updates[0]["latent_gold"]
+    )
+
+    rows = await store.search_events("latent_gold_attached", limit=10)
+    latent_events = [r for r in rows if r["payload"].get("action_name") == "latent_gold_attached"]
+    assert latent_events
+    assert latent_events[0]["payload"]["latent_gold_count"] >= 1
+
+
+@pytest.mark.asyncio
 async def test_event_and_note_records_coexist_in_one_search_surface(tmp_path) -> None:
     db_path = tmp_path / "memory_plane.db"
     store = EventMemoryStore(db_path)
@@ -129,6 +184,7 @@ def test_read_memory_context_uses_memory_plane_when_strange_loop_absent(tmp_path
 
     result = read_memory_context(state_dir=tmp_path)
     assert "[retrieval:note]" in result
+    assert "context.md" in result
     assert "Memory palace context" in result
 
 
@@ -181,6 +237,8 @@ async def test_read_memory_context_query_prefers_temporal_hits(tmp_path) -> None
 
     assert "[retrieval:runtime_event]" in result
     assert "evt-new" not in result  # rendered text, not raw ids
+    assert "action.event" in result
+    assert "orchestrator.lifecycle" in result
     assert "memory_shift" in result or "memory shift" in result
     feedback = RetrievalFeedbackStore(db_path).recent(limit=5)
     assert len(feedback) == 1

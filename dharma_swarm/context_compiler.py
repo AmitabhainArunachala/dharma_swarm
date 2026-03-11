@@ -1,0 +1,510 @@
+"""Canonical runtime context compiler for DGC vNext."""
+
+from __future__ import annotations
+
+import hashlib
+import json
+from dataclasses import dataclass, field
+from datetime import datetime, timezone
+from pathlib import Path
+from typing import Any, Iterable
+
+from dharma_swarm.memory_lattice import MemoryLattice, MemoryRecallHit
+from dharma_swarm.provider_policy import ProviderPolicyRouter, ProviderRouteRequest
+from dharma_swarm.runtime_state import (
+    ArtifactRecord,
+    ContextBundleRecord,
+    DelegationRun,
+    MemoryFact,
+    RuntimeStateStore,
+    SessionState,
+    WorkspaceLease,
+)
+
+
+def _canonical_json(data: dict[str, Any]) -> str:
+    return json.dumps(data, sort_keys=True, separators=(",", ":"), ensure_ascii=True)
+
+
+def _sha256(payload: str) -> str:
+    return hashlib.sha256(payload.encode("utf-8")).hexdigest()
+
+
+def _utc_now() -> datetime:
+    return datetime.now(timezone.utc)
+
+
+def _approx_char_budget(token_budget: int) -> int:
+    return max(800, max(1, int(token_budget)) * 4)
+
+
+def _dedupe(values: Iterable[str]) -> list[str]:
+    seen: set[str] = set()
+    out: list[str] = []
+    for value in values:
+        item = str(value).strip()
+        if not item or item in seen:
+            continue
+        seen.add(item)
+        out.append(item)
+    return out
+
+
+def _truncate(text: str, max_chars: int) -> str:
+    if max_chars <= 0:
+        return ""
+    if len(text) <= max_chars:
+        return text
+    if max_chars <= 20:
+        return text[:max_chars]
+    return text[: max_chars - 15].rstrip() + "\n... [truncated]"
+
+
+@dataclass(frozen=True)
+class ContextSection:
+    name: str
+    priority: int
+    content: str
+    source_refs: list[str] = field(default_factory=list)
+    metadata: dict[str, Any] = field(default_factory=dict)
+
+    def as_dict(self) -> dict[str, Any]:
+        return {
+            "name": self.name,
+            "priority": self.priority,
+            "content": self.content,
+            "source_refs": list(self.source_refs),
+            "metadata": dict(self.metadata),
+        }
+
+
+class ContextCompiler:
+    """Compile reproducible, budgeted context bundles from canonical state."""
+
+    _SECTION_WEIGHTS = {
+        "Governance": 0.10,
+        "Operator Intent": 0.12,
+        "Task State": 0.16,
+        "Always-On Memory": 0.14,
+        "Recent Session": 0.12,
+        "Retrieved Recall": 0.14,
+        "Durable Facts": 0.10,
+        "Artifacts": 0.06,
+        "Workspace": 0.06,
+    }
+
+    def __init__(
+        self,
+        *,
+        runtime_state: RuntimeStateStore,
+        memory_lattice: MemoryLattice,
+        provider_policy: ProviderPolicyRouter | None = None,
+    ) -> None:
+        self.runtime_state = runtime_state
+        self.memory_lattice = memory_lattice
+        self.provider_policy = provider_policy or ProviderPolicyRouter()
+
+    async def compile_bundle(
+        self,
+        *,
+        session_id: str,
+        task_id: str = "",
+        run_id: str = "",
+        operator_intent: str = "",
+        task_description: str = "",
+        query: str | None = None,
+        token_budget: int = 1200,
+        policy_constraints: list[str] | None = None,
+        provider_request: ProviderRouteRequest | None = None,
+        workspace_root: Path | str | None = None,
+        active_paths: list[Path | str] | None = None,
+        metadata: dict[str, Any] | None = None,
+    ) -> ContextBundleRecord:
+        await self.runtime_state.init_db()
+        await self.memory_lattice.init_db()
+
+        session = await self.runtime_state.get_session(session_id)
+        runs = await self.runtime_state.list_delegation_runs(
+            session_id=session_id,
+            task_id=task_id or None,
+            limit=5,
+        )
+        facts = await self.runtime_state.list_memory_facts(
+            session_id=session_id,
+            task_id=task_id or None,
+            truth_state="promoted",
+            limit=6,
+        )
+        artifacts = await self.runtime_state.list_artifacts(
+            session_id=session_id,
+            task_id=task_id or None,
+            run_id=run_id or None,
+            limit=6,
+        )
+        leases = await self.runtime_state.list_workspace_leases(
+            holder_run_id=run_id or None,
+            active_only=True,
+            limit=6,
+        )
+        recent_events = await self.memory_lattice.replay_session(session_id, limit=6)
+        recall_query = self._compose_recall_query(
+            operator_intent=operator_intent,
+            task_description=task_description,
+            query=query,
+            task_id=task_id,
+        )
+        recall_hits = (
+            await self.memory_lattice.recall(
+                recall_query,
+                limit=6,
+                session_id=session_id,
+                task_id=task_id or None,
+            )
+            if recall_query
+            else []
+        )
+        always_on = await self.memory_lattice.always_on_context(max_chars=_approx_char_budget(token_budget) // 4)
+        sections = self._build_sections(
+            session=session,
+            task_id=task_id,
+            run_id=run_id,
+            operator_intent=operator_intent,
+            task_description=task_description,
+            policy_constraints=policy_constraints or [],
+            provider_request=provider_request,
+            always_on=always_on,
+            recent_events=recent_events,
+            recall_hits=recall_hits,
+            facts=facts,
+            artifacts=artifacts,
+            workspace_root=Path(workspace_root).expanduser() if workspace_root else None,
+            active_paths=[Path(item).expanduser() for item in (active_paths or [])],
+            runs=runs,
+            leases=leases,
+        )
+
+        char_budget = _approx_char_budget(token_budget)
+        rendered_text, trimmed_sections = self._fit_sections(sections, char_budget)
+        source_refs = _dedupe(
+            ref
+            for section in trimmed_sections
+            for ref in section.source_refs
+        )
+        created_at = _utc_now()
+        checksum = _sha256(
+            _canonical_json(
+                {
+                    "session_id": session_id,
+                    "task_id": task_id,
+                    "run_id": run_id,
+                    "rendered_text": rendered_text,
+                    "source_refs": source_refs,
+                }
+            )
+        )
+        bundle = ContextBundleRecord(
+            bundle_id=self.runtime_state.new_bundle_id(),
+            session_id=session_id,
+            task_id=task_id,
+            run_id=run_id,
+            token_budget=int(token_budget),
+            rendered_text=rendered_text,
+            sections=[section.as_dict() for section in trimmed_sections],
+            source_refs=source_refs,
+            checksum=checksum,
+            created_at=created_at,
+            metadata=dict(metadata or {}),
+        )
+        saved = await self.runtime_state.record_context_bundle(bundle)
+        if session is not None:
+            await self.runtime_state.upsert_session(
+                SessionState(
+                    session_id=session.session_id,
+                    operator_id=session.operator_id,
+                    status=session.status,
+                    current_task_id=task_id or session.current_task_id,
+                    active_bundle_id=saved.bundle_id,
+                    metadata=session.metadata,
+                    created_at=session.created_at,
+                    updated_at=created_at,
+                )
+            )
+        return saved
+
+    def _compose_recall_query(
+        self,
+        *,
+        operator_intent: str,
+        task_description: str,
+        query: str | None,
+        task_id: str,
+    ) -> str:
+        if query:
+            return str(query).strip()
+        parts = [operator_intent.strip(), task_description.strip(), task_id.strip()]
+        return " ".join(part for part in parts if part).strip()
+
+    def _build_sections(
+        self,
+        *,
+        session: SessionState | None,
+        task_id: str,
+        run_id: str,
+        operator_intent: str,
+        task_description: str,
+        policy_constraints: list[str],
+        provider_request: ProviderRouteRequest | None,
+        always_on: str,
+        recent_events: list[dict[str, Any]],
+        recall_hits: list[MemoryRecallHit],
+        facts: list[MemoryFact],
+        artifacts: list[ArtifactRecord],
+        workspace_root: Path | None,
+        active_paths: list[Path],
+        runs: list[DelegationRun],
+        leases: list[WorkspaceLease],
+    ) -> list[ContextSection]:
+        sections: list[ContextSection] = []
+
+        governance_lines = [f"- {item}" for item in policy_constraints if str(item).strip()]
+        if provider_request is not None:
+            decision = self.provider_policy.route(provider_request)
+            governance_lines.extend(
+                [
+                    f"- provider_path={decision.path.value}",
+                    f"- provider_selected={decision.selected_provider.value}",
+                    f"- provider_confidence={decision.confidence:.2f}",
+                ]
+            )
+            if decision.reasons:
+                governance_lines.append(
+                    f"- provider_reasons={', '.join(str(reason) for reason in decision.reasons)}"
+                )
+        if governance_lines:
+            sections.append(
+                ContextSection(
+                    name="Governance",
+                    priority=1,
+                    content="\n".join(governance_lines),
+                    source_refs=[],
+                )
+            )
+
+        if operator_intent.strip():
+            sections.append(
+                ContextSection(
+                    name="Operator Intent",
+                    priority=2,
+                    content=operator_intent.strip(),
+                    source_refs=[],
+                )
+            )
+
+        task_lines: list[str] = []
+        if task_id:
+            task_lines.append(f"- task_id={task_id}")
+        if run_id:
+            task_lines.append(f"- run_id={run_id}")
+        if task_description.strip():
+            task_lines.append(f"- task={task_description.strip()}")
+        if session is not None:
+            task_lines.append(f"- session_status={session.status}")
+            if session.current_task_id:
+                task_lines.append(f"- session_current_task={session.current_task_id}")
+        for run in runs[:3]:
+            task_lines.append(
+                f"- delegation_run {run.run_id} status={run.status} assigned_to={run.assigned_to}"
+            )
+        for lease in leases[:3]:
+            task_lines.append(
+                f"- workspace_lease {lease.mode} {lease.zone_path} holder={lease.holder_run_id or 'n/a'}"
+            )
+        if task_lines:
+            sections.append(
+                ContextSection(
+                    name="Task State",
+                    priority=3,
+                    content="\n".join(task_lines),
+                    source_refs=[],
+                )
+            )
+
+        if always_on.strip():
+            sections.append(
+                ContextSection(
+                    name="Always-On Memory",
+                    priority=4,
+                    content=always_on.strip(),
+                    source_refs=[],
+                )
+            )
+
+        if recent_events:
+            event_lines = []
+            for event in recent_events[:6]:
+                payload = event.get("payload", {})
+                event_lines.append(
+                    "- "
+                    + " | ".join(
+                        [
+                            str(event.get("emitted_at", "")),
+                            str(event.get("event_type", "")),
+                            str(payload.get("action_name", payload.get("summary", "")))[:120],
+                        ]
+                    ).strip(" |")
+                )
+            sections.append(
+                ContextSection(
+                    name="Recent Session",
+                    priority=5,
+                    content="\n".join(event_lines),
+                    source_refs=[f"session:{session.session_id}"] if session is not None else [],
+                )
+            )
+
+        if recall_hits:
+            recall_lines = []
+            refs: list[str] = []
+            for hit in recall_hits[:6]:
+                refs.append(str(hit.metadata.get("source_path") or hit.record_id))
+                recall_lines.append(
+                    f"- [{hit.source_kind}] score={hit.score:.3f} | {hit.text[:180].replace(chr(10), ' ')}"
+                )
+            sections.append(
+                ContextSection(
+                    name="Retrieved Recall",
+                    priority=6,
+                    content="\n".join(recall_lines),
+                    source_refs=_dedupe(refs),
+                )
+            )
+
+        if facts:
+            fact_lines = []
+            refs = []
+            for fact in facts[:6]:
+                refs.append(f"memory://{fact.fact_id}")
+                fact_lines.append(
+                    f"- [{fact.truth_state}] {fact.fact_kind} ({fact.confidence:.2f}) {fact.text[:180]}"
+                )
+            sections.append(
+                ContextSection(
+                    name="Durable Facts",
+                    priority=7,
+                    content="\n".join(fact_lines),
+                    source_refs=refs,
+                )
+            )
+
+        if artifacts:
+            artifact_lines = []
+            refs = []
+            for artifact in artifacts[:6]:
+                refs.extend(
+                    [
+                        item
+                        for item in (artifact.payload_path, artifact.manifest_path)
+                        if item
+                    ]
+                )
+                payload_label = Path(artifact.payload_path).name if artifact.payload_path else "-"
+                artifact_lines.append(
+                    f"- [{artifact.promotion_state}] {artifact.artifact_kind} payload={payload_label}"
+                )
+            sections.append(
+                ContextSection(
+                    name="Artifacts",
+                    priority=8,
+                    content="\n".join(artifact_lines),
+                    source_refs=_dedupe(refs),
+                )
+            )
+
+        workspace_content, workspace_refs = self._workspace_section(
+            workspace_root=workspace_root,
+            active_paths=active_paths,
+        )
+        if workspace_content:
+            sections.append(
+                ContextSection(
+                    name="Workspace",
+                    priority=9,
+                    content=workspace_content,
+                    source_refs=workspace_refs,
+                )
+            )
+
+        return sections
+
+    def _fit_sections(
+        self,
+        sections: list[ContextSection],
+        char_budget: int,
+    ) -> tuple[str, list[ContextSection]]:
+        kept: list[ContextSection] = []
+        for section in sorted(sections, key=lambda item: item.priority):
+            weight = self._SECTION_WEIGHTS.get(section.name, 0.08)
+            header = f"## {section.name}\n"
+            section_budget = max(180, int(char_budget * weight))
+            content = _truncate(section.content.strip(), max(80, section_budget - len(header)))
+            if not content:
+                continue
+            kept.append(
+                ContextSection(
+                    name=section.name,
+                    priority=section.priority,
+                    content=content,
+                    source_refs=section.source_refs,
+                    metadata=section.metadata,
+                )
+            )
+
+        rendered = self._render(kept)
+        while kept and len(rendered) > char_budget:
+            last = kept[-1]
+            available = max(40, len(last.content) - (len(rendered) - char_budget) - 20)
+            if available < 60 and len(kept) > 1:
+                kept.pop()
+            else:
+                kept[-1] = ContextSection(
+                    name=last.name,
+                    priority=last.priority,
+                    content=_truncate(last.content, available),
+                    source_refs=last.source_refs,
+                    metadata=last.metadata,
+                )
+            rendered = self._render(kept)
+        return rendered, kept
+
+    def _render(self, sections: list[ContextSection]) -> str:
+        parts = ["# DGC Context Bundle"]
+        for section in sections:
+            parts.append(f"\n## {section.name}\n{section.content}")
+        return "\n".join(parts).strip()
+
+    def _workspace_section(
+        self,
+        *,
+        workspace_root: Path | None,
+        active_paths: list[Path],
+    ) -> tuple[str, list[str]]:
+        refs: list[str] = []
+        lines: list[str] = []
+
+        candidates: list[Path] = []
+        if active_paths:
+            candidates.extend(active_paths)
+        elif workspace_root and workspace_root.exists():
+            files = [path for path in workspace_root.rglob("*") if path.is_file()]
+            files.sort(key=lambda item: item.stat().st_mtime, reverse=True)
+            candidates.extend(files[:6])
+
+        for path in candidates[:6]:
+            try:
+                refs.append(str(path))
+                snippet = path.read_text(errors="ignore")[:180].replace("\n", " ")
+            except Exception:
+                snippet = ""
+            lines.append(f"- {path.name}: {snippet}")
+
+        return ("\n".join(lines), _dedupe(refs))

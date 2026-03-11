@@ -130,6 +130,34 @@ def _is_local_http_base(url: str) -> bool:
     )
 
 
+def _accelerator_mode() -> str:
+    configured = any(
+        os.getenv(key, "").strip()
+        for key in ("DGC_NVIDIA_RAG_URL", "DGC_NVIDIA_INGEST_URL", "DGC_DATA_FLYWHEEL_URL")
+    )
+    raw = os.getenv("DGC_ACCELERATOR_MODE", "enabled" if configured else "dormant")
+    mode = raw.strip().lower()
+    return mode or ("enabled" if configured else "dormant")
+
+
+def _accelerators_enabled() -> bool:
+    return _accelerator_mode() not in {"0", "off", "disabled", "none", "dormant"}
+
+
+def _step_uses_accelerators(step: str) -> bool:
+    low = step.strip().lower()
+    return any(p in low for p in INFRA_STEP_PATTERNS) or any(
+        token in low
+        for token in (
+            "dgc rag health",
+            "dgc flywheel jobs",
+            "rag retrieval quality",
+            "flywheel endpoint",
+            "nvidia rag",
+        )
+    )
+
+
 def _resolve_default_path(env_key: str, fallback: Path) -> Path:
     custom = os.getenv(env_key, "").strip()
     if custom:
@@ -422,7 +450,7 @@ def command_matrix() -> list[CycleCommand]:
         ),
     ]
 
-    if os.getenv("DGC_NVIDIA_RAG_URL") or os.getenv("DGC_NVIDIA_INGEST_URL"):
+    if _accelerators_enabled() and (os.getenv("DGC_NVIDIA_RAG_URL") or os.getenv("DGC_NVIDIA_INGEST_URL")):
         cmds.extend(
             [
                 CycleCommand(
@@ -442,7 +470,7 @@ def command_matrix() -> list[CycleCommand]:
             ]
         )
 
-    if os.getenv("DGC_DATA_FLYWHEEL_URL"):
+    if _accelerators_enabled() and os.getenv("DGC_DATA_FLYWHEEL_URL"):
         cmds.append(
             CycleCommand(
                 "flywheel-jobs",
@@ -586,6 +614,8 @@ def rank_top_steps(steps: list[str], limit: int = 20) -> list[dict[str, Any]]:
         priority, category = step_priority(step)
         if category == "noise" and not include_noise:
             continue
+        if category == "infra" and not _accelerators_enabled():
+            continue
         entry = by_norm.setdefault(
             norm,
             {"count": 0, "example": step, "priority": priority, "category": category},
@@ -671,6 +701,9 @@ def execute_single_step(step: str) -> dict[str, Any]:
 
     def _result(action: str, rc: int, verify: str) -> dict[str, Any]:
         return {"step": text, "action": action, "rc": rc, "verify": verify}
+
+    if _step_uses_accelerators(text) and not _accelerators_enabled():
+        return _result("skip_disabled_accelerator", 0, f"accelerator_mode={_accelerator_mode()}")
 
     if "nvidia rag services" in low:
         rag_base = os.getenv("DGC_NVIDIA_RAG_URL", "http://127.0.0.1:8081/v1").rstrip("/")
@@ -980,6 +1013,8 @@ def execute_ranked_steps(ranked: list[dict[str, Any]], max_actions: int) -> list
     for item in ranked:
         if len(actions) >= max_actions:
             break
+        if _step_uses_accelerators(str(item.get("example", ""))) and not _accelerators_enabled():
+            continue
         _push_if_meaningful(execute_single_step(item["example"]))
 
     fallback_steps = [
@@ -1008,9 +1043,9 @@ def build_todo(
     failed = [r for r in command_results if r["rc"] != 0]
     labels = {r["label"] for r in failed}
 
-    if "rag-health" in labels or "ingest-health" in labels:
+    if _accelerators_enabled() and ("rag-health" in labels or "ingest-health" in labels):
         steps.append("Bring up NVIDIA RAG services and verify `/v1/health` on ports 8081/8082.")
-    if "flywheel-jobs" in labels:
+    if _accelerators_enabled() and "flywheel-jobs" in labels:
         steps.append("Fix Data Flywheel endpoint mapping and confirm `GET /api/jobs` returns 200.")
     if {"tests-provider", "tests-integrations", "tests-engine"} & labels:
         steps.append("Triage failing test subset and patch root cause before next cycle.")

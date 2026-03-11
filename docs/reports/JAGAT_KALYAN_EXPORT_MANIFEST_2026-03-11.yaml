@@ -1,0 +1,53 @@
+spinout:
+  target_repo_name: planetary-reciprocity-commons
+  package_name: planetary_reciprocity_commons
+  incubation_dir: spinouts/planetary_reciprocity_commons_seed
+  status: prepared
+  rationale: >
+    Keep DGC as orchestration/cognition and move reciprocity-domain logic into
+    a dedicated repo when the initiative needs its own roadmap and collaborators.
+
+keep_in_dgc:
+  native_level:
+    - dharma_swarm/thinkodynamic_director.py
+    - dharma_swarm/skills/jagat-kalyan.skill.md
+    - dharma_swarm/skills/jagat_kalyan.skill.md
+    - dharma_swarm/integrations/reciprocity_commons.py
+    - tests/test_integrations_reciprocity_commons.py
+  role:
+    - mission synthesis
+    - opportunity scanning
+    - workflow decomposition
+    - delegation into swarm agents
+    - external service integration
+
+move_to_spinout:
+  code:
+    - dharma_swarm/ai_reciprocity_ledger.py
+    - dharma_swarm/gaia_ledger.py
+    - dharma_swarm/gaia_verification.py
+    - dharma_swarm/gaia_fitness.py
+    - tests/test_ai_reciprocity_ledger.py
+    - tests/test_gaia.py
+  docs:
+    - docs/reports/JAGAT_KALYAN_CANONICAL_SYNTHESIS_2026-03-11.md
+    - docs/reports/PLANETARY_RECIPROCITY_COMMONS_PUBLIC_BRIEF_2026-03-11.md
+    - docs/reports/ANTHROPIC_RECIPROCITY_COMMONS_CONCEPT_NOTE_2026-03-11.md
+    - docs/reports/PLANETARY_RECIPROCITY_COMMONS_GOVERNANCE_CHARTER_2026-03-11.md
+    - docs/reports/AI_RECIPROCITY_LEDGER_V0_SCHEMA_2026-03-11.yaml
+
+shared_contracts:
+  duplicate_temporarily:
+    - AI activity payload schema
+    - obligation payload schema
+    - outcome payload schema
+    - summary response schema
+  long_term_boundary:
+    - DGC publishes events to reciprocity service
+    - DGC reads summary/health/pilot status from reciprocity service
+
+next_moves:
+  - create separate repo from spinouts/planetary_reciprocity_commons_seed
+  - migrate move_to_spinout files
+  - keep DGC wired through integrations/reciprocity_commons.py
+  - add service API in new repo for activities, obligations, projects, outcomes, summary
