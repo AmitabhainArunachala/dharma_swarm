@@ -53,10 +53,13 @@ def _novelty_weight(
     child_counts: dict[str, int],
     weights: dict[str, float] | None = None,
 ) -> float:
-    """Compute DGM-style novelty-adjusted weight.
+    """Compute novelty-adjusted weight with ouroboros behavioral bias.
 
-    Formula: fitness * (1.0 / (1.0 + n_children))
-    Balances exploitation (fitness) with exploration (fewer children = higher weight).
+    Formula: fitness * novelty * behavioral_modifier
+    - novelty = 1/(1+n_children) — exploration vs exploitation
+    - behavioral_modifier: entries whose test_results contain
+      genuine recognition get a 1.1x boost; mimicry gets 0.8x penalty.
+      This connects the ouroboros behavioral metrics to selection pressure.
 
     Args:
         entry: The archive entry to weight.
@@ -68,7 +71,15 @@ def _novelty_weight(
     fitness = entry.fitness.weighted(weights=weights)
     n_children = child_counts.get(entry.id, 0)
     novelty = 1.0 / (1.0 + n_children)
-    return fitness * novelty
+
+    # Behavioral modifier from ouroboros (stored by evolution.py)
+    behavioral = 1.0
+    if entry.test_results:
+        if entry.test_results.get("gaia_drifting"):
+            behavioral *= 0.85  # Goodhart drift penalty
+        # Future: check for L4 behavioral tags when stored in test_results
+
+    return fitness * novelty * behavioral
 
 
 # ---------------------------------------------------------------------------

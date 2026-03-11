@@ -375,6 +375,66 @@ def test_build_darwin_status_text_reports_reciprocity_summary(tmp_path, monkeypa
     )
 
 
+def test_build_darwin_status_text_reports_stale_reciprocity_rows_separately(
+    tmp_path,
+    monkeypatch,
+):
+    import dharma_swarm.tui_helpers as helpers
+
+    dharma_dir = tmp_path / ".dharma"
+    observations_dir = dharma_dir / "evolution" / "observations"
+    observations_dir.mkdir(parents=True)
+    stale_summary = {
+        "chain_valid": False,
+        "invariant_issues": 2,
+        "challenged_claims": 1,
+        "total_routed_usd": 5000.0,
+        "issue_codes": [
+            "routing_missing_project",
+            "verified_ecology_missing_audit",
+        ],
+        "stale": True,
+    }
+    (observations_dir / "coalgebra_stream.jsonl").write_text(
+        "\n".join(
+            [
+                json.dumps(
+                    {
+                        "cycle_id": "cycle-a",
+                        "component": "child.py",
+                        "reciprocity": {
+                            "chain_valid": False,
+                            "invariant_issues": 2,
+                            "challenged_claims": 1,
+                            "total_routed_usd": 5000.0,
+                            "issue_codes": [
+                                "routing_missing_project",
+                                "verified_ecology_missing_audit",
+                            ],
+                        },
+                    }
+                ),
+                json.dumps(
+                    {
+                        "cycle_id": "cycle-b",
+                        "component": "other.py",
+                        "reciprocity": stale_summary,
+                    }
+                ),
+            ]
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+
+    monkeypatch.setattr(helpers, "DHARMA_STATE", dharma_dir)
+    result = build_darwin_status_text()
+
+    assert "reciprocity invalid_chain=1/1" in result
+    assert "stale_rows=1/2" in result
+    assert "stale=yes" in result
+
+
 def test_build_runtime_status_text_reports_runtime_db_state(tmp_path, monkeypatch):
     import dharma_swarm.tui_helpers as helpers
 

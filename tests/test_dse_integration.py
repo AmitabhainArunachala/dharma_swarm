@@ -546,6 +546,194 @@ async def test_after_cycle_persists_reciprocity_summary_to_observation_log(tmp_p
     assert persisted[-1]["reciprocity"] == integrator._window.observations[-1]["reciprocity"]
 
 
+async def test_after_cycle_omits_invalid_reciprocity_summary_from_observation_log(tmp_path):
+    integrator = DSEIntegrator(
+        archive_path=tmp_path / "evolution",
+        coordination_interval=10,
+    )
+    integrator._reciprocity_enabled = True
+
+    class _BadReciprocity:
+        async def ledger_summary(self) -> dict[str, object]:
+            return {
+                "service": "reciprocity_commons",
+                "summary_type": "ledger_summary",
+                "actors": 2,
+                "activities": 1,
+                "projects": 1,
+                "obligations": 3,
+                "active_obligations": 2,
+                "challenged_claims": 0,
+                "invariant_issues": 0,
+                "chain_valid": "true",
+                "total_obligation_usd": 25000,
+                "total_routed_usd": 5000,
+            }
+
+    integrator._reciprocity = _BadReciprocity()
+
+    current = ArchiveEntry(
+        component="child.py",
+        change_type="mutation",
+        description="child archive state",
+        diff="- parent\n+ child\n",
+        fitness=FitnessScore(correctness=0.4, dharmic_alignment=1.0, safety=1.0),
+        status="applied",
+    )
+
+    await integrator.after_cycle(
+        CycleResult(
+            cycle_id="cycle-invalid-reciprocity",
+            proposals_submitted=1,
+            proposals_archived=1,
+            best_fitness=0.4,
+            reflection="Reflection on the cycle",
+            lessons_learned=["current lesson"],
+        ),
+        [_proposal("child.py", "proposal description")],
+        [current],
+    )
+
+    assert "reciprocity" not in integrator._window.observations[-1]
+    assert integrator._last_reciprocity_summary is None
+    assert integrator._last_reciprocity_error == "chain_valid must be a boolean"
+
+    obs_path = tmp_path / "evolution" / "observations" / "coalgebra_stream.jsonl"
+    persisted = [
+        json.loads(line)
+        for line in obs_path.read_text(encoding="utf-8").splitlines()
+        if line.strip()
+    ]
+    assert "reciprocity" not in persisted[-1]
+
+
+async def test_after_cycle_marks_reciprocity_summary_stale_when_refresh_is_invalid(tmp_path):
+    integrator = DSEIntegrator(
+        archive_path=tmp_path / "evolution",
+        coordination_interval=10,
+        reciprocity_interval=1,
+    )
+    integrator._reciprocity_enabled = True
+
+    class _FlakyReciprocity:
+        def __init__(self) -> None:
+            self.calls = 0
+
+        async def ledger_summary(self) -> dict[str, object]:
+            self.calls += 1
+            if self.calls == 1:
+                return {
+                    "service": "reciprocity_commons",
+                    "summary_type": "ledger_summary",
+                    "actors": 2,
+                    "activities": 1,
+                    "projects": 1,
+                    "obligations": 3,
+                    "active_obligations": 2,
+                    "challenged_claims": 1,
+                    "invariant_issues": 0,
+                    "chain_valid": True,
+                    "total_obligation_usd": 25000,
+                    "total_routed_usd": 5000,
+                    "issues": [],
+                }
+            return {
+                "service": "reciprocity_commons",
+                "summary_type": "ledger_summary",
+                "actors": 2,
+                "activities": 1,
+                "projects": 1,
+                "obligations": 3,
+                "active_obligations": 2,
+                "challenged_claims": 1,
+                "invariant_issues": 0,
+                "chain_valid": True,
+                "total_obligation_usd": 25000,
+                "total_routed_usd": "nan",
+                "issues": [],
+            }
+
+    flaky = _FlakyReciprocity()
+    integrator._reciprocity = flaky
+
+    current = ArchiveEntry(
+        component="child.py",
+        change_type="mutation",
+        description="child archive state",
+        diff="- parent\n+ child\n",
+        fitness=FitnessScore(correctness=0.4, dharmic_alignment=1.0, safety=1.0),
+        status="applied",
+    )
+    proposal = _proposal("child.py", "proposal description")
+
+    await integrator.after_cycle(
+        CycleResult(
+            cycle_id="cycle-reciprocity-valid",
+            proposals_submitted=1,
+            proposals_archived=1,
+            best_fitness=0.4,
+            reflection="Reflection on the cycle",
+            lessons_learned=["current lesson"],
+        ),
+        [proposal],
+        [current],
+    )
+    await integrator.after_cycle(
+        CycleResult(
+            cycle_id="cycle-reciprocity-stale",
+            proposals_submitted=1,
+            proposals_archived=1,
+            best_fitness=0.45,
+            reflection="Reflection on the cycle again",
+            lessons_learned=["current lesson again"],
+        ),
+        [proposal],
+        [current],
+    )
+
+    assert flaky.calls == 2
+    assert integrator._last_reciprocity_summary == {
+        "source": "reciprocity_commons",
+        "summary_type": "ledger_summary",
+        "actors": 2,
+        "activities": 1,
+        "projects": 1,
+        "obligations": 3,
+        "active_obligations": 2,
+        "challenged_claims": 1,
+        "invariant_issues": 0,
+        "chain_valid": True,
+        "total_obligation_usd": 25000.0,
+        "total_routed_usd": 5000.0,
+        "issue_codes": [],
+    }
+    assert integrator._last_reciprocity_error == "total_routed_usd must be a finite number >= 0"
+    assert integrator._window.observations[-1]["reciprocity"] == {
+        "source": "reciprocity_commons",
+        "summary_type": "ledger_summary",
+        "actors": 2,
+        "activities": 1,
+        "projects": 1,
+        "obligations": 3,
+        "active_obligations": 2,
+        "challenged_claims": 1,
+        "invariant_issues": 0,
+        "chain_valid": True,
+        "total_obligation_usd": 25000.0,
+        "total_routed_usd": 5000.0,
+        "issue_codes": [],
+        "stale": True,
+    }
+
+    obs_path = tmp_path / "evolution" / "observations" / "coalgebra_stream.jsonl"
+    persisted = [
+        json.loads(line)
+        for line in obs_path.read_text(encoding="utf-8").splitlines()
+        if line.strip()
+    ]
+    assert persisted[-1]["reciprocity"] == integrator._window.observations[-1]["reciprocity"]
+
+
 async def test_after_cycle_records_canonical_evaluations_when_binding_available(tmp_path):
     class _FakeOuroboros:
         def observe_cycle_text(
@@ -1083,6 +1271,40 @@ def test_get_coordination_context_includes_ouroboros_warning(tmp_path):
     }
 
 
+def test_get_coordination_summary_returns_canonical_snapshot_shape(tmp_path):
+    integrator = DSEIntegrator(
+        archive_path=tmp_path / "evolution",
+        coordination_interval=10,
+    )
+    integrator._last_coordination = CoordinationSnapshot(
+        timestamp="2026-03-11T00:00:00+00:00",
+        global_truths=2,
+        productive_disagreements=1,
+        cohomological_dimension=1,
+        is_globally_coherent=False,
+        global_truth_claims=["shared truth", "shared route"],
+        disagreement_claims=["route-policy"],
+        rv_trend=-0.1,
+        fitness_trend=0.2,
+        observation_count=4,
+        approaching_fixed_point=True,
+    )
+
+    assert integrator.get_coordination_summary() == {
+        "observed_at": "2026-03-11T00:00:00+00:00",
+        "global_truths": 2,
+        "productive_disagreements": 1,
+        "cohomological_dimension": 1,
+        "is_globally_coherent": False,
+        "global_truth_claim_keys": ["shared truth", "shared route"],
+        "productive_disagreement_claim_keys": ["route-policy"],
+        "rv_trend": -0.1,
+        "fitness_trend": 0.2,
+        "observation_count": 4,
+        "approaching_fixed_point": True,
+    }
+
+
 def test_get_coordination_context_includes_reciprocity_warning(tmp_path):
     integrator = DSEIntegrator(
         archive_path=tmp_path / "evolution",
@@ -1135,4 +1357,63 @@ def test_get_coordination_context_includes_reciprocity_warning(tmp_path):
             "verified_ecology_missing_audit",
         ],
         "stale": False,
+    }
+
+
+def test_get_coordination_context_exposes_health_without_coordination_snapshot(tmp_path):
+    integrator = DSEIntegrator(
+        archive_path=tmp_path / "evolution",
+        coordination_interval=10,
+    )
+
+    class _FakeOuroboros:
+        def detect_cycle_drift(self) -> dict[str, object]:
+            return {
+                "drifting": True,
+                "reason": "high_mimicry",
+                "mimicry_rate": 0.25,
+                "avg_witness_stance": 0.4,
+            }
+
+    integrator._ouroboros = _FakeOuroboros()
+    integrator._last_reciprocity_summary = {
+        "source": "reciprocity_commons",
+        "summary_type": "ledger_summary",
+        "actors": 2,
+        "activities": 1,
+        "projects": 1,
+        "obligations": 3,
+        "active_obligations": 2,
+        "challenged_claims": 0,
+        "invariant_issues": 1,
+        "chain_valid": False,
+        "total_obligation_usd": 25000.0,
+        "total_routed_usd": 5000.0,
+        "issue_codes": ["routing_missing_project"],
+    }
+    integrator._last_reciprocity_error = "refresh failed"
+
+    context = integrator.get_coordination_context()
+
+    assert "global_truths" not in context
+    assert context["ouroboros_warning"] == (
+        "Behavioral drift detected: high_mimicry. "
+        "Mimicry rate: 25.0%, witness stance: 0.40"
+    )
+    assert context["ouroboros_health"] == {
+        "mimicry_rate": 0.25,
+        "witness_stance": 0.4,
+        "drifting": True,
+    }
+    assert context["reciprocity_warning"] == (
+        "Reciprocity integrity pressure (stale): chain_valid=False, "
+        "invariant_issues=1, challenged_claims=0, "
+        "issue_codes=routing_missing_project"
+    )
+    assert context["reciprocity_health"] == {
+        "chain_valid": False,
+        "invariant_issues": 1,
+        "challenged_claims": 0,
+        "issue_codes": ["routing_missing_project"],
+        "stale": True,
     }

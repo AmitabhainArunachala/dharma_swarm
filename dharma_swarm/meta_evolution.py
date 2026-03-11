@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import math
 import random
 from pathlib import Path
 from statistics import mean, pvariance
@@ -148,25 +149,83 @@ class MetaEvolutionEngine:
             return
         payload = {
             "observed_at": str(summary.get("observed_at", "")),
-            "global_truths": int(summary.get("global_truths", 0) or 0),
-            "productive_disagreements": int(
-                summary.get("productive_disagreements", 0) or 0
+            "global_truths": self._coordination_int(
+                summary.get("global_truths"),
             ),
-            "cohomological_dimension": int(
-                summary.get("cohomological_dimension", 0) or 0
+            "productive_disagreements": self._coordination_int(
+                summary.get("productive_disagreements"),
             ),
-            "is_globally_coherent": bool(
-                summary.get("is_globally_coherent", True)
+            "cohomological_dimension": self._coordination_int(
+                summary.get("cohomological_dimension"),
             ),
-            "productive_disagreement_claim_keys": [
-                str(value).strip()
-                for value in summary.get("productive_disagreement_claim_keys", [])
-                if str(value).strip()
-            ],
+            "is_globally_coherent": self._coordination_bool(
+                summary.get("is_globally_coherent"),
+                default=True,
+            ),
+            "global_truth_claim_keys": self._coordination_string_list(
+                summary.get("global_truth_claim_keys"),
+            ),
+            "productive_disagreement_claim_keys": self._coordination_string_list(
+                summary.get("productive_disagreement_claim_keys"),
+            ),
+            "rv_trend": self._coordination_float(summary.get("rv_trend")),
+            "fitness_trend": self._coordination_float(summary.get("fitness_trend")),
+            "observation_count": self._coordination_int(
+                summary.get("observation_count"),
+            ),
+            "approaching_fixed_point": self._coordination_bool(
+                summary.get("approaching_fixed_point"),
+                default=False,
+            ),
         }
         self._coordination_history.append(payload)
         if len(self._coordination_history) > self.n_object_cycles:
             self._coordination_history = self._coordination_history[-self.n_object_cycles :]
+
+    @staticmethod
+    def _coordination_int(value: Any, default: int = 0) -> int:
+        if value is None or isinstance(value, bool):
+            return default
+        try:
+            parsed = int(value)
+        except (TypeError, ValueError):
+            try:
+                parsed_float = float(value)
+            except (TypeError, ValueError):
+                return default
+            if not math.isfinite(parsed_float):
+                return default
+            parsed = int(parsed_float)
+        return max(default, parsed)
+
+    @staticmethod
+    def _coordination_float(value: Any, default: float = 0.0) -> float:
+        if value is None or isinstance(value, bool):
+            return default
+        try:
+            parsed = float(value)
+        except (TypeError, ValueError):
+            return default
+        if not math.isfinite(parsed):
+            return default
+        return parsed
+
+    @staticmethod
+    def _coordination_bool(value: Any, *, default: bool) -> bool:
+        if isinstance(value, bool):
+            return value
+        return default
+
+    @staticmethod
+    def _coordination_string_list(value: Any) -> list[str]:
+        if not isinstance(value, list):
+            return []
+        items: list[str] = []
+        for raw in value:
+            item = str(raw).strip()
+            if item and item not in items:
+                items.append(item)
+        return items
 
     def _load_meta_archive(self) -> None:
         """Load historical meta-configurations from JSONL."""
@@ -293,6 +352,33 @@ class MetaEvolutionEngine:
             min(1.0, float(item.get("cohomological_dimension", 0)))
             for item in recent
         ]
+        truth_scarcity = [
+            1.0
+            if (
+                int(item.get("global_truths", 0) or 0) == 0
+                and int(item.get("productive_disagreements", 0) or 0) > 0
+            )
+            else 0.0
+            for item in recent
+        ]
+        trend_regression = [
+            min(
+                1.0,
+                max(0.0, -float(item.get("rv_trend", 0.0) or 0.0))
+                + max(0.0, -float(item.get("fitness_trend", 0.0) or 0.0)),
+            )
+            for item in recent
+        ]
+        fixed_point_stall = [
+            1.0
+            if bool(item.get("approaching_fixed_point")) and (
+                not bool(item.get("is_globally_coherent", True))
+                or float(item.get("rv_trend", 0.0) or 0.0) <= 0.0
+                or float(item.get("fitness_trend", 0.0) or 0.0) <= 0.0
+            )
+            else 0.0
+            for item in recent
+        ]
         counts: dict[str, int] = {}
         for item in recent:
             for claim_key in item.get("productive_disagreement_claim_keys", []):
@@ -304,10 +390,13 @@ class MetaEvolutionEngine:
         )
         return min(
             1.0,
-            (0.45 * mean(disagreement_levels))
-            + (0.30 * mean(incoherence))
-            + (0.15 * mean(dimensionality))
-            + (0.10 * repeated_claims),
+            (0.32 * mean(disagreement_levels))
+            + (0.24 * mean(incoherence))
+            + (0.12 * mean(dimensionality))
+            + (0.10 * repeated_claims)
+            + (0.08 * mean(truth_scarcity))
+            + (0.08 * mean(trend_regression))
+            + (0.06 * mean(fixed_point_stall)),
         )
 
     def _current_coordination_summary(self) -> dict[str, Any]:

@@ -24,6 +24,7 @@ from __future__ import annotations
 
 import json
 import logging
+import math
 import os
 from datetime import datetime, timezone
 from pathlib import Path
@@ -105,6 +106,63 @@ def _coerce_text(value: Any, *, default: str = "") -> str:
         return default
     text = str(value).strip()
     return text or default
+
+
+def _validated_nonnegative_int(
+    value: Any,
+    *,
+    key: str,
+    default: int = 0,
+) -> int:
+    if value is None:
+        return default
+    if isinstance(value, bool):
+        raise ValueError(f"{key} must be an integer >= 0")
+    try:
+        parsed = int(value)
+    except (TypeError, ValueError):
+        try:
+            parsed_float = float(value)
+        except (TypeError, ValueError) as exc:
+            raise ValueError(f"{key} must be an integer >= 0") from exc
+        if not math.isfinite(parsed_float) or not parsed_float.is_integer():
+            raise ValueError(f"{key} must be an integer >= 0")
+        parsed = int(parsed_float)
+    if parsed < 0:
+        raise ValueError(f"{key} must be an integer >= 0")
+    return parsed
+
+
+def _validated_nonnegative_float(
+    value: Any,
+    *,
+    key: str,
+    default: float = 0.0,
+) -> float:
+    if value is None:
+        return default
+    if isinstance(value, bool):
+        raise ValueError(f"{key} must be a finite number >= 0")
+    try:
+        parsed = float(value)
+    except (TypeError, ValueError) as exc:
+        raise ValueError(f"{key} must be a finite number >= 0") from exc
+    if not math.isfinite(parsed) or parsed < 0:
+        raise ValueError(f"{key} must be a finite number >= 0")
+    return parsed
+
+
+def _validated_bool(
+    value: Any,
+    *,
+    key: str,
+    default: bool = False,
+) -> bool:
+    if value is None:
+        return default
+    if isinstance(value, bool):
+        return value
+    raise ValueError(f"{key} must be a boolean")
 
 
 def _reciprocity_lane_enabled() -> bool:
@@ -537,31 +595,56 @@ class DSEIntegrator:
     @staticmethod
     def _normalize_reciprocity_summary(summary_payload: dict[str, Any]) -> dict[str, Any]:
         return {
-            "source": str(
+            "source": _coerce_text(
                 summary_payload.get("service")
-                or summary_payload.get("source")
-                or "reciprocity_commons"
+                or summary_payload.get("source"),
+                default="reciprocity_commons",
             ),
-            "summary_type": str(summary_payload.get("summary_type") or "ledger_summary"),
-            "actors": _coerce_int(summary_payload.get("actors")),
-            "activities": _coerce_int(summary_payload.get("activities")),
-            "projects": _coerce_int(summary_payload.get("projects")),
-            "obligations": _coerce_int(summary_payload.get("obligations")),
-            "active_obligations": _coerce_int(
-                summary_payload.get("active_obligations")
+            "summary_type": _coerce_text(
+                summary_payload.get("summary_type"),
+                default="ledger_summary",
             ),
-            "challenged_claims": _coerce_int(
-                summary_payload.get("challenged_claims")
+            "actors": _validated_nonnegative_int(
+                summary_payload.get("actors"),
+                key="actors",
             ),
-            "invariant_issues": _coerce_int(summary_payload.get("invariant_issues")),
-            "chain_valid": _coerce_bool(
+            "activities": _validated_nonnegative_int(
+                summary_payload.get("activities"),
+                key="activities",
+            ),
+            "projects": _validated_nonnegative_int(
+                summary_payload.get("projects"),
+                key="projects",
+            ),
+            "obligations": _validated_nonnegative_int(
+                summary_payload.get("obligations"),
+                key="obligations",
+            ),
+            "active_obligations": _validated_nonnegative_int(
+                summary_payload.get("active_obligations"),
+                key="active_obligations",
+            ),
+            "challenged_claims": _validated_nonnegative_int(
+                summary_payload.get("challenged_claims"),
+                key="challenged_claims",
+            ),
+            "invariant_issues": _validated_nonnegative_int(
+                summary_payload.get("invariant_issues"),
+                key="invariant_issues",
+            ),
+            "chain_valid": _validated_bool(
                 summary_payload.get("chain_valid"),
-                default=False,
+                key="chain_valid",
+                default=True,
             ),
-            "total_obligation_usd": _coerce_float(
-                summary_payload.get("total_obligation_usd")
+            "total_obligation_usd": _validated_nonnegative_float(
+                summary_payload.get("total_obligation_usd"),
+                key="total_obligation_usd",
             ),
-            "total_routed_usd": _coerce_float(summary_payload.get("total_routed_usd")),
+            "total_routed_usd": _validated_nonnegative_float(
+                summary_payload.get("total_routed_usd"),
+                key="total_routed_usd",
+            ),
             "issue_codes": _reciprocity_issue_codes(summary_payload),
         }
 
@@ -865,33 +948,55 @@ class DSEIntegrator:
         except Exception:
             pass
 
+    def get_coordination_summary(self) -> dict[str, Any]:
+        """Return the latest sheaf snapshot in the canonical summary shape."""
+        snap = self._last_coordination
+        if snap is None:
+            return {}
+        return {
+            "observed_at": snap.timestamp,
+            "global_truths": snap.global_truths,
+            "productive_disagreements": snap.productive_disagreements,
+            "cohomological_dimension": snap.cohomological_dimension,
+            "is_globally_coherent": snap.is_globally_coherent,
+            "global_truth_claim_keys": list(snap.global_truth_claims),
+            "productive_disagreement_claim_keys": list(snap.disagreement_claims),
+            "rv_trend": snap.rv_trend,
+            "fitness_trend": snap.fitness_trend,
+            "observation_count": snap.observation_count,
+            "approaching_fixed_point": snap.approaching_fixed_point,
+        }
+
     def get_coordination_context(self) -> dict[str, Any]:
         """Return a context dict suitable for injection into agent prompts.
 
         This feeds sheaf results back into the engine: global truths become
         guidance, disagreements become exploration targets.
         """
-        if self._last_coordination is None:
-            return {}
-        snap = self._last_coordination
         context: dict[str, Any] = {
-            "globally_coherent": snap.is_globally_coherent,
-            "global_truths": snap.global_truth_claims[:5],
-            "productive_disagreements": snap.disagreement_claims[:5],
-            "rv_trend": snap.rv_trend,
-            "fitness_trend": snap.fitness_trend,
-            "approaching_fixed_point": snap.approaching_fixed_point,
         }
-        if snap.productive_disagreements > 0:
-            context["exploration_hint"] = (
-                f"H¹ ≠ 0: {snap.productive_disagreements} productive disagreements "
-                f"across components. Consider exploring: {', '.join(snap.disagreement_claims[:3])}"
+        snap = self._last_coordination
+        if snap is not None:
+            context.update(
+                {
+                    "globally_coherent": snap.is_globally_coherent,
+                    "global_truths": snap.global_truth_claims[:5],
+                    "productive_disagreements": snap.disagreement_claims[:5],
+                    "rv_trend": snap.rv_trend,
+                    "fitness_trend": snap.fitness_trend,
+                    "approaching_fixed_point": snap.approaching_fixed_point,
+                }
             )
-        if snap.approaching_fixed_point:
-            context["convergence_hint"] = (
-                "System approaching observation fixed point (L5). "
-                "Consider bolder mutations to escape or validate stability."
-            )
+            if snap.productive_disagreements > 0:
+                context["exploration_hint"] = (
+                    f"H¹ ≠ 0: {snap.productive_disagreements} productive disagreements "
+                    f"across components. Consider exploring: {', '.join(snap.disagreement_claims[:3])}"
+                )
+            if snap.approaching_fixed_point:
+                context["convergence_hint"] = (
+                    "System approaching observation fixed point (L5). "
+                    "Consider bolder mutations to escape or validate stability."
+                )
 
         # Ouroboros: inject behavioral drift warnings
         if self._ouroboros is not None:

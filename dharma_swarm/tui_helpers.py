@@ -411,6 +411,9 @@ def build_darwin_status_text(
         l4_like_count = 0
         reciprocity_count = 0
         invalid_chain_count = 0
+        fresh_reciprocity_count = 0
+        fresh_invalid_chain_count = 0
+        stale_reciprocity_count = 0
         latest_reciprocity: dict | None = None
         for row in dse_rows:
             ouroboros = row.get("ouroboros")
@@ -434,8 +437,15 @@ def build_darwin_status_text(
             reciprocity = row.get("reciprocity")
             if isinstance(reciprocity, dict):
                 reciprocity_count += 1
+                is_stale = _as_bool(reciprocity.get("stale"))
+                if is_stale:
+                    stale_reciprocity_count += 1
+                else:
+                    fresh_reciprocity_count += 1
                 if not _as_bool(reciprocity.get("chain_valid")):
                     invalid_chain_count += 1
+                    if not is_stale:
+                        fresh_invalid_chain_count += 1
                 latest_reciprocity = reciprocity
 
         lines.append("  [cyan]DSE observation stream[/cyan]")
@@ -466,7 +476,21 @@ def build_darwin_status_text(
             lines.append("    ouroboros " + "  ".join(ouroboros_summary))
 
         if reciprocity_count > 0 and latest_reciprocity is not None:
-            reciprocity_summary = [f"invalid_chain={invalid_chain_count}/{reciprocity_count}"]
+            invalid_numerator = (
+                fresh_invalid_chain_count
+                if fresh_reciprocity_count > 0
+                else invalid_chain_count
+            )
+            invalid_denominator = (
+                fresh_reciprocity_count
+                if fresh_reciprocity_count > 0
+                else reciprocity_count
+            )
+            reciprocity_summary = [f"invalid_chain={invalid_numerator}/{invalid_denominator}"]
+            if stale_reciprocity_count > 0:
+                reciprocity_summary.append(
+                    f"stale_rows={stale_reciprocity_count}/{reciprocity_count}"
+                )
             latest_issues = _maybe_int(latest_reciprocity.get("invariant_issues"))
             if latest_issues is not None:
                 reciprocity_summary.append(f"latest_issues={latest_issues}")

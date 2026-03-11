@@ -257,6 +257,42 @@ async def test_coordination_uncertainty_pressure_biases_gradients(engine_paths):
 
 
 @pytest.mark.asyncio
+async def test_stalled_fixed_point_increases_coordination_pressure(engine_paths):
+    stable_engine = DarwinEngine(**engine_paths)
+    await stable_engine.init()
+    stable = MetaEvolutionEngine(stable_engine, n_object_cycles_per_meta=2)
+    stable.observe_coordination_summary(
+        {
+            "observed_at": "2026-03-10T00:00:00+00:00",
+            "productive_disagreements": 0,
+            "cohomological_dimension": 0,
+            "is_globally_coherent": True,
+            "rv_trend": 0.1,
+            "fitness_trend": 0.05,
+            "approaching_fixed_point": False,
+        }
+    )
+
+    stalled_engine = DarwinEngine(**engine_paths)
+    await stalled_engine.init()
+    stalled = MetaEvolutionEngine(stalled_engine, n_object_cycles_per_meta=2)
+    stalled.observe_coordination_summary(
+        {
+            "observed_at": "2026-03-10T01:00:00+00:00",
+            "productive_disagreements": 0,
+            "cohomological_dimension": 0,
+            "is_globally_coherent": True,
+            "rv_trend": -0.2,
+            "fitness_trend": -0.05,
+            "approaching_fixed_point": True,
+        }
+    )
+
+    assert stable._coordination_uncertainty_pressure() == 0.0
+    assert stalled._coordination_uncertainty_pressure() > stable._coordination_uncertainty_pressure()
+
+
+@pytest.mark.asyncio
 async def test_meta_cycle_reports_coordination_pressure(engine_paths, tmp_path, monkeypatch):
     engine = DarwinEngine(**engine_paths)
     await engine.init()
@@ -269,10 +305,16 @@ async def test_meta_cycle_reports_coordination_pressure(engine_paths, tmp_path, 
     meta.observe_coordination_summary(
         {
             "observed_at": "2026-03-10T00:00:00+00:00",
+            "global_truths": 0,
             "productive_disagreements": 1,
             "cohomological_dimension": 1,
             "is_globally_coherent": False,
+            "global_truth_claim_keys": ["shared-route"],
             "productive_disagreement_claim_keys": ["route-policy"],
+            "rv_trend": -0.2,
+            "fitness_trend": -0.05,
+            "observation_count": 4,
+            "approaching_fixed_point": True,
         }
     )
 
@@ -286,3 +328,8 @@ async def test_meta_cycle_reports_coordination_pressure(engine_paths, tmp_path, 
 
     assert result.coordination_pressure > 0.0
     assert result.coordination_summary["productive_disagreements"] == 1
+    assert result.coordination_summary["global_truth_claim_keys"] == ["shared-route"]
+    assert result.coordination_summary["rv_trend"] == -0.2
+    assert result.coordination_summary["fitness_trend"] == -0.05
+    assert result.coordination_summary["observation_count"] == 4
+    assert result.coordination_summary["approaching_fixed_point"] is True

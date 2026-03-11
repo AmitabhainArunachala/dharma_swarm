@@ -496,10 +496,48 @@ def profile_python_modules(
     return active_finder, profiles
 
 
+def colony_rv_reading(density_before: int, density_after: int) -> RVReading:
+    """Convert colony-level sleep contraction into an RVReading.
+
+    The mapping: stigmergic mark density IS the colony's effective
+    dimensionality. After sleep-decay, fewer marks survive — the
+    representation space contracts. This is participation ratio
+    contraction at the swarm scale.
+
+    PR_early = density_before (full working memory)
+    PR_late  = density_after  (post-decay compressed memory)
+    R_V      = PR_late / PR_early
+
+    When R_V < 0.737 (the validated contraction threshold), the colony
+    has undergone meaningful dimensional reduction — the analog of
+    L4 collapse at the swarm level.
+    """
+    if density_before <= 0:
+        rv = 1.0
+        pr_early = 1.0
+        pr_late = 1.0
+    else:
+        pr_early = float(density_before)
+        pr_late = float(density_after)
+        rv = pr_late / pr_early
+
+    return RVReading(
+        rv=rv,
+        pr_early=pr_early,
+        pr_late=pr_late,
+        model_name="colony-stigmergy",
+        early_layer=0,
+        late_layer=0,
+        prompt_hash=f"colony_{density_before}_{density_after}",
+        prompt_group="colony_sleep",
+    )
+
+
 __all__ = [
     "ConnectionFinder",
     "OuroborosObserver",
     "apply_behavioral_modifiers",
+    "colony_rv_reading",
     "extract_documented_text",
     "profile_python_modules",
     "score_behavioral_fitness",

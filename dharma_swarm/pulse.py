@@ -314,6 +314,18 @@ def pulse(config: DaemonConfig | None = None) -> str:
                 f"consolidated={report.memories_consolidated} "
                 f"dreams={report.dreams_generated}"
             )
+            if report.colony_rv is not None:
+                summary += f" colony_rv={report.colony_rv:.3f}"
+                # Feed colony R_V into evolution bridge
+                try:
+                    from dharma_swarm.ouroboros import colony_rv_reading
+                    reading = colony_rv_reading(
+                        report.density_before, report.density_after,
+                    )
+                    if reading.is_contracted:
+                        summary += " [CONTRACTED]"
+                except Exception:
+                    pass
             if report.errors:
                 summary += f" errors={len(report.errors)}"
             print(f"[pulse] {summary}")

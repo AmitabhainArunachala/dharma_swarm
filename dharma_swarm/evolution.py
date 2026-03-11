@@ -773,11 +773,14 @@ class DarwinEngine:
                 proposals,
                 new_entries,
             )
+            self.last_coordination_summary = (
+                self._dse_integrator.get_coordination_context()
+            )
+            observer = getattr(self._meta_evolution_engine, "observe_coordination_summary", None)
+            if callable(observer):
+                observer(self._dse_integrator.get_coordination_summary())
 
             if snapshot is not None:
-                self.last_coordination_summary = (
-                    self._dse_integrator.get_coordination_context()
-                )
                 logger.info(
                     "DSE coordination: H⁰=%d truths, H¹=%d disagreements, "
                     "coherent=%s, rv_trend=%s, fixed_point=%s",

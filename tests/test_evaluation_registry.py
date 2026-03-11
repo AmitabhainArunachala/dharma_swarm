@@ -370,6 +370,18 @@ async def test_evaluation_registry_requires_canonical_binding_for_ouroboros_obse
             },
             "is_mimicry must be a boolean",
         ),
+        (
+            {
+                "is_mimicry": "true",
+            },
+            "is_mimicry must be a boolean",
+        ),
+        (
+            {
+                "is_genuine": 1,
+            },
+            "is_genuine must be a boolean",
+        ),
     ],
 )
 async def test_evaluation_registry_rejects_invalid_ouroboros_metrics_before_persisting(
@@ -450,6 +462,8 @@ async def test_evaluation_registry_rejects_invalid_ouroboros_metrics_before_pers
         ({"active_obligations": True}, "active_obligations must be an integer >= 0"),
         ({"total_routed_usd": "nan"}, "total_routed_usd must be a finite number >= 0"),
         ({"chain_valid": "maybe"}, "chain_valid must be a boolean"),
+        ({"chain_valid": "true"}, "chain_valid must be a boolean"),
+        ({"chain_valid": 1}, "chain_valid must be a boolean"),
     ],
 )
 async def test_evaluation_registry_rejects_invalid_reciprocity_metrics_before_persisting(

@@ -1934,3 +1934,144 @@ async def test_router_promotion_guard_allows_safe_improvement(engine):
     assert stored is not None
     assert stored.status == "promoted"
     assert stored.test_results["policy_archive_entry"]["promotion_state"] == "promoted"
+
+
+async def test_emit_coalgebra_observation_refreshes_context_every_cycle(engine_paths):
+    eng = DarwinEngine(**engine_paths)
+    await eng.init()
+
+    class _FakeIntegrator:
+        def __init__(self) -> None:
+            self.context: dict[str, object] = {
+                "reciprocity_warning": "Reciprocity integrity pressure: chain_valid=False",
+                "reciprocity_health": {
+                    "chain_valid": False,
+                    "invariant_issues": 1,
+                    "challenged_claims": 0,
+                    "issue_codes": ["routing_missing_project"],
+                    "stale": False,
+                },
+            }
+            self.calls = 0
+
+        async def after_cycle(self, result, proposals, new_entries):
+            del result, proposals, new_entries
+            self.calls += 1
+            return None
+
+        def get_coordination_context(self) -> dict[str, object]:
+            return dict(self.context)
+
+        def get_coordination_summary(self) -> dict[str, object]:
+            return {}
+
+    eng._dse_integrator = _FakeIntegrator()
+    result = CycleResult(
+        cycle_id="cycle-dse-context",
+        proposals_submitted=1,
+        proposals_archived=1,
+        best_fitness=0.4,
+    )
+    proposal = _safe_proposal(component="child.py", description="tighten context refresh")
+    entry = ArchiveEntry(
+        component="child.py",
+        change_type="mutation",
+        description="tighten context refresh",
+        diff="- old\n+ new\n",
+        fitness=FitnessScore(correctness=0.4, dharmic_alignment=1.0, safety=1.0),
+        status="applied",
+    )
+
+    await eng._emit_coalgebra_observation(result, [proposal], [entry])
+
+    assert eng._dse_integrator.calls == 1
+    assert eng.last_coordination_summary == {
+        "reciprocity_warning": "Reciprocity integrity pressure: chain_valid=False",
+        "reciprocity_health": {
+            "chain_valid": False,
+            "invariant_issues": 1,
+            "challenged_claims": 0,
+            "issue_codes": ["routing_missing_project"],
+            "stale": False,
+        },
+    }
+
+    eng._dse_integrator.context = {}
+    eng.last_coordination_summary = {"stale": "old-context"}
+
+    await eng._emit_coalgebra_observation(result, [proposal], [entry])
+
+    assert eng._dse_integrator.calls == 2
+    assert eng.last_coordination_summary == {}
+
+
+async def test_emit_coalgebra_observation_forwards_dse_summary_to_meta_evolution(
+    engine_paths,
+):
+    eng = DarwinEngine(**engine_paths)
+    await eng.init()
+
+    class _FakeIntegrator:
+        def __init__(self) -> None:
+            self.context = {
+                "reciprocity_warning": "Reciprocity integrity pressure: chain_valid=False",
+            }
+            self.summary = {
+                "observed_at": "2026-03-11T00:00:00+00:00",
+                "global_truths": 0,
+                "productive_disagreements": 2,
+                "cohomological_dimension": 1,
+                "is_globally_coherent": False,
+                "productive_disagreement_claim_keys": ["route-policy"],
+            }
+
+        async def after_cycle(self, result, proposals, new_entries):
+            del result, proposals, new_entries
+            return None
+
+        def get_coordination_context(self) -> dict[str, object]:
+            return dict(self.context)
+
+        def get_coordination_summary(self) -> dict[str, object]:
+            return dict(self.summary)
+
+    class _FakeMetaEvolution:
+        def __init__(self) -> None:
+            self.observed: list[dict[str, object]] = []
+
+        def observe_coordination_summary(self, summary: dict[str, object]) -> None:
+            self.observed.append(dict(summary))
+
+    eng._dse_integrator = _FakeIntegrator()
+    eng._meta_evolution_engine = _FakeMetaEvolution()
+    result = CycleResult(
+        cycle_id="cycle-dse-meta-summary",
+        proposals_submitted=1,
+        proposals_archived=1,
+        best_fitness=0.4,
+    )
+    proposal = _safe_proposal(component="child.py", description="forward dse summary")
+    entry = ArchiveEntry(
+        component="child.py",
+        change_type="mutation",
+        description="forward dse summary",
+        diff="- old\n+ new\n",
+        fitness=FitnessScore(correctness=0.4, dharmic_alignment=1.0, safety=1.0),
+        status="applied",
+    )
+
+    await eng._emit_coalgebra_observation(result, [proposal], [entry])
+
+    assert eng.last_coordination_summary == {
+        "reciprocity_warning": "Reciprocity integrity pressure: chain_valid=False",
+    }
+    assert eng._meta_evolution_engine.observed == [
+        {
+            "observed_at": "2026-03-11T00:00:00+00:00",
+            "global_truths": 0,
+            "productive_disagreements": 2,
+            "cohomological_dimension": 1,
+            "is_globally_coherent": False,
+            "productive_disagreement_claim_keys": ["route-policy"],
+        }
+    ]

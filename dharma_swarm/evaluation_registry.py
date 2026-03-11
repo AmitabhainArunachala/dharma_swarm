@@ -875,16 +875,6 @@ class EvaluationRegistry:
         value = payload.get(key)
         if isinstance(value, bool):
             return value
-        if isinstance(value, (int, float)):
-            if not math.isfinite(float(value)) or value not in (0, 1):
-                raise ValueError(f"{key} must be a boolean")
-            return bool(value)
-        if isinstance(value, str):
-            normalized = value.strip().lower()
-            if normalized in {"1", "true", "yes", "on"}:
-                return True
-            if normalized in {"0", "false", "no", "off"}:
-                return False
         raise ValueError(f"{key} must be a boolean")
 
     def _reciprocity_issue_codes(self, summary_payload: dict[str, Any]) -> list[str]:
