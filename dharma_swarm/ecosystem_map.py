@@ -81,6 +81,24 @@ ECOSYSTEM: dict[str, dict] = {
             ("~/agni-workspace/knowledge/evergreen/triple-mapping.md", "2,500 year convergent validity"),
         ],
     },
+    "jagat_kalyan": {
+        "description": "Jagat Kalyan -- AI-coordinated ecological restoration",
+        "paths": [
+            ("~/jagat_kalyan/", "JK project root -- FastAPI MVP"),
+            ("~/jagat_kalyan/app.py", "FastAPI application (17KB)"),
+            ("~/jagat_kalyan/matching.py", "Claude API + heuristic matching engine"),
+            ("~/jagat_kalyan/models.py", "SQLAlchemy models (Project, Funder, Match, Outcome)"),
+            ("~/jagat_kalyan/WELFARE_TONS_SPEC.md", "Mathematical spec: W = C*E*A*B*V*P (69KB)"),
+            ("~/jagat_kalyan/anthropic_grant_application.md", "$35K Anthropic Economic Futures grant app"),
+            ("~/jagat_kalyan/PARTNER_RESEARCH.md", "33 orgs across 6 categories"),
+            ("~/jagat_kalyan/CARBON_ATTRIBUTION_FEASIBILITY.md", "Per-inference carbon feasibility study"),
+            ("~/jagat_kalyan/SCOUT_LOG.md", "Autonomous intel gathering log"),
+            ("~/jagat_kalyan/EVOLUTION_LOG.md", "Codebase evolution history"),
+            ("~/jagat_kalyan/pitches/", "3 pitch variants (one-pager, Anthropic, Substack)"),
+            ("~/.dharma/shared/jk_pulse.md", "JK momentum heartbeat"),
+            ("~/.dharma/shared/jk_alert.md", "HIGH URGENCY alerts for morning brief"),
+        ],
+    },
     "dgc": {
         "description": "DGC system itself",
         "paths": [

@@ -45,6 +45,7 @@ from dharma_swarm.sheaf import (
     NoosphereSite,
 )
 from dharma_swarm.telos_gates import check_with_reflective_reroute
+from dharma_swarm.yoga_node import ConstraintVerdict, YogaScheduler
 
 logger = logging.getLogger(__name__)
 
@@ -79,11 +80,13 @@ class Orchestrator:
         ledger_dir: Path | None = None,
         session_id: str | None = None,
         event_memory: Any = None,
+        yoga: YogaScheduler | None = None,
     ) -> None:
         self._board = task_board
         self._pool = agent_pool
         self._bus = message_bus
         self._event_memory = event_memory
+        self._yoga = yoga
         self._ledger = ledger or SessionLedger(
             base_dir=ledger_dir,
             session_id=session_id,
@@ -189,6 +192,24 @@ class Orchestrator:
             agent = self._select_idle_agent(task, available)
             if agent is None:
                 break
+
+            # YogaNode constraint check — if wired, filter before dispatch
+            if self._yoga is not None:
+                checks = self._yoga.can_dispatch(task, agent)
+                blocking = [
+                    c for c in checks
+                    if c.verdict != ConstraintVerdict.ALLOW
+                ]
+                if blocking:
+                    for c in blocking:
+                        logger.info(
+                            "YogaNode blocked dispatch: task=%s agent=%s "
+                            "constraint=%s verdict=%s reason=%s",
+                            task.id, agent.id,
+                            c.constraint_name, c.verdict.value, c.reason,
+                        )
+                    continue  # skip this task, try next
+
             td = TaskDispatch(
                 task_id=task.id,
                 agent_id=agent.id,
@@ -198,6 +219,16 @@ class Orchestrator:
                 ),
             )
             await self._assign_dispatch(td)
+
+            # Record dispatch in YogaNode usage tracker
+            if self._yoga is not None:
+                cost = self._yoga.estimate_cost(task)
+                self._yoga.record_dispatch(
+                    agent_id=agent.id,
+                    provider=cost.required_providers[0] if cost.required_providers else None,
+                    estimated_tokens=cost.estimated_tokens,
+                )
+
             dispatches.append(td)
         return dispatches
 
@@ -1181,6 +1212,9 @@ class Orchestrator:
         error: str,
         source: str,
     ) -> None:
+        # Release YogaNode capacity on failure too
+        if self._yoga is not None:
+            self._yoga.record_completion(td.agent_id)
         failure_signature = self._failure_signature(error)
         retry_count, max_retries, backoff = self._resolve_retry_policy(task)
         meta = self._task_meta(task)
@@ -1487,6 +1521,9 @@ class Orchestrator:
             if self._pool is not None:
                 await self._pool.release(td.agent_id)
             self._active_dispatches.pop(td.task_id, None)
+            # Release YogaNode capacity for this agent
+            if self._yoga is not None:
+                self._yoga.record_completion(td.agent_id)
             logger.info("Task %s completed by agent %s", td.task_id, td.agent_id)
             duration_sec = max(0.0, time.monotonic() - run_started)
             self._record_progress_event(

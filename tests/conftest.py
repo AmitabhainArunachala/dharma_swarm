@@ -44,3 +44,15 @@ def state_dir(tmp_path):
 def db_path(tmp_path):
     """Provide a temporary SQLite database path."""
     return tmp_path / "test.db"
+
+
+# Prefixes whose env vars leak runtime config into routing/scheduling tests.
+_DGC_LEAK_PREFIXES = ("DGC_ROUTER_", "DGC_AGENT_")
+
+
+@pytest.fixture(autouse=True)
+def _isolate_dgc_env(monkeypatch):
+    """Strip DGC_ROUTER_* and DGC_AGENT_* env vars so tests don't inherit runtime config."""
+    for key in list(os.environ):
+        if any(key.startswith(prefix) for prefix in _DGC_LEAK_PREFIXES):
+            monkeypatch.delenv(key)

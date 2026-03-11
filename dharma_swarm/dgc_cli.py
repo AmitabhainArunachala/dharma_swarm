@@ -12,6 +12,7 @@ Usage:
   dgc status                    System status overview
   dgc runtime-status            Canonical runtime control-plane summary
   dgc mission-status            Mission-level readiness across core/accelerators
+  dgc mission-brief             Show the active mission continuity state
   dgc canonical-status          Show which DGC/SAB repos are canonical vs split
   dgc up [--background]         Start the daemon
   dgc down                      Stop the daemon
@@ -676,6 +677,35 @@ def cmd_mission_status(
         print("  Required-tracked mode failed.")
 
     return exit_code
+
+
+def cmd_mission_brief(
+    *,
+    path: str | None = None,
+    state_dir: str | None = None,
+    as_json: bool = False,
+) -> int:
+    """Show the active mission continuity state for the director."""
+    from dharma_swarm.mission_contract import load_active_mission_state, render_mission_brief
+
+    try:
+        artifact = load_active_mission_state(
+            state_dir=state_dir or DHARMA_STATE,
+            path=path,
+        )
+    except ValueError as exc:
+        print(str(exc))
+        return 1
+    if artifact is None:
+        state_root = Path(state_dir).expanduser() if state_dir else DHARMA_STATE
+        mission_path = Path(path).expanduser() if path else state_root / "mission.json"
+        print(f"No active mission state found at {mission_path}")
+        return 1
+    if as_json:
+        print(json.dumps(artifact.model_dump(mode="json"), indent=2))
+    else:
+        print(render_mission_brief(artifact))
+    return 0
 
 
 def cmd_canonical_status(*, as_json: bool = False) -> int:
@@ -2963,6 +2993,18 @@ def _build_parser() -> argparse.ArgumentParser:
             "(strict-core/require-tracked)."
         ),
     )
+    p_mbrief = sub.add_parser("mission-brief", help="Show active mission continuity state")
+    p_mbrief.add_argument("--json", action="store_true", help="Emit mission continuity as JSON")
+    p_mbrief.add_argument(
+        "--path",
+        default=None,
+        help="Explicit path to mission.json or thinkodynamic latest.json",
+    )
+    p_mbrief.add_argument(
+        "--state-dir",
+        default=None,
+        help="Override state root (defaults to ~/.dharma)",
+    )
     p_canonical = sub.add_parser("canonical-status", help="Show canonical DGC/SAB repo topology")
     p_canonical.add_argument("--json", action="store_true", help="Emit JSON report")
 
@@ -3478,6 +3520,14 @@ def main() -> None:
                 strict_core=args.strict_core,
                 require_tracked=args.require_tracked,
                 profile=args.profile,
+            )
+            if rc != 0:
+                raise SystemExit(rc)
+        case "mission-brief":
+            rc = cmd_mission_brief(
+                path=args.path,
+                state_dir=args.state_dir,
+                as_json=args.json,
             )
             if rc != 0:
                 raise SystemExit(rc)

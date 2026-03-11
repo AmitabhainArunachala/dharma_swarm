@@ -20,6 +20,7 @@ from uuid import uuid4
 from pydantic import BaseModel, Field
 
 from dharma_swarm.daemon_config import DaemonConfig, THREAD_PROMPTS
+from dharma_swarm.yoga_node import YogaScheduler
 from dharma_swarm.jikoku_instrumentation import jikoku_auto_span
 from dharma_swarm.models import (
     AgentConfig,
@@ -156,11 +157,16 @@ class SwarmManager:
         self._gatekeeper = DEFAULT_GATEKEEPER
         self._thread_mgr = ThreadManager(self._daemon, self.state_dir)
 
+        self._yoga = YogaScheduler(
+            quiet_hours=self._daemon.quiet_hours,
+            max_daily_tasks=self._daemon.max_daily_contributions * 5,
+        )
         self._orchestrator = Orchestrator(
             task_board=self._task_board,
             agent_pool=self._agent_pool,
             message_bus=self._message_bus,
             event_memory=self._event_memory,
+            yoga=self._yoga,
         )
 
         self._running = True

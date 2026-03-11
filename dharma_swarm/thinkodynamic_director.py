@@ -22,6 +22,7 @@ from __future__ import annotations
 import argparse
 import asyncio
 import json
+import logging
 import os
 import random
 import re
@@ -37,6 +38,7 @@ from dharma_swarm.jikoku_samaya import JikokuTracer
 from dharma_swarm.models import Task, TaskPriority, TaskStatus
 from dharma_swarm.task_board import TaskBoard
 
+logger = logging.getLogger(__name__)
 
 ROOT = Path.home() / "dharma_swarm"
 STATE = Path.home() / ".dharma"
@@ -495,6 +497,16 @@ def _json_default(value: Any) -> Any:
     raise TypeError(f"Cannot serialize {type(value)!r}")
 
 
+def _read_json(path: Path) -> dict[str, Any] | None:
+    """Read a JSON file, returning None if missing or corrupt."""
+    if not path.exists():
+        return None
+    try:
+        return json.loads(path.read_text(encoding="utf-8"))
+    except (json.JSONDecodeError, OSError):
+        return None
+
+
 def _write_json(path: Path, payload: dict[str, Any]) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(
@@ -699,7 +711,71 @@ def read_ecosystem_state() -> dict[str, Any]:
     return state
 
 
-def invoke_claude_vision(
+def _read_recent_task_titles(depth: int = 8) -> list[str]:
+    """Read task titles from the last *depth* TD cycles.
+
+    Used by the loop breaker to suppress repeated plans.
+    """
+    cycle_log = STATE / "logs" / "thinkodynamic_director" / "cycles.jsonl"
+    if not cycle_log.exists():
+        return []
+    try:
+        lines = cycle_log.read_text(encoding="utf-8").strip().splitlines()
+    except Exception:
+        return []
+    titles: list[str] = []
+    for raw in lines[-depth:]:
+        try:
+            entry = json.loads(raw)
+            wf = entry.get("workflow", {})
+            for task_plan in wf.get("tasks", []):
+                t = task_plan.get("title", "").strip()
+                if t:
+                    titles.append(t)
+        except Exception:
+            continue
+    return titles
+
+
+def _detect_task_repetitions(depth: int = 8, threshold: int = 3) -> list[str]:
+    """Return task titles that appeared >= *threshold* times in recent cycles.
+
+    These are the anti-targets: tasks the system keeps generating but can't make
+    progress on.  The loop breaker injects these into the vision prompt so the
+    director avoids them.
+    """
+    from collections import Counter
+
+    titles = _read_recent_task_titles(depth)
+    normalized = [t.lower().strip()[:80] for t in titles]
+    counts = Counter(normalized)
+    return [title for title, n in counts.most_common() if n >= threshold]
+
+
+def _director_provider_timeout_seconds(timeout: int | float | None = None) -> float:
+    """Bound provider fallback runtime so nested-session recovery fails fast."""
+    override = os.getenv("DGC_THINKODYNAMIC_PROVIDER_TIMEOUT")
+    if override:
+        try:
+            return max(float(override), 0.1)
+        except ValueError:
+            logger.warning(
+                "Ignoring invalid DGC_THINKODYNAMIC_PROVIDER_TIMEOUT=%r",
+                override,
+            )
+    if timeout is None:
+        return 20.0
+    return max(5.0, min(30.0, float(timeout) / 12.0))
+
+
+def _usable_provider_content(content: str | None) -> bool:
+    text = (content or "").strip()
+    if not text:
+        return False
+    return not text.upper().startswith("ERROR:")
+
+
+async def invoke_claude_vision(
     seeds: list[tuple[str, str]],
     ecosystem: dict[str, Any],
     previous_visions: str,
@@ -710,8 +786,8 @@ def invoke_claude_vision(
 ) -> tuple[str, bool]:
     """Call ``claude -p`` with the contemplative seeds + ecosystem state.
 
-    Returns (vision_text, success).  The director reads at the highest
-    altitude first, then the vision cascades down into concrete proposals.
+    Falls back to direct LLM provider if running in a nested session.
+    Returns (vision_text, success).
     """
     seed_block = ""
     for text, source in seeds:
@@ -726,6 +802,20 @@ def invoke_claude_vision(
     for key, meta in meta_tasks.items():
         meta_task_lines.append(f"  - {key}: {meta['title']} ({meta['domain']}, ~{meta['estimated_hours']}h)")
     meta_text = "\n".join(meta_task_lines) if meta_task_lines else "  (no meta-tasks)"
+
+    # Loop breaker: detect repeated tasks and inject anti-targets
+    repeated = _detect_task_repetitions()
+    anti_target_block = ""
+    if repeated:
+        anti_lines = "\n".join(f"  - {t}" for t in repeated[:5])
+        anti_target_block = f"""
+LOOP DETECTED — the following tasks have been generated {3}+ times without progress.
+DO NOT propose these again. Find genuinely different work:
+{anti_lines}
+
+Instead: pick a completely different meta-task archetype, or invent something novel.
+The system is stuck in a local minimum. Break out.
+"""
 
     prompt = f"""You are the Thinkodynamic Director — the highest thinking layer of dharma_swarm.
 
@@ -742,7 +832,7 @@ Current ecosystem state:
 
 Available meta-task archetypes (use as anchors, not constraints):
 {meta_text}
-
+{anti_target_block}
 From the highest vantage you can reach:
 
 1. VISION: What is the single most important thing that wants to exist right now?
@@ -768,6 +858,7 @@ No abstractions without referents. If a task will take 8 hours and finishes in
 
 End with: NEXT_VISION: [one sentence about what to think about next cycle]"""
 
+    # --- Primary path: claude -p subprocess ---
     try:
         proc = subprocess.run(
             ["claude", "-p", prompt, "--model", model, "--output-format", "text"],
@@ -778,11 +869,119 @@ End with: NEXT_VISION: [one sentence about what to think about next cycle]"""
         )
         if proc.returncode == 0 and proc.stdout.strip():
             return proc.stdout.strip(), True
-        return f"(Claude returned rc={proc.returncode}: {(proc.stderr or '')[:200]})", False
+        cli_err = proc.stderr or ""
+        # Nested session or other failure → fall through to provider path
+        if "nested" not in cli_err.lower():
+            return f"(Claude returned rc={proc.returncode}: {cli_err[:200]})", False
+        logger.info("Claude CLI unavailable (nested session), trying provider fallback")
     except FileNotFoundError:
-        return "(Claude CLI not available — running in nested session or not installed)", False
+        logger.info("Claude CLI not found, trying provider fallback")
     except subprocess.TimeoutExpired:
         return f"(Claude timed out after {timeout}s)", False
+
+    # --- Fallback path: direct LLM provider (works inside nested sessions) ---
+    return await _vision_via_provider(
+        prompt,
+        timeout_seconds=_director_provider_timeout_seconds(timeout),
+    )
+
+
+async def _vision_via_provider(
+    prompt: str,
+    *,
+    timeout_seconds: float = 20.0,
+) -> tuple[str, bool]:
+    """Fallback vision using direct LLM provider (no subprocess).
+
+    Tries OpenRouter paid, then free tier, then Anthropic.
+    Works inside nested Claude Code sessions where ``claude -p`` cannot launch.
+    """
+    from dharma_swarm.models import LLMRequest
+
+    sys_msg = "You are the Thinkodynamic Director — the highest thinking layer of an autonomous AI swarm."
+    budget = max(float(timeout_seconds), 0.1)
+    deadline = time.monotonic() + budget
+
+    async def _attempt_provider(
+        label: str,
+        provider: Any,
+        request: LLMRequest,
+    ) -> tuple[str, bool] | None:
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            return None
+        attempt_timeout = min(remaining, max(0.1, budget / 3.0))
+        try:
+            resp = await asyncio.wait_for(provider.complete(request), timeout=attempt_timeout)
+        except asyncio.TimeoutError:
+            logger.warning("%s timed out after %.2fs", label, attempt_timeout)
+            return None
+        except Exception as exc:
+            logger.debug("%s failed: %s", label, exc)
+            return None
+        if _usable_provider_content(resp.content):
+            logger.info("%s succeeded (%s chars)", label, len(resp.content))
+            return resp.content.strip(), True
+        logger.debug("%s returned unusable content", label)
+        return None
+
+    # Try OpenRouter paid (cheap, reliable)
+    try:
+        from dharma_swarm.providers import OpenRouterProvider
+
+        result = await _attempt_provider(
+            "Vision via OpenRouterProvider",
+            OpenRouterProvider(),
+            LLMRequest(
+                messages=[{"role": "user", "content": prompt}],
+                system=sys_msg,
+                model="meta-llama/llama-3.3-70b-instruct",
+                max_tokens=4096,
+            ),
+        )
+        if result is not None:
+            return result
+    except Exception as exc:
+        logger.debug("OpenRouterProvider setup failed: %s", exc)
+
+    # Try free tier (zero cost but rate-limited)
+    try:
+        from dharma_swarm.providers import OpenRouterFreeProvider
+
+        result = await _attempt_provider(
+            "Vision via OpenRouterFreeProvider",
+            OpenRouterFreeProvider(),
+            LLMRequest(
+                messages=[{"role": "user", "content": prompt}],
+                system=sys_msg,
+                max_tokens=4096,
+            ),
+        )
+        if result is not None:
+            return result
+    except Exception as exc:
+        logger.debug("OpenRouterFreeProvider setup failed: %s", exc)
+
+    # Try Anthropic (most capable but expensive)
+    try:
+        from dharma_swarm.providers import AnthropicProvider
+
+        result = await _attempt_provider(
+            "Vision via AnthropicProvider",
+            AnthropicProvider(),
+            LLMRequest(
+                messages=[{"role": "user", "content": prompt}],
+                system=sys_msg,
+                model="claude-sonnet-4-20250514",
+                max_tokens=4096,
+            ),
+        )
+        if result is not None:
+            return result
+    except Exception as exc:
+        logger.debug("AnthropicProvider setup failed: %s", exc)
+
+    return f"(All vision providers failed or timed out within {budget:.2f}s)", False
 
 
 def parse_vision_into_tasks(
@@ -1284,7 +1483,7 @@ class ThinkodynamicDirector:
     # SUMMIT — Contemplative vision phase
     # ------------------------------------------------------------------
 
-    def vision(self, *, model: str = "sonnet") -> dict[str, Any]:
+    async def vision(self, *, model: str = "sonnet") -> dict[str, Any]:
         """Read PSMV seeds, previous visions, ecosystem state. Think from altitude.
 
         Returns a vision dict with keys: seeds, ecosystem, vision_text, success,
@@ -1294,7 +1493,7 @@ class ThinkodynamicDirector:
         ecosystem = read_ecosystem_state()
         previous = read_previous_visions(limit=2)
 
-        vision_text, success = invoke_claude_vision(
+        vision_text, success = await invoke_claude_vision(
             seeds=seeds,
             ecosystem=ecosystem,
             previous_visions=previous,
@@ -1386,6 +1585,29 @@ class ThinkodynamicDirector:
         proposed = vision_result.get("proposed_tasks", [])
         primary = sense_result.get("primary")
 
+        # Loop breaker layer 2: filter out tasks matching recent anti-targets
+        repeated_set = {t.lower() for t in _detect_task_repetitions()}
+        if repeated_set and proposed:
+            filtered = [
+                t for t in proposed
+                if t.get("title", "").lower().strip()[:80] not in repeated_set
+            ]
+            if filtered:
+                proposed = filtered
+            else:
+                # ALL proposed tasks are repeats — force meta-task rotation
+                used_themes = {t.lower() for t in repeated_set}
+                available_keys = [
+                    k for k in META_TASKS
+                    if not any(word in META_TASKS[k]["title"].lower() for word in used_themes)
+                ]
+                fallback_key = random.choice(available_keys) if available_keys else random.choice(list(META_TASKS.keys()))
+                proposed = parse_vision_into_tasks("", fallback_meta_key=fallback_key)
+                logger.info(
+                    "Loop breaker: all proposals repeated, rotating to meta-task '%s'",
+                    fallback_key,
+                )
+
         if proposed and len(proposed) >= 2:
             # Vision produced concrete tasks — compile them directly
             theme = "vision"
@@ -1471,6 +1693,7 @@ class ThinkodynamicDirector:
             "Be concrete. Name files and functions."
         )
 
+        # --- Primary: claude -p subprocess ---
         try:
             proc = subprocess.run(
                 ["claude", "-p", prompt, "--model", model, "--output-format", "text"],
@@ -1479,23 +1702,54 @@ class ThinkodynamicDirector:
                 capture_output=True,
                 timeout=timeout,
             )
-            output = proc.stdout.strip() if proc.returncode == 0 else ""
-            return {
-                "task_key": task_plan.key,
-                "title": task_plan.title,
-                "success": proc.returncode == 0 and bool(output),
-                "output_length": len(output),
-                "blocked": "BLOCKED" in output.upper() if output else False,
-                "rapid": len(output) > 0,  # got a response
-            }
-        except (FileNotFoundError, subprocess.TimeoutExpired) as exc:
+            if proc.returncode == 0 and proc.stdout.strip():
+                output = proc.stdout.strip()
+                return {
+                    "task_key": task_plan.key,
+                    "title": task_plan.title,
+                    "success": True,
+                    "output_length": len(output),
+                    "output": output[:2000],
+                    "blocked": "BLOCKED" in output.upper(),
+                    "rapid": True,
+                    "provider": "claude-cli",
+                }
+            stderr = proc.stderr or ""
+            if "nested" not in stderr.lower():
+                return {
+                    "task_key": task_plan.key,
+                    "title": task_plan.title,
+                    "success": False,
+                    "error": stderr[:200],
+                    "blocked": True,
+                }
+            logger.info("Agent spawn: claude -p unavailable (nested), using provider fallback")
+        except FileNotFoundError:
+            logger.info("Agent spawn: claude -p not found, using provider fallback")
+        except subprocess.TimeoutExpired:
             return {
                 "task_key": task_plan.key,
                 "title": task_plan.title,
                 "success": False,
-                "error": str(exc),
+                "error": f"Timeout after {timeout}s",
                 "blocked": True,
             }
+
+        # --- Fallback: direct LLM provider ---
+        output, success = await _vision_via_provider(
+            prompt,
+            timeout_seconds=_director_provider_timeout_seconds(timeout),
+        )
+        return {
+            "task_key": task_plan.key,
+            "title": task_plan.title,
+            "success": success and bool(output),
+            "output_length": len(output) if output else 0,
+            "output": (output or "")[:2000],
+            "blocked": "BLOCKED" in (output or "").upper(),
+            "rapid": success,
+            "provider": "openrouter-fallback",
+        }
 
     async def list_director_tasks(self, *, limit: int = 400) -> list[Task]:
         tasks = await self._task_board.list_tasks(limit=limit)
@@ -1760,13 +2014,24 @@ class ThinkodynamicDirector:
         }
         _write_json(self.heartbeat_file, heartbeat)
 
+        # --- MISSION CONTINUITY: read previous state ---
+        mission_file = self.state_dir / "mission.json"
+        previous_mission = _read_json(mission_file) or {}
+        if previous_mission:
+            logger.info(
+                "Resuming from mission %s (cycle %s, %s)",
+                previous_mission.get("mission_title", "?"),
+                previous_mission.get("last_cycle_id", "?"),
+                previous_mission.get("status", "?"),
+            )
+
         # --- VISION (Summit) ---
         vision_span = self._tracer.start(
             "orient",
             "VISION: Read seeds, think from altitude",
             agent_id="thinkodynamic_director",
         )
-        vision_result = self.vision(model=model)
+        vision_result = await self.vision(model=model)
         self._tracer.end(
             vision_span,
             vision_success=vision_result["vision_success"],
@@ -1875,6 +2140,31 @@ class ThinkodynamicDirector:
         }
         _append_jsonl(self.log_dir / "cycles.jsonl", snapshot)
         _write_json(self.log_dir / "latest.json", snapshot)
+
+        # --- MISSION CONTINUITY: persist state for next session ---
+        mission_state = {
+            "mission_title": workflow.opportunity_title,
+            "mission_thesis": workflow.thesis[:500],
+            "mission_theme": workflow.theme,
+            "last_cycle_id": cycle_id,
+            "last_cycle_ts": _utc_ts(),
+            "status": "delegated" if delegated else "planned",
+            "task_count": len(workflow.tasks),
+            "task_titles": [t.title for t in workflow.tasks],
+            "delegated_task_ids": [task.id for task in delegated_tasks],
+            "review_summary": review.note if review else "",
+            "blockers": review.blockers if review else [],
+            "rapid_ascent": rapid_ascent,
+            "previous_missions": (previous_mission.get("previous_missions", []) + [
+                {
+                    "title": previous_mission.get("mission_title", ""),
+                    "cycle_id": previous_mission.get("last_cycle_id", ""),
+                    "status": previous_mission.get("status", ""),
+                },
+            ])[-10:] if previous_mission else [],
+        }
+        _write_json(mission_file, mission_state)
+
         return snapshot
 
     async def run_loop(
