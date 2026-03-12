@@ -19,13 +19,28 @@ def _j(obj: dict) -> str:
 
 class _FakeStdout:
     def __init__(self, lines: list[str]) -> None:
-        self._lines = [f"{line}\n".encode("utf-8") for line in lines]
+        self._chunks = [f"{line}\n".encode("utf-8") for line in lines]
 
     async def readline(self) -> bytes:
         await asyncio.sleep(0)
-        if not self._lines:
+        if not self._chunks:
             return b""
-        return self._lines.pop(0)
+        return self._chunks.pop(0)
+
+    async def read(self, size: int = -1) -> bytes:
+        await asyncio.sleep(0)
+        if not self._chunks:
+            return b""
+        if size is None or size < 0:
+            data = b"".join(self._chunks)
+            self._chunks = []
+            return data
+        chunk = self._chunks[0]
+        if len(chunk) <= size:
+            return self._chunks.pop(0)
+        data = chunk[:size]
+        self._chunks[0] = chunk[size:]
+        return data
 
 
 class _FakeStderr:
@@ -141,3 +156,42 @@ async def test_codex_failure_emits_error_and_session_end(
         isinstance(e, SessionEnd) and (not e.success) and e.error_code == "usage_exhausted"
         for e in events
     )
+
+
+@pytest.mark.asyncio
+async def test_codex_stream_handles_large_json_event_without_readline_limit(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    adapter = CodexAdapter(
+        config=ProviderConfig(provider_id="codex", default_model="gpt-5.4")
+    )
+    large_text = "x" * 120000
+
+    async def _fake_spawn(cmd: list[str], env: dict[str, str]) -> _FakeProc:
+        return _FakeProc(
+            [
+                _j({"type": "thread.started", "thread_id": "thread-giant"}),
+                _j(
+                    {
+                        "type": "item.completed",
+                        "item": {"type": "message", "content": large_text},
+                    }
+                ),
+            ],
+            exit_code=0,
+        )
+
+    monkeypatch.setattr(adapter, "_spawn_process", _fake_spawn)
+
+    req = CompletionRequest(messages=[{"role": "user", "content": "hello"}])
+    events = [e async for e in adapter.stream(req, session_id="sid-codex-giant")]
+
+    assert any(isinstance(e, SessionStart) for e in events)
+    giant = next((e for e in events if isinstance(e, TextComplete)), None)
+    assert isinstance(giant, TextComplete)
+    assert giant.content == large_text
+    assert all(
+        not (isinstance(e, ErrorEvent) and e.code == "stream_read_error")
+        for e in events
+    )
+    assert any(isinstance(e, SessionEnd) and e.success for e in events)

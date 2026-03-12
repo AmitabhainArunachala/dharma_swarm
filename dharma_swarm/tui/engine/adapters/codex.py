@@ -33,6 +33,8 @@ class CodexAdapter(ProviderAdapter):
     """Provider adapter for the locally authenticated Codex CLI."""
 
     provider_id = "codex"
+    _READ_CHUNK_SIZE = 64 * 1024
+    _MAX_PENDING_EVENT_BYTES = 8 * 1024 * 1024
 
     def __init__(
         self,
@@ -105,37 +107,41 @@ class CodexAdapter(ProviderAdapter):
                 )
                 return
 
-            assert proc.stdout is not None
-            while True:
-                try:
-                    line = await proc.stdout.readline()
-                except Exception as exc:
-                    last_error = ErrorEvent(
-                        provider_id=self.provider_id,
+            try:
+                async for raw_line in self._iter_stdout_lines(proc):
+                    if not raw_line:
+                        continue
+                    for event in self._normalize_line(
+                        raw_line,
                         session_id=session_id,
-                        code="stream_read_error",
-                        message=str(exc),
-                        retryable=True,
-                    )
-                    yield last_error
-                    break
-                if not line:
-                    break
-                raw_line = line.decode("utf-8", errors="replace").strip()
-                if not raw_line:
-                    continue
-                for event in self._normalize_line(
-                    raw_line,
+                        profile=profile,
+                    ):
+                        if isinstance(event, SessionStart):
+                            emitted_session_start = True
+                        elif isinstance(event, TextComplete):
+                            emitted_text = True
+                        elif isinstance(event, ErrorEvent):
+                            last_error = event
+                        yield event
+            except Exception as exc:
+                last_error = ErrorEvent(
+                    provider_id=self.provider_id,
                     session_id=session_id,
-                    profile=profile,
-                ):
-                    if isinstance(event, SessionStart):
-                        emitted_session_start = True
-                    elif isinstance(event, TextComplete):
-                        emitted_text = True
-                    elif isinstance(event, ErrorEvent):
-                        last_error = event
-                    yield event
+                    code="stream_read_error",
+                    message=str(exc),
+                    retryable=True,
+                )
+                yield last_error
+                with contextlib.suppress(Exception):
+                    await self.cancel()
+                yield SessionEnd(
+                    provider_id=self.provider_id,
+                    session_id=session_id,
+                    success=False,
+                    error_code=last_error.code,
+                    error_message=last_error.message,
+                )
+                return
 
             exit_code = await proc.wait()
             if not emitted_session_start:
@@ -262,6 +268,33 @@ class CodexAdapter(ProviderAdapter):
         if callable(wait_closed):
             with contextlib.suppress(Exception):
                 await wait_closed()
+
+    async def _iter_stdout_lines(
+        self,
+        proc: asyncio.subprocess.Process,
+    ) -> AsyncIterator[str]:
+        if proc.stdout is None:
+            return
+        pending = bytearray()
+        while True:
+            chunk = await proc.stdout.read(self._READ_CHUNK_SIZE)
+            if not chunk:
+                break
+            pending.extend(chunk)
+            while True:
+                newline = pending.find(b"\n")
+                if newline < 0:
+                    break
+                raw = bytes(pending[:newline])
+                del pending[: newline + 1]
+                yield raw.decode("utf-8", errors="replace").strip()
+            if len(pending) > self._MAX_PENDING_EVENT_BYTES:
+                raise ValueError(
+                    "Codex JSON event exceeded "
+                    f"{self._MAX_PENDING_EVENT_BYTES} bytes without newline"
+                )
+        if pending:
+            yield pending.decode("utf-8", errors="replace").strip()
 
     def _build_prompt(self, request: CompletionRequest) -> str:
         rendered: list[str] = []
