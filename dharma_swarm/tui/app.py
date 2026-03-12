@@ -587,13 +587,16 @@ class DGCApp(App):
             self._chat_history = self._chat_history[-self._chat_history_max:]
 
     def _restore_last_session_context(self) -> None:
-        """Restore latest Claude session continuity for this workspace."""
+        """Restore Claude continuity only when Claude is still the preferred route."""
         auto_resume = os.getenv("DGC_AUTO_RESUME", "1").strip().lower()
         if auto_resume in {"0", "false", "no", "off"}:
             return
 
         main = self._get_main_screen()
         if not main:
+            return
+
+        if self._preferred_provider != "claude":
             return
 
         try:

@@ -215,6 +215,33 @@ def test_restore_last_session_context_respects_disable_flag(monkeypatch) -> None
     assert not main.stream_output.system
 
 
+def test_restore_last_session_context_skips_claude_resume_when_preferred_is_codex(
+    monkeypatch,
+) -> None:
+    app = DGCApp()
+    app._preferred_provider = "codex"
+    app._preferred_model = "gpt-5.4"
+    app._active_provider = "codex"
+    app._active_model = "gpt-5.4"
+    meta = {
+        "session_id": "dgc-20260308-000001-abcd",
+        "provider_session_id": "prov-abc-123456789",
+        "provider_id": "claude",
+        "model_id": "claude-opus-4-6",
+    }
+    app._session_store = _DummyStore(meta)  # type: ignore[assignment]
+    main = _DummyMain(running=False)
+    monkeypatch.setattr(app, "_get_main_screen", lambda: main)
+    monkeypatch.delenv("DGC_AUTO_RESUME", raising=False)
+
+    app._restore_last_session_context()
+
+    assert app._provider_session_id is None
+    assert app._active_provider == "codex"
+    assert app._active_model == "gpt-5.4"
+    assert not main.stream_output.system
+
+
 def test_model_set_action_switches_provider_and_model(monkeypatch) -> None:
     app = DGCApp()
     main = _DummyMain(running=False)
