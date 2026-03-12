@@ -2109,6 +2109,78 @@ class ThinkodynamicDirector:
         out.write_text("\n".join(lines) + "\n", encoding="utf-8")
         return out
 
+    def _write_morning_brief(
+        self,
+        *,
+        cycle_id: str,
+        workflow: WorkflowPlan,
+        worker_results: list[dict[str, Any]] | None = None,
+        review: WorkflowReview | None = None,
+    ) -> Path:
+        """Write a human-facing morning brief summarizing what happened overnight."""
+        brief_path = self.shared_dir / "morning_brief.md"
+        ts = _utc_ts()
+        done = [r for r in (worker_results or []) if r.get("success") and not r.get("blocked")]
+        blocked = [r for r in (worker_results or []) if r.get("blocked")]
+        failed = [r for r in (worker_results or []) if not r.get("success")]
+
+        lines = [
+            f"# Morning Brief — {ts}",
+            f"",
+            f"## Mission: {workflow.opportunity_title}",
+            f"**Theme**: {workflow.theme}",
+            f"**Thesis**: {workflow.thesis[:200]}",
+            f"",
+            f"## Results",
+            f"- Tasks executed: {len(worker_results or [])}",
+            f"- Completed: {len(done)}",
+            f"- Blocked: {len(blocked)}",
+            f"- Failed: {len(failed)}",
+            f"",
+        ]
+
+        if done:
+            lines.append("## Artifacts Produced")
+            for r in done:
+                lines.append(f"- **{r['title']}** ({r['output_length']} chars)")
+                lines.append(f"  File: `{r['artifact']}`")
+            lines.append("")
+
+        if blocked:
+            lines.append("## Blockers (Need Human Judgment)")
+            for r in blocked:
+                lines.append(f"- **{r['title']}**: blocked")
+                lines.append(f"  File: `{r['artifact']}`")
+            lines.append("")
+
+        if failed:
+            lines.append("## Failed (Need Investigation)")
+            for r in failed:
+                lines.append(f"- **{r['title']}**: provider timeout or error")
+            lines.append("")
+
+        # Mission continuity
+        mission_file = self.state_dir / "mission.json"
+        mission = _read_json(mission_file)
+        if mission:
+            prev = mission.get("previous_missions", [])
+            if prev:
+                lines.append("## Mission History")
+                for p in prev[-5:]:
+                    lines.append(f"- {p.get('title', '?')} [{p.get('status', '?')}]")
+                lines.append("")
+
+        # Next steps
+        remaining_tasks = [t.title for t in workflow.tasks if t.title not in {r.get("title") for r in done}]
+        if remaining_tasks:
+            lines.append("## Next Cycle Queue")
+            for t in remaining_tasks[:5]:
+                lines.append(f"- {t}")
+            lines.append("")
+
+        brief_path.write_text("\n".join(lines), encoding="utf-8")
+        return brief_path
+
     def _write_handoff(self, *, cycle_id: str, review: WorkflowReview) -> Path | None:
         if not review.blockers and not review.rapid_completion:
             return None
@@ -2318,6 +2390,46 @@ class ThinkodynamicDirector:
         while True:
             snapshot = await self.run_cycle(delegate=delegate, model=model)
             snapshots.append(snapshot)
+
+            # EXECUTE: run pending tasks through the worker loop
+            if delegate and snapshot.get("delegated"):
+                try:
+                    worker_results = await self.execute_pending_tasks(
+                        max_concurrent=3, model=model, timeout=600,
+                    )
+                    snapshot["worker_results"] = worker_results
+                    done = sum(1 for r in worker_results if r["success"] and not r["blocked"])
+                    failed = sum(1 for r in worker_results if not r["success"])
+                    blocked = sum(1 for r in worker_results if r["blocked"])
+                    _append_text(
+                        self.log_dir / "director.log",
+                        f"[{_utc_ts()}] WORKER cycle={snapshot['cycle_id']} "
+                        f"done={done} failed={failed} blocked={blocked}",
+                    )
+                    # Write morning brief
+                    wf = snapshot.get("workflow", {})
+                    brief_wf = WorkflowPlan(
+                        cycle_id=snapshot["cycle_id"],
+                        workflow_id=wf.get("workflow_id", ""),
+                        opportunity_id=wf.get("opportunity_id", ""),
+                        opportunity_title=wf.get("opportunity_title", ""),
+                        theme=wf.get("theme", ""),
+                        thesis=wf.get("thesis", ""),
+                        why_now=wf.get("why_now", ""),
+                        expected_duration_min=wf.get("expected_duration_min", 0),
+                        evidence_paths=wf.get("evidence_paths", []),
+                        tasks=[],
+                    )
+                    brief_path = self._write_morning_brief(
+                        cycle_id=snapshot["cycle_id"],
+                        workflow=brief_wf,
+                        worker_results=worker_results,
+                    )
+                    snapshot["morning_brief"] = str(brief_path)
+                except Exception as exc:
+                    logger.warning("Worker loop failed in cycle %s: %s", snapshot["cycle_id"], exc)
+                    snapshot["worker_error"] = str(exc)
+
             if once:
                 break
             if end_at is not None and time.time() >= end_at:
