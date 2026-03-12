@@ -316,6 +316,8 @@ class DGCApp(App):
     def _provider_ready(self, provider_id: str) -> bool:
         if provider_id == "claude":
             return shutil.which("claude") is not None
+        if provider_id == "codex":
+            return shutil.which("codex") is not None
         if provider_id == "openrouter":
             return bool(os.getenv("OPENROUTER_API_KEY"))
         return True
@@ -480,6 +482,10 @@ class DGCApp(App):
         self._mark_active_model_failed()
         if not self._fallback_queue:
             self._fallback_queue = self._build_fallback_queue()
+        if self._prefer_cross_provider_fallback():
+            self._fallback_queue = self._reorder_fallback_queue_cross_provider_first(
+                self._fallback_queue
+            )
 
         next_target: tuple[str, str] | None = None
         while self._fallback_queue:
@@ -513,6 +519,40 @@ class DGCApp(App):
             reset_fallback_queue=False,
         )
         return True
+
+    def _prefer_cross_provider_fallback(self) -> bool:
+        code = (self._last_error_code or "").lower()
+        msg = (self._last_error_message or "").lower()
+        hay = f"{code} {msg}"
+        hard_provider_failure_terms = (
+            "out of extra usage",
+            "usage_exhausted",
+            "rate limit: rejected",
+            "rate_limit_rejected",
+            "subscription",
+            "quota",
+            "billing",
+            "missing_auth",
+            "logged out",
+            "sign in",
+            "login",
+            "unauthorized",
+            "401",
+            "403",
+        )
+        return any(term in hay for term in hard_provider_failure_terms)
+
+    def _reorder_fallback_queue_cross_provider_first(
+        self,
+        queue: list[tuple[str, str]],
+    ) -> list[tuple[str, str]]:
+        cross_provider = [
+            route for route in queue if route[0] != self._active_provider
+        ]
+        same_provider = [
+            route for route in queue if route[0] == self._active_provider
+        ]
+        return cross_provider + same_provider
 
     def _can_route_to(self, provider_id: str, model_id: str) -> bool:
         target = target_for_route(provider_id, model_id)
@@ -765,6 +805,15 @@ class DGCApp(App):
             msg = f"Rate limit: {ev.status}"
             if ev.utilization is not None:
                 msg += f" ({ev.utilization * 100:.0f}%)"
+            status_lower = (ev.status or "").lower()
+            if status_lower:
+                self._last_error_code = "rate_limit"
+                self._last_error_message = msg
+                if "rejected" in status_lower or "exhaust" in status_lower:
+                    self._pending_fallback = (
+                        self._auto_model_fallback
+                        and self._last_user_prompt is not None
+                    )
             output.write_system(f"[yellow]{msg}[/yellow]")
 
         elif isinstance(ev, ErrorEvent):
@@ -842,10 +891,20 @@ class DGCApp(App):
         retry_terms = (
             "timeout",
             "rate_limit",
+            "rate limit",
+            "rate_limit_rejected",
             "429",
             "subscription",
             "quota",
             "billing",
+            "usage_exhausted",
+            "out of extra usage",
+            "rejected",
+            "logged out",
+            "sign in",
+            "login",
+            "missing_auth",
+            "unauthorized",
             "missing_api_key",
             "401",
             "403",

@@ -8,6 +8,7 @@ from .base import (
     ProviderConfig,
 )
 from .claude import ClaudeAdapter, CLAUDE_CAPABILITIES
+from .codex import CODEX_CAPABILITIES, CodexAdapter
 from .openrouter import OpenRouterAdapter, OPENROUTER_CAPABILITIES
 
 __all__ = [
@@ -18,6 +19,8 @@ __all__ = [
     "ProviderConfig",
     "ClaudeAdapter",
     "CLAUDE_CAPABILITIES",
+    "CodexAdapter",
+    "CODEX_CAPABILITIES",
     "OpenRouterAdapter",
     "OPENROUTER_CAPABILITIES",
 ]

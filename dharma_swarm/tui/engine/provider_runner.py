@@ -12,7 +12,7 @@ from textual.message import Message
 from textual.widget import Widget
 from textual.worker import get_current_worker
 
-from .adapters import ClaudeAdapter, CompletionRequest, OpenRouterAdapter
+from .adapters import ClaudeAdapter, CodexAdapter, CompletionRequest, OpenRouterAdapter
 from .events import CanonicalEventType, ErrorEvent
 from .governance import GovernanceFilter, GovernancePolicy
 from .session_store import SessionStore
@@ -44,6 +44,7 @@ class ProviderRunner(Widget):
         super().__init__(**kwargs)
         self._adapters = {
             "claude": ClaudeAdapter(workdir=DEFAULT_CWD),
+            "codex": CodexAdapter(workdir=DEFAULT_CWD),
             "openrouter": OpenRouterAdapter(),
         }
         self._active_task = False

@@ -28,8 +28,8 @@ def test_resolve_alias_and_model_id() -> None:
 def test_inline_switch_detection() -> None:
     target = detect_inline_switch_intent("hey, switch to codex 5.4")
     assert target is not None
-    assert target.provider_id == "openrouter"
-    assert target.model_id == "openai/gpt-5-codex"
+    assert target.provider_id == "codex"
+    assert target.model_id == "gpt-5.4"
 
     assert detect_inline_switch_intent("can you summarize this text?") is None
 

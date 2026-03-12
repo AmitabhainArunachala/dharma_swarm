@@ -47,9 +47,9 @@ MODEL_TARGETS: tuple[ModelTarget, ...] = (
     ),
     ModelTarget(
         alias="codex-5.4",
-        provider_id="openrouter",
-        model_id="openai/gpt-5-codex",
-        label="Codex 5.4 (via OpenRouter)",
+        provider_id="codex",
+        model_id="gpt-5.4",
+        label="Codex 5.4",
         aliases=("codex", "codex 5.4", "gpt 5 codex"),
     ),
     ModelTarget(

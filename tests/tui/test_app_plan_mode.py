@@ -223,8 +223,8 @@ def test_model_set_action_switches_provider_and_model(monkeypatch) -> None:
 
     app._handle_action("model:set codex-5.4", "model set codex-5.4")
 
-    assert app._active_provider == "openrouter"
-    assert app._active_model == "openai/gpt-5-codex"
+    assert app._active_provider == "codex"
+    assert app._active_model == "gpt-5.4"
     assert any("Model switched" in line for line in main.stream_output.system)
 
 
@@ -321,3 +321,49 @@ def test_inline_switch_short_circuits_send(monkeypatch) -> None:
     assert app._active_provider == "claude"
     assert app._active_model == "claude-opus-4-6"
     assert sent == []
+
+
+def test_rate_limit_rejected_marks_pending_fallback(monkeypatch) -> None:
+    from dharma_swarm.tui.engine.events import RateLimitEvent
+
+    app = DGCApp()
+    app._last_user_prompt = "finish the task"
+    app._auto_model_fallback = True
+    main = _DummyMain(running=False)
+    monkeypatch.setattr(app, "_get_main_screen", lambda: main)
+
+    event = type("E", (), {"event": RateLimitEvent(provider_id="claude", session_id="sid", status="rejected")})()
+    app.on_provider_runner_agent_event(event)
+
+    assert app._last_error_code == "rate_limit"
+    assert app._pending_fallback is True
+
+
+def test_auto_fallback_prefers_non_claude_provider_for_usage_exhaustion(monkeypatch) -> None:
+    app = DGCApp()
+    app._active_provider = "claude"
+    app._active_model = "claude-opus-4-6"
+    app._auto_model_fallback = True
+    app._last_user_prompt = "keep going"
+    app._last_error_code = "usage_exhausted"
+    app._last_error_message = "You're out of extra usage · resets tomorrow"
+    main = _DummyMain(running=False)
+    dispatched: list[tuple[str, bool, bool]] = []
+
+    monkeypatch.setattr(app, "_get_main_screen", lambda: main)
+    monkeypatch.setattr(app, "_save_model_policy", lambda: None)
+    monkeypatch.setattr(app, "_provider_ready", lambda provider_id: True)
+    monkeypatch.setattr(
+        app,
+        "_dispatch_prompt",
+        lambda text, append_user=True, reset_fallback_queue=True: dispatched.append(
+            (text, append_user, reset_fallback_queue)
+        ),
+    )
+
+    moved = app._try_auto_fallback(main.stream_output, reason="usage exhaustion")
+
+    assert moved is True
+    assert app._active_provider == "codex"
+    assert app._active_model == "gpt-5.4"
+    assert dispatched == [("keep going", False, False)]
