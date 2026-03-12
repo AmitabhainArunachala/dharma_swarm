@@ -44,6 +44,7 @@ def _restore_terminal_state() -> None:
 
 def run() -> None:
     """Launch the DGC TUI."""
+    _restore_terminal_state()
     app = DGCApp()
     try:
         app.run(mouse=False)
