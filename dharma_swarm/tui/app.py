@@ -588,7 +588,7 @@ class DGCApp(App):
 
     def _restore_last_session_context(self) -> None:
         """Restore Claude continuity only when Claude is still the preferred route."""
-        auto_resume = os.getenv("DGC_AUTO_RESUME", "1").strip().lower()
+        auto_resume = os.getenv("DGC_AUTO_RESUME", "0").strip().lower()
         if auto_resume in {"0", "false", "no", "off"}:
             return
 

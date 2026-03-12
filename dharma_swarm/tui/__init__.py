@@ -46,7 +46,7 @@ def run() -> None:
     """Launch the DGC TUI."""
     app = DGCApp()
     try:
-        app.run()
+        app.run(mouse=False)
     except KeyboardInterrupt:
         _restore_terminal_state()
         with contextlib.suppress(Exception):

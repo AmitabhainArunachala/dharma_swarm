@@ -7,9 +7,11 @@ import dharma_swarm.tui as tui
 
 def test_run_restores_terminal_on_keyboard_interrupt(monkeypatch) -> None:
     called: dict[str, int] = {"restore": 0}
+    captured: dict[str, object] = {}
 
     class _FakeApp:
-        def run(self) -> None:
+        def run(self, *args, **kwargs) -> None:
+            captured.update(kwargs)
             raise KeyboardInterrupt
 
     monkeypatch.setattr(tui, "DGCApp", _FakeApp)
@@ -22,3 +24,4 @@ def test_run_restores_terminal_on_keyboard_interrupt(monkeypatch) -> None:
     tui.run()
 
     assert called["restore"] == 1
+    assert captured["mouse"] is False

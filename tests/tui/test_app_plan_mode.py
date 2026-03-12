@@ -185,7 +185,7 @@ def test_restore_last_session_context_populates_resume_state(monkeypatch) -> Non
     app._session_store = _DummyStore(meta)  # type: ignore[assignment]
     main = _DummyMain(running=False)
     monkeypatch.setattr(app, "_get_main_screen", lambda: main)
-    monkeypatch.delenv("DGC_AUTO_RESUME", raising=False)
+    monkeypatch.setenv("DGC_AUTO_RESUME", "1")
 
     app._restore_last_session_context()
 
@@ -211,6 +211,25 @@ def test_restore_last_session_context_respects_disable_flag(monkeypatch) -> None
     app._restore_last_session_context()
 
     assert app._session.session_id is None
+    assert app._provider_session_id is None
+    assert not main.stream_output.system
+
+
+def test_restore_last_session_context_defaults_off(monkeypatch) -> None:
+    app = DGCApp()
+    meta = {
+        "session_id": "dgc-20260308-000001-abcd",
+        "provider_session_id": "prov-abc-123456789",
+        "provider_id": "claude",
+        "model_id": "claude-opus-4-6",
+    }
+    app._session_store = _DummyStore(meta)  # type: ignore[assignment]
+    main = _DummyMain(running=False)
+    monkeypatch.setattr(app, "_get_main_screen", lambda: main)
+    monkeypatch.delenv("DGC_AUTO_RESUME", raising=False)
+
+    app._restore_last_session_context()
+
     assert app._provider_session_id is None
     assert not main.stream_output.system
 
