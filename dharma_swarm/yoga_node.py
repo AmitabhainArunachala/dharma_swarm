@@ -283,7 +283,7 @@ class YogaScheduler:
         max_daily_tasks: int = 20,
         global_token_budget: int = 500_000,
     ):
-        self.quiet_hours = quiet_hours or [2, 3, 4, 5]
+        self.quiet_hours = quiet_hours if quiet_hours is not None else [2, 3, 4, 5]
         self.max_daily_tasks = max_daily_tasks
         self.global_token_budget = global_token_budget
         self.usage = UsageTracker()

@@ -764,8 +764,8 @@ def _director_provider_timeout_seconds(timeout: int | float | None = None) -> fl
                 override,
             )
     if timeout is None:
-        return 20.0
-    return max(5.0, min(30.0, float(timeout) / 12.0))
+        return 60.0
+    return max(10.0, min(120.0, float(timeout) / 5.0))
 
 
 def _usable_provider_content(content: str | None) -> bool:
@@ -1891,6 +1891,136 @@ class ThinkodynamicDirector:
             )
             reviews.append(self.review_workflow(workflow, group))
         return reviews
+
+    # ------------------------------------------------------------------
+    # WORKER LOOP — Execute enqueued tasks via spawn_agent
+    # ------------------------------------------------------------------
+
+    async def execute_pending_tasks(
+        self,
+        *,
+        max_concurrent: int = 3,
+        model: str = "sonnet",
+        timeout: int = 600,
+    ) -> list[dict[str, Any]]:
+        """Pick up pending director tasks and execute them via spawn_agent.
+
+        This is the worker loop — the piece that turns plans into artifacts.
+        Runs up to ``max_concurrent`` tasks, writes outputs to the shared dir,
+        and marks tasks completed or failed on the board.
+        """
+        await self.init()
+        tasks = await self.list_director_tasks()
+        actionable = {TaskStatus.PENDING, TaskStatus.ASSIGNED, TaskStatus.RUNNING}
+        pending = [
+            t for t in tasks
+            if t.status in actionable
+        ]
+        if not pending:
+            logger.info("Worker loop: no pending tasks")
+            return []
+
+        # Sort by priority (URGENT > HIGH > NORMAL > LOW)
+        priority_order = {"urgent": 0, "high": 1, "normal": 2, "low": 3}
+        pending.sort(key=lambda t: priority_order.get(t.priority.value, 99))
+
+        batch = pending[:max_concurrent]
+        results: list[dict[str, Any]] = []
+
+        for task in batch:
+            # Build a WorkflowTaskPlan from the task metadata
+            plan = WorkflowTaskPlan(
+                key=str(task.metadata.get("director_task_key", task.id[:8])),
+                title=task.title,
+                description=task.description,
+                priority=task.priority.value,
+                role_hint=str(task.metadata.get("director_role_hint", "general")),
+                acceptance=list(task.metadata.get("director_acceptance", [])),
+            )
+            workflow = WorkflowPlan(
+                cycle_id=str(task.metadata.get("director_cycle_id", "")),
+                workflow_id=str(task.metadata.get("director_workflow_id", "")),
+                opportunity_id=str(task.metadata.get("director_opportunity_id", "")),
+                opportunity_title=str(task.metadata.get("director_opportunity_title", "")),
+                theme=str(task.metadata.get("director_theme", "")),
+                thesis=str(task.metadata.get("director_thesis", "")),
+                why_now=str(task.metadata.get("director_why_now", "")),
+                expected_duration_min=int(task.metadata.get("director_expected_duration_min", 60) or 60),
+                evidence_paths=list(task.metadata.get("director_evidence_paths", [])),
+                tasks=[],
+            )
+
+            # Assign and start (handle tasks already in-progress from prior runs)
+            try:
+                await self._task_board.assign(task.id, "worker-loop")
+                await self._task_board.start(task.id)
+            except Exception as exc:
+                logger.debug("Task %s state transition: %s (continuing)", task.id, exc)
+            logger.info("Worker loop: executing task '%s' (%s)", task.title, task.id)
+
+            # Execute via spawn_agent
+            agent_result = await self.spawn_agent(plan, workflow, model=model, timeout=timeout)
+
+            output_text = agent_result.get("output", "")
+            blocked = agent_result.get("blocked", False)
+            success = agent_result.get("success", False)
+
+            # Write artifact
+            ts = _utc_ts().replace(":", "-")
+            slug = plan.key[:30]
+            artifact_dir = self.shared_dir / "artifacts"
+            artifact_dir.mkdir(parents=True, exist_ok=True)
+            artifact_path = artifact_dir / f"{slug}_{ts}.md"
+            artifact_content = [
+                f"# Artifact: {task.title}",
+                f"",
+                f"**Task ID**: {task.id}",
+                f"**Mission**: {workflow.opportunity_title}",
+                f"**Theme**: {workflow.theme}",
+                f"**Status**: {'BLOCKED' if blocked else 'DONE' if success else 'FAILED'}",
+                f"**Provider**: {agent_result.get('provider', 'unknown')}",
+                f"**Output length**: {agent_result.get('output_length', 0)} chars",
+                f"",
+                f"## Output",
+                f"",
+                output_text or "(no output)",
+            ]
+            artifact_path.write_text("\n".join(artifact_content), encoding="utf-8")
+
+            # Update task board (gracefully handle state machine conflicts)
+            try:
+                if blocked:
+                    await self._task_board.fail(
+                        task.id,
+                        error=f"BLOCKED: {output_text[:200]}",
+                    )
+                    logger.info("Worker loop: task '%s' BLOCKED", task.title)
+                elif success:
+                    await self._task_board.complete(
+                        task.id,
+                        result=f"Artifact: {artifact_path.name} ({len(output_text)} chars)",
+                    )
+                    logger.info("Worker loop: task '%s' DONE (%s chars)", task.title, len(output_text))
+                else:
+                    await self._task_board.fail(
+                        task.id,
+                        error=agent_result.get("error", "Agent returned no output"),
+                    )
+                    logger.info("Worker loop: task '%s' FAILED", task.title)
+            except Exception as exc:
+                logger.warning("Worker loop: task '%s' board update failed: %s", task.title, exc)
+
+            results.append({
+                "task_id": task.id,
+                "title": task.title,
+                "success": success,
+                "blocked": blocked,
+                "artifact": str(artifact_path),
+                "output_length": len(output_text),
+                "provider": agent_result.get("provider", "unknown"),
+            })
+
+        return results
 
     def _write_cycle_markdown(
         self,

@@ -341,3 +341,88 @@ def test_compile_workflow_filters_repeated_tasks(
     assert "Map the current state of the swarm" not in task_titles
     assert "Implement highest-leverage slice" not in task_titles
     assert "Build new monitoring dashboard" in task_titles
+
+
+# === Worker Loop Tests ===
+
+
+@pytest.mark.asyncio
+async def test_execute_pending_tasks_runs_and_produces_artifacts(
+    director: ThinkodynamicDirector,
+) -> None:
+    """Worker loop should pick up pending tasks, execute them, and write artifacts."""
+    await director.init()
+    primary = director.choose_primary(director.build_opportunities(director.rank_file_signals()))
+    workflow = director.plan_workflow(primary, cycle_id="worker-test-1")
+    tasks = await director.enqueue_workflow(workflow)
+    assert len(tasks) >= 2
+
+    # Mock spawn_agent to return a fake result (no real API call)
+    async def _fake_spawn(task_plan, wf, *, model="sonnet", timeout=600):
+        return {
+            "task_key": task_plan.key,
+            "title": task_plan.title,
+            "success": True,
+            "output_length": 42,
+            "output": f"Completed: {task_plan.title}. All good.",
+            "blocked": False,
+            "rapid": True,
+            "provider": "test-mock",
+        }
+
+    director.spawn_agent = _fake_spawn  # type: ignore[assignment]
+
+    results = await director.execute_pending_tasks(max_concurrent=2)
+    assert len(results) == 2
+    assert all(r["success"] for r in results)
+    assert all(r["provider"] == "test-mock" for r in results)
+
+    # Verify artifacts were written
+    for r in results:
+        artifact = Path(r["artifact"])
+        assert artifact.exists()
+        content = artifact.read_text()
+        assert "DONE" in content
+        assert r["title"] in content
+
+    # Verify task board was updated
+    completed_tasks = [
+        t for t in await director.list_director_tasks()
+        if t.status == TaskStatus.COMPLETED
+    ]
+    assert len(completed_tasks) == 2
+
+
+@pytest.mark.asyncio
+async def test_execute_pending_tasks_handles_blocked(
+    director: ThinkodynamicDirector,
+) -> None:
+    """Worker loop should mark BLOCKED tasks as failed with blocker info."""
+    await director.init()
+    primary = director.choose_primary(director.build_opportunities(director.rank_file_signals()))
+    workflow = director.plan_workflow(primary, cycle_id="worker-block-1")
+    await director.enqueue_workflow(workflow)
+
+    async def _blocked_spawn(task_plan, wf, *, model="sonnet", timeout=600):
+        return {
+            "task_key": task_plan.key,
+            "title": task_plan.title,
+            "success": True,
+            "output_length": 30,
+            "output": "BLOCKED: Need API key for external service.",
+            "blocked": True,
+            "rapid": True,
+            "provider": "test-mock",
+        }
+
+    director.spawn_agent = _blocked_spawn  # type: ignore[assignment]
+
+    results = await director.execute_pending_tasks(max_concurrent=1)
+    assert len(results) == 1
+    assert results[0]["blocked"] is True
+
+    failed_tasks = [
+        t for t in await director.list_director_tasks()
+        if t.status == TaskStatus.FAILED
+    ]
+    assert len(failed_tasks) >= 1
