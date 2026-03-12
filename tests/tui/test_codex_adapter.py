@@ -37,8 +37,27 @@ class _FakeStderr:
         return self._text.encode("utf-8")
 
 
+class _FakeStdin:
+    def __init__(self) -> None:
+        self.buffer = bytearray()
+        self.closed = False
+
+    def write(self, data: bytes) -> None:
+        self.buffer.extend(data)
+
+    async def drain(self) -> None:
+        await asyncio.sleep(0)
+
+    def close(self) -> None:
+        self.closed = True
+
+    async def wait_closed(self) -> None:
+        await asyncio.sleep(0)
+
+
 class _FakeProc:
     def __init__(self, lines: list[str], *, exit_code: int = 0, stderr: str = "") -> None:
+        self.stdin = _FakeStdin()
         self.stdout = _FakeStdout(lines)
         self.stderr = _FakeStderr(stderr)
         self.returncode = None if exit_code == 0 else exit_code
@@ -61,17 +80,20 @@ async def test_codex_success_reads_output_file(monkeypatch: pytest.MonkeyPatch) 
     adapter = CodexAdapter(
         config=ProviderConfig(provider_id="codex", default_model="gpt-5.4")
     )
+    captured: dict[str, _FakeProc] = {}
 
     async def _fake_spawn(cmd: list[str], env: dict[str, str]) -> _FakeProc:
         output_path = Path(cmd[cmd.index("-o") + 1])
         output_path.write_text("hello from codex\n", encoding="utf-8")
-        return _FakeProc(
+        proc = _FakeProc(
             [
                 _j({"type": "thread.started", "thread_id": "thread-123"}),
                 _j({"type": "turn.started"}),
             ],
             exit_code=0,
         )
+        captured["proc"] = proc
+        return proc
 
     monkeypatch.setattr(adapter, "_spawn_process", _fake_spawn)
 
@@ -81,6 +103,8 @@ async def test_codex_success_reads_output_file(monkeypatch: pytest.MonkeyPatch) 
     assert any(isinstance(e, SessionStart) for e in events)
     assert any(isinstance(e, TextComplete) and e.content == "hello from codex" for e in events)
     assert any(isinstance(e, SessionEnd) and e.success for e in events)
+    assert captured["proc"].stdin.buffer.decode("utf-8") == "User: hello\n"
+    assert captured["proc"].stdin.closed is True
 
 
 @pytest.mark.asyncio

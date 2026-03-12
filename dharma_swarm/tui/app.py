@@ -504,15 +504,26 @@ class DGCApp(App):
 
         provider_id, model_id = next_target
         prev = f"{self._active_provider}:{self._active_model}"
+        promote_preference = (
+            self._prefer_cross_provider_fallback()
+            and provider_id != self._preferred_provider
+        )
         self._set_active_model(
             provider_id=provider_id,
             model_id=model_id,
             announce=False,
+            set_preferred=promote_preference,
+            persist_preference=promote_preference,
         )
         output.write_system(
             "[yellow]Auto-fallback[/yellow]: "
             f"{prev} -> {provider_id}:{model_id} [dim]({reason})[/dim]"
         )
+        if promote_preference:
+            output.write_system(
+                "[dim]Preferred route updated to "
+                f"{provider_id}:{model_id} after hard provider failure.[/dim]"
+            )
         self._pending_fallback = False
         self._dispatch_prompt(
             self._last_user_prompt,

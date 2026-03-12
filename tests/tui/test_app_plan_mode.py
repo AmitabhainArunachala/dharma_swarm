@@ -4,7 +4,16 @@ from __future__ import annotations
 
 from typing import Any
 
+import pytest
+
+import dharma_swarm.tui.app as tui_app
 from dharma_swarm.tui.app import DGCApp
+
+
+@pytest.fixture(autouse=True)
+def _isolate_tui_policy_state(monkeypatch: pytest.MonkeyPatch, tmp_path) -> None:
+    monkeypatch.setattr(tui_app, "MODEL_POLICY_PATH", tmp_path / "tui_model_policy.json")
+    monkeypatch.setattr(tui_app, "MODEL_STATS_PATH", tmp_path / "tui_model_stats.json")
 
 
 class _DummyRunner:
@@ -419,15 +428,18 @@ def test_auto_fallback_prefers_non_claude_provider_for_usage_exhaustion(monkeypa
     app = DGCApp()
     app._active_provider = "claude"
     app._active_model = "claude-opus-4-6"
+    app._preferred_provider = "claude"
+    app._preferred_model = "claude-opus-4-6"
     app._auto_model_fallback = True
     app._last_user_prompt = "keep going"
     app._last_error_code = "usage_exhausted"
     app._last_error_message = "You're out of extra usage · resets tomorrow"
     main = _DummyMain(running=False)
     dispatched: list[tuple[str, bool, bool]] = []
+    policy_saves: list[bool] = []
 
     monkeypatch.setattr(app, "_get_main_screen", lambda: main)
-    monkeypatch.setattr(app, "_save_model_policy", lambda: None)
+    monkeypatch.setattr(app, "_save_model_policy", lambda: policy_saves.append(True))
     monkeypatch.setattr(app, "_provider_ready", lambda provider_id: True)
     monkeypatch.setattr(
         app,
@@ -442,4 +454,8 @@ def test_auto_fallback_prefers_non_claude_provider_for_usage_exhaustion(monkeypa
     assert moved is True
     assert app._active_provider == "codex"
     assert app._active_model == "gpt-5.4"
+    assert app._preferred_provider == "codex"
+    assert app._preferred_model == "gpt-5.4"
+    assert policy_saves == [True]
     assert dispatched == [("keep going", False, False)]
+    assert any("Preferred route updated to codex:gpt-5.4" in line for line in main.stream_output.system)

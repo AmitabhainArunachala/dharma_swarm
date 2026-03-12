@@ -69,6 +69,7 @@ class CodexAdapter(ProviderAdapter):
         session_id: str,
     ) -> AsyncIterator[SessionStart | TextComplete | UsageReport | ErrorEvent | SessionEnd]:
         profile = self.get_profile(request.model)
+        prompt = self._build_prompt(request)
         output_path = Path(
             tempfile.mkstemp(prefix="dgc-codex-last-message-", suffix=".txt")[1]
         )
@@ -82,6 +83,28 @@ class CodexAdapter(ProviderAdapter):
         self._proc = proc
 
         try:
+            try:
+                await self._write_prompt(proc, prompt)
+            except Exception as exc:
+                last_error = ErrorEvent(
+                    provider_id=self.provider_id,
+                    session_id=session_id,
+                    code="stdin_write_error",
+                    message=str(exc),
+                    retryable=True,
+                )
+                yield last_error
+                with contextlib.suppress(Exception):
+                    await self.cancel()
+                yield SessionEnd(
+                    provider_id=self.provider_id,
+                    session_id=session_id,
+                    success=False,
+                    error_code=last_error.code,
+                    error_message=last_error.message,
+                )
+                return
+
             assert proc.stdout is not None
             while True:
                 try:
@@ -190,6 +213,7 @@ class CodexAdapter(ProviderAdapter):
     ) -> asyncio.subprocess.Process:
         return await asyncio.create_subprocess_exec(
             *cmd,
+            stdin=asyncio.subprocess.PIPE,
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.PIPE,
             cwd=str(self._workdir),
@@ -205,7 +229,6 @@ class CodexAdapter(ProviderAdapter):
         *,
         output_path: Path,
     ) -> list[str]:
-        prompt = self._build_prompt(request)
         model = request.model or self._config.default_model or "gpt-5.4"
         cmd = [
             self._cli_path,
@@ -223,6 +246,22 @@ class CodexAdapter(ProviderAdapter):
             "-",
         ]
         return cmd
+
+    async def _write_prompt(
+        self,
+        proc: asyncio.subprocess.Process,
+        prompt: str,
+    ) -> None:
+        if proc.stdin is None:
+            raise RuntimeError("codex subprocess stdin is unavailable")
+        payload = prompt if prompt.endswith("\n") else f"{prompt}\n"
+        proc.stdin.write(payload.encode("utf-8"))
+        await proc.stdin.drain()
+        proc.stdin.close()
+        wait_closed = getattr(proc.stdin, "wait_closed", None)
+        if callable(wait_closed):
+            with contextlib.suppress(Exception):
+                await wait_closed()
 
     def _build_prompt(self, request: CompletionRequest) -> str:
         rendered: list[str] = []
