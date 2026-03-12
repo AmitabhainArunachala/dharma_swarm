@@ -110,11 +110,12 @@ class DGCApp(App):
     COMMANDS = {DGCCommandProvider}
 
     BINDINGS = [
-        Binding("ctrl+c", "smart_cancel_or_copy", "Cancel/Copy", show=True),
+        Binding("ctrl+c", "smart_cancel_or_copy", "Stop/Copy", show=True),
         Binding("ctrl+d", "quit", "Exit", show=True),
         Binding("ctrl+l", "clear_output", "Clear", show=True),
         Binding("ctrl+o", "cycle_mode", "Mode", show=True),
-        Binding("ctrl+n", "new_session", "New Session", show=False),
+        Binding("ctrl+y", "copy_last", "Copy reply", show=False),
+        Binding("ctrl+n", "new_session", "New", show=False),
         Binding("end", "scroll_to_bottom", "Bottom", show=False),
     ]
 
@@ -1651,18 +1652,25 @@ class DGCApp(App):
             self._provider_runner.cancel()
 
     def action_smart_cancel_or_copy(self) -> None:
-        """Ctrl+C: copy selected text if any, otherwise cancel the run."""
+        """Ctrl+C: if running, cancel. If idle, copy last reply to clipboard."""
+        # If a provider is running, cancel it
+        if self._provider_runner and self._provider_runner.is_running:
+            self.action_cancel_run()
+            return
+        # Otherwise, copy the last assistant reply to clipboard
         main = self._get_main_screen()
         if main:
-            selection = main.stream_output.get_selection()
-            if selection and str(selection).strip():
-                self.copy_to_clipboard(str(selection))
-                main.stream_output.write_system(
-                    "[dim]Copied to clipboard.[/dim]"
-                )
-                self.clear_selection()
-                return
-        self.action_cancel_run()
+            output = main.stream_output
+            if hasattr(output, "copy_last_reply_to_clipboard"):
+                if output.copy_last_reply_to_clipboard():
+                    output.write_system(
+                        "[dim #6B9BB5]Copied last reply to clipboard.[/dim #6B9BB5]"
+                    )
+                else:
+                    output.write_system(
+                        "[dim]No reply to copy. "
+                        "Tip: Shift+drag for native terminal selection.[/dim]"
+                    )
 
     def action_scroll_to_bottom(self) -> None:
         """Jump to bottom of stream output and re-enable auto-scroll."""
@@ -1729,15 +1737,25 @@ class DGCApp(App):
             pass
 
     def _copy_last_reply(self) -> None:
-        """Hint user on how to copy text from the TUI."""
+        """Copy last assistant reply to clipboard."""
         main = self._get_main_screen()
         if main:
-            main.stream_output.write_system(  # type: ignore[union-attr]
-                "[dim]To copy text: drag-select with mouse, then "
-                "[bold]Ctrl+C[/bold] to copy.\n"
-                "  Or hold [bold]Shift[/bold] + drag for native terminal "
-                "selection, then Cmd+C.[/dim]"
+            output = main.stream_output
+            if hasattr(output, "copy_last_reply_to_clipboard"):
+                if output.copy_last_reply_to_clipboard():
+                    output.write_system(
+                        "[dim #6B9BB5]Copied last reply to clipboard.[/dim #6B9BB5]"
+                    )
+                    return
+            output.write_system(  # type: ignore[union-attr]
+                "[dim]No reply to copy.\n"
+                "  [bold]Ctrl+C[/bold] (when idle) copies last reply.\n"
+                "  [bold]Shift+drag[/bold] for native terminal selection.[/dim]"
             )
+
+    def action_copy_last(self) -> None:
+        """Ctrl+Y: copy last assistant reply to clipboard."""
+        self._copy_last_reply()
 
     # ─── Mode Policy ─────────────────────────────────────────────────
 

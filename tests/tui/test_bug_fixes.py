@@ -118,12 +118,12 @@ def test_handle_tool_call_complete_flushes_buffer() -> None:
         (i for i, ln in enumerate(lines) if "_flush_buffer" in ln), None
     )
     write_idx = next(
-        (i for i, ln in enumerate(lines) if "self.write" in ln), None
+        (i for i, ln in enumerate(lines) if "self.write" in ln or "_smart_write" in ln), None
     )
 
     assert flush_idx is not None, "handle_tool_call_complete must call _flush_buffer"
-    assert write_idx is not None, "handle_tool_call_complete must call self.write"
-    assert flush_idx < write_idx, "_flush_buffer must be called BEFORE self.write"
+    assert write_idx is not None, "handle_tool_call_complete must call self.write or _smart_write"
+    assert flush_idx < write_idx, "_flush_buffer must be called BEFORE writing"
 
 
 def test_handle_tool_result_canonical_flushes_buffer() -> None:
@@ -139,7 +139,7 @@ def test_handle_tool_result_canonical_flushes_buffer() -> None:
         (i for i, ln in enumerate(lines) if "_flush_buffer" in ln), None
     )
     write_idx = next(
-        (i for i, ln in enumerate(lines) if "self.write" in ln), None
+        (i for i, ln in enumerate(lines) if "self.write" in ln or "_smart_write" in ln), None
     )
 
     assert flush_idx is not None, "handle_tool_result_canonical must call _flush_buffer"
@@ -160,7 +160,7 @@ def test_handle_tool_progress_canonical_flushes_buffer() -> None:
         (i for i, ln in enumerate(lines) if "_flush_buffer" in ln), None
     )
     write_idx = next(
-        (i for i, ln in enumerate(lines) if "self.write" in ln), None
+        (i for i, ln in enumerate(lines) if "self.write" in ln or "_smart_write" in ln), None
     )
 
     assert flush_idx is not None, "handle_tool_progress_canonical must call _flush_buffer"
@@ -196,7 +196,7 @@ def test_legacy_handle_tool_result_flushes_buffer() -> None:
         (i for i, ln in enumerate(lines) if "_flush_buffer" in ln), None
     )
     write_idx = next(
-        (i for i, ln in enumerate(lines) if "self.write" in ln), None
+        (i for i, ln in enumerate(lines) if "self.write" in ln or "_smart_write" in ln), None
     )
 
     assert flush_idx is not None, "handle_tool_result must call _flush_buffer"
@@ -217,7 +217,7 @@ def test_legacy_handle_tool_progress_flushes_buffer() -> None:
         (i for i, ln in enumerate(lines) if "_flush_buffer" in ln), None
     )
     write_idx = next(
-        (i for i, ln in enumerate(lines) if "self.write" in ln), None
+        (i for i, ln in enumerate(lines) if "self.write" in ln or "_smart_write" in ln), None
     )
 
     assert flush_idx is not None

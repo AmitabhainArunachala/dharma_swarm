@@ -4,10 +4,13 @@ and Kyoto nihonga (日本画) pigment shops.
 Colours drawn from traditional Japanese mineral pigments:
   - Ai-iro (藍色): deep indigo-blue, Hokusai's Prussian blue
   - Bengara (弁柄): earthy red-ochre from iron oxide
-  - Uguisu (鶯): muted olive-celadon
-  - Sumi (墨): ink-wash greys
-  - Torinoko (鳥の子): aged paper cream
+  - Rokusho (緑青): verdigris green, copper patina on temple roofs
+  - Sumi (墨): ink-wash greys, the backbone of suiboku-ga
+  - Torinoko (鳥の子): aged washi paper cream
+  - Fuji (藤): wisteria purple, late spring Kyoto
+  - Kitsurubami (黄橡): persimmon tan, autumn warmth
   - Wasurenagusa (勿忘草): pale forget-me-not blue
+  - Shironeri (白練): undyed silk white, clean reading surface
 
 Built for Textual 8.x Theme API. Register with ``app.register_theme(DharmaDarkTheme)``
 and activate with ``app.theme = "dharma-dark"``.
@@ -19,27 +22,27 @@ from textual.theme import Theme
 
 DharmaDarkTheme = Theme(
     name="dharma-dark",
-    primary="#5B7F95",       # Ai-nezu — faded indigo-grey (Hokusai wave crest)
-    secondary="#8A7263",     # Kitsune-iro — fox brown, warm muted earth
-    accent="#6E8B74",        # Rokusho — verdigris green (copper patina)
-    warning="#C2956B",       # Kitsurubami — persimmon-tan, gentle warmth
-    error="#B5564E",         # Bengara — iron oxide red-ochre, not neon
-    success="#6E8B74",       # Rokusho — same verdigris for harmony
-    surface="#1C1B1A",       # Sumi-iro — deep charcoal ink
-    panel="#161614",         # Kuro-cha — blackened tea
+    primary="#4A7B9D",       # Ai-iro — Hokusai's signature indigo
+    secondary="#8A7263",     # Kitsune-iro — fox-brown, warm muted earth
+    accent="#5D8C6E",        # Rokusho — verdigris green, temple patina
+    warning="#C2956B",       # Kitsurubami — persimmon-tan
+    error="#C25B52",         # Bengara — iron oxide red-ochre
+    success="#5D8C6E",       # Rokusho — verdigris for harmony
+    surface="#18171A",       # Sumi-iro — deep charcoal with cool undertone
+    panel="#131215",         # Kuro-cha — blackened tea
     dark=True,
     variables={
-        "bg-base": "#121110",       # Ro-iro — lacquer black with warm undertone
-        "bg-elevated": "#1C1B1A",   # Sumi-iro — ink wash
-        "bg-surface": "#232220",    # Hai-iro — ash grey surface
-        "bg-overlay": "#2A2927",    # Nezumi — mouse grey
-        "text-primary": "#D8D2C4",  # Torinoko — aged paper cream
-        "text-secondary": "#9B9284",  # Usuzumi — dilute ink
-        "text-disabled": "#5C5650", # Nibi-iro — dull grey
-        "accent-bright": "#7B9DAD", # Hanada — washed indigo
-        "accent-dim": "#5B7F95",    # Ai-nezu — faded indigo
-        "accent-subtle": "#3A4F5A", # Kachi — dark victory indigo
-        "thinking": "#8B7BA8",      # Fuji-iro — wisteria purple, soft
-        "info": "#7B9DAD",          # Hanada — washed indigo
+        "bg-base": "#0E0D10",       # Ro-iro — lacquer black, true dark
+        "bg-elevated": "#18171A",   # Sumi-iro — ink wash
+        "bg-surface": "#1F1E22",    # Hai-iro — ash grey surface
+        "bg-overlay": "#272630",    # Nezumi — mouse grey with indigo tint
+        "text-primary": "#DCD5C4",  # Torinoko — aged washi cream
+        "text-secondary": "#9B928A", # Usuzumi — dilute ink
+        "text-disabled": "#5A5560", # Nibi-iro — dull grey-purple
+        "accent-bright": "#6B9BB5", # Hanada — washed indigo, brighter
+        "accent-dim": "#4A7B9D",    # Ai-iro — Hokusai blue
+        "accent-subtle": "#2D3D4F", # Kachi — dark victory indigo
+        "thinking": "#9B85B8",      # Fuji-iro — wisteria purple
+        "info": "#6B9BB5",          # Hanada — washed indigo
     },
 )

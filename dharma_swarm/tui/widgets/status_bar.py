@@ -43,10 +43,10 @@ class StatusBar(Widget):
     """
 
     MODE_COLORS: dict[str, str] = {
-        "N": "#6E8B74",   # Rokusho — verdigris
+        "N": "#5D8C6E",   # Rokusho — verdigris
         "A": "#C2956B",   # Kitsurubami — persimmon
-        "P": "#7B9DAD",   # Hanada — washed indigo
-        "S": "#8B7BA8",   # Fuji — wisteria
+        "P": "#6B9BB5",   # Hanada — washed indigo
+        "S": "#9B85B8",   # Fuji — wisteria
     }
 
     def render(self) -> Text:
@@ -54,11 +54,11 @@ class StatusBar(Widget):
         mode_color = self.MODE_COLORS.get(self.mode, "white")
 
         if self.context_pct > 80:
-            ctx_color = "#B5564E"   # Bengara
+            ctx_color = "#C25B52"   # Bengara
         elif self.context_pct > 60:
             ctx_color = "#C2956B"   # Kitsurubami
         else:
-            ctx_color = "#6E8B74"   # Rokusho
+            ctx_color = "#5D8C6E"   # Rokusho
 
         running_indicator = "\u27f3 " if self.is_running else ""
         display_name = self.session_name or "dgc"

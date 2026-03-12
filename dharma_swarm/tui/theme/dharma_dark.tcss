@@ -1,24 +1,34 @@
-/* DGC Hokusai Theme — mineral pigment palette (ukiyo-e / nihonga) */
+/* DGC Hokusai Theme — mineral pigment palette (ukiyo-e / nihonga 日本画)
+ *
+ * Palette drawn from traditional Japanese mineral pigments:
+ *   Sumi (墨) blacks — ink wash backgrounds
+ *   Ai (藍) blues — Hokusai's signature Prussian blue
+ *   Rokusho (緑青) — copper verdigris green
+ *   Bengara (弁柄) — iron oxide red
+ *   Fuji (藤) — wisteria purple
+ *   Torinoko (鳥の子) — aged paper cream text
+ *   Kitsurubami (黄橡) — persimmon tan accent
+ */
 
 /* === App-level === */
 Screen {
-    background: #121110;
-    color: #D8D2C4;
+    background: #0E0D10;
+    color: #DCD5C4;
 }
 
 /* === Status Bar === */
 StatusBar {
     dock: top;
     height: 1;
-    background: #1C1B1A;
-    color: #9B9284;
+    background: #18171A;
+    color: #9B928A;
 }
 
 /* === Sidebar === */
 #sidebar {
     width: 28;
-    background: #161614;
-    border-right: tall #3A4F5A;
+    background: #131215;
+    border-right: tall #2D3D4F;
 }
 
 #sidebar.hidden {
@@ -27,12 +37,13 @@ StatusBar {
 
 /* === Stream Output === */
 StreamOutput {
-    background: #121110;
+    background: #0E0D10;
     padding: 0 1;
-    scrollbar-background: #1C1B1A;
-    scrollbar-color: #5C5650;
-    scrollbar-color-hover: #9B9284;
-    scrollbar-color-active: #5B7F95;
+    scrollbar-background: #18171A;
+    scrollbar-color: #3A3842;
+    scrollbar-color-hover: #6B9BB5;
+    scrollbar-color-active: #4A7B9D;
+    scrollbar-size-vertical: 1;
 }
 
 /* === Prompt Input === */
@@ -42,19 +53,20 @@ PromptInput {
     min-height: 3;
     max-height: 12;
     margin: 0 1;
-    border: tall #3A4F5A;
-    background: #1C1B1A;
+    border: tall #2D3D4F;
+    background: #18171A;
+    color: #DCD5C4;
 }
 
 PromptInput:focus {
-    border: tall #5B7F95;
+    border: tall #4A7B9D;
 }
 
 /* === Bottom Drawer === */
 #drawer {
     height: 16;
-    border-top: tall #3A4F5A;
-    background: #161614;
+    border-top: tall #2D3D4F;
+    background: #131215;
 }
 
 #drawer.hidden {
@@ -72,23 +84,23 @@ ToolCallCard.-running {
 }
 
 ToolCallCard.-success {
-    border-left: thick #6E8B74;
+    border-left: thick #5D8C6E;
 }
 
 ToolCallCard.-error {
-    border-left: thick #B5564E;
+    border-left: thick #C25B52;
 }
 
 /* === Thinking Panel === */
 ThinkingPanel {
-    color: #8B7BA8;
+    color: #9B85B8;
     margin: 0 4 0 0;
     padding: 0 1;
 }
 
 /* === Mode-specific prompt border === */
 .mode-normal PromptInput {
-    border: tall #6E8B74;
+    border: tall #5D8C6E;
 }
 
 .mode-auto PromptInput {
@@ -96,16 +108,17 @@ ThinkingPanel {
 }
 
 .mode-plan PromptInput {
-    border: tall #7B9DAD;
+    border: tall #6B9BB5;
 }
 
 .mode-sage PromptInput {
-    border: tall #8B7BA8;
+    border: tall #9B85B8;
 }
 
 /* === Footer === */
 Footer {
-    background: #1C1B1A;
+    background: #18171A;
+    color: #9B928A;
 }
 
 /* === Scrollbars global === */
@@ -115,25 +128,25 @@ Footer {
 
 /* === Modal Screens === */
 ModalScreen {
-    background: #121110 80%;
+    background: #0E0D10 80%;
 }
 
 ModalScreen > * {
-    background: #1C1B1A;
-    border: thick #5B7F95;
+    background: #18171A;
+    border: thick #4A7B9D;
     margin: 4 8;
 }
 
 /* === Header === */
 Header {
-    background: #161614;
-    color: #7B9DAD;
+    background: #131215;
+    color: #6B9BB5;
 }
 
 /* === Splash Screen === */
 #splash-container {
     align: center middle;
-    background: #121110;
+    background: #0E0D10;
 }
 
 #splash-art {
@@ -141,7 +154,7 @@ Header {
     content-align: center middle;
     text-align: center;
     padding: 1;
-    color: #7B9DAD;
+    color: #6B9BB5;
 }
 
 #splash-prompt {
@@ -149,6 +162,12 @@ Header {
     height: 3;
     content-align: center middle;
     text-align: center;
-    background: #161614;
-    color: #9B9284;
+    background: #131215;
+    color: #9B928A;
+}
+
+/* === Scroll-lock indicator === */
+.scroll-locked StreamOutput {
+    scrollbar-color: #C2956B;
+    scrollbar-color-hover: #C2956B;
 }
