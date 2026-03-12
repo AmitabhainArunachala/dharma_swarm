@@ -889,32 +889,34 @@ End with: NEXT_VISION: [one sentence about what to think about next cycle]"""
 async def _vision_via_provider(
     prompt: str,
     *,
-    timeout_seconds: float = 20.0,
+    timeout_seconds: float = 60.0,
 ) -> tuple[str, bool]:
     """Fallback vision using direct LLM provider (no subprocess).
 
-    Tries OpenRouter paid, then free tier, then Anthropic.
+    Provider cascade with retry: OpenRouter paid (70B then 24B fallback),
+    then free tier, then Anthropic. Each attempt gets generous time.
     Works inside nested Claude Code sessions where ``claude -p`` cannot launch.
     """
     from dharma_swarm.models import LLMRequest
 
     sys_msg = "You are the Thinkodynamic Director — the highest thinking layer of an autonomous AI swarm."
-    budget = max(float(timeout_seconds), 0.1)
+    budget = max(float(timeout_seconds), 10.0)
     deadline = time.monotonic() + budget
 
-    async def _attempt_provider(
+    async def _attempt(
         label: str,
         provider: Any,
         request: LLMRequest,
+        per_attempt_max: float = 45.0,
     ) -> tuple[str, bool] | None:
         remaining = deadline - time.monotonic()
-        if remaining <= 0:
+        if remaining <= 2.0:
             return None
-        attempt_timeout = min(remaining, max(0.1, budget / 3.0))
+        attempt_timeout = min(remaining, per_attempt_max)
         try:
             resp = await asyncio.wait_for(provider.complete(request), timeout=attempt_timeout)
         except asyncio.TimeoutError:
-            logger.warning("%s timed out after %.2fs", label, attempt_timeout)
+            logger.warning("%s timed out after %.1fs", label, attempt_timeout)
             return None
         except Exception as exc:
             logger.debug("%s failed: %s", label, exc)
@@ -925,49 +927,59 @@ async def _vision_via_provider(
         logger.debug("%s returned unusable content", label)
         return None
 
-    # Try OpenRouter paid (cheap, reliable)
+    # Provider cascade — each gets generous time, total bounded by deadline
+    # Mistral 24B is fastest and most reliable; Llama 70B is smarter but slower
+    attempts: list[tuple[str, str, float]] = [
+        # (label, model, per_attempt_max)
+        ("OpenRouter/mistral-24b", "mistralai/mistral-small-3.1-24b-instruct", 30.0),
+        ("OpenRouter/llama-70b", "meta-llama/llama-3.3-70b-instruct", 45.0),
+    ]
+
     try:
         from dharma_swarm.providers import OpenRouterProvider
 
-        result = await _attempt_provider(
-            "Vision via OpenRouterProvider",
-            OpenRouterProvider(),
-            LLMRequest(
-                messages=[{"role": "user", "content": prompt}],
-                system=sys_msg,
-                model="meta-llama/llama-3.3-70b-instruct",
-                max_tokens=4096,
-            ),
-        )
-        if result is not None:
-            return result
+        for label, model, max_t in attempts:
+            result = await _attempt(
+                label,
+                OpenRouterProvider(),
+                LLMRequest(
+                    messages=[{"role": "user", "content": prompt}],
+                    system=sys_msg,
+                    model=model,
+                    max_tokens=4096,
+                ),
+                per_attempt_max=max_t,
+            )
+            if result is not None:
+                return result
     except Exception as exc:
         logger.debug("OpenRouterProvider setup failed: %s", exc)
 
-    # Try free tier (zero cost but rate-limited)
+    # Free tier (zero cost, rate-limited)
     try:
         from dharma_swarm.providers import OpenRouterFreeProvider
 
-        result = await _attempt_provider(
-            "Vision via OpenRouterFreeProvider",
+        result = await _attempt(
+            "OpenRouter/free",
             OpenRouterFreeProvider(),
             LLMRequest(
                 messages=[{"role": "user", "content": prompt}],
                 system=sys_msg,
                 max_tokens=4096,
             ),
+            per_attempt_max=30.0,
         )
         if result is not None:
             return result
     except Exception as exc:
         logger.debug("OpenRouterFreeProvider setup failed: %s", exc)
 
-    # Try Anthropic (most capable but expensive)
+    # Anthropic (most capable, expensive — last resort)
     try:
         from dharma_swarm.providers import AnthropicProvider
 
-        result = await _attempt_provider(
-            "Vision via AnthropicProvider",
+        result = await _attempt(
+            "Anthropic/sonnet",
             AnthropicProvider(),
             LLMRequest(
                 messages=[{"role": "user", "content": prompt}],
@@ -975,13 +987,15 @@ async def _vision_via_provider(
                 model="claude-sonnet-4-20250514",
                 max_tokens=4096,
             ),
+            per_attempt_max=45.0,
         )
         if result is not None:
             return result
     except Exception as exc:
         logger.debug("AnthropicProvider setup failed: %s", exc)
 
-    return f"(All vision providers failed or timed out within {budget:.2f}s)", False
+    elapsed = budget - max(0, deadline - time.monotonic())
+    return f"(All vision providers failed or timed out within {elapsed:.1f}s)", False
 
 
 def parse_vision_into_tasks(
