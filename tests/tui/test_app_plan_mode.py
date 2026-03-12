@@ -228,6 +228,36 @@ def test_model_set_action_switches_provider_and_model(monkeypatch) -> None:
     assert any("Model switched" in line for line in main.stream_output.system)
 
 
+def test_process_started_surfaces_codex_startup_hint(monkeypatch) -> None:
+    app = DGCApp()
+    main = _DummyMain(running=False)
+    app._inflight_provider = "codex"
+    app._inflight_model = "gpt-5.4"
+    monkeypatch.setattr(app, "_get_main_screen", lambda: main)
+    monkeypatch.setattr(app, "set_timer", lambda *_args, **_kwargs: None)
+
+    app.on_provider_runner_process_started(type("E", (), {})())
+
+    assert main.status_bar.is_running is True
+    assert any("Starting Codex session" in line for line in main.stream_output.system)
+
+
+def test_report_slow_provider_start_writes_hint(monkeypatch) -> None:
+    app = DGCApp()
+    main = _DummyMain(running=False)
+    app._provider_runner = type("Runner", (), {"is_running": True})()  # type: ignore[assignment]
+    app._active_provider = "codex"
+    app._active_model = "gpt-5.4"
+    app._inflight_provider = "codex"
+    app._inflight_model = "gpt-5.4"
+    app._provider_event_seen = False
+    monkeypatch.setattr(app, "_get_main_screen", lambda: main)
+
+    app._report_slow_provider_start()
+
+    assert any("Still waiting for codex:gpt-5.4" in line for line in main.stream_output.system)
+
+
 def test_model_set_resets_provider_session_even_same_provider(monkeypatch) -> None:
     app = DGCApp()
     app._provider_session_id = "prov-123"

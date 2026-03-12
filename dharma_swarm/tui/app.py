@@ -148,6 +148,7 @@ class DGCApp(App):
         self._inflight_started_ts: float | None = None
         self._last_session_success: bool | None = None
         self._pending_fallback: bool = False
+        self._provider_event_seen: bool = False
         # State context cache (same 60s TTL as old TUI)
         self._state_cache: str = ""
         self._state_cache_time: float = 0.0
@@ -190,8 +191,8 @@ class DGCApp(App):
         main = self._get_main_screen()
         if main:
             main.stream_output.write_system(
-                "[bold #7B9DAD]DGC[/bold #7B9DAD] -- Talk to Claude or type /help "
-                "for system commands\n"
+                "[bold #7B9DAD]DGC[/bold #7B9DAD] -- Mission console ready. "
+                f"Active route: {self._status_model_label()}. Type /help for system commands.\n"
             )
             main.status_bar.model = self._status_model_label()  # type: ignore[union-attr]
             self._restore_last_session_context()
@@ -705,6 +706,7 @@ class DGCApp(App):
     ) -> None:
         """Route canonical provider events to display widgets."""
         ev = event.event
+        self._provider_event_seen = True
         self._session.handle_event(ev)
 
         main = self._get_main_screen()
@@ -828,6 +830,34 @@ class DGCApp(App):
         main = self._get_main_screen()
         if main:
             main.status_bar.is_running = True  # type: ignore[union-attr]
+            route = self._status_model_label()
+            if self._inflight_provider == "codex":
+                main.stream_output.write_system(  # type: ignore[union-attr]
+                    "[dim]Starting Codex session on "
+                    f"{route}. Output may appear after the first model event; Ctrl+C cancels.[/dim]"
+                )
+            else:
+                main.stream_output.write_system(  # type: ignore[union-attr]
+                    f"[dim]Starting {route}...[/dim]"
+                )
+            self.set_timer(1.5, self._report_slow_provider_start)
+
+    def _report_slow_provider_start(self) -> None:
+        """Surface a hint when a provider has not emitted any event yet."""
+        if (
+            not self._provider_runner
+            or not self._provider_runner.is_running
+            or self._provider_event_seen
+        ):
+            return
+        main = self._get_main_screen()
+        if not main:
+            return
+        route = self._status_model_label()
+        main.stream_output.write_system(  # type: ignore[union-attr]
+            "[dim]Still waiting for "
+            f"{route} to emit its first event. This route can be quieter than Claude; Ctrl+C cancels.[/dim]"
+        )
 
     def on_provider_runner_process_exited(
         self, event: ProviderRunner.ProcessExited
@@ -847,6 +877,7 @@ class DGCApp(App):
             self._inflight_started_ts = None
             self._last_session_success = None
             self._pending_fallback = False
+            self._provider_event_seen = False
         else:
             latency_ms: float | None = None
             if self._inflight_started_ts is not None:
@@ -869,6 +900,7 @@ class DGCApp(App):
             self._inflight_model = None
             self._inflight_started_ts = None
             self._last_session_success = None
+            self._provider_event_seen = False
 
         if (not event.was_cancelled) and event.exit_code != 0:
             output.write_error(
@@ -1217,6 +1249,7 @@ class DGCApp(App):
         self._inflight_started_ts = time.time()
         self._last_session_success = None
         self._pending_fallback = False
+        self._provider_event_seen = False
         self._provider_runner.run_provider(
             request,
             session_id=local_session_id,
