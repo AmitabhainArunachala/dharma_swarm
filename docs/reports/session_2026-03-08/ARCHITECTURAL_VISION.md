@@ -8,6 +8,33 @@
 
 Dharma_swarm has **one genuine moat**: self-improving AI that cannot optimize away its ethics. Everything else is scaffolding that obscures this core value. This document proposes a radical simplification: keep what enforces the moat, cut everything else, rebuild around three high-value applications.
 
+## North Star Reframe (2026-03-11)
+
+The stronger formulation is:
+
+**DGC should be a persistent mission organism, not merely a self-improving code
+tool.**
+
+At full power, it should:
+
+- hold a mission across days, not just a prompt across minutes
+- decompose vague intent into executable campaigns
+- route work across multiple agents and providers
+- keep continuity through durable memory and runtime truth
+- ship artifacts, not just interpretations
+- detect blockage, escalate, and replan without losing the thread
+
+The real moat is therefore not just "ethical self-improvement."
+
+It is:
+
+**ethical, memory-backed, multi-agent mission continuity with artifact
+production under constraint.**
+
+That is the layer Claude Code, Codex, or OpenClaw alone do not naturally
+provide. They are powerful workers. DGC should be the thing that chooses,
+coordinates, remembers, compounds, and resumes.
+
 ---
 
 ## The Real Moat (Load-Bearing Structure)

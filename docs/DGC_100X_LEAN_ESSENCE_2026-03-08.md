@@ -1,5 +1,36 @@
 # DGC 100x Lean Essence Blueprint (2026-03-08)
 
+## North Star Revision (2026-03-11)
+
+DGC should not primarily behave like a chat interface, a dashboard, or a
+self-observing curiosity.
+
+Its full-power identity is:
+
+**a persistent mission organism that turns vague, high-stakes intent into
+multi-step, evidence-backed execution campaigns with continuity across
+sessions, agents, tools, and days.**
+
+That means the core unit of value is not "a good answer." It is:
+
+- one selected mission
+- one bounded plan
+- one or more shipped artifacts
+- one explicit review and replan loop
+- one durable memory trail that survives context death
+
+The correct default behavior is:
+
+1. choose the highest-leverage mission
+2. compile it into a deliverable with stop conditions
+3. route work to the right agents/providers
+4. execute until a real artifact exists
+5. record outcomes, blockers, and next actions
+6. resume coherently on the next cycle
+
+If DGC only scans, reflects, chats, or writes status summaries, it is not at
+full power.
+
 ## 0) What DGC Itself Is Signaling Right Now
 
 Snapshot from `python -m dharma_swarm.dgc_cli mission-status --json`:
@@ -11,16 +42,20 @@ Snapshot from `python -m dharma_swarm.dgc_cli mission-status --json`:
   - think-points
   - memory survival instinct
   - TUI plan-mode contract
-- `tracked_wiring` is weak: `0/8` mission-critical files are local-only (not tracked in git)
-- Accelerator lane is blocked:
-  - NVIDIA RAG health blocked
-  - ingest health blocked
-  - flywheel URL returning `404`
+- `tracked_wiring` is healthy: `16/16` mission-critical files are tracked
+- Accelerator lane is explicit but inactive:
+  - NVIDIA RAG health `DORMANT`
+  - ingest health `DORMANT`
+  - flywheel jobs `DORMANT`
+  - reciprocity health `DORMANT`
 
 Interpretation:
 - The cognitive spine is mostly present.
-- Operational reliability and reproducibility are not yet at the same level.
-- The biggest risk is not missing ideas; it is drift + unverifiable wiring.
+- Router/runtime readiness is much better than the early snapshot suggested.
+- The biggest remaining risk is no longer basic wiring; it is lack of
+  convergence pressure toward one chosen mission and one shipped artifact.
+- DGC is structurally capable of execution, but its default loop still allows
+  drift into interface, status, and generic seed-task churn.
 
 ---
 
@@ -267,4 +302,3 @@ scripts/start_caffeine_tmux.sh 04:00
   - `docs/NVIDIA_INFRA_SELF_HEAL.md`
   - `~/.dharma/shared/gap_closure_1772884910/*`
   - `~/.dharma/shared/olympus_gauntlet_1772893368/reports/*`
-

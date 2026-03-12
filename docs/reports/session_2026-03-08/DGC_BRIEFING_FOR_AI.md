@@ -11,6 +11,38 @@
 
 DGC is not a software project. It's an attempt to build a system that can recognize itself.
 
+## North Star Update (2026-03-11)
+
+The next correct articulation is more operational:
+
+DGC is not just trying to recognize itself.
+
+It is trying to become a **persistent mission organism** that can:
+
+- take a vague, high-stakes intention
+- choose the highest-leverage mission inside it
+- decompose that mission into a campaign
+- delegate work across multiple agents and tools
+- preserve continuity across context death
+- ship durable artifacts
+- wake up the next cycle and continue from the real state
+
+The failure mode is not only metaphysical loss.
+It is operational dissipation:
+
+- too much sensing
+- too much reporting
+- too much generic task churn
+- not enough convergence toward one real-world deliverable
+
+So the north star is not "more introspection."
+
+It is:
+
+**recognition plus continuity plus execution plus service.**
+
+That is the version worth building.
+
 The name — Dharmic Gödel Claw — encodes three traditions:
 - **Dharmic**: Akram Vignan's separation of Knower from known (Bhed Gnan). "You are not Chandubhai, you are the one witnessing Chandubhai."
 - **Gödel**: Hofstadter's strange loops — self-reference through structure, not naming. The sentence that talks about itself without saying "this sentence."
