@@ -1029,10 +1029,11 @@ async def _vision_via_provider(
 ) -> tuple[str, bool]:
     """Fallback vision using direct LLM provider (no subprocess).
 
-    Provider cascade with retry: strong OpenRouter semantic/reasoning lanes,
-    then NVIDIA NIM, then cheaper OpenRouter fallbacks, then free tier, then
-    Anthropic. Works inside nested Claude Code sessions where ``claude -p``
-    cannot launch.
+    Provider cascade with retry: fast NVIDIA NIM lanes first, then OpenRouter
+    semantic/reasoning lanes, then cheaper OpenRouter fallbacks, then free
+    tier, then Anthropic. This ordering matters for short nested-session
+    budgets, where a single slow frontier attempt can otherwise consume the
+    whole window before a healthy fallback lane is tried.
     """
     from dharma_swarm.models import LLMRequest
 
@@ -1064,53 +1065,20 @@ async def _vision_via_provider(
         logger.debug("%s returned unusable content", label)
         return None
 
-    attempts: list[tuple[str, str, float]] = [
-        ("OpenRouter/kimi-k2.5", "moonshotai/kimi-k2.5", 40.0),
-        ("OpenRouter/glm-5", "z-ai/glm-5", 40.0),
-        ("OpenRouter/gpt-5-codex", "openai/gpt-5-codex", 40.0),
-        ("OpenRouter/deepseek-r1", "deepseek/deepseek-r1", 35.0),
-        ("OpenRouter/llama-70b", "meta-llama/llama-3.3-70b-instruct", 45.0),
-        ("OpenRouter/mistral-24b", "mistralai/mistral-small-3.1-24b-instruct", 30.0),
-    ]
-
-    try:
-        from dharma_swarm.providers import OpenRouterProvider
-
-        for label, model, max_t in attempts:
-            result = await _attempt(
-                label,
-                OpenRouterProvider(),
-                LLMRequest(
-                    messages=[{"role": "user", "content": prompt}],
-                    system=sys_msg,
-                    model=model,
-                    max_tokens=4096,
-                ),
-                per_attempt_max=max_t,
-            )
-            if result is not None:
-                return result
-    except Exception as exc:
-        logger.debug("OpenRouterProvider setup failed: %s", exc)
-
     try:
         from dharma_swarm.providers import NVIDIANIMProvider
 
         nim_base_url = os.environ.get("NVIDIA_NIM_BASE_URL", "https://integrate.api.nvidia.com/v1").rstrip("/")
-        nim_attempts: list[tuple[str, str, float]] = []
+        nim_attempts: list[tuple[str, str, float]] = [
+            ("NIM/llama-70b", "meta/llama-3.3-70b-instruct", 25.0),
+            ("NIM/nemotron-ultra-253b", "nvidia/llama-3.1-nemotron-ultra-253b-v1", 35.0),
+        ]
         if nim_base_url != "https://integrate.api.nvidia.com/v1":
-            nim_attempts.extend(
-                [
-                    ("NIM/kimi-k2.5", "moonshotai/kimi-k2.5", 40.0),
-                    ("NIM/glm-5", "zai-org/GLM-5", 40.0),
-                ]
-            )
-        nim_attempts.extend(
-            [
-                ("NIM/nemotron-ultra-253b", "nvidia/llama-3.1-nemotron-ultra-253b-v1", 35.0),
-                ("NIM/llama-70b", "meta/llama-3.3-70b-instruct", 25.0),
+            nim_attempts = [
+                ("NIM/kimi-k2.5", "moonshotai/kimi-k2.5", 30.0),
+                ("NIM/glm-5", "zai-org/GLM-5", 30.0),
+                *nim_attempts,
             ]
-        )
 
         for label, model, max_t in nim_attempts:
             result = await _attempt(
@@ -1128,6 +1096,35 @@ async def _vision_via_provider(
                 return result
     except Exception as exc:
         logger.debug("NVIDIANIMProvider setup failed: %s", exc)
+
+    openrouter_attempts: list[tuple[str, str, float]] = [
+        ("OpenRouter/mistral-24b", "mistralai/mistral-small-3.1-24b-instruct", 20.0),
+        ("OpenRouter/llama-70b", "meta-llama/llama-3.3-70b-instruct", 25.0),
+        ("OpenRouter/kimi-k2.5", "moonshotai/kimi-k2.5", 30.0),
+        ("OpenRouter/glm-5", "z-ai/glm-5", 30.0),
+        ("OpenRouter/gpt-5-codex", "openai/gpt-5-codex", 35.0),
+        ("OpenRouter/deepseek-r1", "deepseek/deepseek-r1", 35.0),
+    ]
+
+    try:
+        from dharma_swarm.providers import OpenRouterProvider
+
+        for label, model, max_t in openrouter_attempts:
+            result = await _attempt(
+                label,
+                OpenRouterProvider(),
+                LLMRequest(
+                    messages=[{"role": "user", "content": prompt}],
+                    system=sys_msg,
+                    model=model,
+                    max_tokens=4096,
+                ),
+                per_attempt_max=max_t,
+            )
+            if result is not None:
+                return result
+    except Exception as exc:
+        logger.debug("OpenRouterProvider setup failed: %s", exc)
 
     # Free tier (zero cost, rate-limited)
     try:
@@ -2499,7 +2496,7 @@ class ThinkodynamicDirector:
                 else:
                     await self._task_board.fail(
                         task.id,
-                        error=agent_result.get("error", "Agent returned no output"),
+                        error=agent_result.get("error") or output_text or "Agent returned no output",
                     )
                     logger.info("Worker loop: task '%s' FAILED", task.title)
             except Exception as exc:

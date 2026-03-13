@@ -639,7 +639,8 @@ class DarwinEngine:
             "- Only fix real issues: bugs, missing error handling, performance, clarity\n"
             "- Do NOT add docstrings, type hints, or comments to code you didn't change\n"
             "- Do NOT refactor working code for style\n"
-            "- The diff must be a valid unified diff (--- a/file, +++ b/file, @@ hunks)\n"
+            "- The diff must be a valid unified diff (--- a/path/to/file, +++ b/path/to/file, @@ hunks)\n"
+            "- IMPORTANT: Use the EXACT relative path shown in the '## File:' header for diff paths\n"
             "- If the code is already good, say DESCRIPTION: no-op and leave DIFF empty"
         )
 
@@ -2186,13 +2187,23 @@ class DarwinEngine:
             component=component_key,
             profile_name=target.profile_name,
         )
+        # Compute relative path from workspace root so the LLM produces
+        # correct diff headers (e.g. --- a/dharma_swarm/selector.py)
+        try:
+            file_rel_path = str(source_file.relative_to(Path.cwd()))
+        except ValueError:
+            try:
+                file_rel_path = str(source_file.relative_to(Path.home() / "dharma_swarm"))
+            except ValueError:
+                file_rel_path = source_file.name
+
         user_msg = (
             "## Mutation Envelope\n"
             f"- mutation_rate: {mutation_rate:.3f}\n"
             f"- diff_budget_lines: {mutation_budget}\n"
             f"- adaptive_strategy: {strategy}\n"
             f"- execution_profile: {target.profile_name}\n\n"
-            f"## File: {source_file.name}\n\n```python\n{source}\n```"
+            f"## File: {file_rel_path}\n\n```python\n{source}\n```"
         )
         if context:
             user_msg = f"## Context\n{context}\n\n{user_msg}"

@@ -18,6 +18,7 @@ from __future__ import annotations
 import logging
 import os
 import random
+import re
 from dataclasses import dataclass, field
 from enum import Enum
 from typing import Any
@@ -98,7 +99,7 @@ EVOLUTION_ROSTER: tuple[ModelSlot, ...] = (
     # Same frontier models via OpenRouter (when direct keys aren't set)
     ModelSlot(
         ProviderType.OPENROUTER,
-        "anthropic/claude-opus-4-20250514",
+        "anthropic/claude-opus-4",
         "Claude Opus 4",
         ModelTier.FRONTIER,
         ("reasoning", "code", "architecture"),
@@ -107,7 +108,7 @@ EVOLUTION_ROSTER: tuple[ModelSlot, ...] = (
     ),
     ModelSlot(
         ProviderType.OPENROUTER,
-        "anthropic/claude-sonnet-4-20250514",
+        "anthropic/claude-sonnet-4",
         "Claude Sonnet 4",
         ModelTier.FRONTIER,
         ("code", "reasoning", "speed"),
@@ -389,12 +390,14 @@ def get_available_roster(
 
         # Dedup: skip OpenRouter slots that mirror a direct provider model
         if slot.provider in (ProviderType.OPENROUTER, ProviderType.OPENROUTER_FREE):
-            # e.g. "anthropic/claude-opus-4-20250514" → "claude-opus-4-20250514"
+            # e.g. "anthropic/claude-opus-4" → "claude-opus-4"
             base_id = slot.model_id.split("/")[-1].removesuffix(":free")
             if base_id in direct_model_ids:
                 continue
         elif slot.provider in _DIRECT_PROVIDERS:
-            direct_model_ids.add(slot.model_id)
+            # Normalize: strip date suffix (e.g. -20250514) for cross-provider dedup
+            normalized = re.sub(r"-\d{8}$", "", slot.model_id)
+            direct_model_ids.add(normalized)
 
         available.append(slot)
 

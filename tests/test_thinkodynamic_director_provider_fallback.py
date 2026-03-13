@@ -59,6 +59,53 @@ async def test_vision_via_provider_times_out_fast(monkeypatch):
 
 
 @pytest.mark.asyncio
+async def test_vision_via_provider_tries_nim_before_slow_openrouter(monkeypatch):
+    class _FakeClock:
+        def __init__(self) -> None:
+            self.value = 0.0
+
+        def monotonic(self) -> float:
+            return self.value
+
+        def advance(self, delta: float) -> None:
+            self.value += delta
+
+    clock = _FakeClock()
+    calls: list[tuple[str, str | None]] = []
+
+    class _BudgetEatingOpenRouter:
+        async def complete(self, request):
+            calls.append(("openrouter", request.model))
+            clock.advance(10.0)
+            raise RuntimeError("synthetic openrouter stall")
+
+    class _NimSuccess:
+        async def complete(self, request):
+            from dharma_swarm.models import LLMResponse
+
+            calls.append(("nim", request.model))
+            return LLMResponse(content="nim result", model="fake")
+
+    monkeypatch.setattr("dharma_swarm.thinkodynamic_director.time.monotonic", clock.monotonic)
+    monkeypatch.setattr(
+        "dharma_swarm.providers.NVIDIANIMProvider",
+        lambda *args, **kwargs: _NimSuccess(),
+    )
+    monkeypatch.setattr(
+        "dharma_swarm.providers.OpenRouterProvider",
+        lambda *args, **kwargs: _BudgetEatingOpenRouter(),
+    )
+    monkeypatch.setattr("dharma_swarm.providers.OpenRouterFreeProvider", _SlowProvider)
+    monkeypatch.setattr("dharma_swarm.providers.AnthropicProvider", _SlowProvider)
+
+    output, success = await _vision_via_provider("prompt", timeout_seconds=10.0)
+
+    assert success is True
+    assert output == "nim result"
+    assert calls[0][0] == "nim"
+
+
+@pytest.mark.asyncio
 async def test_vision_via_provider_ignores_error_string_and_uses_next_provider(monkeypatch):
     monkeypatch.setattr("dharma_swarm.providers.OpenRouterProvider", _ErrorStringProvider)
     monkeypatch.setattr("dharma_swarm.providers.OpenRouterFreeProvider", _SuccessProvider)

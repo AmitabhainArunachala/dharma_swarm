@@ -515,6 +515,40 @@ async def test_execute_pending_tasks_can_scope_to_cycle_id(
 
 
 @pytest.mark.asyncio
+async def test_execute_pending_tasks_preserves_failure_output_on_task_record(
+    director: ThinkodynamicDirector,
+) -> None:
+    await director.init()
+    primary = director.choose_primary(director.build_opportunities(director.rank_file_signals()))
+    workflow = director.plan_workflow(primary, cycle_id="worker-fail-1")
+    await director.enqueue_workflow(workflow)
+
+    async def _failed_spawn(task_plan, wf, *, model="sonnet", timeout=600):
+        return {
+            "task_key": task_plan.key,
+            "title": task_plan.title,
+            "success": False,
+            "output_length": 55,
+            "output": "(All vision providers failed or timed out within 24.0s)",
+            "blocked": False,
+            "rapid": False,
+            "provider": "test-mock",
+        }
+
+    director.spawn_agent = _failed_spawn  # type: ignore[assignment]
+
+    results = await director.execute_pending_tasks(max_concurrent=1)
+
+    assert len(results) == 1
+    failed_tasks = [
+        task for task in await director.list_director_tasks()
+        if task.status == TaskStatus.FAILED
+    ]
+    assert failed_tasks
+    assert failed_tasks[0].result == "(All vision providers failed or timed out within 24.0s)"
+
+
+@pytest.mark.asyncio
 async def test_execute_pending_tasks_can_scope_to_specific_task_ids(
     director: ThinkodynamicDirector,
 ) -> None:
