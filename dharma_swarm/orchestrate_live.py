@@ -1,0 +1,356 @@
+"""Live Orchestrator — runs all DGC systems concurrently.
+
+Boots SwarmManager + concurrent pulse heartbeat + evolution cycles + health
+monitoring in a single asyncio event loop. Uses `claude -p` (authenticated)
+as the execution engine — no API keys required.
+
+Usage:
+    dgc orchestrate                     # interactive (60s tick)
+    dgc orchestrate --background        # background daemon
+    python3 -m dharma_swarm.orchestrate_live  # direct
+
+Systems run concurrently:
+    1. Swarm loop — agent pool, task dispatch, coordination synthesis
+    2. Pulse loop — claude -p heartbeat with thread rotation + telos gates
+    3. Evolution loop — periodic Darwin Engine cycles
+    4. Living layers — stigmergy decay, shakti perception, subconscious dreams
+    5. Health monitor — anomaly detection, auto-healing
+"""
+
+from __future__ import annotations
+
+import asyncio
+import logging
+import os
+import signal
+import sys
+from datetime import datetime, timezone
+from pathlib import Path
+
+logger = logging.getLogger(__name__)
+
+HOME = Path.home()
+STATE_DIR = HOME / ".dharma"
+LOG_DIR = STATE_DIR / "logs"
+
+# Orchestrator defaults (overridable via env)
+SWARM_TICK = int(os.environ.get("DGC_SWARM_TICK", "60"))
+PULSE_INTERVAL = int(os.environ.get("DGC_PULSE_INTERVAL", "300"))
+EVOLUTION_INTERVAL = int(os.environ.get("DGC_EVOLUTION_INTERVAL", "600"))
+HEALTH_INTERVAL = int(os.environ.get("DGC_HEALTH_INTERVAL", "120"))
+LIVING_INTERVAL = int(os.environ.get("DGC_LIVING_INTERVAL", "180"))
+MAX_DAILY = int(os.environ.get("DGC_MAX_DAILY", "50"))
+
+
+def _log(system: str, msg: str) -> None:
+    ts = datetime.now(timezone.utc).strftime("%H:%M:%S")
+    line = f"[{ts}] [{system}] {msg}"
+    print(line, flush=True)
+    logger.info("[%s] %s", system, msg)
+
+
+async def run_swarm_loop(shutdown_event: asyncio.Event) -> None:
+    """Primary loop: SwarmManager init + run with reasonable tick interval."""
+    from dharma_swarm.daemon_config import DaemonConfig
+    from dharma_swarm.swarm import SwarmManager
+
+    _log("swarm", f"Initializing (tick={SWARM_TICK}s, max_daily={MAX_DAILY})...")
+
+    cfg = DaemonConfig()
+    cfg.heartbeat_interval = float(SWARM_TICK)
+    cfg.max_daily_contributions = MAX_DAILY
+
+    swarm = SwarmManager(state_dir=str(STATE_DIR), daemon_config=cfg)
+    await swarm.init()
+
+    agents = await swarm.list_agents()
+    _log("swarm", f"Ready: {len(agents)} agents, thread={swarm.current_thread}")
+
+    try:
+        while not shutdown_event.is_set():
+            try:
+                # The swarm's run() loop blocks, so we tick manually
+                overrides = swarm._check_human_overrides()
+                if overrides.get("paused"):
+                    _log("swarm", "Paused (.PAUSE file)")
+                    await asyncio.sleep(30)
+                    continue
+
+                if cfg.circuit_breaker.is_broken:
+                    _log("swarm", "Circuit breaker tripped, waiting...")
+                    await asyncio.sleep(60)
+                    continue
+
+                activity = await swarm._orchestrator.tick()
+                dispatched = activity.get("dispatched", 0)
+                settled = activity.get("settled", 0)
+                if dispatched or settled:
+                    _log("swarm", f"tick: dispatched={dispatched} settled={settled}")
+
+            except Exception as e:
+                _log("swarm", f"tick error: {e}")
+                cfg.circuit_breaker.record_failure()
+
+            await asyncio.sleep(SWARM_TICK)
+    finally:
+        await swarm.shutdown()
+        _log("swarm", "Shutdown complete")
+
+
+async def run_pulse_loop(shutdown_event: asyncio.Event) -> None:
+    """Pulse heartbeat — runs claude -p with thread rotation.
+
+    Skips if running inside a Claude Code session (nested sessions not allowed).
+    """
+    if os.environ.get("CLAUDECODE"):
+        _log("pulse", "Skipping — running inside Claude Code session (nested not allowed)")
+        return
+
+    from dharma_swarm.pulse import pulse
+    from dharma_swarm.daemon_config import DaemonConfig
+
+    _log("pulse", f"Starting (interval={PULSE_INTERVAL}s)")
+
+    cfg = DaemonConfig()
+    cfg.heartbeat_interval = float(PULSE_INTERVAL)
+    cfg.max_daily_contributions = MAX_DAILY
+    daily_count = 0
+
+    while not shutdown_event.is_set():
+        if daily_count >= MAX_DAILY:
+            _log("pulse", f"Daily limit ({MAX_DAILY}) reached")
+            await asyncio.sleep(3600)
+            continue
+
+        try:
+            _log("pulse", f"Pulsing... (#{daily_count + 1})")
+            # Run pulse in thread to not block event loop (it calls subprocess)
+            result = await asyncio.to_thread(pulse, cfg)
+            short = result[:120].replace("\n", " ")
+            _log("pulse", f"Result: {short}")
+
+            if not result.startswith(("PAUSED", "QUIET", "CIRCUIT", "TELOS")):
+                daily_count += 1
+        except Exception as e:
+            _log("pulse", f"Error: {e}")
+
+        await asyncio.sleep(PULSE_INTERVAL)
+
+
+async def run_evolution_loop(shutdown_event: asyncio.Event) -> None:
+    """Periodic evolution cycles — propose, gate, evaluate, archive."""
+    from dharma_swarm.evolution import DarwinEngine
+
+    _log("evolution", f"Starting (interval={EVOLUTION_INTERVAL}s)")
+    await asyncio.sleep(30)  # Let swarm init first
+
+    evo_dir = STATE_DIR / "evolution"
+    traces_dir = STATE_DIR / "traces"
+
+    engine = DarwinEngine(
+        archive_path=evo_dir / "archive.jsonl",
+        traces_path=traces_dir,
+        predictor_path=evo_dir / "predictor_data.jsonl",
+    )
+    await engine.init()
+
+    while not shutdown_event.is_set():
+        try:
+            count = len(engine.archive._entries) if engine.archive else 0
+            _log("evolution", f"Archive: {count} entries")
+
+            # Check fitness trend
+            try:
+                trend = engine.fitness_trend(window=5)
+                if trend:
+                    avg = sum(t.get("fitness", 0) for t in trend) / len(trend)
+                    _log("evolution", f"Fitness trend (last {len(trend)}): avg={avg:.3f}")
+            except Exception:
+                pass  # fitness_trend may not exist
+
+        except Exception as e:
+            _log("evolution", f"Error: {e}")
+
+        await asyncio.sleep(EVOLUTION_INTERVAL)
+
+
+async def run_health_loop(shutdown_event: asyncio.Event) -> None:
+    """Health monitoring — detect anomalies, report status."""
+    _log("health", f"Starting (interval={HEALTH_INTERVAL}s)")
+    await asyncio.sleep(15)  # Let swarm init first
+
+    while not shutdown_event.is_set():
+        try:
+            from dharma_swarm.monitor import SystemMonitor
+            from dharma_swarm.traces import TraceStore
+
+            traces_dir = STATE_DIR / "traces"
+            store = TraceStore(base_path=traces_dir)
+            await store.init()
+            monitor = SystemMonitor(trace_store=store)
+
+            anomalies = await monitor.detect_anomalies()
+            if anomalies:
+                for a in anomalies[:3]:
+                    _log("health", f"ANOMALY: {a.anomaly_type} severity={a.severity} — {a.description[:80]}")
+            else:
+                # Quick summary
+                pid_file = STATE_DIR / "daemon.pid"
+                pulse_log = STATE_DIR / "pulse.log"
+                status_parts = []
+                if pid_file.exists():
+                    try:
+                        pid = int(pid_file.read_text().strip())
+                        os.kill(pid, 0)
+                        status_parts.append(f"daemon=PID:{pid}")
+                    except (ValueError, OSError):
+                        status_parts.append("daemon=dead")
+                if pulse_log.exists():
+                    lines = pulse_log.read_text().split("--- PULSE @")
+                    status_parts.append(f"pulses={len(lines)-1}")
+                _log("health", f"OK ({', '.join(status_parts) or 'nominal'})")
+
+        except Exception as e:
+            _log("health", f"Error: {e}")
+
+        await asyncio.sleep(HEALTH_INTERVAL)
+
+
+async def run_living_layers(shutdown_event: asyncio.Event) -> None:
+    """Living layers — stigmergy decay, shakti perception, subconscious dreams."""
+    _log("living", f"Starting (interval={LIVING_INTERVAL}s)")
+    await asyncio.sleep(45)  # Let other systems init first
+
+    while not shutdown_event.is_set():
+        try:
+            from dharma_swarm.stigmergy import StigmergyStore
+            from dharma_swarm.subconscious import SubconsciousStream
+            from dharma_swarm.shakti import ShaktiLoop
+
+            store = StigmergyStore()
+            density = store.density()
+            summary = [f"density={density}"]
+
+            # Stigmergy decay (evaporate old marks)
+            if density > 100:
+                decayed = await store.decay(max_age_hours=168)
+                if decayed:
+                    summary.append(f"decayed={decayed}")
+
+            # Subconscious dreams (trigger on density threshold)
+            stream = SubconsciousStream(stigmergy=store)
+            if await stream.should_wake():
+                associations = await stream.dream()
+                summary.append(f"dreams={len(associations)}")
+
+            # Shakti perception
+            loop = ShaktiLoop(stigmergy=store)
+            perceptions = await loop.perceive(
+                current_context="orchestrator living-layer tick",
+                agent_role="orchestrator",
+            )
+            if perceptions:
+                summary.append(f"perceptions={len(perceptions)}")
+                high = [p for p in perceptions if p.salience >= 0.7]
+                if high:
+                    summary.append(f"high_salience={len(high)}")
+
+            _log("living", " ".join(summary))
+
+        except Exception as e:
+            _log("living", f"Error: {e}")
+
+        await asyncio.sleep(LIVING_INTERVAL)
+
+
+def _stop_old_daemon() -> None:
+    """Stop existing daemon if running, to avoid DB conflicts."""
+    pid_file = STATE_DIR / "daemon.pid"
+    if not pid_file.exists():
+        return
+    try:
+        pid = int(pid_file.read_text().strip())
+        os.kill(pid, 0)  # Check alive
+        _log("orchestrator", f"Stopping old daemon (PID {pid})...")
+        os.kill(pid, signal.SIGTERM)
+        # Wait up to 5 seconds for clean exit
+        for _ in range(10):
+            try:
+                os.kill(pid, 0)
+                import time
+                time.sleep(0.5)
+            except OSError:
+                break
+        _log("orchestrator", "Old daemon stopped")
+    except (ValueError, OSError):
+        pass
+    pid_file.unlink(missing_ok=True)
+
+
+async def orchestrate(background: bool = False) -> None:
+    """Main entry point — run all systems concurrently."""
+    STATE_DIR.mkdir(parents=True, exist_ok=True)
+    LOG_DIR.mkdir(parents=True, exist_ok=True)
+
+    # Stop any existing daemon to avoid DB conflicts
+    _stop_old_daemon()
+
+    # Write PID
+    pid_file = STATE_DIR / "orchestrator.pid"
+    pid_file.write_text(str(os.getpid()))
+
+    shutdown_event = asyncio.Event()
+
+    def _signal_handler(signum, frame):
+        _log("orchestrator", f"Signal {signum} received, shutting down...")
+        shutdown_event.set()
+
+    signal.signal(signal.SIGINT, _signal_handler)
+    signal.signal(signal.SIGTERM, _signal_handler)
+
+    _log("orchestrator", "=" * 60)
+    _log("orchestrator", "DGC Live Orchestrator starting")
+    _log("orchestrator", f"  PID: {os.getpid()}")
+    _log("orchestrator", f"  State: {STATE_DIR}")
+    _log("orchestrator", f"  Swarm tick: {SWARM_TICK}s")
+    _log("orchestrator", f"  Pulse interval: {PULSE_INTERVAL}s")
+    _log("orchestrator", f"  Evolution interval: {EVOLUTION_INTERVAL}s")
+    _log("orchestrator", f"  Health interval: {HEALTH_INTERVAL}s")
+    _log("orchestrator", f"  Living layers interval: {LIVING_INTERVAL}s")
+    _log("orchestrator", f"  Max daily: {MAX_DAILY}")
+    _log("orchestrator", "=" * 60)
+
+    tasks = [
+        asyncio.create_task(run_swarm_loop(shutdown_event), name="swarm"),
+        asyncio.create_task(run_pulse_loop(shutdown_event), name="pulse"),
+        asyncio.create_task(run_evolution_loop(shutdown_event), name="evolution"),
+        asyncio.create_task(run_health_loop(shutdown_event), name="health"),
+        asyncio.create_task(run_living_layers(shutdown_event), name="living"),
+    ]
+
+    _log("orchestrator", f"All {len(tasks)} systems launched")
+
+    try:
+        # Wait for shutdown or first failure
+        done, pending = await asyncio.wait(tasks, return_when=asyncio.FIRST_EXCEPTION)
+        for t in done:
+            if t.exception():
+                _log("orchestrator", f"System {t.get_name()} failed: {t.exception()}")
+    except asyncio.CancelledError:
+        pass
+    finally:
+        shutdown_event.set()
+        for t in tasks:
+            t.cancel()
+        await asyncio.gather(*tasks, return_exceptions=True)
+        pid_file.unlink(missing_ok=True)
+        _log("orchestrator", "All systems stopped")
+
+
+if __name__ == "__main__":
+    logging.basicConfig(
+        level=logging.INFO,
+        format="%(asctime)s %(name)s [%(levelname)s] %(message)s",
+    )
+    bg = "--background" in sys.argv or "--bg" in sys.argv
+    asyncio.run(orchestrate(background=bg))

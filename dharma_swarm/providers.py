@@ -9,6 +9,7 @@ from __future__ import annotations
 import asyncio
 from dataclasses import replace
 from datetime import datetime, timezone
+import inspect
 import json
 import os
 import random
@@ -403,8 +404,9 @@ class _SubprocessProvider(LLMProvider):
         prompt += MEMORY_SURVIVAL_DIRECTIVE
         return prompt
 
-    def _build_cli_args(self, prompt: str) -> list[str]:
-        return [self._cli_command, "-p", prompt, "--output-format", "text", "--model", "opus"]
+    def _build_cli_args(self, prompt: str, model: str | None = None) -> list[str]:
+        resolved = model or "sonnet"
+        return [self._cli_command, "-p", prompt, "--output-format", "text", "--model", resolved]
 
     def _build_env(self) -> dict[str, str]:
         env = {**os.environ, "CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC": "1"}
@@ -417,7 +419,7 @@ class _SubprocessProvider(LLMProvider):
         shared.mkdir(parents=True, exist_ok=True)
 
         prompt = self._build_prompt(request)
-        args = self._build_cli_args(prompt)
+        args = self._build_cli_args(prompt, model=request.model)
         env = self._build_env()
 
         proc = await asyncio.create_subprocess_exec(
@@ -433,7 +435,9 @@ class _SubprocessProvider(LLMProvider):
                 proc.communicate(), timeout=self._timeout
             )
         except asyncio.TimeoutError:
-            proc.terminate()
+            terminate_result = proc.terminate()
+            if inspect.isawaitable(terminate_result):
+                await terminate_result
             await proc.wait()
             return LLMResponse(content="TIMEOUT: exceeded limit", model=self._cli_label)
 
@@ -471,7 +475,7 @@ class CodexProvider(_SubprocessProvider):
     _cli_command = "codex"
     _cli_label = "codex"
 
-    def _build_cli_args(self, prompt: str) -> list[str]:
+    def _build_cli_args(self, prompt: str, model: str | None = None) -> list[str]:
         return [self._cli_command, "exec", prompt]
 
     def _build_env(self) -> dict[str, str]:
@@ -1565,13 +1569,6 @@ def create_default_router() -> ModelRouter:
 
     Missing API keys are tolerated here -- providers only raise on use.
     """
-    return ModelRouter({
-        ProviderType.ANTHROPIC: AnthropicProvider(),
-        ProviderType.OPENAI: OpenAIProvider(),
-        ProviderType.OPENROUTER: OpenRouterProvider(),
-        ProviderType.NVIDIA_NIM: NVIDIANIMProvider(),
-        ProviderType.CLAUDE_CODE: ClaudeCodeProvider(),
-        ProviderType.CODEX: CodexProvider(),
-        ProviderType.OPENROUTER_FREE: OpenRouterFreeProvider(),
-        ProviderType.OLLAMA: OllamaProvider(),
-    })
+    from dharma_swarm.runtime_provider import create_default_provider_map
+
+    return ModelRouter(create_default_provider_map())

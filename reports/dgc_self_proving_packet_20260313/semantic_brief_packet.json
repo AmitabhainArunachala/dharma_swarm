@@ -1,0 +1,259 @@
+{
+  "artifacts": [
+    {
+      "artifact_kind": "semantic_brief_packet",
+      "citations": [
+        "Curry (2014) 'Sheaves, Cosheaves and Applications'",
+        "Ghrist (2014) 'Elementary Applied Topology'",
+        "Robinson (2022) 'Sheaf Neural Networks'",
+        "Parunak (2026) 'Stigmergic Swarming Agents for Fast Subgraph Isomorphism' \u2014 AAMAS 2026",
+        "S-MADRL (2025) Stigmergic multi-agent deep RL",
+        "Knowledge graphs as coordination hubs (IBM 2026)",
+        "Moggi (1991) 'Notions of computation and monads'",
+        "Rutten (2000) 'Universal coalgebra: a theory of systems'",
+        "Haskell IO Monad / Effect Systems (2024-2026)"
+      ],
+      "depends_on": [],
+      "metadata": {},
+      "path": "reports/dgc_self_proving_packet_20260313/semantic_graph.json",
+      "source": "semantic_briefs",
+      "summary": "3 semantic briefs, 3 execution briefs",
+      "title": "semantic brief packet"
+    }
+  ],
+  "execution_briefs": [
+    {
+      "acceptance": [
+        "Produce at least one artifact tied to the cluster thesis.",
+        "Verify touched code or docs with concrete evidence.",
+        "Archive the resulting artifact back into campaign memory.",
+        "Address the top hardening gap: Import target missing: dharma_swarm/cohomology_cechcohomology_to_sheaf_coord.py"
+      ],
+      "brief_id": "execution-semantic-adb569da84754d48",
+      "depends_on_briefs": [
+        "semantic-adb569da84754d48"
+      ],
+      "evidence_paths": [
+        "dharma_swarm/sheaf.py",
+        "dharma_swarm/gaia_verification.py",
+        "dharma_swarm/cohomology_cechcohomology_to_sheaf_coord.py",
+        "docs/clusters/cohomology_cechcohomology_to_sheaf_coord_spec.md",
+        "tests/test_cohomology_cechcohomology_to_sheaf_coord.py",
+        "docs/clusters/cohomology_cechcohomology_to_sheaf_coord_research.md"
+      ],
+      "goal": "Grounds the intersection of [CechCohomology, to_sheaf_coordination] via [cohomology, sheaf] connected to research in [applied topology, computational topology, geometric deep learning] Core concepts: CechCohomology, to_sheaf_coordination. Research spine: Curry (2014) 'Sheaves, Cosheaves and Applications'.",
+      "metadata": {
+        "cluster_id": "adb569da84754d48",
+        "semantic_brief_id": "semantic-adb569da84754d48"
+      },
+      "readiness_score": 0.597,
+      "task_titles": [
+        "Implement or revise dharma_swarm/cohomology_cechcohomology_to_sheaf_coord.py.",
+        "Write or refresh docs/clusters/cohomology_cechcohomology_to_sheaf_coord_spec.md.",
+        "Add or update verification in tests/test_cohomology_cechcohomology_to_sheaf_coord.py.",
+        "Write or refresh docs/clusters/cohomology_cechcohomology_to_sheaf_coord_research.md."
+      ],
+      "title": "Cohomology \u2014 Cechcohomology \u2014 To Sheaf Coordination build brief"
+    },
+    {
+      "acceptance": [
+        "Produce at least one artifact tied to the cluster thesis.",
+        "Verify touched code or docs with concrete evidence.",
+        "Archive the resulting artifact back into campaign memory.",
+        "Address the top hardening gap: Import target missing: dharma_swarm/stigmergy_shaktiloop_sleepcycle.py"
+      ],
+      "brief_id": "execution-semantic-c1362e27f68449b5",
+      "depends_on_briefs": [
+        "semantic-c1362e27f68449b5"
+      ],
+      "evidence_paths": [
+        "dharma_swarm/shakti.py",
+        "dharma_swarm/sleep_cycle.py",
+        "dharma_swarm/stigmergy_shaktiloop_sleepcycle.py",
+        "docs/clusters/stigmergy_shaktiloop_sleepcycle_spec.md",
+        "tests/test_stigmergy_shaktiloop_sleepcycle.py",
+        "docs/clusters/stigmergy_shaktiloop_sleepcycle_research.md"
+      ],
+      "goal": "Grounds the intersection of [ShaktiLoop, SleepCycle] via [stigmergy] connected to research in [enterprise AI, reinforcement learning, multi-agent systems] Core concepts: ShaktiLoop, SleepCycle. Research spine: Parunak (2026) 'Stigmergic Swarming Agents for Fast Subgraph Isomorphism' \u2014 AAMAS 2026.",
+      "metadata": {
+        "cluster_id": "c1362e27f68449b5",
+        "semantic_brief_id": "semantic-c1362e27f68449b5"
+      },
+      "readiness_score": 0.592,
+      "task_titles": [
+        "Implement or revise dharma_swarm/stigmergy_shaktiloop_sleepcycle.py.",
+        "Write or refresh docs/clusters/stigmergy_shaktiloop_sleepcycle_spec.md.",
+        "Add or update verification in tests/test_stigmergy_shaktiloop_sleepcycle.py.",
+        "Write or refresh docs/clusters/stigmergy_shaktiloop_sleepcycle_research.md."
+      ],
+      "title": "Stigmergy \u2014 Shaktiloop \u2014 Sleepcycle build brief"
+    },
+    {
+      "acceptance": [
+        "Produce at least one artifact tied to the cluster thesis.",
+        "Verify touched code or docs with concrete evidence.",
+        "Archive the resulting artifact back into campaign memory.",
+        "Address the top hardening gap: Import target missing: dharma_swarm/monad_dseintegrator_dse_integration.py"
+      ],
+      "brief_id": "execution-semantic-47dc1969585d43cd",
+      "depends_on_briefs": [
+        "semantic-47dc1969585d43cd"
+      ],
+      "evidence_paths": [
+        "dharma_swarm/dse_integration.py",
+        "dharma_swarm/monad_dseintegrator_dse_integration.py",
+        "docs/clusters/monad_dseintegrator_dse_integration_spec.md",
+        "tests/test_monad_dseintegrator_dse_integration.py",
+        "docs/clusters/monad_dseintegrator_dse_integration_research.md"
+      ],
+      "goal": "Grounds the intersection of [DSEIntegrator, dse_integration] via [monad, sheaf, coalgebra] connected to research in [category theory / PL theory, programming languages, theoretical computer science] Core concepts: DSEIntegrator, dse_integration. Research spine: Moggi (1991) 'Notions of computation and monads'.",
+      "metadata": {
+        "cluster_id": "47dc1969585d43cd",
+        "semantic_brief_id": "semantic-47dc1969585d43cd"
+      },
+      "readiness_score": 0.584,
+      "task_titles": [
+        "Implement or revise dharma_swarm/monad_dseintegrator_dse_integration.py.",
+        "Write or refresh docs/clusters/monad_dseintegrator_dse_integration_spec.md.",
+        "Add or update verification in tests/test_monad_dseintegrator_dse_integration.py.",
+        "Write or refresh docs/clusters/monad_dseintegrator_dse_integration_research.md."
+      ],
+      "title": "Monad \u2014 Dseintegrator \u2014 Dse Integration build brief"
+    }
+  ],
+  "generated_at": "2026-03-13T11:27:41.792559+00:00",
+  "graph_path": "reports/dgc_self_proving_packet_20260313/semantic_graph.json",
+  "metrics": {
+    "avg_readiness": 0.591,
+    "clusters_considered": 4,
+    "execution_briefs": 3,
+    "reports_considered": 4,
+    "semantic_briefs": 3
+  },
+  "project_root": ".",
+  "semantic_briefs": [
+    {
+      "brief_id": "semantic-adb569da84754d48",
+      "citations": [
+        "Curry (2014) 'Sheaves, Cosheaves and Applications'",
+        "Ghrist (2014) 'Elementary Applied Topology'",
+        "Robinson (2022) 'Sheaf Neural Networks'"
+      ],
+      "cluster_name": "Cohomology \u2014 Cechcohomology \u2014 To Sheaf Coordination",
+      "concept_names": [
+        "CechCohomology",
+        "to_sheaf_coordination"
+      ],
+      "evidence_paths": [
+        "dharma_swarm/sheaf.py",
+        "dharma_swarm/gaia_verification.py",
+        "dharma_swarm/cohomology_cechcohomology_to_sheaf_coord.py",
+        "docs/clusters/cohomology_cechcohomology_to_sheaf_coord_spec.md",
+        "tests/test_cohomology_cechcohomology_to_sheaf_coord.py",
+        "docs/clusters/cohomology_cechcohomology_to_sheaf_coord_research.md"
+      ],
+      "gaps": [
+        "Import target missing: dharma_swarm/cohomology_cechcohomology_to_sheaf_coord.py",
+        "Unresolved cross-reference: 'Curry (2014) 'Sheaves, Cosheaves and Applications'' in docs/clusters/cohomology_cechcohomology_to_sheaf_coord_research.md",
+        "Unresolved cross-reference: 'Ghrist (2014) 'Elementary Applied Topology'' in docs/clusters/cohomology_cechcohomology_to_sheaf_coord_research.md",
+        "Unresolved cross-reference: 'Robinson (2022) 'Sheaf Neural Networks'' in docs/clusters/cohomology_cechcohomology_to_sheaf_coord_research.md",
+        "Concept 'CechCohomology' entropy 1.000 outside healthy range [0.3, 0.9]",
+        "Concept 'to_sheaf_coordination' entropy 0.996 outside healthy range [0.3, 0.9]"
+      ],
+      "metadata": {
+        "cluster_id": "adb569da84754d48",
+        "intersection_type": "formal_structure",
+        "overall_score": 0.841,
+        "passed": true
+      },
+      "next_actions": [
+        "[context_engineering] Improve: Unresolved cross-reference: 'Curry (2014) 'Sheaves, Cosheaves and Applications'' in docs/clusters/cohomology_cechcohomology_to_sheaf_coord_research.md"
+      ],
+      "readiness_score": 0.597,
+      "thesis": "Grounds the intersection of [CechCohomology, to_sheaf_coordination] via [cohomology, sheaf] connected to research in [applied topology, computational topology, geometric deep learning] Core concepts: CechCohomology, to_sheaf_coordination. Research spine: Curry (2014) 'Sheaves, Cosheaves and Applications'.",
+      "title": "Cohomology \u2014 Cechcohomology \u2014 To Sheaf Coordination"
+    },
+    {
+      "brief_id": "semantic-c1362e27f68449b5",
+      "citations": [
+        "Parunak (2026) 'Stigmergic Swarming Agents for Fast Subgraph Isomorphism' \u2014 AAMAS 2026",
+        "S-MADRL (2025) Stigmergic multi-agent deep RL",
+        "Knowledge graphs as coordination hubs (IBM 2026)"
+      ],
+      "cluster_name": "Stigmergy \u2014 Shaktiloop \u2014 Sleepcycle",
+      "concept_names": [
+        "ShaktiLoop",
+        "SleepCycle"
+      ],
+      "evidence_paths": [
+        "dharma_swarm/shakti.py",
+        "dharma_swarm/sleep_cycle.py",
+        "dharma_swarm/stigmergy_shaktiloop_sleepcycle.py",
+        "docs/clusters/stigmergy_shaktiloop_sleepcycle_spec.md",
+        "tests/test_stigmergy_shaktiloop_sleepcycle.py",
+        "docs/clusters/stigmergy_shaktiloop_sleepcycle_research.md"
+      ],
+      "gaps": [
+        "Import target missing: dharma_swarm/stigmergy_shaktiloop_sleepcycle.py",
+        "Unresolved cross-reference: 'Parunak (2026) 'Stigmergic Swarming Agents for Fast Subgraph Isomorphism' \u2014 AAMAS 2026' in docs/clusters/stigmergy_shaktiloop_sleepcycle_research.md",
+        "Unresolved cross-reference: 'S-MADRL (2025) Stigmergic multi-agent deep RL' in docs/clusters/stigmergy_shaktiloop_sleepcycle_research.md",
+        "Unresolved cross-reference: 'Knowledge graphs as coordination hubs (IBM 2026)' in docs/clusters/stigmergy_shaktiloop_sleepcycle_research.md",
+        "Concept 'ShaktiLoop' entropy 0.994 outside healthy range [0.3, 0.9]",
+        "Concept 'SleepCycle' entropy 1.000 outside healthy range [0.3, 0.9]"
+      ],
+      "metadata": {
+        "cluster_id": "c1362e27f68449b5",
+        "intersection_type": "formal_structure",
+        "overall_score": 0.834,
+        "passed": true
+      },
+      "next_actions": [
+        "[context_engineering] Improve: Unresolved cross-reference: 'Parunak (2026) 'Stigmergic Swarming Agents for Fast Subgraph Isomorphism' \u2014 AAMAS 2026' in docs/clusters/stigmergy_shaktiloop_sleepcycle_research.md"
+      ],
+      "readiness_score": 0.592,
+      "thesis": "Grounds the intersection of [ShaktiLoop, SleepCycle] via [stigmergy] connected to research in [enterprise AI, reinforcement learning, multi-agent systems] Core concepts: ShaktiLoop, SleepCycle. Research spine: Parunak (2026) 'Stigmergic Swarming Agents for Fast Subgraph Isomorphism' \u2014 AAMAS 2026.",
+      "title": "Stigmergy \u2014 Shaktiloop \u2014 Sleepcycle"
+    },
+    {
+      "brief_id": "semantic-47dc1969585d43cd",
+      "citations": [
+        "Moggi (1991) 'Notions of computation and monads'",
+        "Rutten (2000) 'Universal coalgebra: a theory of systems'",
+        "Haskell IO Monad / Effect Systems (2024-2026)"
+      ],
+      "cluster_name": "Monad \u2014 Dseintegrator \u2014 Dse Integration",
+      "concept_names": [
+        "DSEIntegrator",
+        "dse_integration"
+      ],
+      "evidence_paths": [
+        "dharma_swarm/dse_integration.py",
+        "dharma_swarm/monad_dseintegrator_dse_integration.py",
+        "docs/clusters/monad_dseintegrator_dse_integration_spec.md",
+        "tests/test_monad_dseintegrator_dse_integration.py",
+        "docs/clusters/monad_dseintegrator_dse_integration_research.md"
+      ],
+      "gaps": [
+        "Import target missing: dharma_swarm/monad_dseintegrator_dse_integration.py",
+        "Unresolved cross-reference: 'Moggi (1991) 'Notions of computation and monads'' in docs/clusters/monad_dseintegrator_dse_integration_research.md",
+        "Unresolved cross-reference: 'Rutten (2000) 'Universal coalgebra: a theory of systems'' in docs/clusters/monad_dseintegrator_dse_integration_research.md",
+        "Unresolved cross-reference: 'Haskell IO Monad / Effect Systems (2024-2026)' in docs/clusters/monad_dseintegrator_dse_integration_research.md",
+        "Concept 'DSEIntegrator' entropy 0.991 outside healthy range [0.3, 0.9]",
+        "Concept 'dse_integration' entropy 0.975 outside healthy range [0.3, 0.9]"
+      ],
+      "metadata": {
+        "cluster_id": "47dc1969585d43cd",
+        "intersection_type": "formal_structure",
+        "overall_score": 0.822,
+        "passed": true
+      },
+      "next_actions": [
+        "[context_engineering] Improve: Unresolved cross-reference: 'Moggi (1991) 'Notions of computation and monads'' in docs/clusters/monad_dseintegrator_dse_integration_research.md",
+        "[computational] Improve: Import target missing: dharma_swarm/monad_dseintegrator_dse_integration.py"
+      ],
+      "readiness_score": 0.584,
+      "thesis": "Grounds the intersection of [DSEIntegrator, dse_integration] via [monad, sheaf, coalgebra] connected to research in [category theory / PL theory, programming languages, theoretical computer science] Core concepts: DSEIntegrator, dse_integration. Research spine: Moggi (1991) 'Notions of computation and monads'.",
+      "title": "Monad \u2014 Dseintegrator \u2014 Dse Integration"
+    }
+  ]
+}

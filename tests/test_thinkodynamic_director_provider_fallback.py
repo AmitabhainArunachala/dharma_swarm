@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import time
 from pathlib import Path
+from types import SimpleNamespace
 from unittest.mock import patch
 
 import pytest
@@ -205,6 +206,49 @@ async def test_spawn_agent_falls_back_when_claude_cli_returns_nonzero(tmp_path: 
     assert result["success"] is True
     assert result["provider"] == "openrouter-fallback"
     assert result["output"] == "provider fallback ok"
+
+
+@pytest.mark.asyncio
+async def test_spawn_agent_prefers_codex_for_implementation_tasks(tmp_path: Path):
+    director = ThinkodynamicDirector(
+        repo_root=tmp_path,
+        state_dir=tmp_path / ".dharma",
+        external_roots=(),
+    )
+    workflow = WorkflowPlan(
+        cycle_id="1",
+        workflow_id="wf-1",
+        opportunity_id="opp-1",
+        opportunity_title="Implement a real coding slice",
+        theme="autonomy",
+        thesis="Implementation tasks should prefer a tool-backed worker.",
+        why_now="This is where execution leverage lives.",
+        expected_duration_min=5,
+        tasks=[],
+    )
+    task = WorkflowTaskPlan(
+        key="t1",
+        title="Implement the worker telemetry",
+        description="Write structured logs for each execution wave.",
+        priority="high",
+        role_hint="surgeon",
+        acceptance=["Telemetry exists"],
+    )
+
+    def _fake_subprocess(cmd, **kwargs):
+        if cmd[0] == "codex":
+            output_path = Path(cmd[cmd.index("-o") + 1])
+            output_path.parent.mkdir(parents=True, exist_ok=True)
+            output_path.write_text("codex completed the slice", encoding="utf-8")
+            return SimpleNamespace(returncode=0, stdout="codex stdout", stderr="")
+        raise AssertionError(f"unexpected backend call: {cmd}")
+
+    with patch("dharma_swarm.thinkodynamic_director.subprocess.run", side_effect=_fake_subprocess):
+        result = await director.spawn_agent(task, workflow, timeout=24)
+
+    assert result["success"] is True
+    assert result["provider"] == "codex-cli"
+    assert result["output"] == "codex completed the slice"
 
 
 @pytest.mark.asyncio

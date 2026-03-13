@@ -103,6 +103,41 @@ def test_dgc_cli_runtime_status_command():
             assert mock.call_args.kwargs["db_path"] == "/tmp/runtime.db"
 
 
+def test_dgc_cli_ledger_search_dispatch():
+    """main() dispatches `ledger search` options to cmd_ledger."""
+    from dharma_swarm.dgc_cli import main
+
+    with patch(
+        "sys.argv",
+        [
+            "dgc",
+            "ledger",
+            "search",
+            "provider",
+            "timeout",
+            "--session",
+            "sess-1",
+            "--kind",
+            "progress",
+            "--db-path",
+            "/tmp/runtime.db",
+            "--no-sync-ledgers",
+            "--limit-sessions",
+            "3",
+        ],
+    ):
+        with patch("dharma_swarm.dgc_cli.cmd_ledger") as mock:
+            main()
+            mock.assert_called_once()
+            assert mock.call_args.kwargs["ledger_cmd"] == "search"
+            assert mock.call_args.kwargs["query"] == "provider timeout"
+            assert mock.call_args.kwargs["session"] == "sess-1"
+            assert mock.call_args.kwargs["kind"] == "progress"
+            assert mock.call_args.kwargs["db_path"] == "/tmp/runtime.db"
+            assert mock.call_args.kwargs["sync_ledgers"] is False
+            assert mock.call_args.kwargs["limit_sessions"] == 3
+
+
 def test_dgc_cli_mission_status_command():
     """main() dispatches 'mission-status' to cmd_mission_status."""
     from dharma_swarm.dgc_cli import main

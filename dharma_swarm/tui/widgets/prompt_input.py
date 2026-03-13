@@ -45,7 +45,7 @@ class PromptInput(TextArea):
 
     def __init__(self, **kwargs: object) -> None:
         super().__init__(language=None, **kwargs)
-        self.border_title = "Enter to send | Shift+Enter / Ctrl+J for newline"
+        self.border_title = "Enter send | Shift+Enter/Ctrl+J newline"
 
     async def _on_key(self, event: events.Key) -> None:
         """Intercept Enter for submit; allow Shift+Enter and Ctrl+J for newline.

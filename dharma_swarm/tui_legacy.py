@@ -775,38 +775,14 @@ class DGCApp(App):
             if self._state_cache:
                 return self._state_cache
 
-        parts: list[str] = []
+        from dharma_swarm.prompt_builder import build_state_context_snapshot
 
-        # Current thread
-        thread_file = DHARMA_STATE / "thread_state.json"
-        if thread_file.exists():
-            try:
-                ts = json.loads(thread_file.read_text())
-                parts.append(f"Active thread: {ts.get('current_thread', 'unknown')}")
-            except Exception:
-                pass
-
-        # Recent memory (last 3)
-        try:
-            from dharma_swarm.context import read_memory_context
-            mem = read_memory_context()
-            if mem and "No memory" not in mem:
-                parts.append(f"Recent memory:\n{mem}")
-        except Exception:
-            pass
-
-        # Ecosystem status
-        manifest = HOME / ".dharma_manifest.json"
-        if manifest.exists():
-            try:
-                data = json.loads(manifest.read_text())
-                eco = data.get("ecosystem", {})
-                alive = sum(1 for v in eco.values() if v.get("exists"))
-                parts.append(f"Ecosystem: {alive}/{len(eco)} alive")
-            except Exception:
-                pass
-
-        result = "\n".join(parts) if parts else ""
+        result = build_state_context_snapshot(
+            state_dir=DHARMA_STATE,
+            home=HOME,
+            max_chars=6000,
+            include_latent_gold=False,
+        )
         self._state_cache = result
         self._state_cache_time = now
         return result

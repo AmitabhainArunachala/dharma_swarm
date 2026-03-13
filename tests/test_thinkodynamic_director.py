@@ -2,15 +2,19 @@ from __future__ import annotations
 
 import json
 from pathlib import Path
+from types import SimpleNamespace
 from unittest.mock import patch
 
 import pytest
 
 from dharma_swarm.engine.conversation_memory import ConversationMemoryStore
-from dharma_swarm.models import TaskStatus
+from dharma_swarm.models import AgentRole, AgentState, AgentStatus, ProviderType, TaskStatus
 from dharma_swarm.thinkodynamic_director import (
     ThinkodynamicDirector,
+    WorkflowPlan,
+    WorkflowTaskPlan,
     _detect_task_repetitions,
+    _parse_output_delegations,
     _parse_mission_deliverables,
     _read_recent_task_titles,
 )
@@ -163,6 +167,33 @@ def test_plan_workflow_creates_dependent_execution_spine(
     assert workflow.tasks[3].depends_on_keys == ["highest-leverage-slice"]
 
 
+def test_plan_workflow_attaches_primary_agent_preferences(
+    director: ThinkodynamicDirector,
+) -> None:
+    primary = director.choose_primary(director.build_opportunities(director.rank_file_signals()))
+    workflow = director.plan_workflow(primary, cycle_id="12345")
+
+    assert workflow.tasks[0].preferred_agents[0] == "opus-primus"
+    assert workflow.tasks[0].preferred_backends[0] == "claude-cli"
+    assert workflow.tasks[2].preferred_agents[0] == "codex-primus"
+    assert workflow.tasks[2].preferred_backends[0] == "codex-cli"
+    assert ProviderType.CODEX.value in workflow.tasks[2].provider_allowlist
+
+
+def test_director_auto_concurrency_caps_to_active_limit(tmp_path: Path) -> None:
+    director = ThinkodynamicDirector(
+        repo_root=tmp_path / "repo",
+        state_dir=tmp_path / ".dharma",
+        scan_roots=(),
+        external_roots=(),
+        max_active_tasks=4,
+        max_concurrent_tasks=0,
+    )
+
+    assert director.max_active_tasks == 4
+    assert director.max_concurrent_tasks == 4
+
+
 @pytest.mark.asyncio
 async def test_enqueue_workflow_creates_director_tasks(
     director: ThinkodynamicDirector,
@@ -221,6 +252,30 @@ async def test_run_cycle_writes_artifacts_and_respects_preview_mode(
     payload = json.loads(campaign.read_text(encoding="utf-8"))
     assert payload["mission_title"]
     assert payload["artifacts"]
+
+
+@pytest.mark.asyncio
+async def test_deliberate_council_writes_heuristic_dialogue_without_swarm(
+    director: ThinkodynamicDirector,
+) -> None:
+    await director.init()
+    primary = director.choose_primary(director.build_opportunities(director.rank_file_signals()))
+    workflow = director.plan_workflow(primary, cycle_id="council-1")
+
+    council = await director.deliberate_council(
+        cycle_id="council-1",
+        workflow=workflow,
+        vision_result={"vision_text": "Keep the mission sharp."},
+        sense_result={"opportunities": [primary]},
+    )
+
+    assert council.members == ["codex-primus", "opus-primus"]
+    dialogue_path = Path(council.dialogue_path)
+    assert dialogue_path.exists()
+    dialogue = dialogue_path.read_text(encoding="utf-8")
+    assert "Director Council Dialogue" in dialogue
+    assert "codex-primus" in dialogue
+    assert "opus-primus" in dialogue
 
 
 @pytest.mark.asyncio
@@ -341,6 +396,22 @@ def test_detect_task_repetitions_finds_repeated(
     assert "fix data flywheel endpoint" in repeated
 
 
+def test_parse_output_delegations_extracts_follow_on_tasks() -> None:
+    text = (
+        "Finished the slice.\n\n"
+        "## DELEGATIONS\n"
+        "- [validator] Add focused regression tests :: Cover the new worker loop.\n"
+        "- [architect] Tighten retry policy :: Document why the backend order exists.\n"
+    )
+
+    delegations = _parse_output_delegations(text)
+
+    assert len(delegations) == 2
+    assert delegations[0]["role"] == "validator"
+    assert delegations[0]["title"] == "Add focused regression tests"
+    assert delegations[1]["description"] == "Document why the backend order exists."
+
+
 def test_compile_workflow_filters_repeated_tasks(
     director: ThinkodynamicDirector,
     tmp_path: Path,
@@ -396,7 +467,7 @@ def test_compile_workflow_filters_repeated_tasks(
 async def test_execute_pending_tasks_runs_and_produces_artifacts(
     director: ThinkodynamicDirector,
 ) -> None:
-    """Worker loop should execute dependency-ready tasks and write artifacts."""
+    """Worker loop should keep pulling newly ready tasks until the workflow clears."""
     await director.init()
     primary = director.choose_primary(director.build_opportunities(director.rank_file_signals()))
     workflow = director.plan_workflow(primary, cycle_id="worker-test-1")
@@ -419,7 +490,7 @@ async def test_execute_pending_tasks_runs_and_produces_artifacts(
     director.spawn_agent = _fake_spawn  # type: ignore[assignment]
 
     results = await director.execute_pending_tasks(max_concurrent=2)
-    assert len(results) == 1
+    assert len(results) == len(tasks)
     assert all(r["success"] for r in results)
     assert all(r["provider"] == "test-mock" for r in results)
 
@@ -436,7 +507,7 @@ async def test_execute_pending_tasks_runs_and_produces_artifacts(
         t for t in await director.list_director_tasks()
         if t.status == TaskStatus.COMPLETED
     ]
-    assert len(completed_tasks) == 1
+    assert len(completed_tasks) == len(tasks)
 
 
 @pytest.mark.asyncio
@@ -515,6 +586,149 @@ async def test_execute_pending_tasks_can_scope_to_cycle_id(
 
 
 @pytest.mark.asyncio
+async def test_execute_pending_tasks_can_delegate_follow_on_work(
+    director: ThinkodynamicDirector,
+) -> None:
+    await director.init()
+    workflow = WorkflowPlan(
+        cycle_id="dynamic-fanout",
+        workflow_id="wf-dynamic-fanout",
+        opportunity_id="opp-dynamic-fanout",
+        opportunity_title="Dynamic fanout",
+        theme="autonomy",
+        thesis="Let one planning task seed follow-on work.",
+        why_now="This proves the worker can keep moving without another director cycle.",
+        expected_duration_min=30,
+        tasks=[
+            WorkflowTaskPlan(
+                key="seed-fanout",
+                title="Seed the fanout",
+                description="Create the next tasks.",
+                priority="high",
+                role_hint="architect",
+                acceptance=["Create follow-on tasks."],
+            )
+        ],
+    )
+    tasks = await director.enqueue_workflow(workflow)
+
+    async def _fanout_spawn(task_plan, wf, *, model="sonnet", timeout=600):
+        if task_plan.title == "Seed the fanout":
+            return {
+                "task_key": task_plan.key,
+                "title": task_plan.title,
+                "success": True,
+                "output_length": 120,
+                "output": (
+                    "Completed the planning slice.\n\n"
+                    "## DELEGATIONS\n"
+                    "- [surgeon] Implement worker telemetry :: Write structured logs for each wave.\n"
+                ),
+                "blocked": False,
+                "rapid": True,
+                "provider": "test-mock",
+            }
+        return {
+            "task_key": task_plan.key,
+            "title": task_plan.title,
+            "success": True,
+            "output_length": 48,
+            "output": f"Completed child task: {task_plan.title}",
+            "blocked": False,
+            "rapid": True,
+            "provider": "test-mock",
+        }
+
+    director.spawn_agent = _fanout_spawn  # type: ignore[assignment]
+
+    results = await director.execute_pending_tasks(max_concurrent=2, task_ids=[tasks[0].id])
+
+    assert len(results) == 2
+    assert any(result["title"] == "Seed the fanout" for result in results)
+    assert any(result["title"] == "Implement worker telemetry" for result in results)
+    child_tasks = [
+        task for task in await director.list_director_tasks()
+        if task.metadata.get("director_source_kind") == "dynamic_delegation"
+    ]
+    assert len(child_tasks) == 1
+
+
+@pytest.mark.asyncio
+async def test_execute_pending_tasks_prefers_named_swarm_agent(
+    director: ThinkodynamicDirector,
+) -> None:
+    await director.init()
+
+    workflow = director._decorate_workflow_execution(
+        WorkflowPlan(
+            cycle_id="named-agent",
+            workflow_id="wf-named-agent",
+            opportunity_id="opp-named-agent",
+            opportunity_title="Named agent execution",
+            theme="autonomy",
+            thesis="The director should use a persistent named runner when available.",
+            why_now="This is the missing bridge from slots to minds.",
+            expected_duration_min=20,
+            evidence_paths=[],
+            tasks=[
+                WorkflowTaskPlan(
+                    key="implement-slice",
+                    title="Implement a precise slice",
+                    description="Write the concrete implementation artifact.",
+                    priority="high",
+                    role_hint="general",
+                    acceptance=["Artifact exists"],
+                )
+            ],
+        )
+    )
+    await director.enqueue_workflow(workflow)
+
+    class _FakeRunner:
+        def __init__(self) -> None:
+            self.state = AgentState(
+                id="agent-codex-1",
+                name="codex-primus",
+                role=AgentRole.ORCHESTRATOR,
+                status=AgentStatus.IDLE,
+            )
+            self._config = SimpleNamespace(provider=ProviderType.CODEX)
+            self.last_task = None
+
+        async def run_task(self, task):
+            self.last_task = task
+            return "named swarm runner completed the slice"
+
+    class _FakePool:
+        def __init__(self, runner) -> None:
+            self._runner = runner
+
+        async def get_idle_agents(self):
+            return [self._runner.state]
+
+        async def get(self, agent_id: str):
+            if agent_id == self._runner.state.id:
+                return self._runner
+            return None
+
+    runner = _FakeRunner()
+    director._swarm_agent_pool = _FakePool(runner)
+
+    async def _unexpected_spawn(*args, **kwargs):
+        raise AssertionError("spawn_agent should not be used when a named runner is available")
+
+    director.spawn_agent = _unexpected_spawn  # type: ignore[assignment]
+
+    results = await director.execute_pending_tasks(max_concurrent=1)
+
+    assert len(results) == 1
+    assert results[0]["provider"] == "swarm:codex-primus"
+    assert results[0]["agent_name"] == "codex-primus"
+    assert runner.last_task is not None
+    assert runner.last_task.metadata["available_provider_types"] == [ProviderType.CODEX.value]
+
+
+@pytest.mark.asyncio
 async def test_execute_pending_tasks_preserves_failure_output_on_task_record(
     director: ThinkodynamicDirector,
 ) -> None:
@@ -577,6 +791,52 @@ async def test_execute_pending_tasks_can_scope_to_specific_task_ids(
     )
 
     assert results == []
+
+
+@pytest.mark.asyncio
+async def test_run_loop_uses_configured_worker_concurrency(
+    director: ThinkodynamicDirector,
+) -> None:
+    director.max_concurrent_tasks = 5
+
+    async def _fake_run_cycle(*, delegate=True, model="sonnet"):
+        return {
+            "cycle_id": "cycle-1",
+            "delegated": True,
+            "delegated_task_ids": ["task-1"],
+            "workflow": {
+                "workflow_id": "wf-1",
+                "opportunity_id": "opp-1",
+                "opportunity_title": "Concurrency test",
+                "theme": "autonomy",
+                "thesis": "Ensure run_loop honors configured worker concurrency.",
+                "why_now": "The hardcoded cap should be gone.",
+                "expected_duration_min": 5,
+                "evidence_paths": [],
+                "tasks": [],
+            },
+        }
+
+    recorded: dict[str, int] = {}
+
+    async def _fake_execute_pending_tasks(
+        *,
+        max_concurrent=3,
+        model="sonnet",
+        timeout=600,
+        cycle_id=None,
+        task_ids=None,
+    ):
+        recorded["max_concurrent"] = max_concurrent
+        return []
+
+    director.run_cycle = _fake_run_cycle  # type: ignore[assignment]
+    director.execute_pending_tasks = _fake_execute_pending_tasks  # type: ignore[assignment]
+
+    snapshots = await director.run_loop(once=True)
+
+    assert snapshots
+    assert recorded["max_concurrent"] == 5
 
 
 # ------------------------------------------------------------------

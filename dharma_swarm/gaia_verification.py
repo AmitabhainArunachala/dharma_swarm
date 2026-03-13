@@ -15,6 +15,10 @@ from typing import Any, Sequence
 
 from pydantic import BaseModel, Field
 
+from dharma_swarm.cohomology_cechcohomology_to_sheaf_coord import (
+    LocalClaimAssessment,
+    to_sheaf_coordination as coordinate_claim_assessments,
+)
 from dharma_swarm.gaia_ledger import (
     GaiaLedger,
     UnitType,
@@ -22,11 +26,7 @@ from dharma_swarm.gaia_ledger import (
     _new_id,
 )
 from dharma_swarm.sheaf import (
-    CoordinationProtocol,
     CoordinationResult,
-    Discovery,
-    InformationChannel,
-    NoosphereSite,
 )
 
 
@@ -176,41 +176,21 @@ class VerificationOracle:
         if not session or not session.verdicts:
             return None
 
-        # Build site: oracles as agents, connected through the session
-        oracle_ids = [v.oracle_type for v in session.verdicts]
-        channels: list[InformationChannel] = []
-        for i, oid in enumerate(oracle_ids):
-            for j in range(i + 1, len(oracle_ids)):
-                channels.append(
-                    InformationChannel(
-                        source_agent=oid,
-                        target_agent=oracle_ids[j],
-                        topics=[f"offset:{session.offset_id}"],
-                        weight=1.0,
-                    )
-                )
-
-        site = NoosphereSite(oracle_ids, channels)
-        protocol = CoordinationProtocol(site)
-
-        # Publish each verdict as a discovery (local section)
-        for verdict in session.verdicts:
-            claim_key = f"offset_{session.offset_id}_valid"
-            content = (
-                f"agrees:{verdict.agrees_with_claim} "
-                f"confidence:{verdict.confidence:.2f}"
-            )
-            discovery = Discovery(
-                agent_id=verdict.oracle_type,
-                claim_key=claim_key,
-                content=content,
+        assessments = [
+            LocalClaimAssessment(
+                source_id=verdict.oracle_type,
+                target_id=session.offset_id,
+                claim_name="valid",
+                agrees_with_claim=verdict.agrees_with_claim,
                 confidence=verdict.confidence,
-                evidence=[verdict.evidence_hash] if verdict.evidence_hash else [],
-                perspective=verdict.oracle_type,
+                evidence_refs=[verdict.evidence_hash] if verdict.evidence_hash else [],
+                evidence_summary=verdict.evidence_summary,
+                topic=f"offset:{session.offset_id}",
+                metadata=dict(verdict.metadata),
             )
-            protocol.publish(verdict.oracle_type, [discovery])
-
-        return protocol.coordinate()
+            for verdict in session.verdicts
+        ]
+        return coordinate_claim_assessments(assessments)
 
 
 # ── Convenience: Full Verification Pipeline ──────────────────────────────

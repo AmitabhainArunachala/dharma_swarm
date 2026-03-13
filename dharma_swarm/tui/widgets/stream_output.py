@@ -90,7 +90,13 @@ class StreamOutput(RichLog):
     ASH = "#A29789"
 
     def __init__(self, **kwargs: object) -> None:
-        super().__init__(wrap=True, highlight=False, markup=True, **kwargs)
+        super().__init__(
+            wrap=True,
+            highlight=False,
+            markup=True,
+            max_lines=None,
+            **kwargs,
+        )
         self._text_buffer: str = ""
         self._thinking_buffer: str = ""
         self._flush_timer: Timer | None = None
@@ -133,13 +139,12 @@ class StreamOutput(RichLog):
         return (self.max_scroll_y - self.scroll_y) <= 3
 
     def on_mouse_scroll_up(self, _event: events.MouseScrollUp) -> None:
-        """User scrolled up with mouse wheel — lock scroll."""
-        self._lock_scroll()
+        """User scrolled up with mouse wheel."""
+        self.scroll_history_up()
 
     def on_mouse_scroll_down(self, _event: events.MouseScrollDown) -> None:
-        """User scrolled down with mouse wheel — unlock if at bottom."""
-        if self._is_near_bottom():
-            self._unlock_scroll()
+        """User scrolled down with mouse wheel."""
+        self.scroll_history_down()
 
     async def _on_key(self, event: events.Key) -> None:
         """Handle scroll-related keys."""
@@ -158,6 +163,33 @@ class StreamOutput(RichLog):
     def scroll_to_bottom(self) -> None:
         """Public API: force scroll to bottom and re-enable auto-scroll."""
         self._unlock_scroll()
+
+    def scroll_history_up(self) -> None:
+        """Scroll one notch up through transcript history."""
+        self._lock_scroll()
+        self.scroll_up(animate=False)
+
+    def scroll_history_down(self) -> None:
+        """Scroll one notch down through transcript history."""
+        self.scroll_down(animate=False)
+        if self._is_near_bottom():
+            self._unlock_scroll()
+
+    def scroll_history_page_up(self) -> None:
+        """Scroll one page up through transcript history."""
+        self._lock_scroll()
+        self.scroll_page_up(animate=False)
+
+    def scroll_history_page_down(self) -> None:
+        """Scroll one page down through transcript history."""
+        self.scroll_page_down(animate=False)
+        if self._is_near_bottom():
+            self._unlock_scroll()
+
+    def scroll_to_top(self) -> None:
+        """Jump to the oldest visible transcript content."""
+        self._lock_scroll()
+        self.scroll_home(animate=False)
 
     def _smart_write(self, content: object, **kwargs: object) -> None:
         """Write content respecting scroll lock.
@@ -198,8 +230,19 @@ class StreamOutput(RichLog):
     def _ts() -> str:
         return datetime.now().strftime("%H:%M:%S")
 
-    def _prefixed_markup(self, label: str, color: str, msg: str) -> str:
-        return f"[dim {color}]{self._ts()} {label}[/dim {color}] {msg}"
+    def _prefixed_text(
+        self,
+        label: str,
+        label_style: str,
+        msg: str,
+        *,
+        body_style: str | None = None,
+    ) -> Text:
+        try:
+            body = Text.from_markup(msg, style=body_style or self.PAPER_SOFT)
+        except Exception:
+            body = Text(str(msg), style=body_style or self.PAPER_SOFT)
+        return Text.assemble((f"{self._ts()} {label} ", label_style), body)
 
     # ── Event handlers ────────────────────────────────────────────────
 
@@ -268,10 +311,10 @@ class StreamOutput(RichLog):
         """Render a tool progress heartbeat."""
         self._flush_buffer()
         self._smart_write(
-            Text(
-                f"  \u23f3 {progress.tool_name} running... "
-                f"({progress.elapsed_seconds:.1f}s)",
-                style=f"dim {self.OCHRE_DEEP}",
+            self._prefixed_text(
+                "TOOL",
+                f"bold {self.OCHRE_DEEP}",
+                f"{progress.tool_name} running ({progress.elapsed_seconds:.1f}s)",
             )
         )
 
@@ -311,15 +354,13 @@ class StreamOutput(RichLog):
 
     def handle_text_complete(self, msg: CanonicalTextComplete) -> None:
         self._flush_buffer()
+        if msg.role == "user":
+            self.write_user(msg.content)
+            return
         if msg.role != "assistant":
             note = msg.content.strip()
             if note:
-                self._smart_write(
-                    Text(
-                        f"  · {note}",
-                        style=f"dim {self.ASH}",
-                    )
-                )
+                self.write_commentary(note)
             return
         self._smart_write(Markdown(msg.content))
         # Save complete reply
@@ -387,10 +428,10 @@ class StreamOutput(RichLog):
     def handle_tool_progress_canonical(self, progress: CanonicalToolProgress) -> None:
         self._flush_buffer()
         self._smart_write(
-            Text(
-                f"  \u23f3 {progress.tool_name} running... "
-                f"({progress.elapsed_seconds:.1f}s)",
-                style=f"dim {self.OCHRE_DEEP}",
+            self._prefixed_text(
+                "TOOL",
+                f"bold {self.OCHRE_DEEP}",
+                f"{progress.tool_name} running ({progress.elapsed_seconds:.1f}s)",
             )
         )
 
@@ -399,10 +440,11 @@ class StreamOutput(RichLog):
         if usage.total_cost_usd is None:
             return
         self._smart_write(
-            Text(
-                f"  [usage] in={usage.input_tokens} out={usage.output_tokens} "
+            self._prefixed_text(
+                "USAGE",
+                f"bold {self.VERDIGRIS_DEEP}",
+                f"in={usage.input_tokens} out={usage.output_tokens} "
                 f"cost=${usage.total_cost_usd:.4f}",
-                style=f"dim {self.VERDIGRIS_DEEP}",
             )
         )
 
@@ -410,7 +452,13 @@ class StreamOutput(RichLog):
 
     def write_system(self, msg: str) -> None:
         """Write a system/status message. Callers should include Rich markup."""
-        self._smart_write(self._prefixed_markup("SYS", self.ASH, msg))
+        self._smart_write(self._prefixed_text("SYS", f"bold {self.ASH}", msg))
+
+    def write_commentary(self, msg: str) -> None:
+        """Write an explicit agent-progress note."""
+        self._smart_write(
+            self._prefixed_text("AGENT", f"bold {self.OCHRE_DEEP}", msg)
+        )
 
     def write_user(self, msg: str) -> None:
         """Write the user's prompt with a bold indicator."""
@@ -425,7 +473,13 @@ class StreamOutput(RichLog):
 
     def write_error(self, msg: str) -> None:
         """Write an error message. Callers should include Rich markup."""
-        self._smart_write(self._prefixed_markup("ERR", self.BENGARA_DEEP, msg))
+        self._smart_write(
+            self._prefixed_text(
+                "ERR",
+                f"bold {self.BENGARA_DEEP}",
+                msg,
+            )
+        )
 
     # ── Internal ──────────────────────────────────────────────────────
 

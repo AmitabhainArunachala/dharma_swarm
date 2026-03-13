@@ -8,7 +8,9 @@ transactional, and inspectable.
 
 from __future__ import annotations
 
+import hashlib
 import json
+import re
 import sqlite3
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
@@ -169,6 +171,36 @@ CREATE TABLE IF NOT EXISTS operator_actions (
     created_at TEXT NOT NULL
 )"""
 
+_SESSION_EVENTS_DDL = """
+CREATE TABLE IF NOT EXISTS session_events (
+    event_id TEXT PRIMARY KEY,
+    session_id TEXT NOT NULL DEFAULT '',
+    ledger_kind TEXT NOT NULL,
+    event_name TEXT NOT NULL,
+    task_id TEXT NOT NULL DEFAULT '',
+    run_id TEXT NOT NULL DEFAULT '',
+    agent_id TEXT NOT NULL DEFAULT '',
+    summary TEXT NOT NULL DEFAULT '',
+    event_text TEXT NOT NULL DEFAULT '',
+    payload_json TEXT NOT NULL DEFAULT '{}',
+    created_at TEXT NOT NULL
+)"""
+
+_SESSION_EVENTS_FTS_DDL = """
+CREATE VIRTUAL TABLE IF NOT EXISTS session_events_fts USING fts5(
+    event_id UNINDEXED,
+    session_id UNINDEXED,
+    ledger_kind UNINDEXED,
+    event_name,
+    task_id,
+    run_id,
+    agent_id,
+    summary,
+    event_text,
+    created_at UNINDEXED,
+    tokenize='porter unicode61'
+)"""
+
 _INDEXES = [
     "CREATE INDEX IF NOT EXISTS idx_sessions_status_updated ON sessions(status, updated_at)",
     "CREATE INDEX IF NOT EXISTS idx_claims_task_status ON task_claims(task_id, status)",
@@ -183,6 +215,8 @@ _INDEXES = [
     "CREATE INDEX IF NOT EXISTS idx_context_session_created ON context_bundles(session_id, created_at)",
     "CREATE INDEX IF NOT EXISTS idx_context_task_created ON context_bundles(task_id, created_at)",
     "CREATE INDEX IF NOT EXISTS idx_operator_actions_session_created ON operator_actions(session_id, created_at)",
+    "CREATE INDEX IF NOT EXISTS idx_session_events_session_created ON session_events(session_id, created_at)",
+    "CREATE INDEX IF NOT EXISTS idx_session_events_kind_created ON session_events(ledger_kind, created_at)",
 ]
 
 
@@ -250,6 +284,8 @@ def ensure_runtime_state_schema_sync(
         _MEMORY_EDGES_DDL,
         _CONTEXT_BUNDLES_DDL,
         _OPERATOR_ACTIONS_DDL,
+        _SESSION_EVENTS_DDL,
+        _SESSION_EVENTS_FTS_DDL,
     ):
         db.execute(ddl)
     for idx in _INDEXES:
@@ -277,6 +313,8 @@ async def ensure_runtime_state_schema_async(
         _MEMORY_EDGES_DDL,
         _CONTEXT_BUNDLES_DDL,
         _OPERATOR_ACTIONS_DDL,
+        _SESSION_EVENTS_DDL,
+        _SESSION_EVENTS_FTS_DDL,
     ):
         await db.execute(ddl)
     for idx in _INDEXES:
@@ -420,6 +458,21 @@ class OperatorAction:
     created_at: datetime = field(default_factory=_utc_now)
 
 
+@dataclass(frozen=True)
+class SessionEventRecord:
+    event_id: str
+    session_id: str
+    ledger_kind: str
+    event_name: str
+    task_id: str = ""
+    run_id: str = ""
+    agent_id: str = ""
+    summary: str = ""
+    event_text: str = ""
+    payload: dict[str, Any] = field(default_factory=dict)
+    created_at: datetime = field(default_factory=_utc_now)
+
+
 def _row_to_session(row: sqlite3.Row | aiosqlite.Row) -> SessionState:
     return SessionState(
         session_id=str(row["session_id"]),
@@ -550,6 +603,118 @@ def _row_to_operator_action(row: sqlite3.Row | aiosqlite.Row) -> OperatorAction:
     )
 
 
+def _row_to_session_event(row: sqlite3.Row | aiosqlite.Row) -> SessionEventRecord:
+    return SessionEventRecord(
+        event_id=str(row["event_id"]),
+        session_id=str(row["session_id"] or ""),
+        ledger_kind=str(row["ledger_kind"]),
+        event_name=str(row["event_name"]),
+        task_id=str(row["task_id"] or ""),
+        run_id=str(row["run_id"] or ""),
+        agent_id=str(row["agent_id"] or ""),
+        summary=str(row["summary"] or ""),
+        event_text=str(row["event_text"] or ""),
+        payload=_json_load(row["payload_json"], {}),
+        created_at=_parse_dt(row["created_at"]) or _utc_now(),
+    )
+
+
+def _flatten_search_text(value: Any) -> str:
+    if value is None:
+        return ""
+    if isinstance(value, dict):
+        parts: list[str] = []
+        for key, inner in value.items():
+            flattened = _flatten_search_text(inner)
+            if flattened:
+                parts.append(f"{key} {flattened}")
+        return " ".join(parts)
+    if isinstance(value, (list, tuple, set)):
+        return " ".join(_flatten_search_text(item) for item in value if _flatten_search_text(item))
+    return str(value)
+
+
+def _session_event_summary(payload: dict[str, Any], event_text: str) -> str:
+    preferred_keys = (
+        "summary",
+        "reason",
+        "failure_signature",
+        "error",
+        "status",
+        "artifact",
+        "result",
+        "assigned_to",
+        "assigned_by",
+    )
+    parts = [
+        str(payload.get(key, "")).strip()
+        for key in preferred_keys
+        if str(payload.get(key, "")).strip()
+    ]
+    summary = " | ".join(parts) if parts else event_text.strip()
+    return summary[:240]
+
+
+def _ledger_record_event_id(session_id: str, ledger_kind: str, record: dict[str, Any]) -> str:
+    existing = str(record.get("event_id", "")).strip()
+    if existing:
+        return existing
+    canonical = {
+        "session_id": session_id,
+        "ledger_kind": ledger_kind,
+        "record": record,
+    }
+    digest = hashlib.sha256(_json_dump(canonical).encode("utf-8")).hexdigest()[:24]
+    return f"sevt_{digest}"
+
+
+def build_session_event_from_ledger_record(
+    *,
+    session_id: str,
+    ledger_kind: str,
+    record: dict[str, Any],
+) -> SessionEventRecord:
+    payload = {
+        key: value
+        for key, value in dict(record).items()
+        if key not in {"event_id", "session_id", "ledger_kind", "ts_utc", "event"}
+    }
+    event_name = str(record.get("event", "")).strip() or "unknown_event"
+    task_id = str(payload.get("task_id", "") or "")
+    run_id = str(payload.get("run_id", "") or "")
+    agent_id = str(payload.get("agent_id", "") or payload.get("claimed_by", "") or "")
+    event_text = " ".join(
+        part
+        for part in [
+            event_name,
+            task_id,
+            run_id,
+            agent_id,
+            _flatten_search_text(payload),
+        ]
+        if str(part).strip()
+    ).strip()
+    created_at = _parse_dt(str(record.get("ts_utc", "")).strip()) or _utc_now()
+    return SessionEventRecord(
+        event_id=_ledger_record_event_id(session_id, ledger_kind, record),
+        session_id=session_id,
+        ledger_kind=ledger_kind,
+        event_name=event_name,
+        task_id=task_id,
+        run_id=run_id,
+        agent_id=agent_id,
+        summary=_session_event_summary(payload, event_text),
+        event_text=event_text,
+        payload=payload,
+        created_at=created_at,
+    )
+
+
+def _fts_query(query: str) -> str:
+    tokens = re.findall(r"[A-Za-z0-9_]+", query or "")
+    return " AND ".join(f"{token}*" for token in tokens if token)
+
+
 class RuntimeStateStore:
     """WAL-backed SQLite store for live runtime truth."""
 
@@ -562,6 +727,14 @@ class RuntimeStateStore:
         self.db_path = Path(db_path or DEFAULT_RUNTIME_DB)
         self.include_memory_plane = include_memory_plane
 
+    def init_db_sync(self) -> None:
+        self.db_path.parent.mkdir(parents=True, exist_ok=True)
+        with sqlite3.connect(self.db_path) as db:
+            ensure_runtime_state_schema_sync(
+                db,
+                include_memory_plane=self.include_memory_plane,
+            )
+
     async def init_db(self) -> None:
         self.db_path.parent.mkdir(parents=True, exist_ok=True)
         async with aiosqlite.connect(self.db_path) as db:
@@ -569,6 +742,141 @@ class RuntimeStateStore:
                 db,
                 include_memory_plane=self.include_memory_plane,
             )
+
+    @staticmethod
+    def _upsert_session_stub_sync(db: sqlite3.Connection, event: SessionEventRecord) -> None:
+        current_task_id = event.task_id or ""
+        created_at = event.created_at.isoformat()
+        db.execute(
+            "INSERT INTO sessions (session_id, operator_id, status, current_task_id,"
+            " active_bundle_id, metadata_json, created_at, updated_at)"
+            " VALUES (?, '', 'active', ?, '', '{}', ?, ?)"
+            " ON CONFLICT(session_id) DO UPDATE SET"
+            " current_task_id = CASE"
+            "   WHEN excluded.current_task_id != '' THEN excluded.current_task_id"
+            "   ELSE sessions.current_task_id"
+            " END,"
+            " updated_at = excluded.updated_at",
+            (
+                event.session_id,
+                current_task_id,
+                created_at,
+                created_at,
+            ),
+        )
+
+    @staticmethod
+    async def _upsert_session_stub_async(
+        db: aiosqlite.Connection,
+        event: SessionEventRecord,
+    ) -> None:
+        current_task_id = event.task_id or ""
+        created_at = event.created_at.isoformat()
+        await db.execute(
+            "INSERT INTO sessions (session_id, operator_id, status, current_task_id,"
+            " active_bundle_id, metadata_json, created_at, updated_at)"
+            " VALUES (?, '', 'active', ?, '', '{}', ?, ?)"
+            " ON CONFLICT(session_id) DO UPDATE SET"
+            " current_task_id = CASE"
+            "   WHEN excluded.current_task_id != '' THEN excluded.current_task_id"
+            "   ELSE sessions.current_task_id"
+            " END,"
+            " updated_at = excluded.updated_at",
+            (
+                event.session_id,
+                current_task_id,
+                created_at,
+                created_at,
+            ),
+        )
+
+    @classmethod
+    def _record_session_event_sync_db(
+        cls,
+        db: sqlite3.Connection,
+        event: SessionEventRecord,
+    ) -> None:
+        cls._upsert_session_stub_sync(db, event)
+        db.execute(
+            "INSERT OR REPLACE INTO session_events (event_id, session_id, ledger_kind,"
+            " event_name, task_id, run_id, agent_id, summary, event_text, payload_json,"
+            " created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            (
+                event.event_id,
+                event.session_id,
+                event.ledger_kind,
+                event.event_name,
+                event.task_id,
+                event.run_id,
+                event.agent_id,
+                event.summary,
+                event.event_text,
+                _json_dump(event.payload),
+                event.created_at.isoformat(),
+            ),
+        )
+        db.execute("DELETE FROM session_events_fts WHERE event_id = ?", (event.event_id,))
+        db.execute(
+            "INSERT INTO session_events_fts (event_id, session_id, ledger_kind, event_name,"
+            " task_id, run_id, agent_id, summary, event_text, created_at)"
+            " VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            (
+                event.event_id,
+                event.session_id,
+                event.ledger_kind,
+                event.event_name,
+                event.task_id,
+                event.run_id,
+                event.agent_id,
+                event.summary,
+                event.event_text,
+                event.created_at.isoformat(),
+            ),
+        )
+
+    @classmethod
+    async def _record_session_event_async_db(
+        cls,
+        db: aiosqlite.Connection,
+        event: SessionEventRecord,
+    ) -> None:
+        await cls._upsert_session_stub_async(db, event)
+        await db.execute(
+            "INSERT OR REPLACE INTO session_events (event_id, session_id, ledger_kind,"
+            " event_name, task_id, run_id, agent_id, summary, event_text, payload_json,"
+            " created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            (
+                event.event_id,
+                event.session_id,
+                event.ledger_kind,
+                event.event_name,
+                event.task_id,
+                event.run_id,
+                event.agent_id,
+                event.summary,
+                event.event_text,
+                _json_dump(event.payload),
+                event.created_at.isoformat(),
+            ),
+        )
+        await db.execute("DELETE FROM session_events_fts WHERE event_id = ?", (event.event_id,))
+        await db.execute(
+            "INSERT INTO session_events_fts (event_id, session_id, ledger_kind, event_name,"
+            " task_id, run_id, agent_id, summary, event_text, created_at)"
+            " VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            (
+                event.event_id,
+                event.session_id,
+                event.ledger_kind,
+                event.event_name,
+                event.task_id,
+                event.run_id,
+                event.agent_id,
+                event.summary,
+                event.event_text,
+                event.created_at.isoformat(),
+            ),
+        )
 
     async def upsert_session(self, session: SessionState) -> SessionState:
         await self.init_db()
@@ -600,6 +908,22 @@ class RuntimeStateStore:
         assert loaded is not None
         return loaded
 
+    def record_session_event_sync(self, event: SessionEventRecord) -> SessionEventRecord:
+        self.init_db_sync()
+        with sqlite3.connect(self.db_path) as db:
+            _apply_connection_pragmas_sync(db)
+            self._record_session_event_sync_db(db, event)
+            db.commit()
+        return event
+
+    async def record_session_event(self, event: SessionEventRecord) -> SessionEventRecord:
+        await self.init_db()
+        async with aiosqlite.connect(self.db_path) as db:
+            await _apply_connection_pragmas_async(db)
+            await self._record_session_event_async_db(db, event)
+            await db.commit()
+        return event
+
     async def get_session(self, session_id: str) -> SessionState | None:
         await self.init_db()
         async with aiosqlite.connect(self.db_path) as db:
@@ -613,6 +937,138 @@ class RuntimeStateStore:
                 )
             ).fetchone()
         return _row_to_session(row) if row is not None else None
+
+    def list_sessions_sync(
+        self,
+        *,
+        status: str | None = None,
+        limit: int = 20,
+    ) -> list[SessionState]:
+        self.init_db_sync()
+        query = (
+            "SELECT session_id, operator_id, status, current_task_id, active_bundle_id,"
+            " metadata_json, created_at, updated_at FROM sessions WHERE 1=1"
+        )
+        params: list[Any] = []
+        if status is not None:
+            query += " AND status = ?"
+            params.append(status)
+        query += " ORDER BY updated_at DESC LIMIT ?"
+        params.append(max(1, limit))
+        with sqlite3.connect(self.db_path) as db:
+            db.row_factory = sqlite3.Row
+            rows = db.execute(query, params).fetchall()
+        return [_row_to_session(row) for row in rows]
+
+    def search_session_events_sync(
+        self,
+        query: str,
+        *,
+        session_id: str | None = None,
+        ledger_kind: str | None = None,
+        limit: int = 20,
+    ) -> list[SessionEventRecord]:
+        self.init_db_sync()
+        with sqlite3.connect(self.db_path) as db:
+            _apply_connection_pragmas_sync(db)
+            db.row_factory = sqlite3.Row
+            match_query = _fts_query(query)
+            base_params: list[Any] = []
+            filter_sql = ""
+            if session_id is not None:
+                filter_sql += " AND se.session_id = ?"
+                base_params.append(session_id)
+            if ledger_kind is not None:
+                filter_sql += " AND se.ledger_kind = ?"
+                base_params.append(ledger_kind)
+
+            if match_query:
+                try:
+                    rows = db.execute(
+                        "SELECT se.event_id, se.session_id, se.ledger_kind, se.event_name,"
+                        " se.task_id, se.run_id, se.agent_id, se.summary, se.event_text,"
+                        " se.payload_json, se.created_at"
+                        " FROM session_events_fts"
+                        " JOIN session_events se ON se.event_id = session_events_fts.event_id"
+                        " WHERE session_events_fts MATCH ?"
+                        f"{filter_sql}"
+                        " ORDER BY bm25(session_events_fts), se.created_at DESC LIMIT ?",
+                        [match_query, *base_params, max(1, limit)],
+                    ).fetchall()
+                    return [_row_to_session_event(row) for row in rows]
+                except sqlite3.Error:
+                    pass
+
+            like = f"%{query.strip()}%"
+            rows = db.execute(
+                "SELECT event_id, session_id, ledger_kind, event_name, task_id, run_id,"
+                " agent_id, summary, event_text, payload_json, created_at"
+                " FROM session_events se WHERE"
+                " (se.event_text LIKE ? OR se.summary LIKE ? OR se.event_name LIKE ?)"
+                f"{filter_sql}"
+                " ORDER BY se.created_at DESC LIMIT ?",
+                [like, like, like, *base_params, max(1, limit)],
+            ).fetchall()
+        return [_row_to_session_event(row) for row in rows]
+
+    def index_ledger_session_sync(self, session_dir: Path | str) -> int:
+        session_path = Path(session_dir)
+        if not session_path.exists() or not session_path.is_dir():
+            return 0
+        session_id = session_path.name
+        self.init_db_sync()
+        processed = 0
+        with sqlite3.connect(self.db_path) as db:
+            _apply_connection_pragmas_sync(db)
+            for ledger_kind, filename in (("task", "task_ledger.jsonl"), ("progress", "progress_ledger.jsonl")):
+                path = session_path / filename
+                if not path.exists():
+                    continue
+                for raw in path.read_text(encoding="utf-8", errors="ignore").splitlines():
+                    if not raw.strip():
+                        continue
+                    try:
+                        record = json.loads(raw)
+                    except Exception:
+                        continue
+                    event = build_session_event_from_ledger_record(
+                        session_id=session_id,
+                        ledger_kind=ledger_kind,
+                        record=record,
+                    )
+                    self._record_session_event_sync_db(db, event)
+                    processed += 1
+            db.commit()
+        return processed
+
+    def index_ledgers_sync(
+        self,
+        *,
+        ledger_base: Path | str | None = None,
+        session_id: str | None = None,
+        limit_sessions: int | None = None,
+    ) -> tuple[int, int]:
+        base = Path(ledger_base or (Path.home() / ".dharma" / "ledgers"))
+        if not base.exists():
+            return (0, 0)
+        if session_id:
+            targets = [base / session_id]
+        else:
+            targets = sorted(
+                (path for path in base.iterdir() if path.is_dir()),
+                key=lambda path: path.stat().st_mtime,
+                reverse=True,
+            )
+            if limit_sessions is not None:
+                targets = targets[: max(1, limit_sessions)]
+        sessions_scanned = 0
+        events_scanned = 0
+        for target in targets:
+            if not target.exists() or not target.is_dir():
+                continue
+            sessions_scanned += 1
+            events_scanned += self.index_ledger_session_sync(target)
+        return sessions_scanned, events_scanned
 
     async def record_task_claim(self, claim: TaskClaim) -> TaskClaim:
         await self.init_db()

@@ -29,6 +29,13 @@ class SplashScreen(Screen):
     Press Enter, Escape, or Space to dismiss and proceed to the main workspace.
     """
 
+    DEFAULT_CSS = """
+    SplashScreen {
+        height: 100%;
+        width: 100%;
+    }
+    """
+
     BINDINGS = [
         Binding("enter", "dismiss_splash", "Continue"),
         Binding("escape", "dismiss_splash", "Continue"),

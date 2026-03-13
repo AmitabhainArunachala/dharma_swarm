@@ -1009,18 +1009,69 @@ def cmd_pulse() -> None:
     print(response)
 
 
-def cmd_up(background: bool = False) -> None:
-    """Start the daemon."""
-    daemon_script = DGC_CORE / "daemon" / "dgc_daemon.py"
-    args = ["python3", str(daemon_script)]
+def cmd_orchestrate_live(background: bool = False) -> None:
+    """Run all DGC systems concurrently (live orchestrator)."""
+    import asyncio
+
+    pid_file = DHARMA_STATE / "orchestrator.pid"
+    if pid_file.exists():
+        try:
+            pid = int(pid_file.read_text().strip())
+            os.kill(pid, 0)
+            print(f"Orchestrator already running (PID {pid})")
+            return
+        except (ValueError, OSError):
+            pid_file.unlink(missing_ok=True)
+
     if background:
-        args.append("--background")
-    os.execvp("python3", args)
+        import subprocess as sp
+        proc = sp.Popen(
+            [sys.executable, "-m", "dharma_swarm.orchestrate_live", "--background"],
+            stdout=sp.DEVNULL,
+            stderr=sp.DEVNULL,
+            start_new_session=True,
+        )
+        print(f"Orchestrator started in background (PID {proc.pid})")
+    else:
+        from dharma_swarm.orchestrate_live import orchestrate
+        asyncio.run(orchestrate())
+
+
+def cmd_up(background: bool = False) -> None:
+    """Start the dharma_swarm daemon (pulse heartbeat loop)."""
+    pid_file = DHARMA_STATE / "daemon.pid"
+    if pid_file.exists():
+        try:
+            pid = int(pid_file.read_text().strip())
+            os.kill(pid, 0)  # Check if running
+            print(f"Daemon already running (PID {pid})")
+            return
+        except (ValueError, OSError):
+            pid_file.unlink(missing_ok=True)
+
+    repo_root = Path(__file__).resolve().parent.parent
+    daemon_script = repo_root / "run_daemon.sh"
+    env = os.environ.copy()
+    env["MISSION_PREFLIGHT"] = "0"  # Skip preflight for direct launch
+
+    if background:
+        import subprocess
+        proc = subprocess.Popen(
+            ["bash", str(daemon_script)],
+            env=env,
+            cwd=str(repo_root),
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            start_new_session=True,
+        )
+        print(f"Daemon started in background (PID {proc.pid})")
+    else:
+        os.execvpe("bash", ["bash", str(daemon_script)], env)
 
 
 def cmd_down() -> None:
     """Stop the daemon."""
-    pid_file = DGC_CORE / "daemon" / "dgc.pid"
+    pid_file = DHARMA_STATE / "daemon.pid"
     if pid_file.exists():
         try:
             pid = int(pid_file.read_text().strip())
@@ -1040,13 +1091,25 @@ def cmd_down() -> None:
 
 def cmd_daemon_status() -> None:
     """Show daemon state."""
-    state_file = DGC_CORE / "daemon" / "state.json"
-    if state_file.exists():
-        state = json.loads(state_file.read_text())
-        for k, v in state.items():
-            print(f"  {k}: {v}")
+    pid_file = DHARMA_STATE / "daemon.pid"
+    pulse_log = DHARMA_STATE / "pulse.log"
+    if pid_file.exists():
+        try:
+            pid = int(pid_file.read_text().strip())
+            os.kill(pid, 0)
+            print(f"  status: running (PID {pid})")
+        except (ValueError, OSError):
+            print("  status: stale PID file")
     else:
-        print("Daemon: not running")
+        print("  status: not running")
+    if pulse_log.exists():
+        # Show last 5 lines of pulse log
+        lines = pulse_log.read_text().strip().split("\n")
+        print(f"  pulse_log: {len(lines)} entries")
+        for line in lines[-5:]:
+            print(f"    {line[:120]}")
+    else:
+        print("  pulse_log: no entries")
 
 
 def cmd_agni(command: str) -> None:
@@ -2820,44 +2883,13 @@ def cmd_tui() -> None:
 
 def _build_chat_context_snapshot() -> str:
     """Build a compact DGC context snapshot for Claude chat sessions."""
-    parts: list[str] = []
+    from dharma_swarm.prompt_builder import build_state_context_snapshot
 
-    try:
-        thread_file = DHARMA_STATE / "thread_state.json"
-        if thread_file.exists():
-            ts = json.loads(thread_file.read_text())
-            parts.append(f"Active thread: {ts.get('current_thread', 'unknown')}")
-    except Exception:
-        pass
-
-    try:
-        from dharma_swarm.context import read_latent_gold_overview, read_memory_context
-
-        mem = read_memory_context()
-        if mem and "No memory" not in mem:
-            parts.append("Recent memory:")
-            parts.append(mem)
-        latent = read_latent_gold_overview(state_dir=DHARMA_STATE, limit=3)
-        if latent:
-            parts.append("Latent gold:")
-            parts.append(latent)
-    except Exception:
-        pass
-
-    try:
-        manifest = HOME / ".dharma_manifest.json"
-        if manifest.exists():
-            data = json.loads(manifest.read_text())
-            eco = data.get("ecosystem", {})
-            alive = sum(1 for v in eco.values() if v.get("exists"))
-            parts.append(f"Ecosystem: {alive}/{len(eco)} alive")
-    except Exception:
-        pass
-
-    snapshot = "\n".join(parts).strip()
-    if not snapshot:
-        return ""
-    return snapshot[:6000]
+    return build_state_context_snapshot(
+        state_dir=DHARMA_STATE,
+        home=HOME,
+        max_chars=6000,
+    )
 
 
 def cmd_chat(
@@ -2987,6 +3019,10 @@ def cmd_ledger(
     n: int = 20,
     session: str | None = None,
     kind: str = "all",
+    query: str | None = None,
+    db_path: str | None = None,
+    sync_ledgers: bool = True,
+    limit_sessions: int | None = None,
 ) -> None:
     """Inspect orchestrator session ledgers."""
     ledger_base = Path.home() / ".dharma" / "ledgers"
@@ -3065,8 +3101,61 @@ def cmd_ledger(
             _tail_file(target / "progress_ledger.jsonl", "Progress Ledger")
         return
 
+    if ledger_cmd == "index":
+        from dharma_swarm.runtime_state import RuntimeStateStore
+
+        runtime_state = RuntimeStateStore(Path(db_path) if db_path else None)
+        sessions_scanned, events_scanned = runtime_state.index_ledgers_sync(
+            ledger_base=ledger_base,
+            session_id=session,
+            limit_sessions=limit_sessions,
+        )
+        print(
+            f"Indexed {events_scanned} ledger events across "
+            f"{sessions_scanned} session(s) into {runtime_state.db_path}"
+        )
+        return
+
+    if ledger_cmd == "search":
+        from dharma_swarm.runtime_state import RuntimeStateStore
+
+        normalized_query = (query or "").strip()
+        if not normalized_query:
+            print("Search query is required.")
+            return
+        runtime_state = RuntimeStateStore(Path(db_path) if db_path else None)
+        if sync_ledgers:
+            runtime_state.index_ledgers_sync(
+                ledger_base=ledger_base,
+                session_id=session,
+                limit_sessions=limit_sessions,
+            )
+        ledger_kind = None if kind == "all" else kind
+        results = runtime_state.search_session_events_sync(
+            normalized_query,
+            session_id=session,
+            ledger_kind=ledger_kind,
+            limit=n,
+        )
+        if not results:
+            print(f"No indexed ledger events matched: {normalized_query}")
+            return
+        print(f"Search: {normalized_query}")
+        for item in results:
+            ts = item.created_at.isoformat()[:19]
+            task = item.task_id[:8] if item.task_id else "-"
+            summary = item.summary or item.event_text
+            summary = " ".join(summary.split())
+            if len(summary) > 96:
+                summary = summary[:93] + "..."
+            print(
+                f"  {ts}  {item.session_id:<22} {item.ledger_kind:<8} "
+                f"{item.event_name:<28} {task}  {summary}"
+            )
+        return
+
     print(f"Unknown ledger subcommand: {ledger_cmd}")
-    print("Usage: dgc ledger tail | dgc ledger sessions")
+    print("Usage: dgc ledger tail | dgc ledger sessions | dgc ledger search | dgc ledger index")
 
 
 # ---------------------------------------------------------------------------
@@ -3418,6 +3507,204 @@ def cmd_bootstrap() -> None:
 # ---------------------------------------------------------------------------
 
 
+# ---------------------------------------------------------------------------
+# Cron and Gateway commands (v0.6.0)
+# ---------------------------------------------------------------------------
+
+def cmd_cron(
+    cron_cmd: str | None,
+    prompt: str = "",
+    schedule: str = "",
+    name: str | None = None,
+    repeat: int | None = None,
+    deliver: str = "local",
+    urgent: bool = False,
+    job_id: str = "",
+) -> None:
+    """Cron scheduler commands."""
+    from dharma_swarm.cron_scheduler import (
+        create_job,
+        list_jobs,
+        remove_job,
+        tick,
+    )
+
+    match cron_cmd:
+        case "add":
+            job = create_job(
+                prompt=prompt,
+                schedule=schedule,
+                name=name,
+                repeat=repeat,
+                deliver=deliver,
+                urgent=urgent,
+            )
+            print(f"  Created job {job['id']}: {job['name']}")
+            print(f"  Schedule: {job['schedule_display']}")
+            print(f"  Next run: {job.get('next_run_at', 'N/A')}")
+        case "list":
+            jobs = list_jobs(include_disabled=True)
+            if not jobs:
+                print("  No cron jobs.")
+                return
+            for j in jobs:
+                status = j.get("last_status", "-")
+                enabled = "✓" if j.get("enabled", True) else "✗"
+                completed = j.get("repeat", {}).get("completed", 0)
+                times = j.get("repeat", {}).get("times")
+                repeat_str = f"{completed}/{times}" if times else f"{completed}/∞"
+                print(f"  {enabled} {j['id']}  {j['name'][:40]:<40}  "
+                      f"{j.get('schedule_display', '?'):<20}  "
+                      f"runs={repeat_str}  last={status}")
+        case "remove":
+            if remove_job(job_id):
+                print(f"  Removed job {job_id}")
+            else:
+                print(f"  Job {job_id} not found")
+        case "tick":
+            from dharma_swarm.review_cycle import review_run_fn
+            executed = tick(verbose=True, run_fn=review_run_fn)
+            print(f"  Tick complete: {executed} job(s) executed")
+        case _:
+            print("Usage: dgc cron {add|list|remove|tick}")
+
+
+def cmd_xray(
+    repo_path: str,
+    output: str | None = None,
+    as_json: bool = False,
+) -> None:
+    """Run a Repo X-Ray analysis."""
+    from pathlib import Path
+    from dharma_swarm.xray import run_xray, analyze_repo, render_markdown
+
+    path = Path(repo_path).expanduser().resolve()
+    if not path.is_dir():
+        print(f"  Error: {path} is not a directory")
+        raise SystemExit(1)
+
+    print(f"  Scanning {path}...")
+    report_path = run_xray(path, output_path=output, as_json=as_json)
+
+    if not as_json:
+        # Also print to stdout
+        report = analyze_repo(path)
+        md = render_markdown(report)
+        print(md)
+
+    print(f"\n  Report saved to: {report_path}")
+
+
+def cmd_review(hours: float = 6.0, skip_tests: bool = False) -> None:
+    """Manually trigger a review cycle report."""
+    from dharma_swarm.review_cycle import generate_review_sync
+
+    print(f"  Generating {hours:.0f}h review cycle report...")
+    report = generate_review_sync(
+        hours=hours,
+        run_tests=not skip_tests,
+    )
+    print(report)
+
+
+def cmd_initiatives(
+    init_cmd: str | None = None,
+    title: str = "",
+    description: str = "",
+    initiative_id: str = "",
+    reason: str = "",
+) -> None:
+    """Initiative depth ledger commands."""
+    from dharma_swarm.iteration_depth import IterationLedger, CompoundingQueue
+
+    ledger = IterationLedger()
+    ledger.load()
+
+    match init_cmd:
+        case "list":
+            inits = ledger.get_all()
+            if not inits:
+                print("  No initiatives tracked.")
+                return
+            for i in sorted(inits, key=lambda x: x.updated_at, reverse=True):
+                icon = {"seed": "\U0001f331", "growing": "\U0001f33f",
+                        "solid": "\U0001faa8", "shipped": "\U0001f680",
+                        "abandoned": "\u274c"}.get(i.status.value, "?")
+                print(f"  {icon} {i.id}  {i.title[:40]:<40}  "
+                      f"iter={i.iteration_count}  quality={i.quality_score:.3f}  "
+                      f"status={i.status.value}")
+        case "add":
+            if not title:
+                print("  Error: --title is required")
+                return
+            init = ledger.create(title=title, description=description)
+            print(f"  Created initiative {init.id}: {init.title}")
+        case "abandon":
+            if not initiative_id or not reason:
+                print("  Error: initiative_id and --reason are required")
+                return
+            if ledger.abandon(initiative_id, reason):
+                print(f"  Abandoned {initiative_id}: {reason}")
+            else:
+                print(f"  Initiative {initiative_id} not found")
+        case "promote":
+            if not initiative_id:
+                print("  Error: initiative_id is required")
+                return
+            ok, msg = ledger.promote(initiative_id)
+            print(f"  {'\u2705' if ok else '\u274c'} {msg}")
+        case "summary":
+            summary = ledger.summary()
+            print(f"  Total: {summary['total']}  Active: {summary['active_count']}")
+            print(f"  Avg iterations: {summary['avg_iterations']}  "
+                  f"Avg quality: {summary['avg_quality']:.3f}")
+            if summary["shallow"]:
+                print(f"  Shallow ({summary['shallow_count']}):")
+                for s in summary["shallow"]:
+                    print(f"    - {s['title']}: {s['iterations']} iterations")
+            if summary["ready_to_promote"]:
+                print(f"  Ready to promote:")
+                for r in summary["ready_to_promote"]:
+                    print(f"    - {r['title']}: quality={r['quality']:.3f}")
+        case _:
+            print("Usage: dgc initiatives {list|add|abandon|promote|summary}")
+
+
+def cmd_gateway(config_path: str | None = None) -> None:
+    """Start the messaging gateway."""
+    from pathlib import Path
+
+    async def _run_gateway() -> None:
+        from dharma_swarm.gateway.runner import GatewayRunner, load_gateway_config
+
+        config = load_gateway_config(
+            Path(config_path) if config_path else None
+        )
+        if not config:
+            print("  No gateway config found. Create ~/.dharma/gateway.yaml")
+            print("  Example:")
+            print("    telegram:")
+            print("      enabled: true")
+            print("      token: ${TELEGRAM_BOT_TOKEN}")
+            return
+
+        runner = GatewayRunner(config=config)
+        print("  Starting gateway...")
+        await runner.start()
+        print(f"  Gateway running with {len(runner.adapters)} adapter(s). Press Ctrl+C to stop.")
+
+        try:
+            while runner.is_running:
+                await asyncio.sleep(1)
+        except KeyboardInterrupt:
+            print("\n  Stopping gateway...")
+        finally:
+            await runner.stop()
+            print("  Gateway stopped.")
+
+    asyncio.run(_run_gateway())
+
+
 def cmd_field_scan() -> None:
     """Run full D3 field intelligence scan."""
     import subprocess
@@ -3615,6 +3902,13 @@ def _build_parser() -> argparse.ArgumentParser:
 
     # -- pulse --
     sub.add_parser("pulse", help="Run one heartbeat pulse")
+
+    # -- orchestrate-live --
+    p_orch_live = sub.add_parser(
+        "orchestrate-live",
+        help="Run all DGC systems concurrently (live orchestrator)",
+    )
+    p_orch_live.add_argument("--background", action="store_true", help="Run in background")
 
     # -- swarm (captures all remaining args) --
     p_swarm = sub.add_parser("swarm", help="Swarm orchestrator + overnight/live")
@@ -4052,6 +4346,34 @@ def _build_parser() -> argparse.ArgumentParser:
     )
 
     ledger_sub.add_parser("sessions", help="List recent sessions")
+    p_ledger_search = ledger_sub.add_parser("search", help="Search indexed ledger events")
+    p_ledger_search.add_argument("query", nargs="+", help="Search query")
+    p_ledger_search.add_argument("-n", type=int, default=10, help="Number of matches")
+    p_ledger_search.add_argument("--session", default=None, help="Limit search to one session ID")
+    p_ledger_search.add_argument(
+        "--kind", choices=["task", "progress", "all"], default="all", help="Which ledger"
+    )
+    p_ledger_search.add_argument("--db-path", default=None, help="Override runtime state DB path")
+    p_ledger_search.add_argument(
+        "--no-sync-ledgers",
+        action="store_true",
+        help="Skip ledger-dir reindex before searching",
+    )
+    p_ledger_search.add_argument(
+        "--limit-sessions",
+        type=int,
+        default=None,
+        help="Limit reindex to the most recent N sessions",
+    )
+    p_ledger_index = ledger_sub.add_parser("index", help="Index ledger JSONL into runtime search store")
+    p_ledger_index.add_argument("--session", default=None, help="Index only one session ID")
+    p_ledger_index.add_argument("--db-path", default=None, help="Override runtime state DB path")
+    p_ledger_index.add_argument(
+        "--limit-sessions",
+        type=int,
+        default=None,
+        help="Limit indexing to the most recent N sessions",
+    )
 
     # -- semantic --
     p_sem = sub.add_parser("semantic", help="Semantic Evolution Engine commands")
@@ -4109,6 +4431,50 @@ def _build_parser() -> argparse.ArgumentParser:
     field_sub.add_parser("position", help="Show DGC competitive positioning")
     field_sub.add_parser("unique", help="Show DGC unique moats")
     field_sub.add_parser("summary", help="Field KB summary statistics")
+
+    # -- xray (Phase 14: Repo X-Ray Product) --
+    p_xray = sub.add_parser("xray", help="Run Repo X-Ray — codebase analysis for any repo")
+    p_xray.add_argument("repo_path", help="Path to repository to analyze")
+    p_xray.add_argument("--output", "-o", default=None, help="Output file path")
+    p_xray.add_argument("--json", action="store_true", dest="as_json", help="Output JSON instead of markdown")
+
+    # -- review (Phase 13: Quality Ratchet) --
+    p_review = sub.add_parser("review", help="Generate 6-hour review cycle report")
+    p_review.add_argument("--hours", type=float, default=6.0, help="Review window in hours")
+    p_review.add_argument("--skip-tests", action="store_true", help="Skip running tests")
+
+    # -- initiatives (Phase 13: Iteration Depth Tracker) --
+    p_init = sub.add_parser("initiatives", help="Initiative depth ledger")
+    init_sub = p_init.add_subparsers(dest="init_cmd")
+    init_sub.add_parser("list", help="List all initiatives")
+    p_init_add = init_sub.add_parser("add", help="Add a new initiative")
+    p_init_add.add_argument("--title", required=True, help="Initiative title")
+    p_init_add.add_argument("--description", default="", help="Description")
+    p_init_promote = init_sub.add_parser("promote", help="Promote an initiative")
+    p_init_promote.add_argument("initiative_id", help="Initiative ID")
+    p_init_abandon = init_sub.add_parser("abandon", help="Abandon an initiative")
+    p_init_abandon.add_argument("initiative_id", help="Initiative ID")
+    p_init_abandon.add_argument("--reason", required=True, help="Reason for abandonment")
+    init_sub.add_parser("summary", help="Show initiative summary")
+
+    # -- cron (v0.6.0: Hermes-inspired cron scheduler) --
+    p_cron = sub.add_parser("cron", help="Cron job scheduler (v0.6.0)")
+    cron_sub = p_cron.add_subparsers(dest="cron_cmd")
+    p_cron_add = cron_sub.add_parser("add", help="Add a new cron job")
+    p_cron_add.add_argument("prompt", help="Task prompt to execute")
+    p_cron_add.add_argument("schedule", help="Schedule: '30m', 'every 2h', '0 9 * * *'")
+    p_cron_add.add_argument("--name", default=None, help="Friendly job name")
+    p_cron_add.add_argument("--repeat", type=int, default=None, help="Repeat count (None=forever)")
+    p_cron_add.add_argument("--deliver", default="local", help="Delivery target")
+    p_cron_add.add_argument("--urgent", action="store_true", help="Run even during quiet hours")
+    cron_sub.add_parser("list", help="List all cron jobs")
+    p_cron_rm = cron_sub.add_parser("remove", help="Remove a cron job")
+    p_cron_rm.add_argument("job_id", help="Job ID to remove")
+    cron_sub.add_parser("tick", help="Manually trigger a cron tick")
+
+    # -- gateway (v0.6.0: Hermes-inspired messaging gateway) --
+    p_gw = sub.add_parser("gateway", help="Start messaging gateway (v0.6.0)")
+    p_gw.add_argument("--config", default=None, help="Path to gateway.yaml")
 
     return parser
 
@@ -4217,6 +4583,8 @@ def main() -> None:
             cmd_daemon_status()
         case "pulse":
             cmd_pulse()
+        case "orchestrate-live":
+            cmd_orchestrate_live(background=args.background)
         case "swarm":
             cmd_swarm(args.swarm_args)
         case "stress":
@@ -4514,6 +4882,10 @@ def main() -> None:
                 n=getattr(args, "n", 20),
                 session=getattr(args, "session", None),
                 kind=getattr(args, "kind", "all"),
+                query=" ".join(getattr(args, "query", []) or []),
+                db_path=getattr(args, "db_path", None),
+                sync_ledgers=not getattr(args, "no_sync_ledgers", False),
+                limit_sessions=getattr(args, "limit_sessions", None),
             )
         case "semantic":
             try:
@@ -4576,6 +4948,38 @@ def main() -> None:
             except Exception as e:
                 print(f"Field command failed: {e}")
                 raise SystemExit(2)
+        case "xray":
+            cmd_xray(
+                repo_path=args.repo_path,
+                output=args.output,
+                as_json=args.as_json,
+            )
+        case "review":
+            cmd_review(
+                hours=args.hours,
+                skip_tests=args.skip_tests,
+            )
+        case "initiatives":
+            cmd_initiatives(
+                init_cmd=args.init_cmd,
+                title=getattr(args, "title", ""),
+                description=getattr(args, "description", ""),
+                initiative_id=getattr(args, "initiative_id", ""),
+                reason=getattr(args, "reason", ""),
+            )
+        case "cron":
+            cmd_cron(
+                cron_cmd=args.cron_cmd,
+                prompt=getattr(args, "prompt", ""),
+                schedule=getattr(args, "schedule", ""),
+                name=getattr(args, "name", None),
+                repeat=getattr(args, "repeat", None),
+                deliver=getattr(args, "deliver", "local"),
+                urgent=getattr(args, "urgent", False),
+                job_id=getattr(args, "job_id", ""),
+            )
+        case "gateway":
+            cmd_gateway(config_path=args.config)
         case _:
             parser.print_help()
 

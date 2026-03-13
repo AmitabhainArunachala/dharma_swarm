@@ -18,6 +18,8 @@ dependencies = [
     "openai>=1.0",
     "httpx>=0.25",
     "aiosqlite>=0.19",
+    "aiofiles>=23.0",
+    "scipy>=1.11",
     "textual>=0.40",
 ]
 

@@ -12,7 +12,7 @@ from typing import Any
 from dharma_swarm.continuity_harness import append_snapshot, verify_replay_integrity
 from dharma_swarm.session_event_bridge import SessionEventBridge
 
-from .events import CanonicalEvent
+from .events import CanonicalEvent, CanonicalEventType, EVENT_TYPES
 
 HOME = Path.home()
 DEFAULT_ROOT = HOME / ".dharma" / "sessions"
@@ -142,6 +142,44 @@ class SessionStore:
         except Exception:
             pass
         self._touch_session(session_id)
+
+    def load_transcript(
+        self,
+        session_id: str,
+        *,
+        include_types: set[str] | None = None,
+        limit: int | None = None,
+    ) -> list[CanonicalEventType]:
+        """Load canonical events from the persisted transcript jsonl."""
+        tp = self.root / session_id / "transcript.jsonl"
+        if not tp.exists():
+            return []
+
+        events: list[CanonicalEventType] = []
+        for raw_line in tp.read_text(encoding="utf-8").splitlines():
+            line = raw_line.strip()
+            if not line:
+                continue
+            try:
+                payload = json.loads(line)
+            except Exception:
+                continue
+            event_type = str(payload.get("type", "") or "").strip()
+            if not event_type:
+                continue
+            if include_types is not None and event_type not in include_types:
+                continue
+            event_cls = EVENT_TYPES.get(event_type)
+            if event_cls is None:
+                continue
+            try:
+                events.append(event_cls(**payload))
+            except Exception:
+                continue
+
+        if limit is not None and limit >= 0:
+            return events[-limit:]
+        return events
 
     def append_audit(self, session_id: str, entry: dict[str, Any]) -> None:
         sp = self.root / session_id

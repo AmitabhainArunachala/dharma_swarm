@@ -24,7 +24,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
-from textual import work
+from textual import events, work
 from textual.app import App, ComposeResult
 from textual.binding import Binding
 from textual.timer import Timer
@@ -91,6 +91,20 @@ _MODE_NAMES: dict[str, str] = {
     "S": "sage",
 }
 _MODE_KEYS = list(_MODE_NAMES.keys())
+_HISTORY_REPLAY_TYPES = {
+    "session_start",
+    "session_end",
+    "text_complete",
+    "thinking_complete",
+    "tool_call_complete",
+    "tool_result",
+    "task_started",
+    "task_progress",
+    "task_complete",
+    "usage",
+    "error",
+    "rate_limit",
+}
 
 _PLAN_MODE_SYSTEM_PROMPT = (
     "PLAN MODE CONTRACT (strict):\n"
@@ -123,6 +137,8 @@ class DGCApp(App):
         Binding("ctrl+o", "cycle_mode", "Mode", show=True),
         Binding("ctrl+y", "copy_last", "Copy reply", show=False),
         Binding("ctrl+n", "new_session", "New", show=False),
+        Binding("pageup", "scroll_page_up", "History Up", show=False, priority=True),
+        Binding("pagedown", "scroll_page_down", "History Down", show=False, priority=True),
         Binding("end", "scroll_to_bottom", "Bottom", show=False),
     ]
 
@@ -202,13 +218,27 @@ class DGCApp(App):
         main = self._get_main_screen()
         if main:
             self._init_status_bar(main.status_bar, model=self._status_model_label())  # type: ignore[arg-type]
-            main.stream_output.write_system(
-                f"[bold {INDIGO}]DGC[/bold {INDIGO}] mission console ready. "
-                f"Route: [bold]{self._status_model_label()}[/bold]. "
-                "Use /help for commands.\n"
+            resume_candidate = self._find_auto_resume_session()
+            history_loaded = self._restore_last_session_history(
+                preferred_session_id=(
+                    str(resume_candidate[1].get("session_id", "") or "").strip()
+                    if resume_candidate
+                    else None
+                )
             )
-            self._restore_last_session_context()
-            self._run_status_on_startup()
+            self._restore_last_session_context(candidate=resume_candidate)
+            if history_loaded:
+                main.stream_output.write_system(  # type: ignore[union-attr]
+                    "[dim]Loaded prior session history. Ctrl+N starts clean.[/dim]"
+                )
+            else:
+                main.stream_output.write_system(  # type: ignore[union-attr]
+                    f"[bold {INDIGO}]DGC[/bold {INDIGO}] mission console ready. "
+                    f"Route: [bold]{self._status_model_label()}[/bold]. "
+                    "Use /help for commands.\n"
+                )
+            if self._startup_status_enabled():
+                self._run_status_on_startup()
 
     # ─── Screen Access ───────────────────────────────────────────────
 
@@ -225,8 +255,27 @@ class DGCApp(App):
                 return screen
         return None
 
+    def _active_stream_output(self) -> StreamOutput | None:
+        """Return the visible transcript pane when the main workspace is active."""
+        if not isinstance(self.screen, MainScreen):
+            return None
+        return self.screen.stream_output
+
     def _status_model_label(self) -> str:
         return f"{self._active_provider}:{self._active_model}"
+
+    @staticmethod
+    def _env_truthy(name: str, default: bool) -> bool:
+        raw = os.getenv(name)
+        if raw is None:
+            return default
+        return raw.strip().lower() in {"1", "true", "yes", "on"}
+
+    def _startup_status_enabled(self) -> bool:
+        return self._env_truthy("DGC_TUI_STARTUP_STATUS", False)
+
+    def _history_restore_enabled(self) -> bool:
+        return self._env_truthy("DGC_TUI_RESTORE_HISTORY", True)
 
     def _open_btw_screen(self, *, initial_text: str = "") -> None:
         existing = self._get_btw_screen()
@@ -750,19 +799,12 @@ class DGCApp(App):
         if len(self._chat_history) > self._chat_history_max:
             self._chat_history = self._chat_history[-self._chat_history_max:]
 
-    def _restore_last_session_context(self) -> None:
-        """Restore Claude continuity only when Claude is still the preferred route."""
-        auto_resume = os.getenv("DGC_AUTO_RESUME", "0").strip().lower()
-        if auto_resume in {"0", "false", "no", "off"}:
-            return
-
-        main = self._get_main_screen()
-        if not main:
-            return
-
+    def _find_auto_resume_session(self) -> tuple[str, dict[str, Any]] | None:
+        """Return the Claude session chosen for auto-resume, if any."""
+        if not self._env_truthy("DGC_AUTO_RESUME", False):
+            return None
         if self._preferred_provider != "claude":
-            return
-
+            return None
         try:
             min_turns = int(os.getenv("DGC_AUTO_RESUME_MIN_TURNS", "2"))
         except Exception:
@@ -771,12 +813,6 @@ class DGCApp(App):
         allow_cross_workspace = os.getenv(
             "DGC_AUTO_RESUME_CROSS_WORKSPACE", "0"
         ).strip().lower() in {"1", "true", "yes", "on"}
-        debug_resume = os.getenv("DGC_AUTO_RESUME_DEBUG", "0").strip().lower() in {
-            "1",
-            "true",
-            "yes",
-            "on",
-        }
 
         candidates: list[tuple[str, dict[str, Any]]] = [
             (
@@ -825,11 +861,30 @@ class DGCApp(App):
                 selected_scope = scope
                 break
         if not meta:
-            if debug_resume:
+            return None
+        return selected_scope, meta
+
+    def _restore_last_session_context(
+        self,
+        *,
+        candidate: tuple[str, dict[str, Any]] | None = None,
+    ) -> str | None:
+        """Restore Claude continuity only when Claude is still the preferred route."""
+        main = self._get_main_screen()
+        if not main:
+            return None
+
+        debug_resume = self._env_truthy("DGC_AUTO_RESUME_DEBUG", False)
+        if candidate is None:
+            candidate = self._find_auto_resume_session()
+        if candidate is None:
+            if debug_resume and self._env_truthy("DGC_AUTO_RESUME", False):
                 main.stream_output.write_system(  # type: ignore[union-attr]
                     "[dim]Auto-resume: no resumable Claude session found.[/dim]"
                 )
-            return
+            return None
+
+        selected_scope, meta = candidate
 
         provider_sid = str(meta.get("provider_session_id", "") or "").strip()
         local_sid = str(meta.get("session_id", "") or "").strip()
@@ -838,7 +893,7 @@ class DGCApp(App):
                 main.stream_output.write_system(  # type: ignore[union-attr]
                     "[dim]Auto-resume: session metadata missing provider session id.[/dim]"
                 )
-            return
+            return None
 
         self._session.session_id = local_sid
         self._provider_session_id = provider_sid
@@ -869,6 +924,193 @@ class DGCApp(App):
             main.stream_output.write_system(  # type: ignore[union-attr]
                 f"[dim]Auto-resume scope fallback: {selected_scope}.[/dim]"
             )
+        return local_sid
+
+    def _restore_last_session_history(
+        self,
+        *,
+        preferred_session_id: str | None = None,
+    ) -> bool:
+        """Replay the most recent session transcript into the output pane."""
+        if not self._history_restore_enabled():
+            return False
+
+        main = self._get_main_screen()
+        if not main:
+            return False
+
+        session_id = (preferred_session_id or "").strip()
+        meta: dict[str, Any] | None = None
+        if session_id:
+            with contextlib.suppress(Exception):
+                meta = self._session_store.load_meta(session_id)
+        if meta is None:
+            with contextlib.suppress(Exception):
+                meta = self._session_store.latest_session(cwd=str(DHARMA_SWARM))
+        if not meta:
+            return False
+
+        session_id = str(meta.get("session_id", "") or "").strip()
+        if not session_id:
+            return False
+
+        try:
+            events = self._session_store.load_transcript(
+                session_id,
+                include_types=_HISTORY_REPLAY_TYPES,
+            )
+        except Exception:
+            return False
+        if not events:
+            return False
+
+        output: StreamOutput = main.stream_output  # type: ignore[assignment]
+        self._hydrate_chat_history_from_events(events)
+        provider_id = str(meta.get("provider_id", "") or "?")
+        model_id = str(meta.get("model_id", "") or "?")
+        output.write_system(
+            "[dim]Session history: "
+            f"{session_id[:18]}... | {provider_id}:{model_id}[/dim]"
+        )
+        for event in events:
+            self._replay_history_event(output, event)
+        return True
+
+    def _hydrate_chat_history_from_events(self, events: list[Any]) -> None:
+        """Seed the local chat history from persisted user/assistant turns."""
+        history: list[dict[str, str]] = []
+        for event in events:
+            if not isinstance(event, TextComplete):
+                continue
+            if event.role not in {"user", "assistant"}:
+                continue
+            content = event.content.strip()
+            if not content:
+                continue
+            history.append({"role": event.role, "content": event.content})
+        if history:
+            self._chat_history = history[-self._chat_history_max:]
+
+    def _replay_history_event(self, output: StreamOutput, event: Any) -> None:
+        """Render a persisted transcript event back into the visible log."""
+        if isinstance(event, SessionStart):
+            output.write_system(
+                "Session connected: "
+                f"{(event.provider_session_id or event.session_id)[:12]}... | "
+                f"Model: {event.model} | Tools: {len(event.tools_available)}"
+            )
+            return
+
+        if isinstance(event, TextComplete):
+            if hasattr(output, "handle_text_complete"):
+                output.handle_text_complete(event)
+            else:
+                if event.role == "user" and hasattr(output, "write_user"):
+                    output.write_user(event.content)
+                else:
+                    output.write(event.content)
+            return
+
+        if isinstance(event, ThinkingComplete):
+            if hasattr(output, "handle_thinking_complete"):
+                output.handle_thinking_complete(event)
+            else:
+                output.write(event.content)
+            return
+
+        if isinstance(event, ToolCallComplete):
+            if hasattr(output, "handle_tool_call_complete"):
+                output.handle_tool_call_complete(event)
+            else:
+                output.write_system(
+                    f"[dim]Tool: {event.tool_name or 'unknown'}[/dim]"
+                )
+            return
+
+        if isinstance(event, ToolResult):
+            if hasattr(output, "handle_tool_result_canonical"):
+                output.handle_tool_result_canonical(event)
+            else:
+                output.write(event.content)
+            return
+
+        if isinstance(event, UsageReport):
+            if hasattr(output, "handle_usage_report"):
+                output.handle_usage_report(event)
+            elif event.total_cost_usd is not None:
+                output.write_system(
+                    "[dim]"
+                    f"usage in={event.input_tokens} out={event.output_tokens} "
+                    f"cost=${event.total_cost_usd:.4f}[/dim]"
+                )
+            return
+
+        if isinstance(event, SessionEnd):
+            if event.success:
+                output.write_system("\u2713 Session complete.")
+            else:
+                detail = (
+                    f"{event.error_code}: {event.error_message}"
+                    if event.error_code
+                    else (event.error_message or "unknown provider failure")
+                )
+                output.write_error(
+                    f"[{BENGARA}]\u2717 Session failed -- {detail}[/{BENGARA}]"
+                )
+            return
+
+        if isinstance(event, TaskStarted):
+            output.write_system(f"Subagent started: {event.description}")
+            return
+
+        if isinstance(event, TaskProgress):
+            output.write_system(f"Subagent progress: {event.summary}")
+            return
+
+        if isinstance(event, TaskComplete):
+            state = "ok" if event.success else "error"
+            output.write_system(
+                f"Subagent complete ({state}): {event.summary}"
+            )
+            return
+
+        if isinstance(event, RateLimitEvent):
+            msg = f"Rate limit: {event.status}"
+            if event.utilization is not None:
+                msg += f" ({event.utilization * 100:.0f}%)"
+            output.write_system(f"[{OCHRE}]{msg}[/{OCHRE}]")
+            return
+
+        if isinstance(event, ErrorEvent):
+            output.write_error(f"[{BENGARA}]{event.code}: {event.message}[/{BENGARA}]")
+            return
+
+    def _ensure_local_session_record(self, session_id: str) -> None:
+        """Create local transcript metadata before the provider emits its first event."""
+        if (self._session_store.root / session_id / "meta.json").exists():
+            return
+        self._session_store.create_session(
+            session_id=session_id,
+            provider_id=self._active_provider,
+            model_id=self._active_model,
+            cwd=str(DHARMA_SWARM),
+            provider_session_id=self._provider_session_id,
+        )
+
+    def _append_local_user_turn(self, session_id: str, content: str) -> None:
+        """Persist the user-side turn so transcript replay has both sides."""
+        if not content:
+            return
+        self._ensure_local_session_record(session_id)
+        self._session_store.append_event(
+            session_id,
+            TextComplete(
+                provider_id=self._active_provider,
+                session_id=session_id,
+                content=content,
+                role="user",
+            ),
+        )
 
     # ─── Event Routing: ProviderRunner -> Widgets ────────────────────
 
@@ -910,8 +1152,9 @@ class DGCApp(App):
             if ev.provider_session_id:
                 self._provider_session_id = ev.provider_session_id
             output.write_system(
-                f"[dim]Session: {(ev.provider_session_id or ev.session_id)[:12]}... | "
-                f"Model: {ev.model} | Tools: {len(ev.tools_available)}[/dim]"
+                "Session connected: "
+                f"{(ev.provider_session_id or ev.session_id)[:12]}... | "
+                f"Model: {ev.model} | Tools: {len(ev.tools_available)}"
             )
 
         elif isinstance(ev, TextDelta):
@@ -991,7 +1234,7 @@ class DGCApp(App):
                 if target:
                     self._cooldown_until_by_alias.pop(target.alias, None)
                 self._set_status_activity(status, "complete")
-                output.write_system("[dim]\u2713 Session complete.[/dim]")
+                output.write_system("\u2713 Session complete.")
                 self._pending_fallback = False
             else:
                 detail = f"{ev.error_code}: {ev.error_message}" if ev.error_code else (
@@ -1009,12 +1252,12 @@ class DGCApp(App):
         elif isinstance(ev, TaskStarted):
             self._set_status_activity(status, "agent:start")
             output.write_system(
-                f"[dim]Subagent started: {ev.description}[/dim]"
+                f"Subagent started: {ev.description}"
             )
 
         elif isinstance(ev, TaskProgress):
             self._set_status_activity(status, "agent:work")
-            output.write_system(f"[dim]Subagent progress: {ev.summary}[/dim]")
+            output.write_system(f"Subagent progress: {ev.summary}")
 
         elif isinstance(ev, TaskComplete):
             self._set_status_activity(
@@ -1023,7 +1266,7 @@ class DGCApp(App):
             )
             state = "ok" if ev.success else "error"
             output.write_system(
-                f"[dim]Subagent complete ({state}): {ev.summary}[/dim]"
+                f"Subagent complete ({state}): {ev.summary}"
             )
 
         elif isinstance(ev, RateLimitEvent):
@@ -1060,12 +1303,12 @@ class DGCApp(App):
             route = self._status_model_label()
             if self._inflight_provider == "codex":
                 main.stream_output.write_system(  # type: ignore[union-attr]
-                    "[dim]Starting Codex session on "
-                    f"{route}. Live tools, usage, and cost will stream here; Ctrl+C cancels.[/dim]"
+                    "Starting Codex session on "
+                    f"{route}. Live commentary, tools, usage, and cost will stream here; Ctrl+C cancels."
                 )
             else:
                 main.stream_output.write_system(  # type: ignore[union-attr]
-                    f"[dim]Starting {route}...[/dim]"
+                    f"Starting {route}..."
                 )
             self._start_provider_idle_watch()
             self.set_timer(1.5, self._report_slow_provider_start)
@@ -1087,8 +1330,8 @@ class DGCApp(App):
         route = self._status_model_label()
         self._set_status_activity(main.status_bar, "waiting")  # type: ignore[arg-type]
         main.stream_output.write_system(  # type: ignore[union-attr]
-            "[dim]Still waiting for "
-            f"{route} to emit its first event. Startup can be quiet for a few seconds; Ctrl+C cancels.[/dim]"
+            "Still waiting for "
+            f"{route} to emit its first event. Startup can be quiet for a few seconds; Ctrl+C cancels."
         )
 
     def _start_provider_idle_watch(self) -> None:
@@ -1533,9 +1776,13 @@ class DGCApp(App):
         self._last_user_prompt = text
         self._last_error_code = None
         self._last_error_message = None
+        with contextlib.suppress(Exception):
+            self._ensure_local_session_record(local_session_id)
 
         if append_user:
             self._append_chat(role="user", content=text)
+            with contextlib.suppress(Exception):
+                self._append_local_user_turn(local_session_id, text)
 
         if reset_fallback_queue:
             self._maybe_restore_preferred_model()
@@ -1635,45 +1882,13 @@ class DGCApp(App):
         if (now - self._state_cache_time) < 60 and self._state_cache:
             return self._state_cache
 
-        parts: list[str] = []
+        from dharma_swarm.prompt_builder import build_state_context_snapshot
 
-        # Current research thread
-        thread_file = DHARMA_STATE / "thread_state.json"
-        if thread_file.exists():
-            try:
-                ts = json.loads(thread_file.read_text())
-                parts.append(
-                    f"Active thread: {ts.get('current_thread', 'unknown')}"
-                )
-            except Exception:
-                pass
-
-        # Recent memory
-        try:
-            from dharma_swarm.context import read_latent_gold_overview, read_memory_context
-
-            mem = read_memory_context()
-            if mem and "No memory" not in mem:
-                parts.append(f"Recent memory:\n{mem}")
-            latent = read_latent_gold_overview(state_dir=DHARMA_STATE, limit=3)
-            if latent:
-                parts.append(f"Latent gold:\n{latent}")
-        except Exception:
-            pass
-
-        # Ecosystem status from manifest
-        manifest = HOME / ".dharma_manifest.json"
-        if manifest.exists():
-            try:
-                data = json.loads(manifest.read_text())
-                eco = data.get("ecosystem", {})
-                if eco:
-                    alive = sum(1 for v in eco.values() if v.get("exists"))
-                    parts.append(f"Ecosystem: {alive}/{len(eco)} alive")
-            except Exception:
-                pass
-
-        result = "\n".join(parts) if parts else ""
+        result = build_state_context_snapshot(
+            state_dir=DHARMA_STATE,
+            home=HOME,
+            max_chars=6000,
+        )
         self._state_cache = result
         self._state_cache_time = now
         return result
@@ -2132,9 +2347,43 @@ class DGCApp(App):
 
     def action_scroll_to_bottom(self) -> None:
         """Jump to bottom of stream output and re-enable auto-scroll."""
-        main = self._get_main_screen()
-        if main and hasattr(main.stream_output, "scroll_to_bottom"):
-            main.stream_output.scroll_to_bottom()
+        output = self._active_stream_output()
+        if output is not None and hasattr(output, "scroll_to_bottom"):
+            output.scroll_to_bottom()
+
+    def action_scroll_page_up(self) -> None:
+        """Scroll one page up through transcript history."""
+        output = self._active_stream_output()
+        if output is not None and hasattr(output, "scroll_history_page_up"):
+            output.scroll_history_page_up()
+
+    def action_scroll_page_down(self) -> None:
+        """Scroll one page down through transcript history."""
+        output = self._active_stream_output()
+        if output is not None and hasattr(output, "scroll_history_page_down"):
+            output.scroll_history_page_down()
+
+    def on_mouse_scroll_up(self, event: events.MouseScrollUp) -> None:
+        """Route wheel-up on chrome widgets back into the transcript pane."""
+        output = self._active_stream_output()
+        if output is None:
+            return
+        target = getattr(event, "widget", None)
+        if target is output:
+            return
+        output.scroll_history_up()
+        event.stop()
+
+    def on_mouse_scroll_down(self, event: events.MouseScrollDown) -> None:
+        """Route wheel-down on chrome widgets back into the transcript pane."""
+        output = self._active_stream_output()
+        if output is None:
+            return
+        target = getattr(event, "widget", None)
+        if target is output:
+            return
+        output.scroll_history_down()
+        event.stop()
 
     def action_clear_output(self) -> None:
         """Clear the stream output widget."""

@@ -73,7 +73,13 @@ class JikokuTracer:
 
     def __init__(self, log_path: Optional[Path] = None, session_id: Optional[str] = None):
         self.log_path = log_path or Path.home() / ".dharma" / "jikoku" / "JIKOKU_LOG.jsonl"
-        self.log_path.parent.mkdir(parents=True, exist_ok=True)
+        self._logging_disabled = False
+        self._logging_error: Optional[str] = None
+        try:
+            self.log_path.parent.mkdir(parents=True, exist_ok=True)
+        except OSError as exc:
+            self._logging_disabled = True
+            self._logging_error = str(exc)
         self.session_id = session_id or f"session-{int(time.time() * 1000)}"
         self.active_spans: Dict[str, JikokuSpan] = {}
         self._span_counter = 0
@@ -156,9 +162,15 @@ class JikokuTracer:
         # Merge extra metadata
         span.metadata.update(extra_metadata)
 
-        # Append to JIKOKU_LOG.jsonl (atomic write)
-        with open(self.log_path, 'a') as f:
-            f.write(span.to_jsonl() + '\n')
+        # Append to JIKOKU_LOG.jsonl. Tracing must never break the caller.
+        if not self._logging_disabled:
+            try:
+                with open(self.log_path, 'a') as f:
+                    f.write(span.to_jsonl() + '\n')
+            except OSError as exc:
+                self._logging_disabled = True
+                self._logging_error = str(exc)
+                span.metadata.setdefault("log_write_error", str(exc))
 
         return span
 

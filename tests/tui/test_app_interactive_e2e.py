@@ -6,6 +6,7 @@ import json
 from pathlib import Path
 
 import pytest
+from textual import events
 
 import dharma_swarm.tui.app as tui_app
 from dharma_swarm.tui.app import DGCApp
@@ -18,12 +19,15 @@ from dharma_swarm.tui.engine.events import (
     ToolResult,
     UsageReport,
 )
+from dharma_swarm.tui.engine.session_store import SessionStore
 
 
 @pytest.fixture(autouse=True)
 def _isolate_tui_state(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
     monkeypatch.setattr(tui_app, "MODEL_POLICY_PATH", tmp_path / "tui_model_policy.json")
     monkeypatch.setattr(tui_app, "MODEL_STATS_PATH", tmp_path / "tui_model_stats.json")
+    monkeypatch.setenv("DGC_TUI_RESTORE_HISTORY", "0")
+    monkeypatch.setenv("DGC_AUTO_RESUME", "0")
     tui_app.MODEL_POLICY_PATH.write_text(
         json.dumps(
             {
@@ -40,7 +44,7 @@ def _isolate_tui_state(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
 @pytest.mark.asyncio
 async def test_tui_submit_dispatches_to_persisted_codex_route() -> None:
     app = DGCApp()
-    app._restore_last_session_context = lambda: None
+    app._restore_last_session_context = lambda **_: None
     app._run_status_on_startup = lambda: None
 
     async with app.run_test() as pilot:
@@ -72,7 +76,7 @@ async def test_tui_submit_dispatches_to_persisted_codex_route() -> None:
 @pytest.mark.asyncio
 async def test_tui_renders_provider_events_after_submit() -> None:
     app = DGCApp()
-    app._restore_last_session_context = lambda: None
+    app._restore_last_session_context = lambda **_: None
     app._run_status_on_startup = lambda: None
 
     async with app.run_test() as pilot:
@@ -132,9 +136,127 @@ async def test_tui_renders_provider_events_after_submit() -> None:
 
 
 @pytest.mark.asyncio
+async def test_tui_replays_last_session_history_on_startup(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    app = DGCApp()
+    app._run_status_on_startup = lambda: None
+    monkeypatch.setenv("DGC_TUI_RESTORE_HISTORY", "1")
+    store = SessionStore(root=tmp_path)
+    session_id = store.create_session(
+        session_id="dgc-20260313-090000-abcd",
+        provider_id="codex",
+        model_id="gpt-5.4",
+        cwd=str(tui_app.DHARMA_SWARM),
+    )
+    store.append_event(
+        session_id,
+        TextComplete(
+            provider_id="codex",
+            session_id=session_id,
+            content="hello",
+            role="user",
+        ),
+    )
+    store.append_event(
+        session_id,
+        TextComplete(
+            provider_id="codex",
+            session_id=session_id,
+            content="history reply",
+            role="assistant",
+        ),
+    )
+    app._session_store = store  # type: ignore[assignment]
+
+    async with app.run_test() as pilot:
+        await pilot.pause()
+        await pilot.press("enter")
+        await pilot.pause()
+
+        main = app._get_main_screen()
+        assert main is not None
+        assert main.stream_output.get_last_reply() == "history reply"
+        assert app._chat_history == [
+            {"role": "user", "content": "hello"},
+            {"role": "assistant", "content": "history reply"},
+        ]
+
+
+@pytest.mark.asyncio
+async def test_tui_pageup_scrolls_transcript_while_prompt_stays_focused() -> None:
+    app = DGCApp()
+    app._restore_last_session_context = lambda **_: None
+    app._run_status_on_startup = lambda: None
+
+    async with app.run_test(size=(100, 20)) as pilot:
+        await pilot.pause()
+        await pilot.press("enter")
+        await pilot.pause()
+
+        main = app._get_main_screen()
+        assert main is not None
+        output = main.stream_output
+
+        for index in range(120):
+            output.write_system(f"line {index}")
+        await pilot.pause()
+
+        bottom = output.scroll_y
+        assert getattr(app.screen.focused, "id", None) == "prompt-input"
+
+        await pilot.press("pageup")
+        await pilot.pause()
+
+        assert output.scroll_y < bottom
+        assert output._scroll_locked is True
+        assert getattr(app.screen.focused, "id", None) == "prompt-input"
+
+
+@pytest.mark.asyncio
+async def test_tui_mouse_scroll_over_prompt_routes_to_transcript() -> None:
+    app = DGCApp()
+    app._restore_last_session_context = lambda **_: None
+    app._run_status_on_startup = lambda: None
+
+    async with app.run_test(size=(100, 20)) as pilot:
+        await pilot.pause()
+        await pilot.press("enter")
+        await pilot.pause()
+
+        main = app._get_main_screen()
+        assert main is not None
+        output = main.stream_output
+
+        for index in range(120):
+            output.write_system(f"line {index}")
+        await pilot.pause()
+
+        bottom = output.scroll_y
+        app.on_mouse_scroll_up(
+            events.MouseScrollUp(
+                main.prompt_input,
+                x=1,
+                y=1,
+                delta_x=0,
+                delta_y=-1,
+                button=0,
+                shift=False,
+                meta=False,
+                ctrl=False,
+            )
+        )
+        await pilot.pause()
+
+        assert output.scroll_y < bottom
+        assert output._scroll_locked is True
+
+
+@pytest.mark.asyncio
 async def test_tui_codex_progress_notes_do_not_count_as_turns() -> None:
     app = DGCApp()
-    app._restore_last_session_context = lambda: None
+    app._restore_last_session_context = lambda **_: None
     app._run_status_on_startup = lambda: None
 
     async with app.run_test() as pilot:
@@ -230,7 +352,7 @@ async def test_tui_codex_progress_notes_do_not_count_as_turns() -> None:
 @pytest.mark.asyncio
 async def test_tui_status_bar_tracks_activity_tools_and_usage() -> None:
     app = DGCApp()
-    app._restore_last_session_context = lambda: None
+    app._restore_last_session_context = lambda **_: None
     app._run_status_on_startup = lambda: None
 
     async with app.run_test() as pilot:
@@ -331,7 +453,7 @@ async def test_tui_status_bar_tracks_activity_tools_and_usage() -> None:
 @pytest.mark.asyncio
 async def test_tui_bare_darwin_runs_system_command_not_chat() -> None:
     app = DGCApp()
-    app._restore_last_session_context = lambda: None
+    app._restore_last_session_context = lambda **_: None
     app._run_status_on_startup = lambda: None
 
     async with app.run_test() as pilot:
@@ -355,7 +477,7 @@ async def test_tui_bare_darwin_runs_system_command_not_chat() -> None:
 @pytest.mark.asyncio
 async def test_tui_slash_btw_opens_parallel_overlay() -> None:
     app = DGCApp()
-    app._restore_last_session_context = lambda: None
+    app._restore_last_session_context = lambda **_: None
     app._run_status_on_startup = lambda: None
 
     async with app.run_test() as pilot:
@@ -373,7 +495,7 @@ async def test_tui_slash_btw_opens_parallel_overlay() -> None:
 @pytest.mark.asyncio
 async def test_btw_merge_adds_context_to_main_chat_history() -> None:
     app = DGCApp()
-    app._restore_last_session_context = lambda: None
+    app._restore_last_session_context = lambda **_: None
     app._run_status_on_startup = lambda: None
 
     async with app.run_test() as pilot:
@@ -402,7 +524,7 @@ async def test_btw_merge_adds_context_to_main_chat_history() -> None:
 @pytest.mark.asyncio
 async def test_tui_darkwin_autocorrects_to_darwin_command() -> None:
     app = DGCApp()
-    app._restore_last_session_context = lambda: None
+    app._restore_last_session_context = lambda **_: None
     app._run_status_on_startup = lambda: None
 
     async with app.run_test() as pilot:

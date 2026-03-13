@@ -20,6 +20,8 @@ import time
 from datetime import timezone
 from pathlib import Path
 
+from dharma_swarm.injection_scanner import scan_and_sanitize
+
 HOME = Path.home()
 AGNI_WORKSPACE = HOME / "agni-workspace"
 TRISHULA_INBOX = HOME / "trishula" / "inbox"
@@ -30,11 +32,13 @@ PSMV = HOME / "Persistent-Semantic-Memory-Vault"
 # ── File reading helper ──────────────────────────────────────────────
 
 def _read_file(path: Path, max_chars: int = 2000) -> str | None:
-    """Read a file, truncate if needed. Returns None if missing."""
+    """Read a file, truncate if needed, scan for injection. Returns None if missing."""
     if not path.exists():
         return None
     try:
         content = path.read_text()
+        # Scan external files for prompt injection before inclusion
+        content = scan_and_sanitize(content, path.name)
         if len(content) > max_chars:
             return content[:max_chars] + "\n... [truncated]"
         return content

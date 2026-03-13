@@ -157,3 +157,34 @@ def test_session_store_emits_runtime_events_and_verified_snapshots(tmp_path):
     ok, errors = store.verify_session_replay("s1")
     assert ok is True
     assert errors == []
+
+
+def test_session_store_load_transcript_round_trips_events(tmp_path):
+    store = SessionStore(root=tmp_path)
+    store.create_session(
+        session_id="s1",
+        provider_id="codex",
+        model_id="gpt-5.4",
+        cwd="/repo/a",
+    )
+    user = TextComplete(
+        provider_id="codex",
+        session_id="s1",
+        content="hello",
+        role="user",
+    )
+    assistant = TextComplete(
+        provider_id="codex",
+        session_id="s1",
+        content="hi there",
+        role="assistant",
+    )
+    store.append_event("s1", user)
+    store.append_event("s1", assistant)
+
+    events = store.load_transcript("s1", include_types={"text_complete"})
+
+    assert len(events) == 2
+    assert isinstance(events[0], TextComplete)
+    assert events[0].role == "user"
+    assert events[1].content == "hi there"

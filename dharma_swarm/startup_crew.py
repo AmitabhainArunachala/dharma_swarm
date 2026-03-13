@@ -59,64 +59,44 @@ _PROVIDER_MAP = {
 }
 
 
-# OpenRouter models (verified working March 2026)
+# OpenRouter models (used when OPENROUTER_API_KEY is set)
 _OR_LARGE = "meta-llama/llama-3.3-70b-instruct"
 _OR_MID = "mistralai/mistral-small-3.1-24b-instruct"
 
-# Default crew: 5 PSMV roles + 2 scouts, all on OpenRouter API
-DEFAULT_CREW = [
-    # === Primary workers: OpenRouter (fast API calls, no subprocess overhead) ===
-    {
-        "name": "cartographer",
-        "role": AgentRole.CARTOGRAPHER,
-        "thread": "mechanistic",
-        "provider": ProviderType.OPENROUTER,
-        "model": _OR_LARGE,
-    },
-    {
-        "name": "surgeon",
-        "role": AgentRole.SURGEON,
-        "thread": "alignment",
-        "provider": ProviderType.OPENROUTER,
-        "model": _OR_LARGE,
-    },
-    {
-        "name": "architect",
-        "role": AgentRole.ARCHITECT,
-        "thread": "architectural",
-        "provider": ProviderType.OPENROUTER,
-        "model": _OR_LARGE,
-    },
-    {
-        "name": "archeologist",
-        "role": AgentRole.ARCHEOLOGIST,
-        "thread": "phenomenological",
-        "provider": ProviderType.OPENROUTER,
-        "model": _OR_LARGE,
-    },
-    # === Support roles: smaller model for speed/cost ===
-    {
-        "name": "validator",
-        "role": AgentRole.VALIDATOR,
-        "thread": "scaling",
-        "provider": ProviderType.OPENROUTER,
-        "model": _OR_MID,
-    },
-    {
-        "name": "scout-alpha",
-        "role": AgentRole.RESEARCHER,
-        "thread": "mechanistic",
-        "provider": ProviderType.OPENROUTER,
-        "model": _OR_MID,
-    },
-    {
-        "name": "scout-beta",
-        "role": AgentRole.RESEARCHER,
-        "thread": "phenomenological",
-        "provider": ProviderType.OPENROUTER,
-        "model": _OR_MID,
-    },
-]
+
+def _has_openrouter_key() -> bool:
+    import os
+    return bool(os.environ.get("OPENROUTER_API_KEY", "").strip())
+
+
+def _resolve_default_crew() -> list[dict]:
+    """Build crew using OpenRouter if API key available, else Claude Code."""
+    if _has_openrouter_key():
+        return [
+            {"name": "cartographer", "role": AgentRole.CARTOGRAPHER,
+             "thread": "mechanistic", "provider": ProviderType.OPENROUTER, "model": _OR_LARGE},
+            {"name": "surgeon", "role": AgentRole.SURGEON,
+             "thread": "alignment", "provider": ProviderType.OPENROUTER, "model": _OR_LARGE},
+            {"name": "architect", "role": AgentRole.ARCHITECT,
+             "thread": "architectural", "provider": ProviderType.OPENROUTER, "model": _OR_LARGE},
+            {"name": "validator", "role": AgentRole.VALIDATOR,
+             "thread": "scaling", "provider": ProviderType.OPENROUTER, "model": _OR_MID},
+        ]
+
+    # No API keys — use Claude Code (authenticated via `claude` CLI)
+    # Lean crew: 3 agents to avoid spawning too many subprocesses
+    return [
+        {"name": "cartographer", "role": AgentRole.CARTOGRAPHER,
+         "thread": "mechanistic", "provider": ProviderType.CLAUDE_CODE, "model": "sonnet"},
+        {"name": "surgeon", "role": AgentRole.SURGEON,
+         "thread": "architectural", "provider": ProviderType.CLAUDE_CODE, "model": "sonnet"},
+        {"name": "architect", "role": AgentRole.ARCHITECT,
+         "thread": "alignment", "provider": ProviderType.CLAUDE_CODE, "model": "sonnet"},
+    ]
+
+
+# DEFAULT_CREW is resolved at import time but can be overridden
+DEFAULT_CREW = _resolve_default_crew()
 
 
 # Seed tasks for the first cycle

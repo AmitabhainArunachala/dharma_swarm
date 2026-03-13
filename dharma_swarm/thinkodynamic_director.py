@@ -44,7 +44,7 @@ from dharma_swarm.mission_contract import (
     save_campaign_state,
     save_mission_state,
 )
-from dharma_swarm.models import Task, TaskPriority, TaskStatus
+from dharma_swarm.models import AgentRole, ProviderType, Task, TaskPriority, TaskStatus
 from dharma_swarm.task_board import TaskBoard
 
 logger = logging.getLogger(__name__)
@@ -301,6 +301,10 @@ ROLE_BRIEFS = {
         "Turn the mission into a precise execution spine with acceptance "
         "criteria, dependencies, and failure modes."
     ),
+    "surgeon": (
+        "Make precise, high-leverage code or configuration changes. Prefer "
+        "small, verified edits over broad rewrites."
+    ),
     "general": (
         "Implement or assemble the highest-leverage slice. Prefer auditable "
         "artifacts over speculative prose."
@@ -466,6 +470,9 @@ class WorkflowTaskPlan:
     role_hint: str
     depends_on_keys: list[str] = field(default_factory=list)
     acceptance: list[str] = field(default_factory=list)
+    preferred_agents: list[str] = field(default_factory=list)
+    preferred_backends: list[str] = field(default_factory=list)
+    provider_allowlist: list[str] = field(default_factory=list)
 
 
 @dataclass(slots=True)
@@ -480,6 +487,10 @@ class WorkflowPlan:
     expected_duration_min: int
     evidence_paths: list[str] = field(default_factory=list)
     tasks: list[WorkflowTaskPlan] = field(default_factory=list)
+    council_guidance: str = ""
+    council_members: list[str] = field(default_factory=list)
+    council_routing_strategy: dict[str, list[str]] = field(default_factory=dict)
+    council_dialogue_path: str = ""
 
 
 @dataclass(slots=True)
@@ -493,6 +504,76 @@ class WorkflowReview:
     needs_resynthesis: bool
     blockers: list[str] = field(default_factory=list)
     note: str = ""
+
+
+@dataclass(frozen=True, slots=True)
+class DirectorMindSpec:
+    name: str
+    role: str
+    provider: str
+    model: str
+    backend: str
+    purpose: str
+    focus: tuple[str, ...] = ()
+    cost_tier: str = "frontier"
+
+
+@dataclass(slots=True)
+class CouncilTurn:
+    agent_name: str
+    provider: str
+    model: str
+    backend: str
+    success: bool
+    content: str = ""
+    error: str = ""
+
+
+@dataclass(slots=True)
+class CouncilConsensus:
+    cycle_id: str
+    members: list[str]
+    shared_summary: str
+    routing_strategy: dict[str, list[str]]
+    meta_directives: list[str] = field(default_factory=list)
+    turns: list[CouncilTurn] = field(default_factory=list)
+    dialogue_path: str = ""
+    handoff_id: str = ""
+
+
+TOOL_WORKER_TOKENS = (
+    "implement",
+    "build",
+    "fix",
+    "wire",
+    "refactor",
+    "integrate",
+    "edit",
+    "patch",
+    "test",
+    "validate",
+    "verify",
+    "run",
+)
+
+ANALYSIS_WORKER_TOKENS = (
+    "map",
+    "research",
+    "audit",
+    "design",
+    "spec",
+    "analyze",
+    "synthesize",
+    "investigate",
+    "inventory",
+    "compare",
+)
+
+DELEGATION_HEADING_RE = re.compile(r"^##\s*delegations\b", re.IGNORECASE)
+DELEGATION_ITEM_RE = re.compile(
+    r"^-\s*(?:\[(?P<role>[a-z0-9_\- ]+)\]\s*)?(?P<title>[^:]+?)(?:\s*::\s*(?P<description>.+))?$",
+    re.IGNORECASE,
+)
 
 
 def _utc_now() -> datetime:
@@ -515,6 +596,64 @@ def _json_default(value: Any) -> Any:
     if hasattr(value, "__dataclass_fields__"):
         return asdict(value)
     raise TypeError(f"Cannot serialize {type(value)!r}")
+
+
+def _parse_output_delegations(text: str, *, limit: int = 3) -> list[dict[str, str]]:
+    delegations: list[dict[str, str]] = []
+    in_section = False
+    for raw_line in text.splitlines():
+        line = raw_line.strip()
+        if not line:
+            continue
+        if DELEGATION_HEADING_RE.match(line):
+            in_section = True
+            continue
+        if in_section and line.startswith("## "):
+            break
+        if not in_section or not line.startswith("-"):
+            continue
+        match = DELEGATION_ITEM_RE.match(line)
+        if not match:
+            continue
+        title = (match.group("title") or "").strip()
+        if not title:
+            continue
+        delegations.append(
+            {
+                "role": (match.group("role") or "").strip().lower(),
+                "title": title,
+                "description": (match.group("description") or "").strip(),
+            }
+        )
+        if len(delegations) >= limit:
+            break
+    return delegations
+
+
+def _parse_council_response(text: str) -> dict[str, str]:
+    """Extract structured council fields from a primary-orchestrator reply."""
+    fields = {
+        "AGREEMENT": "",
+        "RISK": "",
+        "DELEGATION": "",
+        "COST": "",
+        "META": "",
+    }
+    current = ""
+    for raw_line in str(text or "").splitlines():
+        line = raw_line.strip()
+        if not line:
+            continue
+        if ":" in line:
+            key, value = line.split(":", 1)
+            upper = key.strip().upper()
+            if upper in fields:
+                current = upper
+                fields[upper] = value.strip()
+                continue
+        if current:
+            fields[current] = f"{fields[current]} {line}".strip()
+    return fields
 
 
 def _read_json(path: Path) -> dict[str, Any] | None:
@@ -1035,11 +1174,17 @@ async def _vision_via_provider(
     budgets, where a single slow frontier attempt can otherwise consume the
     whole window before a healthy fallback lane is tried.
     """
-    from dharma_swarm.models import LLMRequest
+    from dharma_swarm.models import LLMRequest, ProviderType
+    from dharma_swarm.runtime_provider import (
+        NVIDIA_NIM_BASE_URL,
+        create_runtime_provider,
+        resolve_runtime_provider_config,
+    )
 
     sys_msg = "You are the Thinkodynamic Director — the highest thinking layer of an autonomous AI swarm."
-    budget = max(float(timeout_seconds), 10.0)
+    budget = max(float(timeout_seconds), 1.0)
     deadline = time.monotonic() + budget
+    tiny_budget = budget < 2.0
 
     async def _attempt(
         label: str,
@@ -1048,7 +1193,7 @@ async def _vision_via_provider(
         per_attempt_max: float = 45.0,
     ) -> tuple[str, bool] | None:
         remaining = deadline - time.monotonic()
-        if remaining <= 2.0:
+        if remaining <= 0.2:
             return None
         attempt_timeout = min(remaining, per_attempt_max)
         try:
@@ -1065,37 +1210,44 @@ async def _vision_via_provider(
         logger.debug("%s returned unusable content", label)
         return None
 
-    try:
-        from dharma_swarm.providers import NVIDIANIMProvider
-
-        nim_base_url = os.environ.get("NVIDIA_NIM_BASE_URL", "https://integrate.api.nvidia.com/v1").rstrip("/")
-        nim_attempts: list[tuple[str, str, float]] = [
-            ("NIM/llama-70b", "meta/llama-3.3-70b-instruct", 25.0),
-            ("NIM/nemotron-ultra-253b", "nvidia/llama-3.1-nemotron-ultra-253b-v1", 35.0),
-        ]
-        if nim_base_url != "https://integrate.api.nvidia.com/v1":
-            nim_attempts = [
-                ("NIM/kimi-k2.5", "moonshotai/kimi-k2.5", 30.0),
-                ("NIM/glm-5", "zai-org/GLM-5", 30.0),
-                *nim_attempts,
+    if not tiny_budget:
+        try:
+            nim_base_url = (
+                resolve_runtime_provider_config(ProviderType.NVIDIA_NIM).base_url
+                or NVIDIA_NIM_BASE_URL
+            ).rstrip("/")
+            nim_attempts: list[tuple[str, str, float]] = [
+                ("NIM/llama-70b", "meta/llama-3.3-70b-instruct", 25.0),
+                ("NIM/nemotron-ultra-253b", "nvidia/llama-3.1-nemotron-ultra-253b-v1", 35.0),
             ]
+            if nim_base_url != NVIDIA_NIM_BASE_URL:
+                nim_attempts = [
+                    ("NIM/kimi-k2.5", "moonshotai/kimi-k2.5", 30.0),
+                    ("NIM/glm-5", "zai-org/GLM-5", 30.0),
+                    *nim_attempts,
+                ]
 
-        for label, model, max_t in nim_attempts:
-            result = await _attempt(
-                label,
-                NVIDIANIMProvider(default_model=model),
-                LLMRequest(
-                    messages=[{"role": "user", "content": prompt}],
-                    system=sys_msg,
-                    model=model,
-                    max_tokens=4096,
-                ),
-                per_attempt_max=max_t,
-            )
-            if result is not None:
-                return result
-    except Exception as exc:
-        logger.debug("NVIDIANIMProvider setup failed: %s", exc)
+            for label, model, max_t in nim_attempts:
+                result = await _attempt(
+                    label,
+                    create_runtime_provider(
+                        resolve_runtime_provider_config(
+                            ProviderType.NVIDIA_NIM,
+                            model=model,
+                        )
+                    ),
+                    LLMRequest(
+                        messages=[{"role": "user", "content": prompt}],
+                        system=sys_msg,
+                        model=model,
+                        max_tokens=4096,
+                    ),
+                    per_attempt_max=max_t,
+                )
+                if result is not None:
+                    return result
+        except Exception as exc:
+            logger.debug("NVIDIANIMProvider setup failed: %s", exc)
 
     openrouter_attempts: list[tuple[str, str, float]] = [
         ("OpenRouter/mistral-24b", "mistralai/mistral-small-3.1-24b-instruct", 20.0),
@@ -1107,12 +1259,15 @@ async def _vision_via_provider(
     ]
 
     try:
-        from dharma_swarm.providers import OpenRouterProvider
-
         for label, model, max_t in openrouter_attempts:
             result = await _attempt(
                 label,
-                OpenRouterProvider(),
+                create_runtime_provider(
+                    resolve_runtime_provider_config(
+                        ProviderType.OPENROUTER,
+                        model=model,
+                    )
+                ),
                 LLMRequest(
                     messages=[{"role": "user", "content": prompt}],
                     system=sys_msg,
@@ -1128,11 +1283,11 @@ async def _vision_via_provider(
 
     # Free tier (zero cost, rate-limited)
     try:
-        from dharma_swarm.providers import OpenRouterFreeProvider
-
         result = await _attempt(
             "OpenRouter/free",
-            OpenRouterFreeProvider(),
+            create_runtime_provider(
+                resolve_runtime_provider_config(ProviderType.OPENROUTER_FREE)
+            ),
             LLMRequest(
                 messages=[{"role": "user", "content": prompt}],
                 system=sys_msg,
@@ -1147,11 +1302,14 @@ async def _vision_via_provider(
 
     # Anthropic (most capable, expensive — last resort)
     try:
-        from dharma_swarm.providers import AnthropicProvider
-
         result = await _attempt(
             "Anthropic/sonnet",
-            AnthropicProvider(),
+            create_runtime_provider(
+                resolve_runtime_provider_config(
+                    ProviderType.ANTHROPIC,
+                    model="claude-sonnet-4-20250514",
+                )
+            ),
             LLMRequest(
                 messages=[{"role": "user", "content": prompt}],
                 system=sys_msg,
@@ -1295,8 +1453,10 @@ class ThinkodynamicDirector:
         external_roots: Sequence[str | Path] | None = None,
         mission_brief: str | None = None,
         max_active_tasks: int = 12,
+        max_concurrent_tasks: int = 0,
         signal_limit: int = 16,
         max_candidates: int = 180,
+        swarm: Any | None = None,
     ) -> None:
         self.repo_root = (repo_root or ROOT).expanduser()
         self.state_dir = (state_dir or STATE).expanduser()
@@ -1320,13 +1480,261 @@ class ThinkodynamicDirector:
             or os.getenv("DGC_DIRECTOR_MISSION", "").strip()
             or DEFAULT_MISSION
         )
-        self.max_active_tasks = max_active_tasks
+        self.max_active_tasks = max(1, max_active_tasks)
+        auto_concurrency = min(6, self.max_active_tasks)
+        requested_concurrency = max_concurrent_tasks if max_concurrent_tasks > 0 else auto_concurrency
+        self.max_concurrent_tasks = max(1, min(requested_concurrency, self.max_active_tasks))
         self.signal_limit = signal_limit
         self.max_candidates = max_candidates
         self._task_board = TaskBoard(self.state_dir / "db" / "tasks.db")
         self._tracer = JikokuTracer(
             log_path=self.state_dir / "jikoku" / "THINKODYNAMIC_DIRECTOR_LOG.jsonl",
         )
+        self._swarm = swarm
+        self._swarm_agent_pool: Any = getattr(swarm, "_agent_pool", None) if swarm is not None else None
+        self._message_bus: Any = getattr(swarm, "_message_bus", None) if swarm is not None else None
+        self._handoff: Any = getattr(swarm, "_handoff", None) if swarm is not None else None
+        self._council_state_path = self.state_dir / "director_council.json"
+        self._council_dialogue_path = self.shared_dir / "director_council_dialogue.md"
+        self._primary_minds = self._resolve_primary_minds()
+        self._support_minds = self._resolve_support_minds()
+
+    def _sync_swarm_refs(self) -> None:
+        if self._swarm is None:
+            return
+        self._swarm_agent_pool = self._swarm_agent_pool or getattr(self._swarm, "_agent_pool", None)
+        self._message_bus = self._message_bus or getattr(self._swarm, "_message_bus", None)
+        self._handoff = self._handoff or getattr(self._swarm, "_handoff", None)
+
+    @staticmethod
+    def _as_agent_role(role: str) -> AgentRole:
+        normalized = str(role).strip().lower()
+        mapping = {
+            "orchestrator": AgentRole.ORCHESTRATOR,
+            "architect": AgentRole.ARCHITECT,
+            "researcher": AgentRole.RESEARCHER,
+            "validator": AgentRole.VALIDATOR,
+            "surgeon": AgentRole.SURGEON,
+            "cartographer": AgentRole.CARTOGRAPHER,
+            "general": AgentRole.GENERAL,
+        }
+        return mapping.get(normalized, AgentRole.GENERAL)
+
+    @staticmethod
+    def _dedupe_preserve(values: Sequence[str]) -> list[str]:
+        seen: set[str] = set()
+        out: list[str] = []
+        for value in values:
+            item = str(value).strip()
+            if not item or item in seen:
+                continue
+            seen.add(item)
+            out.append(item)
+        return out
+
+    def _resolve_primary_minds(self) -> list[DirectorMindSpec]:
+        codex_model = os.getenv("DGC_DIRECTOR_CODEX_MODEL", "").strip() or "gpt-5.4"
+        opus_model = os.getenv("DGC_DIRECTOR_OPUS_MODEL", "").strip() or "claude-opus-4-6"
+        return [
+            DirectorMindSpec(
+                name="codex-primus",
+                role="orchestrator",
+                provider=ProviderType.CODEX.value,
+                model=codex_model,
+                backend="codex-cli",
+                purpose="Own tool-backed execution strategy, coding leverage, and hard verification pressure.",
+                focus=("surgeon", "general", "validator", "architect"),
+            ),
+            DirectorMindSpec(
+                name="opus-primus",
+                role="orchestrator",
+                provider=ProviderType.CLAUDE_CODE.value,
+                model=opus_model,
+                backend="claude-cli",
+                purpose="Own mission framing, critique, synthesis, and rerouting pressure with equal authority.",
+                focus=("cartographer", "researcher", "architect", "validator"),
+            ),
+        ]
+
+    def _resolve_support_minds(self) -> list[DirectorMindSpec]:
+        return [
+            DirectorMindSpec(
+                name="kimi-cartographer",
+                role="researcher",
+                provider=ProviderType.OPENROUTER.value,
+                model=os.getenv("DGC_DIRECTOR_KIMI_MODEL", "").strip() or "moonshotai/kimi-k2.5",
+                backend="provider-fallback",
+                purpose="Cheap high-context mapping, corpus digestion, and buyer-pain scanning.",
+                focus=("cartographer", "researcher", "architect"),
+                cost_tier="efficient",
+            ),
+            DirectorMindSpec(
+                name="glm-researcher",
+                role="researcher",
+                provider=ProviderType.OPENROUTER.value,
+                model=os.getenv("DGC_DIRECTOR_GLM_MODEL", "").strip() or "z-ai/glm-5",
+                backend="provider-fallback",
+                purpose="Reasoning-heavy synthesis and contradiction hunting at lower cost than primary lanes.",
+                focus=("researcher", "architect", "validator"),
+                cost_tier="efficient",
+            ),
+            DirectorMindSpec(
+                name="qwen-builder",
+                role="general",
+                provider=ProviderType.OPENROUTER.value,
+                model=os.getenv("DGC_DIRECTOR_QWEN_MODEL", "").strip() or "qwen/qwen2.5-coder-32b-instruct",
+                backend="provider-fallback",
+                purpose="Commodity implementation, mechanical coding, and parallel draft execution.",
+                focus=("surgeon", "general"),
+                cost_tier="efficient",
+            ),
+            DirectorMindSpec(
+                name="nim-validator",
+                role="validator",
+                provider=ProviderType.NVIDIA_NIM.value,
+                model=os.getenv("DGC_DIRECTOR_NIM_VALIDATOR_MODEL", "").strip() or "nvidia/llama-3.1-nemotron-ultra-253b-v1",
+                backend="provider-fallback",
+                purpose="Fast validation pressure and wide-context review without burning frontier budget.",
+                focus=("validator", "architect", "researcher"),
+                cost_tier="efficient",
+            ),
+            DirectorMindSpec(
+                name="nim-generalist",
+                role="general",
+                provider=ProviderType.NVIDIA_NIM.value,
+                model=os.getenv("DGC_DIRECTOR_NIM_GENERAL_MODEL", "").strip() or "meta/llama-3.3-70b-instruct",
+                backend="provider-fallback",
+                purpose="General low-cost support lane for summaries, drafts, and broad execution support.",
+                focus=("general", "researcher", "cartographer"),
+                cost_tier="efficient",
+            ),
+        ]
+
+    def _live_council_enabled(self) -> bool:
+        raw = os.getenv("DGC_DIRECTOR_COUNCIL_LIVE", "").strip().lower()
+        return self._swarm is not None or raw in {"1", "true", "yes", "on"}
+
+    def _preferred_execution_profile(
+        self,
+        role_hint: str,
+    ) -> tuple[list[str], list[str], list[str]]:
+        role = str(role_hint).strip().lower()
+        if role in {"surgeon", "general"}:
+            return (
+                ["codex-primus", "qwen-builder", "nim-generalist", "opus-primus"],
+                ["codex-cli", "claude-cli", "provider-fallback"],
+                [
+                    ProviderType.CODEX.value,
+                    ProviderType.OPENROUTER.value,
+                    ProviderType.NVIDIA_NIM.value,
+                    ProviderType.CLAUDE_CODE.value,
+                ],
+            )
+        if role == "validator":
+            return (
+                ["opus-primus", "nim-validator", "codex-primus", "glm-researcher"],
+                ["claude-cli", "codex-cli", "provider-fallback"],
+                [
+                    ProviderType.CLAUDE_CODE.value,
+                    ProviderType.NVIDIA_NIM.value,
+                    ProviderType.CODEX.value,
+                    ProviderType.OPENROUTER.value,
+                ],
+            )
+        return (
+            ["opus-primus", "glm-researcher", "kimi-cartographer", "nim-generalist", "codex-primus"],
+            ["claude-cli", "provider-fallback", "codex-cli"],
+            [
+                ProviderType.CLAUDE_CODE.value,
+                ProviderType.OPENROUTER.value,
+                ProviderType.NVIDIA_NIM.value,
+                ProviderType.CODEX.value,
+            ],
+        )
+
+    def _decorate_workflow_execution(self, workflow: WorkflowPlan) -> WorkflowPlan:
+        for task in workflow.tasks:
+            preferred_agents, preferred_backends, provider_allowlist = self._preferred_execution_profile(
+                task.role_hint
+            )
+            task.preferred_agents = self._dedupe_preserve(
+                [*task.preferred_agents, *preferred_agents]
+            )
+            task.preferred_backends = self._dedupe_preserve(
+                [*task.preferred_backends, *preferred_backends]
+            )
+            task.provider_allowlist = self._dedupe_preserve(
+                [*task.provider_allowlist, *provider_allowlist]
+            )
+        return workflow
+
+    def _mind_system_prompt(self, spec: DirectorMindSpec) -> str:
+        return (
+            f"You are {spec.name}, a {spec.role} mind inside the dharma_swarm director.\n"
+            f"Purpose: {spec.purpose}\n"
+            "Rules:\n"
+            "- You are part of a common-dialogue council with equal standing among primary orchestrators.\n"
+            "- Route repetitive or broad work outward to cheaper lanes whenever quality allows.\n"
+            "- Keep outputs terse, concrete, and reusable by downstream agents.\n"
+            "- Externalize insights to durable artifacts; do not rely on ephemeral context.\n"
+        )
+
+    def _provider_type_from_string(self, value: str) -> ProviderType | None:
+        normalized = str(value).strip().lower()
+        return next((provider for provider in ProviderType if provider.value == normalized), None)
+
+    def _runtime_provider_available(self, spec: DirectorMindSpec) -> bool:
+        provider = self._provider_type_from_string(spec.provider)
+        if provider is None:
+            return False
+        try:
+            from dharma_swarm.runtime_provider import resolve_runtime_provider_config
+
+            config = resolve_runtime_provider_config(
+                provider,
+                model=spec.model,
+                working_dir=str(self.repo_root),
+            )
+        except Exception as exc:
+            logger.debug("Runtime provider resolution failed for %s: %s", spec.name, exc)
+            return False
+        return bool(config.available)
+
+    async def _ensure_orchestrator_swarm(self) -> None:
+        self._sync_swarm_refs()
+        if self._swarm is None:
+            return
+        try:
+            existing = await self._swarm.list_agents()
+        except Exception as exc:
+            logger.debug("Could not inspect swarm agents for director crew: %s", exc)
+            return
+
+        existing_names = {state.name for state in existing}
+        for spec in [*self._primary_minds, *self._support_minds]:
+            if spec.name in existing_names:
+                continue
+            if not self._runtime_provider_available(spec):
+                logger.debug(
+                    "Skipping director mind %s because provider %s is not available",
+                    spec.name,
+                    spec.provider,
+                )
+                continue
+            provider_type = self._provider_type_from_string(spec.provider)
+            if provider_type is None:
+                continue
+            try:
+                await self._swarm.spawn_agent(
+                    name=spec.name,
+                    role=self._as_agent_role(spec.role),
+                    model=spec.model,
+                    provider_type=provider_type,
+                    system_prompt=self._mind_system_prompt(spec),
+                    thread="architectural" if spec.role in {"orchestrator", "architect", "validator"} else "mechanistic",
+                )
+            except Exception as exc:
+                logger.debug("Failed to spawn director mind %s: %s", spec.name, exc)
 
     def _iter_scan_roots(self) -> Iterable[Path]:
         for root in self.scan_roots:
@@ -1699,7 +2107,7 @@ class ThinkodynamicDirector:
             )
             previous_key = key
 
-        return WorkflowPlan(
+        return self._decorate_workflow_execution(WorkflowPlan(
             cycle_id=cycle_id,
             workflow_id=f"wf-brief-{_safe_slug(brief.brief_id or brief.title)}-{cycle_id}",
             opportunity_id=brief.brief_id,
@@ -1714,7 +2122,7 @@ class ThinkodynamicDirector:
             expected_duration_min=max(45, len(tasks) * 45),
             evidence_paths=list(brief.evidence_paths),
             tasks=tasks,
-        )
+        ))
 
     def plan_workflow(
         self,
@@ -1819,7 +2227,7 @@ class ThinkodynamicDirector:
                 )
             )
 
-        return WorkflowPlan(
+        return self._decorate_workflow_execution(WorkflowPlan(
             cycle_id=cycle_id,
             workflow_id=workflow_id,
             opportunity_id=opportunity.opportunity_id,
@@ -1830,13 +2238,495 @@ class ThinkodynamicDirector:
             expected_duration_min=opportunity.expected_duration_min,
             evidence_paths=list(opportunity.evidence_paths),
             tasks=tasks,
-        )
+        ))
 
     async def init(self) -> None:
         (self.state_dir / "db").mkdir(parents=True, exist_ok=True)
         self.shared_dir.mkdir(parents=True, exist_ok=True)
         self.log_dir.mkdir(parents=True, exist_ok=True)
         await self._task_board.init_db()
+        await self._ensure_orchestrator_swarm()
+
+    def _build_council_prompt(
+        self,
+        member: DirectorMindSpec,
+        workflow: WorkflowPlan,
+        *,
+        vision_result: dict[str, Any],
+        sense_result: dict[str, Any],
+    ) -> str:
+        from dharma_swarm.prompt_builder import build_state_context_snapshot
+
+        top_opportunities = [
+            str(opportunity.title)
+            for opportunity in list(sense_result.get("opportunities", []))[:3]
+        ]
+        workflow_tasks = "\n".join(
+            f"- [{task.role_hint}] {task.title}"
+            for task in workflow.tasks
+        ) or "- none"
+        deliverables = "\n".join(
+            f"- {task.acceptance[0]}"
+            for task in workflow.tasks
+            if task.acceptance
+        ) or "- Produce a concrete, auditable artifact."
+        state_snapshot = build_state_context_snapshot(
+            state_dir=self.state_dir,
+            home=Path.home(),
+            max_chars=1200,
+        )
+        return (
+            f"You are {member.name}. Purpose: {member.purpose}\n"
+            "You have equal standing with the other primary orchestrator. "
+            "Your job is not to do the whole mission alone; your job is to improve the mission shape.\n\n"
+            f"Mission brief:\n{self.mission_brief}\n\n"
+            f"Selected workflow:\n"
+            f"- title: {workflow.opportunity_title}\n"
+            f"- theme: {workflow.theme}\n"
+            f"- thesis: {workflow.thesis}\n"
+            f"- why_now: {workflow.why_now}\n\n"
+            f"Workflow tasks:\n{workflow_tasks}\n\n"
+            f"Acceptance anchors:\n{deliverables}\n\n"
+            f"Top alternatives in play:\n"
+            + ("\n".join(f"- {item}" for item in top_opportunities) if top_opportunities else "- none")
+            + "\n\n"
+            f"Vision excerpt:\n{str(vision_result.get('vision_text', '') or '')[:1200]}\n\n"
+            + (f"Mission-control snapshot:\n{state_snapshot}\n\n" if state_snapshot else "")
+            + "Respond in exactly this shape:\n"
+            "AGREEMENT: one sentence on the best current direction.\n"
+            "RISK: one sentence on the most important failure mode.\n"
+            "DELEGATION: one sentence on which cheaper lanes should do what.\n"
+            "COST: one sentence on how to preserve frontier budget.\n"
+            "META: one sentence on what Codex and Opus should keep revising at the meta layer.\n"
+        )
+
+    async def _find_swarm_runner(self, agent_name: str) -> Any | None:
+        self._sync_swarm_refs()
+        pool = self._swarm_agent_pool
+        if pool is None:
+            return None
+        get_idle = getattr(pool, "get_idle_agents", None)
+        get_runner = getattr(pool, "get", None)
+        if not callable(get_idle) or not callable(get_runner):
+            return None
+        try:
+            idle_states = await get_idle()
+        except Exception as exc:
+            logger.debug("Could not inspect idle swarm agents: %s", exc)
+            return None
+        for state in idle_states:
+            if str(getattr(state, "name", "")).strip() != agent_name:
+                continue
+            try:
+                return await get_runner(state.id)
+            except Exception as exc:
+                logger.debug("Could not fetch runner for %s: %s", agent_name, exc)
+                return None
+        return None
+
+    async def _run_raw_backend_prompt(
+        self,
+        *,
+        backend: str,
+        prompt: str,
+        model: str,
+        timeout: int,
+        label: str,
+    ) -> dict[str, Any]:
+        if backend == "codex-cli":
+            run_dir = self.log_dir / "worker_runs"
+            run_dir.mkdir(parents=True, exist_ok=True)
+            output_file = run_dir / f"{label}_{int(time.time())}_codex.txt"
+            try:
+                proc = await self._run_subprocess_agent(
+                    self._build_codex_command(output_file=output_file, model=model),
+                    timeout=timeout,
+                    cwd=self.repo_root,
+                    input_text=prompt,
+                )
+            except FileNotFoundError:
+                return {"success": False, "output": "", "error": "codex not found", "provider": "codex-cli"}
+            except subprocess.TimeoutExpired:
+                return {"success": False, "output": "", "error": f"codex timeout after {timeout}s", "provider": "codex-cli"}
+
+            file_output = output_file.read_text(encoding="utf-8").strip() if output_file.exists() else ""
+            stdout = (proc.stdout or "").strip()
+            stderr = (proc.stderr or "").strip()
+            output = file_output or stdout
+            if proc.returncode == 0 and output:
+                return {"success": True, "output": output, "provider": "codex-cli", "output_length": len(output)}
+            return {
+                "success": False,
+                "output": output,
+                "error": stderr or stdout or f"codex rc={proc.returncode}",
+                "provider": "codex-cli",
+            }
+
+        if backend == "claude-cli":
+            env = {**os.environ, "CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC": "1"}
+            env.pop("CLAUDECODE", None)
+            try:
+                proc = await self._run_subprocess_agent(
+                    ["claude", "-p", prompt, "--model", model, "--output-format", "text"],
+                    timeout=timeout,
+                    cwd=self.repo_root,
+                    env=env,
+                )
+            except FileNotFoundError:
+                return {"success": False, "output": "", "error": "claude not found", "provider": "claude-cli"}
+            except subprocess.TimeoutExpired:
+                return {"success": False, "output": "", "error": f"claude timeout after {timeout}s", "provider": "claude-cli"}
+
+            output = (proc.stdout or "").strip()
+            stderr = (proc.stderr or "").strip()
+            if proc.returncode == 0 and output:
+                return {"success": True, "output": output, "provider": "claude-cli", "output_length": len(output)}
+            return {
+                "success": False,
+                "output": output,
+                "error": stderr or output or f"claude rc={proc.returncode}",
+                "provider": "claude-cli",
+            }
+
+        output, success = await _vision_via_provider(
+            prompt,
+            timeout_seconds=_director_provider_timeout_seconds(timeout),
+        )
+        return {
+            "success": success and bool(output),
+            "output": output or "",
+            "provider": "provider-fallback",
+            "output_length": len(output or ""),
+            "error": "" if success and output else (output or "provider fallback returned no output"),
+        }
+
+    async def _query_council_member(
+        self,
+        member: DirectorMindSpec,
+        workflow: WorkflowPlan,
+        *,
+        vision_result: dict[str, Any],
+        sense_result: dict[str, Any],
+    ) -> CouncilTurn:
+        prompt = self._build_council_prompt(
+            member,
+            workflow,
+            vision_result=vision_result,
+            sense_result=sense_result,
+        )
+        runner = await self._find_swarm_runner(member.name)
+        if runner is not None:
+            council_task = Task(
+                title=f"Council review: {workflow.opportunity_title}",
+                description=prompt,
+                priority=TaskPriority.HIGH,
+                created_by="thinkodynamic_director",
+                metadata={
+                    "source": "thinkodynamic_director_council",
+                    "requires_frontier_precision": True,
+                    "allow_provider_routing": False,
+                    "director_council_member": member.name,
+                },
+            )
+            try:
+                content = await runner.run_task(council_task)
+                return CouncilTurn(
+                    agent_name=member.name,
+                    provider=member.provider,
+                    model=member.model,
+                    backend=member.backend,
+                    success=bool(content.strip()),
+                    content=content.strip(),
+                )
+            except Exception as exc:
+                return CouncilTurn(
+                    agent_name=member.name,
+                    provider=member.provider,
+                    model=member.model,
+                    backend=member.backend,
+                    success=False,
+                    error=str(exc),
+                )
+
+        result = await self._run_raw_backend_prompt(
+            backend=member.backend,
+            prompt=prompt,
+            model=member.model,
+            timeout=90,
+            label=f"council_{_safe_slug(member.name)}",
+        )
+        return CouncilTurn(
+            agent_name=member.name,
+            provider=member.provider,
+            model=member.model,
+            backend=member.backend,
+            success=bool(result.get("success")),
+            content=str(result.get("output", "")).strip(),
+            error=str(result.get("error", "")).strip(),
+        )
+
+    def _default_council_routing_strategy(self) -> dict[str, list[str]]:
+        return {
+            "meta": ["codex-primus", "opus-primus"],
+            "coding": ["codex-primus", "qwen-builder", "nim-generalist"],
+            "research": ["opus-primus", "glm-researcher", "kimi-cartographer"],
+            "validation": ["opus-primus", "nim-validator", "codex-primus"],
+            "fallback_backends": ["codex-cli", "claude-cli", "provider-fallback"],
+        }
+
+    def _synthesize_council_consensus(
+        self,
+        *,
+        cycle_id: str,
+        turns: Sequence[CouncilTurn],
+    ) -> CouncilConsensus:
+        parsed = [_parse_council_response(turn.content) for turn in turns if turn.success and turn.content]
+        agreements = self._dedupe_preserve(
+            [fields["AGREEMENT"] for fields in parsed if fields.get("AGREEMENT")]
+        )
+        risks = self._dedupe_preserve(
+            [fields["RISK"] for fields in parsed if fields.get("RISK")]
+        )
+        delegations = self._dedupe_preserve(
+            [fields["DELEGATION"] for fields in parsed if fields.get("DELEGATION")]
+        )
+        costs = self._dedupe_preserve(
+            [fields["COST"] for fields in parsed if fields.get("COST")]
+        )
+        meta = self._dedupe_preserve(
+            [fields["META"] for fields in parsed if fields.get("META")]
+        )
+
+        if not agreements:
+            agreements = [
+                "Keep Codex and Opus on mission shape, coding leverage, and hard validation instead of spending them on every subtask.",
+            ]
+        if not risks:
+            risks = [
+                "Do not let the swarm devolve into parallel chatter or burn frontier budget on tasks that cheaper lanes can clear first.",
+            ]
+        if not delegations:
+            delegations = [
+                "Use Kimi and GLM for scanning, synthesis, and contradiction hunting; use Qwen and NIM lanes for broad low-cost execution and validation.",
+            ]
+        if not costs:
+            costs = [
+                "Push wide exploration to efficient lanes first, then escalate only the irreducible edge cases back to Codex and Opus.",
+            ]
+        if not meta:
+            meta = [
+                "Codex and Opus should keep revising the mission frame, routing rules, and acceptance surfaces while support lanes carry commodity work.",
+            ]
+
+        shared_summary = (
+            f"Council agreement: {agreements[0]} "
+            f"Primary risk: {risks[0]} "
+            f"Delegation rule: {delegations[0]} "
+            f"Cost discipline: {costs[0]}"
+        )
+        return CouncilConsensus(
+            cycle_id=cycle_id,
+            members=[mind.name for mind in self._primary_minds],
+            shared_summary=shared_summary,
+            routing_strategy=self._default_council_routing_strategy(),
+            meta_directives=self._dedupe_preserve([*meta, *risks]),
+            turns=list(turns),
+        )
+
+    def _write_council_dialogue(self, council: CouncilConsensus) -> Path:
+        lines = [
+            f"# Director Council Dialogue — Cycle {council.cycle_id}",
+            "",
+            "## Shared Guidance",
+            "",
+            council.shared_summary,
+            "",
+            "## Routing Strategy",
+            "",
+        ]
+        for lane, members in council.routing_strategy.items():
+            lines.append(f"- {lane}: {', '.join(members)}")
+        lines.extend(["", "## Meta Directives", ""])
+        for item in council.meta_directives:
+            lines.append(f"- {item}")
+        lines.extend(["", "## Turns", ""])
+        for turn in council.turns:
+            lines.append(
+                f"### {turn.agent_name} [{turn.backend} :: {turn.model}] {'OK' if turn.success else 'FAILED'}"
+            )
+            if turn.content:
+                lines.append(turn.content)
+            if turn.error:
+                lines.append(f"ERROR: {turn.error}")
+            lines.append("")
+        self._council_dialogue_path.write_text("\n".join(lines).strip() + "\n", encoding="utf-8")
+        return self._council_dialogue_path
+
+    async def _persist_council_handoff(
+        self,
+        council: CouncilConsensus,
+        workflow: WorkflowPlan,
+    ) -> str:
+        self._sync_swarm_refs()
+        if self._handoff is None:
+            return ""
+        try:
+            from dharma_swarm.handoff import Artifact, ArtifactType
+
+            handoff = await self._handoff.create_handoff(
+                from_agent="director-council",
+                to_agent="*",
+                task_context=f"Council guidance for {workflow.opportunity_title}",
+                artifacts=[
+                    Artifact(
+                        artifact_type=ArtifactType.CONTEXT,
+                        content=council.shared_summary,
+                        summary="Shared guidance from Codex and Opus",
+                    ),
+                    Artifact(
+                        artifact_type=ArtifactType.PLAN,
+                        content=json.dumps(council.routing_strategy, indent=2),
+                        summary="Routing strategy",
+                    ),
+                ],
+            )
+        except Exception as exc:
+            logger.debug("Council handoff persist failed: %s", exc)
+            return ""
+        return handoff.id
+
+    async def deliberate_council(
+        self,
+        *,
+        cycle_id: str,
+        workflow: WorkflowPlan,
+        vision_result: dict[str, Any],
+        sense_result: dict[str, Any],
+    ) -> CouncilConsensus:
+        turns: list[CouncilTurn]
+        if self._live_council_enabled():
+            turns = list(
+                await asyncio.gather(
+                    *[
+                        self._query_council_member(
+                            member,
+                            workflow,
+                            vision_result=vision_result,
+                            sense_result=sense_result,
+                        )
+                        for member in self._primary_minds
+                    ]
+                )
+            )
+        else:
+            turns = [
+                CouncilTurn(
+                    agent_name=member.name,
+                    provider=member.provider,
+                    model=member.model,
+                    backend=member.backend,
+                    success=False,
+                    error="live council disabled; using heuristic consensus",
+                )
+                for member in self._primary_minds
+            ]
+
+        council = self._synthesize_council_consensus(cycle_id=cycle_id, turns=turns)
+        dialogue_path = self._write_council_dialogue(council)
+        council.dialogue_path = str(dialogue_path)
+        council.handoff_id = await self._persist_council_handoff(council, workflow)
+        _write_json(
+            self._council_state_path,
+            {
+                "cycle_id": council.cycle_id,
+                "members": council.members,
+                "shared_summary": council.shared_summary,
+                "routing_strategy": council.routing_strategy,
+                "meta_directives": council.meta_directives,
+                "turns": [asdict(turn) for turn in council.turns],
+                "dialogue_path": council.dialogue_path,
+                "handoff_id": council.handoff_id,
+            },
+        )
+        return council
+
+    def _apply_council_consensus(
+        self,
+        workflow: WorkflowPlan,
+        council: CouncilConsensus,
+    ) -> WorkflowPlan:
+        workflow = self._decorate_workflow_execution(workflow)
+        workflow.council_guidance = council.shared_summary
+        workflow.council_members = list(council.members)
+        workflow.council_routing_strategy = dict(council.routing_strategy)
+        workflow.council_dialogue_path = council.dialogue_path
+        for task in workflow.tasks:
+            if council.shared_summary and council.shared_summary not in task.description:
+                task.description = (
+                    f"{task.description.rstrip()}\n\n"
+                    "Primary orchestrator guidance:\n"
+                    f"{council.shared_summary}"
+                ).strip()
+        return workflow
+
+    async def _select_named_swarm_agent(
+        self,
+        task_plan: WorkflowTaskPlan,
+    ) -> tuple[str, Any] | None:
+        self._sync_swarm_refs()
+        pool = self._swarm_agent_pool
+        if pool is None:
+            return None
+        get_idle = getattr(pool, "get_idle_agents", None)
+        get_runner = getattr(pool, "get", None)
+        if not callable(get_idle) or not callable(get_runner):
+            return None
+        try:
+            idle_states = await get_idle()
+        except Exception as exc:
+            logger.debug("Idle swarm lookup failed: %s", exc)
+            return None
+        idle_by_name = {
+            str(getattr(state, "name", "")).strip(): state
+            for state in idle_states
+        }
+        for agent_name in task_plan.preferred_agents:
+            state = idle_by_name.get(agent_name)
+            if state is None:
+                continue
+            try:
+                runner = await get_runner(state.id)
+            except Exception as exc:
+                logger.debug("Runner lookup failed for %s: %s", agent_name, exc)
+                continue
+            if runner is not None:
+                return agent_name, runner
+        return None
+
+    async def _run_via_swarm_runner(
+        self,
+        runner: Any,
+        task: Task,
+        *,
+        agent_name: str,
+    ) -> dict[str, Any]:
+        metadata = dict(task.metadata or {})
+        provider = getattr(getattr(runner, "_config", None), "provider", None)
+        if provider is not None:
+            metadata["available_provider_types"] = [provider.value]
+            metadata["allow_provider_routing"] = False
+        pinned_task = task.model_copy(update={"metadata": metadata})
+        output = await runner.run_task(pinned_task)
+        return {
+            "success": bool(output.strip()),
+            "output": output,
+            "output_length": len(output),
+            "blocked": "BLOCKED" in output.upper(),
+            "rapid": True,
+            "provider": f"swarm:{agent_name}",
+            "agent_name": agent_name,
+            "error": "" if output.strip() else "swarm runner returned empty output",
+        }
 
     # ------------------------------------------------------------------
     # SUMMIT — Contemplative vision phase
@@ -1978,7 +2868,7 @@ class ThinkodynamicDirector:
                 if ln.strip()
             ]
             title = brief_lines[0][:120] if brief_lines else "Mission-directed workflow"
-            return WorkflowPlan(
+            return self._decorate_workflow_execution(WorkflowPlan(
                 cycle_id=cycle_id,
                 workflow_id=workflow_id,
                 opportunity_id=f"mission-{cycle_id}",
@@ -1989,7 +2879,7 @@ class ThinkodynamicDirector:
                 expected_duration_min=len(mission_tasks) * 60,
                 evidence_paths=[],
                 tasks=tasks,
-            )
+            ))
 
         try:
             active_campaign = load_active_campaign_state(state_dir=self.state_dir)
@@ -2061,7 +2951,7 @@ class ThinkodynamicDirector:
                 ))
                 prev_key = key
 
-            return WorkflowPlan(
+            return self._decorate_workflow_execution(WorkflowPlan(
                 cycle_id=cycle_id,
                 workflow_id=workflow_id,
                 opportunity_id=f"vision-{cycle_id}",
@@ -2074,7 +2964,7 @@ class ThinkodynamicDirector:
                 ),
                 evidence_paths=[vision_result.get("vision_file", "")],
                 tasks=tasks,
-            )
+            ))
 
         # Fallback to theme-based planner
         if primary:
@@ -2094,6 +2984,316 @@ class ThinkodynamicDirector:
     # AGENT SPAWNING — Hierarchical delegation with escalation
     # ------------------------------------------------------------------
 
+    @staticmethod
+    def _task_text(task_plan: WorkflowTaskPlan, workflow: WorkflowPlan) -> str:
+        return " ".join(
+            [
+                workflow.theme,
+                workflow.opportunity_title,
+                task_plan.role_hint,
+                task_plan.title,
+                task_plan.description,
+            ]
+        ).lower()
+
+    def _preferred_backend_order(
+        self,
+        task_plan: WorkflowTaskPlan,
+        workflow: WorkflowPlan,
+    ) -> list[str]:
+        explicit = [
+            backend
+            for backend in task_plan.preferred_backends
+            if backend in {"codex-cli", "claude-cli", "provider-fallback"}
+        ]
+        if explicit:
+            ordered = self._dedupe_preserve(
+                [*explicit, "codex-cli", "claude-cli", "provider-fallback"]
+            )
+            return ordered
+
+        text = self._task_text(task_plan, workflow)
+        tool_score = sum(token in text for token in TOOL_WORKER_TOKENS)
+        analysis_score = sum(token in text for token in ANALYSIS_WORKER_TOKENS)
+        if task_plan.role_hint in {"surgeon", "general", "validator"}:
+            tool_score += 2
+        if task_plan.role_hint in {"cartographer", "researcher", "architect"}:
+            analysis_score += 2
+
+        tool_primary = os.getenv("DGC_DIRECTOR_TOOL_BACKEND", "codex-cli").strip().lower()
+        analysis_primary = os.getenv("DGC_DIRECTOR_ANALYSIS_BACKEND", "claude-cli").strip().lower()
+        preferred = tool_primary if tool_score >= analysis_score else analysis_primary
+        if preferred not in {"codex-cli", "claude-cli"}:
+            preferred = "codex-cli" if tool_score >= analysis_score else "claude-cli"
+
+        alternates = ["codex-cli", "claude-cli", "provider-fallback"]
+        ordered = [preferred]
+        ordered.extend(backend for backend in alternates if backend not in ordered)
+        return ordered
+
+    def _build_agent_prompt(
+        self,
+        task_plan: WorkflowTaskPlan,
+        workflow: WorkflowPlan,
+        *,
+        backend: str,
+    ) -> str:
+        from dharma_swarm.prompt_builder import build_director_agent_prompt
+
+        return build_director_agent_prompt(
+            task_plan,
+            workflow,
+            backend=backend,
+            repo_root=self.repo_root,
+            state_dir=self.state_dir,
+            role_briefs=ROLE_BRIEFS,
+            home=Path.home(),
+        )
+
+    async def _run_subprocess_agent(
+        self,
+        cmd: list[str],
+        *,
+        timeout: int,
+        cwd: Path,
+        env: dict[str, str] | None = None,
+        input_text: str | None = None,
+    ) -> subprocess.CompletedProcess[str]:
+        run_kwargs: dict[str, Any] = {
+            "cwd": str(cwd),
+            "text": True,
+            "capture_output": True,
+            "timeout": timeout,
+        }
+        if env is not None:
+            run_kwargs["env"] = env
+        if input_text is not None:
+            run_kwargs["input"] = input_text
+        return await asyncio.to_thread(subprocess.run, cmd, **run_kwargs)
+
+    def _build_codex_command(
+        self,
+        *,
+        output_file: Path,
+        model: str,
+    ) -> list[str]:
+        cmd = [
+            "codex",
+            "exec",
+            "--full-auto",
+            "-C",
+            str(self.repo_root),
+            "--add-dir",
+            str(self.state_dir),
+            "-o",
+            str(output_file),
+            "-",
+        ]
+        requested_model = os.getenv("DGC_DIRECTOR_CODEX_MODEL", "").strip()
+        if not requested_model and "codex" in model.lower():
+            requested_model = model.strip()
+        if requested_model:
+            cmd[2:2] = ["-m", requested_model]
+        return cmd
+
+    async def _spawn_via_codex(
+        self,
+        task_plan: WorkflowTaskPlan,
+        workflow: WorkflowPlan,
+        *,
+        model: str,
+        timeout: int,
+    ) -> dict[str, Any]:
+        run_dir = self.log_dir / "worker_runs"
+        run_dir.mkdir(parents=True, exist_ok=True)
+        output_file = run_dir / (
+            f"{workflow.cycle_id}_{_safe_slug(task_plan.key)}_{int(time.time())}_codex.txt"
+        )
+        prompt = self._build_agent_prompt(task_plan, workflow, backend="codex-cli")
+        try:
+            proc = await self._run_subprocess_agent(
+                self._build_codex_command(output_file=output_file, model=model),
+                timeout=timeout,
+                cwd=self.repo_root,
+                input_text=prompt,
+            )
+        except FileNotFoundError:
+            return {"success": False, "output": "", "error": "codex not found", "provider": "codex-cli"}
+        except subprocess.TimeoutExpired:
+            return {"success": False, "output": "", "error": f"codex timeout after {timeout}s", "provider": "codex-cli"}
+
+        file_output = output_file.read_text(encoding="utf-8").strip() if output_file.exists() else ""
+        stdout = (proc.stdout or "").strip()
+        stderr = (proc.stderr or "").strip()
+        output = file_output or stdout
+        if proc.returncode == 0 and output:
+            return {
+                "success": True,
+                "output": output,
+                "output_length": len(output),
+                "blocked": "BLOCKED" in output.upper(),
+                "rapid": True,
+                "provider": "codex-cli",
+            }
+        return {
+            "success": False,
+            "output": output,
+            "error": stderr or stdout or f"codex rc={proc.returncode}",
+            "provider": "codex-cli",
+        }
+
+    async def _spawn_via_claude(
+        self,
+        task_plan: WorkflowTaskPlan,
+        workflow: WorkflowPlan,
+        *,
+        model: str,
+        timeout: int,
+    ) -> dict[str, Any]:
+        prompt = self._build_agent_prompt(task_plan, workflow, backend="claude-cli")
+        env = {**os.environ, "CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC": "1"}
+        env.pop("CLAUDECODE", None)
+        try:
+            proc = await self._run_subprocess_agent(
+                ["claude", "-p", prompt, "--model", model, "--output-format", "text"],
+                timeout=timeout,
+                cwd=self.repo_root,
+                env=env,
+            )
+        except FileNotFoundError:
+            return {"success": False, "output": "", "error": "claude not found", "provider": "claude-cli"}
+        except subprocess.TimeoutExpired:
+            return {"success": False, "output": "", "error": f"claude timeout after {timeout}s", "provider": "claude-cli"}
+
+        output = (proc.stdout or "").strip()
+        stderr = (proc.stderr or "").strip()
+        if proc.returncode == 0 and output:
+            return {
+                "success": True,
+                "output": output,
+                "output_length": len(output),
+                "blocked": "BLOCKED" in output.upper(),
+                "rapid": True,
+                "provider": "claude-cli",
+            }
+        return {
+            "success": False,
+            "output": output,
+            "error": stderr or output or f"claude rc={proc.returncode}",
+            "provider": "claude-cli",
+        }
+
+    async def _spawn_via_provider(
+        self,
+        task_plan: WorkflowTaskPlan,
+        workflow: WorkflowPlan,
+        *,
+        timeout: int,
+    ) -> dict[str, Any]:
+        prompt = self._build_agent_prompt(task_plan, workflow, backend="provider-fallback")
+        output, success = await _vision_via_provider(
+            prompt,
+            timeout_seconds=_director_provider_timeout_seconds(timeout),
+        )
+        return {
+            "success": success and bool(output),
+            "output": output or "",
+            "output_length": len(output) if output else 0,
+            "blocked": "BLOCKED" in (output or "").upper(),
+            "rapid": success,
+            "provider": "openrouter-fallback",
+            "error": "" if success and output else (output or "provider fallback returned no output"),
+        }
+
+    async def _spawn_with_backend(
+        self,
+        backend: str,
+        task_plan: WorkflowTaskPlan,
+        workflow: WorkflowPlan,
+        *,
+        model: str,
+        timeout: int,
+    ) -> dict[str, Any]:
+        if backend == "codex-cli":
+            return await self._spawn_via_codex(task_plan, workflow, model=model, timeout=timeout)
+        if backend == "claude-cli":
+            return await self._spawn_via_claude(task_plan, workflow, model=model, timeout=timeout)
+        return await self._spawn_via_provider(task_plan, workflow, timeout=timeout)
+
+    async def _create_dynamic_delegations(
+        self,
+        parent_task: Task,
+        workflow: WorkflowPlan,
+        output_text: str,
+    ) -> list[Task]:
+        delegations = _parse_output_delegations(output_text)
+        if not delegations:
+            return []
+
+        existing = await self.list_director_tasks(limit=800)
+        existing_titles = {
+            (
+                str(task.metadata.get("director_workflow_id", "")),
+                task.title.strip().lower(),
+            )
+            for task in existing
+        }
+
+        created: list[Task] = []
+        for index, item in enumerate(delegations):
+            title = item["title"].strip()
+            duplicate_key = (workflow.workflow_id, title.lower())
+            if duplicate_key in existing_titles:
+                continue
+            role_hint = item["role"] or self._execution_role_hint(title, index)
+            description = item["description"] or (
+                f"Dynamic delegation created from completed task {parent_task.title}."
+            )
+            if workflow.council_guidance and workflow.council_guidance not in description:
+                description = (
+                    f"{description.rstrip()}\n\n"
+                    "Primary orchestrator guidance:\n"
+                    f"{workflow.council_guidance}"
+                ).strip()
+            preferred_agents, preferred_backends, provider_allowlist = self._preferred_execution_profile(
+                role_hint
+            )
+            metadata = {
+                "source": "thinkodynamic_director",
+                "director_cycle_id": workflow.cycle_id,
+                "director_workflow_id": workflow.workflow_id,
+                "director_opportunity_id": workflow.opportunity_id,
+                "director_opportunity_title": workflow.opportunity_title,
+                "director_theme": workflow.theme,
+                "director_source_kind": "dynamic_delegation",
+                "director_role_hint": role_hint,
+                "director_expected_duration_min": workflow.expected_duration_min,
+                "director_task_key": f"{parent_task.metadata.get('director_task_key', parent_task.id[:8])}-delegation-{index + 1}",
+                "director_acceptance": [],
+                "director_evidence_paths": list(workflow.evidence_paths),
+                "director_thesis": workflow.thesis,
+                "director_why_now": workflow.why_now,
+                "director_council_guidance": workflow.council_guidance,
+                "director_council_members": list(workflow.council_members),
+                "director_council_dialogue_path": workflow.council_dialogue_path,
+                "director_council_routing_strategy": dict(workflow.council_routing_strategy),
+                "director_preferred_agents": preferred_agents,
+                "director_preferred_backends": preferred_backends,
+                "available_provider_types": provider_allowlist,
+                "director_parent_task_id": parent_task.id,
+            }
+            created_task = await self._task_board.create(
+                title=title,
+                description=description,
+                priority=TaskPriority.HIGH if index == 0 else TaskPriority.NORMAL,
+                created_by="thinkodynamic_director",
+                depends_on=[parent_task.id],
+                metadata=metadata,
+            )
+            created.append(created_task)
+            existing_titles.add(duplicate_key)
+        return created
+
     async def spawn_agent(
         self,
         task_plan: WorkflowTaskPlan,
@@ -2102,79 +3302,45 @@ class ThinkodynamicDirector:
         model: str = "sonnet",
         timeout: int = 600,
     ) -> dict[str, Any]:
-        """Spawn a real agent via ``claude -p`` for a workflow task.
+        """Spawn the best available worker for a workflow task.
 
-        The agent thinks autonomously.  If it hits a wall, it writes to
-        the handoff file for escalation.  Returns result dict.
+        Coding and validation slices prefer a tool-backed Codex lane.
+        Mapping/design/research slices prefer a Claude CLI lane.
+        Provider fallback stays last so the director keeps moving when local
+        CLIs are unavailable or overloaded.
         """
-        role_brief = ROLE_BRIEFS.get(task_plan.role_hint, ROLE_BRIEFS["general"])
-        prompt = (
-            f"You are a {task_plan.role_hint} agent in dharma_swarm.\n\n"
-            f"Role: {role_brief}\n\n"
-            f"Mission: {workflow.opportunity_title}\n"
-            f"Thesis: {workflow.thesis}\n\n"
-            f"Your task: {task_plan.title}\n"
-            f"Description: {task_plan.description}\n\n"
-            f"Acceptance criteria:\n"
-            + "\n".join(f"- {a}" for a in task_plan.acceptance)
-            + "\n\n"
-            "If you complete this quickly, say DONE and describe what you accomplished.\n"
-            "If you hit a wall, write the blocker to "
-            "~/.dharma/shared/thinkodynamic_director_handoff.md and say BLOCKED.\n"
-            "Be concrete. Name files and functions."
-        )
-
-        # --- Primary: claude -p subprocess ---
-        try:
-            proc = subprocess.run(
-                ["claude", "-p", prompt, "--model", model, "--output-format", "text"],
-                cwd=str(ROOT),
-                text=True,
-                capture_output=True,
+        backend_errors: list[str] = []
+        for backend in self._preferred_backend_order(task_plan, workflow):
+            result = await self._spawn_with_backend(
+                backend,
+                task_plan,
+                workflow,
+                model=model,
                 timeout=timeout,
             )
-            if proc.returncode == 0 and proc.stdout.strip():
-                output = proc.stdout.strip()
-                return {
-                    "task_key": task_plan.key,
-                    "title": task_plan.title,
-                    "success": True,
-                    "output_length": len(output),
-                    "output": output,
-                    "blocked": "BLOCKED" in output.upper(),
-                    "rapid": True,
-                    "provider": "claude-cli",
-                }
-            stderr = (proc.stderr or "").strip()
-            stdout = (proc.stdout or "").strip()
+            result.update({"task_key": task_plan.key, "title": task_plan.title})
+            if result.get("success") and result.get("output"):
+                return result
+            error_text = (result.get("error") or result.get("output") or "").strip()
+            if error_text:
+                backend_errors.append(f"{backend}: {error_text[:220]}")
             logger.info(
-                "Agent spawn: claude -p unusable (rc=%s, stdout=%r, stderr=%r), using provider fallback",
-                proc.returncode,
-                stdout[:120],
-                stderr[:200],
-            )
-        except FileNotFoundError:
-            logger.info("Agent spawn: claude -p not found, using provider fallback")
-        except subprocess.TimeoutExpired:
-            logger.info(
-                "Agent spawn: claude -p timed out after %ss, using provider fallback",
-                timeout,
+                "Agent spawn fallback: backend=%s task=%s error=%s",
+                backend,
+                task_plan.title,
+                error_text[:200],
             )
 
-        # --- Fallback: direct LLM provider ---
-        output, success = await _vision_via_provider(
-            prompt,
-            timeout_seconds=_director_provider_timeout_seconds(timeout),
-        )
         return {
             "task_key": task_plan.key,
             "title": task_plan.title,
-            "success": success and bool(output),
-            "output_length": len(output) if output else 0,
-            "output": output or "",
-            "blocked": "BLOCKED" in (output or "").upper(),
-            "rapid": success,
-            "provider": "openrouter-fallback",
+            "success": False,
+            "output_length": 0,
+            "output": "",
+            "blocked": False,
+            "rapid": False,
+            "provider": "agent-fallback-exhausted",
+            "error": " | ".join(backend_errors) or "no backend produced usable output",
         }
 
     async def list_director_tasks(self, *, limit: int = 400) -> list[Task]:
@@ -2196,6 +3362,7 @@ class ThinkodynamicDirector:
 
     async def enqueue_workflow(self, workflow: WorkflowPlan) -> list[Task]:
         if workflow.theme == "execution_brief" and workflow.opportunity_id:
+            task_plan_by_key = {task_plan.key: task_plan for task_plan in workflow.tasks}
             existing = [
                 task
                 for task in await self.list_director_tasks(limit=800)
@@ -2214,6 +3381,8 @@ class ThinkodynamicDirector:
 
                 refreshed: list[Task] = []
                 for task in existing:
+                    task_key = str(task.metadata.get("director_task_key", "")).strip()
+                    task_plan = task_plan_by_key.get(task_key)
                     merged_metadata = dict(task.metadata or {})
                     merged_metadata.update({
                         "director_cycle_id": workflow.cycle_id,
@@ -2225,7 +3394,19 @@ class ThinkodynamicDirector:
                         "director_evidence_paths": list(workflow.evidence_paths),
                         "director_thesis": workflow.thesis,
                         "director_why_now": workflow.why_now,
+                        "director_council_guidance": workflow.council_guidance,
+                        "director_council_members": list(workflow.council_members),
+                        "director_council_dialogue_path": workflow.council_dialogue_path,
+                        "director_council_routing_strategy": dict(workflow.council_routing_strategy),
                     })
+                    if task_plan is not None:
+                        merged_metadata.update(
+                            {
+                                "director_preferred_agents": list(task_plan.preferred_agents),
+                                "director_preferred_backends": list(task_plan.preferred_backends),
+                                "available_provider_types": list(task_plan.provider_allowlist),
+                            }
+                        )
                     if task.status in {TaskStatus.FAILED, TaskStatus.CANCELLED}:
                         refreshed.append(
                             await self._task_board.requeue(
@@ -2267,6 +3448,13 @@ class ThinkodynamicDirector:
                 "director_evidence_paths": list(workflow.evidence_paths),
                 "director_thesis": workflow.thesis,
                 "director_why_now": workflow.why_now,
+                "director_council_guidance": workflow.council_guidance,
+                "director_council_members": list(workflow.council_members),
+                "director_council_dialogue_path": workflow.council_dialogue_path,
+                "director_council_routing_strategy": dict(workflow.council_routing_strategy),
+                "director_preferred_agents": list(task_plan.preferred_agents),
+                "director_preferred_backends": list(task_plan.preferred_backends),
+                "available_provider_types": list(task_plan.provider_allowlist),
             }
             created_task = await self._task_board.create(
                 title=task_plan.title,
@@ -2388,37 +3576,12 @@ class ThinkodynamicDirector:
         and marks tasks completed or failed on the board.
         """
         await self.init()
-        tasks = await self.list_director_tasks()
-        ready = await self._task_board.get_ready_tasks()
-        ready_ids = {task.id for task in ready}
-        actionable = {TaskStatus.PENDING, TaskStatus.ASSIGNED, TaskStatus.RUNNING}
-        pending = [
-            t for t in tasks
-            if t.status in actionable and (t.status != TaskStatus.PENDING or t.id in ready_ids)
-        ]
-        if task_ids is not None:
-            allowed = {str(task_id) for task_id in task_ids if str(task_id)}
-            pending = [task for task in pending if task.id in allowed]
-        elif cycle_id:
-            scoped = [
-                task
-                for task in pending
-                if str(task.metadata.get("director_cycle_id", "")) == cycle_id
-            ]
-            pending = scoped
-        if not pending:
-            logger.info("Worker loop: no pending tasks")
-            return []
-
-        # Sort by priority (URGENT > HIGH > NORMAL > LOW)
-        priority_order = {"urgent": 0, "high": 1, "normal": 2, "low": 3}
-        pending.sort(key=lambda t: priority_order.get(t.priority.value, 99))
-
-        batch = pending[:max_concurrent]
         results: list[dict[str, Any]] = []
+        allowed_ids = {str(task_id) for task_id in task_ids if str(task_id)} if task_ids is not None else None
+        priority_order = {"urgent": 0, "high": 1, "normal": 2, "low": 3}
+        attempted_ids: set[str] = set()
 
-        for task in batch:
-            # Build a WorkflowTaskPlan from the task metadata
+        async def _execute_one(task: Task) -> tuple[dict[str, Any], list[str]]:
             plan = WorkflowTaskPlan(
                 key=str(task.metadata.get("director_task_key", task.id[:8])),
                 title=task.title,
@@ -2426,6 +3589,9 @@ class ThinkodynamicDirector:
                 priority=task.priority.value,
                 role_hint=str(task.metadata.get("director_role_hint", "general")),
                 acceptance=list(task.metadata.get("director_acceptance", [])),
+                preferred_agents=list(task.metadata.get("director_preferred_agents", [])),
+                preferred_backends=list(task.metadata.get("director_preferred_backends", [])),
+                provider_allowlist=list(task.metadata.get("available_provider_types", [])),
             )
             workflow = WorkflowPlan(
                 cycle_id=str(task.metadata.get("director_cycle_id", "")),
@@ -2438,48 +3604,84 @@ class ThinkodynamicDirector:
                 expected_duration_min=int(task.metadata.get("director_expected_duration_min", 60) or 60),
                 evidence_paths=list(task.metadata.get("director_evidence_paths", [])),
                 tasks=[],
+                council_guidance=str(task.metadata.get("director_council_guidance", "")),
+                council_members=list(task.metadata.get("director_council_members", [])),
+                council_routing_strategy=dict(task.metadata.get("director_council_routing_strategy", {})),
+                council_dialogue_path=str(task.metadata.get("director_council_dialogue_path", "")),
             )
 
-            # Assign and start (handle tasks already in-progress from prior runs)
+            selected_agent = await self._select_named_swarm_agent(plan)
+            assigned_to = selected_agent[0] if selected_agent is not None else "worker-loop"
             try:
-                await self._task_board.assign(task.id, "worker-loop")
+                await self._task_board.assign(task.id, assigned_to)
                 await self._task_board.start(task.id)
             except Exception as exc:
                 logger.debug("Task %s state transition: %s (continuing)", task.id, exc)
-            logger.info("Worker loop: executing task '%s' (%s)", task.title, task.id)
+            logger.info(
+                "Worker loop: executing task '%s' (%s) via %s",
+                task.title,
+                task.id,
+                assigned_to,
+            )
 
-            # Execute via spawn_agent
-            agent_result = await self.spawn_agent(plan, workflow, model=model, timeout=timeout)
+            agent_result: dict[str, Any] | None = None
+            if selected_agent is not None:
+                agent_name, runner = selected_agent
+                try:
+                    agent_result = await self._run_via_swarm_runner(
+                        runner,
+                        task,
+                        agent_name=agent_name,
+                    )
+                except Exception as exc:
+                    logger.info(
+                        "Swarm runner %s failed for task %s, falling back to backend spawn: %s",
+                        agent_name,
+                        task.title,
+                        exc,
+                    )
 
+            if agent_result is None or not agent_result.get("success"):
+                agent_result = await self.spawn_agent(plan, workflow, model=model, timeout=timeout)
+                agent_result.setdefault("agent_name", "worker-loop")
             output_text = agent_result.get("output", "")
             blocked = agent_result.get("blocked", False)
             success = agent_result.get("success", False)
             error_text = agent_result.get("error", "")
             rendered_output = output_text or (f"ERROR: {error_text}" if error_text else "(no output)")
 
-            # Write artifact
-            ts = _utc_ts().replace(":", "-")
-            slug = plan.key[:30]
             artifact_dir = self.shared_dir / "artifacts"
             artifact_dir.mkdir(parents=True, exist_ok=True)
+            ts = _utc_ts().replace(":", "-")
+            slug = plan.key[:30]
             artifact_path = artifact_dir / f"{slug}_{ts}.md"
+
+            delegated_children: list[Task] = []
+            if success and not blocked and output_text:
+                delegated_children = await self._create_dynamic_delegations(task, workflow, output_text)
+
             artifact_content = [
                 f"# Artifact: {task.title}",
-                f"",
+                "",
                 f"**Task ID**: {task.id}",
                 f"**Mission**: {workflow.opportunity_title}",
                 f"**Theme**: {workflow.theme}",
                 f"**Status**: {'BLOCKED' if blocked else 'DONE' if success else 'FAILED'}",
                 f"**Provider**: {agent_result.get('provider', 'unknown')}",
+                f"**Agent**: {agent_result.get('agent_name', assigned_to)}",
                 f"**Output length**: {agent_result.get('output_length', 0)} chars",
-                f"",
-                f"## Output",
-                f"",
+                f"**Dynamic delegations**: {len(delegated_children)}",
+                "",
+                "## Council",
+                "",
+                workflow.council_guidance or "(no explicit council guidance recorded)",
+                "",
+                "## Output",
+                "",
                 rendered_output,
             ]
             artifact_path.write_text("\n".join(artifact_content), encoding="utf-8")
 
-            # Update task board (gracefully handle state machine conflicts)
             try:
                 if blocked:
                     await self._task_board.fail(
@@ -2502,7 +3704,7 @@ class ThinkodynamicDirector:
             except Exception as exc:
                 logger.warning("Worker loop: task '%s' board update failed: %s", task.title, exc)
 
-            results.append({
+            result = {
                 "task_id": task.id,
                 "title": task.title,
                 "success": success,
@@ -2510,8 +3712,45 @@ class ThinkodynamicDirector:
                 "artifact": str(artifact_path),
                 "output_length": len(output_text),
                 "provider": agent_result.get("provider", "unknown"),
-            })
+                "agent_name": agent_result.get("agent_name", assigned_to),
+                "delegated_child_task_ids": [child.id for child in delegated_children],
+            }
+            return result, [child.id for child in delegated_children]
 
+        while True:
+            tasks = await self.list_director_tasks()
+            ready = await self._task_board.get_ready_tasks()
+            ready_ids = {task.id for task in ready}
+            actionable = {TaskStatus.PENDING, TaskStatus.ASSIGNED, TaskStatus.RUNNING}
+            pending = [
+                task
+                for task in tasks
+                if task.id not in attempted_ids
+                and task.status in actionable
+                and (task.status != TaskStatus.PENDING or task.id in ready_ids)
+            ]
+            if allowed_ids is not None:
+                pending = [task for task in pending if task.id in allowed_ids]
+            elif cycle_id:
+                pending = [
+                    task
+                    for task in pending
+                    if str(task.metadata.get("director_cycle_id", "")) == cycle_id
+                ]
+            if not pending:
+                break
+
+            pending.sort(key=lambda task: priority_order.get(task.priority.value, 99))
+            batch = pending[:max_concurrent]
+            attempted_ids.update(task.id for task in batch)
+            wave_results = await asyncio.gather(*[_execute_one(task) for task in batch])
+            for result, child_ids in wave_results:
+                results.append(result)
+                if allowed_ids is not None and child_ids:
+                    allowed_ids.update(child_ids)
+
+        if not results:
+            logger.info("Worker loop: no pending tasks")
         return results
 
     def _write_cycle_markdown(
@@ -2521,6 +3760,7 @@ class ThinkodynamicDirector:
         signals: Sequence[FileSignal],
         latent_gold: Sequence[LatentGoldSignal],
         opportunities: Sequence[DirectorOpportunity],
+        council: CouncilConsensus | None,
         workflow: WorkflowPlan,
         delegated_tasks: Sequence[Task],
         review: WorkflowReview | None,
@@ -2576,6 +3816,17 @@ class ThinkodynamicDirector:
             )
             lines.append(f"  why_now: {opp.why_now}")
 
+        lines.extend(["", "## Council", ""])
+        if council is not None:
+            lines.append(f"- members: {', '.join(council.members)}")
+            lines.append(f"- shared_summary: {council.shared_summary}")
+            if council.dialogue_path:
+                lines.append(f"- dialogue: {council.dialogue_path}")
+            if council.handoff_id:
+                lines.append(f"- handoff_id: {council.handoff_id}")
+        else:
+            lines.append("- No council dialogue recorded for this cycle.")
+
         lines.extend(
             [
                 "",
@@ -2624,6 +3875,7 @@ class ThinkodynamicDirector:
         *,
         cycle_id: str,
         workflow: WorkflowPlan,
+        council: CouncilConsensus | None = None,
         worker_results: list[dict[str, Any]] | None = None,
         review: WorkflowReview | None = None,
     ) -> Path:
@@ -2648,6 +3900,16 @@ class ThinkodynamicDirector:
             f"- Failed: {len(failed)}",
             f"",
         ]
+
+        if council is not None:
+            lines.extend(
+                [
+                    "## Primary Council",
+                    f"- Members: {', '.join(council.members)}",
+                    f"- Guidance: {council.shared_summary}",
+                    "",
+                ]
+            )
 
         if done:
             lines.append("## Artifacts Produced")
@@ -2777,6 +4039,13 @@ class ThinkodynamicDirector:
         workflow = self.compile_workflow_from_vision(
             vision_result, sense_result, cycle_id=cycle_id,
         )
+        council = await self.deliberate_council(
+            cycle_id=cycle_id,
+            workflow=workflow,
+            vision_result=vision_result,
+            sense_result=sense_result,
+        )
+        workflow = self._apply_council_consensus(workflow, council)
 
         # --- DELEGATE ---
         heartbeat["altitude"] = "ground"
@@ -2825,6 +4094,7 @@ class ThinkodynamicDirector:
             signals=signals,
             latent_gold=latent_gold,
             opportunities=opportunities,
+            council=council,
             workflow=workflow,
             delegated_tasks=delegated_tasks,
             review=review,
@@ -2844,10 +4114,13 @@ class ThinkodynamicDirector:
             },
             "latent_gold": [asdict(signal) for signal in latent_gold],
             "selected_opportunity": asdict(primary) if primary else None,
+            "council": asdict(council),
             "workflow": asdict(workflow),
             "delegated": delegated,
             "delegated_task_ids": [task.id for task in delegated_tasks],
             "active_director_tasks_before": active_before,
+            "max_active_tasks": self.max_active_tasks,
+            "max_concurrent_tasks": self.max_concurrent_tasks,
             "review": asdict(review) if review else None,
             "rapid_ascent": rapid_ascent,
             "cycle_elapsed_min": round(cycle_elapsed_min, 2),
@@ -2871,6 +4144,8 @@ class ThinkodynamicDirector:
             "review_summary": review.note if review else "",
             "blockers": review.blockers if review else [],
             "rapid_ascent": rapid_ascent,
+            "max_active_tasks": self.max_active_tasks,
+            "max_concurrent_tasks": self.max_concurrent_tasks,
             "previous_missions": (previous_mission.get("previous_missions", []) + [
                 {
                     "title": previous_mission.get("mission_title", ""),
@@ -2905,6 +4180,16 @@ class ThinkodynamicDirector:
                     source="thinkodynamic_director",
                 )
             )
+        if council.dialogue_path:
+            campaign_artifacts.append(
+                CampaignArtifact(
+                    artifact_kind="director_council",
+                    title=f"director council {cycle_id}",
+                    path=council.dialogue_path,
+                    summary=council.shared_summary,
+                    source="thinkodynamic_director",
+                )
+            )
         vision_file = str(vision_result.get("vision_file") or "").strip()
         if vision_file:
             campaign_artifacts.append(
@@ -2927,6 +4212,8 @@ class ThinkodynamicDirector:
                 "workflow_task_count": len(workflow.tasks),
                 "delegated_task_count": len(delegated_tasks),
                 "rapid_ascent": rapid_ascent,
+                "max_active_tasks": self.max_active_tasks,
+                "max_concurrent_tasks": self.max_concurrent_tasks,
             },
         )
         save_campaign_state(self.state_dir / "campaign.json", campaign_state)
@@ -2959,7 +4246,7 @@ class ThinkodynamicDirector:
             if delegate and snapshot.get("delegated"):
                 try:
                     worker_results = await self.execute_pending_tasks(
-                        max_concurrent=3,
+                        max_concurrent=self.max_concurrent_tasks,
                         model=model,
                         timeout=600,
                         cycle_id=snapshot["cycle_id"],
@@ -2987,10 +4274,30 @@ class ThinkodynamicDirector:
                         expected_duration_min=wf.get("expected_duration_min", 0),
                         evidence_paths=wf.get("evidence_paths", []),
                         tasks=[],
+                        council_guidance=wf.get("council_guidance", ""),
+                        council_members=wf.get("council_members", []),
+                        council_routing_strategy=wf.get("council_routing_strategy", {}),
+                        council_dialogue_path=wf.get("council_dialogue_path", ""),
+                    )
+                    council_payload = snapshot.get("council") or {}
+                    council = CouncilConsensus(
+                        cycle_id=str(council_payload.get("cycle_id", snapshot["cycle_id"])),
+                        members=list(council_payload.get("members", [])),
+                        shared_summary=str(council_payload.get("shared_summary", "")),
+                        routing_strategy=dict(council_payload.get("routing_strategy", {})),
+                        meta_directives=list(council_payload.get("meta_directives", [])),
+                        turns=[
+                            CouncilTurn(**turn)
+                            for turn in list(council_payload.get("turns", []))
+                            if isinstance(turn, dict)
+                        ],
+                        dialogue_path=str(council_payload.get("dialogue_path", "")),
+                        handoff_id=str(council_payload.get("handoff_id", "")),
                     )
                     brief_path = self._write_morning_brief(
                         cycle_id=snapshot["cycle_id"],
                         workflow=brief_wf,
+                        council=council,
                         worker_results=worker_results,
                     )
                     snapshot["morning_brief"] = str(brief_path)
@@ -3089,6 +4396,12 @@ def build_arg_parser() -> argparse.ArgumentParser:
         help="Do not enqueue new work when active director tasks exceed this count.",
     )
     parser.add_argument(
+        "--max-concurrent-tasks",
+        type=int,
+        default=0,
+        help="Worker concurrency per execution wave; 0 means auto (up to 6, capped by active-task limit).",
+    )
+    parser.add_argument(
         "--model",
         default="sonnet",
         help="Model to use for Claude CLI vision calls (default: sonnet).",
@@ -3112,6 +4425,7 @@ async def _amain(args: argparse.Namespace) -> list[dict[str, Any]]:
         signal_limit=args.signal_limit,
         max_candidates=args.max_candidates,
         max_active_tasks=args.max_active_tasks,
+        max_concurrent_tasks=args.max_concurrent_tasks,
     )
     delegate = args.mode == "direct"
     return await director.run_loop(

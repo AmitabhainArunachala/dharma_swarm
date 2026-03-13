@@ -32,3 +32,4 @@ docs/merge/imports/legacy_import_*
 specs/*.bak*
 specs/states/
 specs/tla2tools.jar
+external/

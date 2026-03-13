@@ -117,6 +117,11 @@ class SwarmManager:
         self._director_interval_ticks: int = 10  # Run director every N ticks
         self._tick_count: int = 0
 
+        # v0.6.0: Hermes-inspired integration
+        self._tool_registry: Any = None    # ToolRegistry
+        self._cron_scheduler: Any = None   # module ref
+        self._gateway: Any = None          # GatewayRunner
+
         # Daemon state
         self._last_contribution: datetime | None = None
         self._daily_contributions: int = 0
@@ -300,6 +305,7 @@ class SwarmManager:
 
             self._director = ThinkodynamicDirector(
                 state_dir=self.state_dir,
+                swarm=self,
             )
             await self._director.init()
             logger.info("ThinkodynamicDirector initialized")

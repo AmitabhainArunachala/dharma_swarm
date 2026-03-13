@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import sqlite3
 from datetime import datetime, timezone
 
@@ -10,6 +11,8 @@ from dharma_swarm.runtime_state import (
     MemoryFact,
     RuntimeStateStore,
     SessionState,
+    SessionEventRecord,
+    build_session_event_from_ledger_record,
 )
 
 
@@ -102,3 +105,66 @@ async def test_runtime_state_updates_memory_fact_truth(tmp_path) -> None:
     assert updated.metadata["promoted_by"] == "operator"
     assert facts[0].fact_id == created.fact_id
     assert facts[0].updated_at >= datetime(2026, 1, 1, tzinfo=timezone.utc)
+
+
+@pytest.mark.asyncio
+async def test_runtime_state_records_and_searches_session_events(tmp_path) -> None:
+    store = RuntimeStateStore(tmp_path / "runtime.db")
+    await store.record_session_event(
+        SessionEventRecord(
+            event_id="sevt-1",
+            session_id="sess-search",
+            ledger_kind="progress",
+            event_name="task_failed",
+            task_id="task-9",
+            agent_id="worker-loop",
+            summary="provider timeout on fallback lane",
+            event_text="task_failed task-9 worker-loop provider timeout on fallback lane",
+            payload={"failure_signature": "provider_timeout"},
+        )
+    )
+
+    hits = store.search_session_events_sync("provider timeout", session_id="sess-search")
+    sessions = store.list_sessions_sync(limit=5)
+
+    assert len(hits) == 1
+    assert hits[0].event_name == "task_failed"
+    assert hits[0].task_id == "task-9"
+    assert sessions[0].session_id == "sess-search"
+
+
+def test_runtime_state_indexes_historic_ledgers(tmp_path) -> None:
+    ledger_base = tmp_path / "ledgers"
+    session_dir = ledger_base / "sess-old"
+    session_dir.mkdir(parents=True)
+    task_record = {
+        "ts_utc": "2026-03-13T08:38:16+00:00",
+        "session_id": "sess-old",
+        "event": "dispatch_assigned",
+        "task_id": "task-1",
+        "agent_id": "a1",
+        "reason": "architectural pass",
+    }
+    progress_record = {
+        "ts_utc": "2026-03-13T08:39:16+00:00",
+        "session_id": "sess-old",
+        "event": "task_failed",
+        "task_id": "task-1",
+        "failure_signature": "provider_timeout",
+    }
+    (session_dir / "task_ledger.jsonl").write_text(json.dumps(task_record) + "\n", encoding="utf-8")
+    (session_dir / "progress_ledger.jsonl").write_text(json.dumps(progress_record) + "\n", encoding="utf-8")
+
+    store = RuntimeStateStore(tmp_path / "runtime.db")
+    sessions_scanned, events_scanned = store.index_ledgers_sync(ledger_base=ledger_base)
+    hits = store.search_session_events_sync("provider timeout", session_id="sess-old")
+    rebuilt = build_session_event_from_ledger_record(
+        session_id="sess-old",
+        ledger_kind="progress",
+        record=progress_record,
+    )
+
+    assert sessions_scanned == 1
+    assert events_scanned == 2
+    assert len(hits) == 1
+    assert hits[0].event_id == rebuilt.event_id

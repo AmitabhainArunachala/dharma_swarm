@@ -79,7 +79,14 @@ class ContextSection:
 
 
 class ContextCompiler:
-    """Compile reproducible, budgeted context bundles from canonical state."""
+    """Compile reproducible, budgeted context bundles from canonical state.
+
+    Supports frozen snapshots for prompt-cache-friendly operation:
+    call ``freeze(session_id)`` after the first compile to lock the
+    bundle for that session.  Subsequent ``compile_bundle()`` calls
+    return the frozen snapshot (avoiding prompt cache invalidation)
+    unless ``force_refresh=True`` is passed.
+    """
 
     _SECTION_WEIGHTS = {
         "Governance": 0.10,
@@ -103,6 +110,22 @@ class ContextCompiler:
         self.runtime_state = runtime_state
         self.memory_lattice = memory_lattice
         self.provider_policy = provider_policy or ProviderPolicyRouter()
+        # Frozen snapshot cache: session_id -> ContextBundleRecord
+        self._frozen_bundles: dict[str, ContextBundleRecord] = {}
+
+    # ── Frozen snapshot API ─────────────────────────────────────────
+
+    def freeze(self, session_id: str, bundle: ContextBundleRecord) -> None:
+        """Freeze a bundle for *session_id*, enabling prompt cache reuse."""
+        self._frozen_bundles[session_id] = bundle
+
+    def thaw(self, session_id: str) -> ContextBundleRecord | None:
+        """Remove and return the frozen bundle for *session_id*, or None."""
+        return self._frozen_bundles.pop(session_id, None)
+
+    def is_frozen(self, session_id: str) -> bool:
+        """Check whether a frozen snapshot exists for *session_id*."""
+        return session_id in self._frozen_bundles
 
     async def compile_bundle(
         self,
@@ -119,7 +142,11 @@ class ContextCompiler:
         workspace_root: Path | str | None = None,
         active_paths: list[Path | str] | None = None,
         metadata: dict[str, Any] | None = None,
+        force_refresh: bool = False,
     ) -> ContextBundleRecord:
+        # Return frozen snapshot if available (preserves prompt cache)
+        if not force_refresh and session_id in self._frozen_bundles:
+            return self._frozen_bundles[session_id]
         await self.runtime_state.init_db()
         await self.memory_lattice.init_db()
 

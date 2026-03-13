@@ -8,14 +8,16 @@ import re
 from pathlib import Path
 from typing import Any
 
-from dharma_swarm.models import LLMRequest
+from dharma_swarm.models import LLMRequest, ProviderType
 from dharma_swarm.ollama_config import (
     OLLAMA_CLOUD_FRONTIER_MODELS,
-    ollama_transport_mode,
-    resolve_ollama_base_url,
-    resolve_ollama_model,
 )
-from dharma_swarm.providers import NVIDIANIMProvider, OllamaProvider, OpenRouterProvider
+from dharma_swarm.runtime_provider import (
+    NVIDIA_NIM_BASE_URL,
+    OPENROUTER_BASE_URL,
+    create_runtime_provider,
+    resolve_runtime_provider_config,
+)
 
 
 _SIZE_RE = re.compile(r"(?P<size>\d+(?:\.\d+)?)\s*(?P<unit>[bkmg]?)", re.I)
@@ -23,7 +25,6 @@ _OLLAMA_ROOT_ERROR_MARKERS = (
     "ensure path elements are traversable",
     ".ollama: file exists",
 )
-_DEFAULT_NIM_BASE_URL = "https://integrate.api.nvidia.com/v1"
 _NIM_HOSTED_FRONTIER_MODELS = (
     "nvidia/llama-3.1-nemotron-ultra-253b-v1",
     "meta/llama-3.3-70b-instruct",
@@ -90,8 +91,12 @@ def _configured_ollama_root(base_dir: str | Path | None = None) -> Path:
 
 
 def _nim_deployment_mode(base_url: str | None = None) -> str:
-    resolved = (base_url or os.environ.get("NVIDIA_NIM_BASE_URL") or _DEFAULT_NIM_BASE_URL).rstrip("/")
-    return "self_hosted" if resolved != _DEFAULT_NIM_BASE_URL else "hosted_api"
+    resolved = (
+        base_url
+        or os.environ.get("NVIDIA_NIM_BASE_URL")
+        or NVIDIA_NIM_BASE_URL
+    ).rstrip("/")
+    return "self_hosted" if resolved != NVIDIA_NIM_BASE_URL else "hosted_api"
 
 
 def inspect_ollama_root(base_dir: str | Path | None = None) -> dict[str, str]:
@@ -155,7 +160,11 @@ def strongest_ollama_model(installed_models: list[str]) -> str | None:
 
 
 async def _probe_ollama(model: str) -> dict[str, Any]:
-    provider = OllamaProvider(model=model)
+    config = resolve_runtime_provider_config(
+        ProviderType.OLLAMA,
+        model=model,
+    )
+    provider = create_runtime_provider(config)
     try:
         response = await provider.complete(
             LLMRequest(
@@ -170,15 +179,15 @@ async def _probe_ollama(model: str) -> dict[str, Any]:
             "model": response.model or model,
             "response_preview": (response.content or "")[:120],
             "usage": response.usage,
-            "base_url": provider.base_url,
-            "transport_mode": provider.transport_mode,
+            "base_url": config.base_url,
+            "transport_mode": config.transport_mode,
         }
     except Exception as exc:
         return {
             "status": _classify_error(exc),
             "model": model,
-            "base_url": provider.base_url,
-            "transport_mode": provider.transport_mode,
+            "base_url": config.base_url,
+            "transport_mode": config.transport_mode,
             "error": str(exc),
         }
     finally:
@@ -186,7 +195,11 @@ async def _probe_ollama(model: str) -> dict[str, Any]:
 
 
 async def _probe_nim(model: str) -> dict[str, Any]:
-    provider = NVIDIANIMProvider(default_model=model)
+    config = resolve_runtime_provider_config(
+        ProviderType.NVIDIA_NIM,
+        model=model,
+    )
+    provider = create_runtime_provider(config)
     try:
         response = await provider.complete(
             LLMRequest(
@@ -201,13 +214,13 @@ async def _probe_nim(model: str) -> dict[str, Any]:
             "model": response.model or model,
             "response_preview": (response.content or "")[:120],
             "usage": response.usage,
-            "base_url": os.environ.get("NVIDIA_NIM_BASE_URL", provider._base_url),  # noqa: SLF001
+            "base_url": config.base_url,
         }
     except Exception as exc:
         return {
             "status": _classify_error(exc),
             "model": model,
-            "base_url": os.environ.get("NVIDIA_NIM_BASE_URL", ""),
+            "base_url": config.base_url or "",
             "error": str(exc),
         }
     finally:
@@ -215,7 +228,11 @@ async def _probe_nim(model: str) -> dict[str, Any]:
 
 
 async def _probe_openrouter(model: str) -> dict[str, Any]:
-    provider = OpenRouterProvider()
+    config = resolve_runtime_provider_config(
+        ProviderType.OPENROUTER,
+        model=model,
+    )
+    provider = create_runtime_provider(config)
     try:
         response = await provider.complete(
             LLMRequest(
@@ -230,11 +247,13 @@ async def _probe_openrouter(model: str) -> dict[str, Any]:
             "model": response.model or model,
             "response_preview": (response.content or "")[:120],
             "usage": response.usage,
+            "base_url": config.base_url,
         }
     except Exception as exc:
         return {
             "status": _classify_error(exc),
             "model": model,
+            "base_url": config.base_url,
             "error": str(exc),
         }
     finally:
@@ -296,10 +315,14 @@ def run_provider_smoke(
     nim_model: str | None = None,
 ) -> dict[str, Any]:
     """Run best-effort smoke tests for cloud and external provider lanes."""
-    nim_base_url = os.environ.get("NVIDIA_NIM_BASE_URL", _DEFAULT_NIM_BASE_URL)
+    ollama_config = resolve_runtime_provider_config(ProviderType.OLLAMA)
+    nim_config = resolve_runtime_provider_config(ProviderType.NVIDIA_NIM)
+    openrouter_config = resolve_runtime_provider_config(ProviderType.OPENROUTER)
+
+    nim_base_url = nim_config.base_url or NVIDIA_NIM_BASE_URL
     nim_mode = _nim_deployment_mode(nim_base_url)
-    ollama_base_url = resolve_ollama_base_url()
-    ollama_mode = ollama_transport_mode(base_url=ollama_base_url)
+    ollama_base_url = ollama_config.base_url or ""
+    ollama_mode = ollama_config.transport_mode or "local_api"
     ollama_root = (
         inspect_ollama_root()
         if ollama_mode == "local_api"
@@ -315,7 +338,7 @@ def run_provider_smoke(
     resolved_ollama = _dedupe_models(
         [
             ollama_model or "",
-            resolve_ollama_model(base_url=ollama_base_url),
+            ollama_config.default_model or "",
             *(OLLAMA_CLOUD_FRONTIER_MODELS if ollama_mode == "cloud_api" else ()),
             strongest_local or "",
         ]
@@ -365,7 +388,7 @@ def run_provider_smoke(
             **nim,
         },
         "openrouter": {
-            "configured_base_url": "https://openrouter.ai/api/v1",
+            "configured_base_url": openrouter_config.base_url or OPENROUTER_BASE_URL,
             "configured_model": resolved_openrouter[0] if resolved_openrouter else "",
             **openrouter,
         },
