@@ -13,6 +13,7 @@ Usage:
   dgc runtime-status            Canonical runtime control-plane summary
   dgc mission-status            Mission-level readiness across core/accelerators
   dgc mission-brief             Show the active mission continuity state
+  dgc campaign-brief            Show the active dual-engine campaign state
   dgc canonical-status          Show which DGC/SAB repos are canonical vs split
   dgc up [--background]         Start the daemon
   dgc down                      Stop the daemon
@@ -20,13 +21,16 @@ Usage:
   dgc pulse                     Run one heartbeat pulse
   dgc swarm [plan]              Run orchestrator (build/research/deploy/maintenance)
   dgc stress [--profile max]    Run end-to-end max-capacity stress harness
+  dgc full-power-probe          Run operator-facing full-power verification
+  dgc provider-smoke            Probe Ollama and NVIDIA NIM completion lanes
   dgc swarm --status            Show orchestrator state
   dgc swarm live [N]            Persistent tmux swarm (N agents)
   dgc swarm overnight start [H] [--aggressive]
   dgc swarm overnight stop|status|report
-  dgc swarm codex-night start [H]
+  dgc swarm codex-night start [H] [--yolo] [--mission-file PATH]
+  dgc swarm codex-night yolo [H]
   dgc swarm codex-night stop|status|report
-  dgc swarm yolo                Aggressive overnight (10h)
+  dgc swarm yolo                Aggressive Codex overnight (10h)
   dgc context [domain]          Load context (research/content/ops/all)
   dgc memory                    Show memory status
   dgc witness "msg"             Record a witness observation
@@ -69,6 +73,7 @@ HOME = Path.home()
 DHARMA_STATE = HOME / ".dharma"
 DHARMA_SWARM = HOME / "dharma_swarm"
 DGC_CORE = HOME / "dgc-core"
+DEFAULT_SPRINT_LLM_TIMEOUT_SEC = 12.0
 
 # Keep mission-status aligned with the lanes the overnight cycle depends on:
 # accelerator adapters, canonical evaluation binding, and behavioral feedback.
@@ -708,6 +713,35 @@ def cmd_mission_brief(
     return 0
 
 
+def cmd_campaign_brief(
+    *,
+    path: str | None = None,
+    state_dir: str | None = None,
+    as_json: bool = False,
+) -> int:
+    """Show the active campaign continuity state for the director."""
+    from dharma_swarm.mission_contract import load_active_campaign_state, render_campaign_brief
+
+    try:
+        artifact = load_active_campaign_state(
+            state_dir=state_dir or DHARMA_STATE,
+            path=path,
+        )
+    except ValueError as exc:
+        print(str(exc))
+        return 1
+    if artifact is None:
+        state_root = Path(state_dir).expanduser() if state_dir else DHARMA_STATE
+        campaign_path = Path(path).expanduser() if path else state_root / "campaign.json"
+        print(f"No active campaign state found at {campaign_path}")
+        return 1
+    if as_json:
+        print(json.dumps(artifact.model_dump(mode="json"), indent=2))
+    else:
+        print(render_campaign_brief(artifact))
+    return 0
+
+
 def cmd_canonical_status(*, as_json: bool = False) -> int:
     """Show which local repos are canonical, support shells, or legacy."""
     from dharma_swarm.workspace_topology import build_workspace_topology
@@ -1201,22 +1235,42 @@ def cmd_swarm(extra_args: list[str]) -> None:
     def _codex_night(args: list[str]) -> None:
         action = args[0] if args else "status"
 
-        if action == "start":
-            hours = "8"
-            for a in args[1:]:
-                if a == "forever":
-                    hours = a
-                    continue
-                try:
-                    float(a)
-                    hours = a
-                except ValueError:
-                    pass
+        if action in ("start", "yolo"):
+            parser = argparse.ArgumentParser(add_help=False)
+            parser.add_argument("hours", nargs="?", default="10" if action == "yolo" else "8")
+            parser.add_argument("--yolo", action="store_true")
+            parser.add_argument("--model", default="")
+            parser.add_argument("--mission-file", default="")
+            parser.add_argument("--max-cycles", type=int, default=0)
+            parser.add_argument("--poll-seconds", type=int, default=0)
+            parser.add_argument("--cycle-timeout", type=int, default=0)
+            parser.add_argument("--state-dir", default="")
+            parser.add_argument("--label", default="")
+            parsed = parser.parse_args(args[1:])
+
+            env = os.environ.copy()
+            if action == "yolo" or parsed.yolo:
+                env["DGC_CODEX_NIGHT_YOLO"] = "1"
+            if parsed.model:
+                env["DGC_CODEX_NIGHT_MODEL"] = parsed.model
+            if parsed.mission_file:
+                env["DGC_CODEX_NIGHT_MISSION_FILE"] = parsed.mission_file
+            if parsed.max_cycles > 0:
+                env["MAX_CYCLES"] = str(parsed.max_cycles)
+            if parsed.poll_seconds > 0:
+                env["POLL_SECONDS"] = str(parsed.poll_seconds)
+            if parsed.cycle_timeout > 0:
+                env["CYCLE_TIMEOUT"] = str(parsed.cycle_timeout)
+            if parsed.state_dir:
+                env["DGC_CODEX_NIGHT_STATE_DIR"] = parsed.state_dir
+            if parsed.label:
+                env["DGC_CODEX_NIGHT_LABEL"] = parsed.label
+
             proc = subprocess.run(
-                ["bash", str(codex_start_script), hours],
+                ["bash", str(codex_start_script), parsed.hours],
                 capture_output=True,
                 text=True,
-                env=os.environ.copy(),
+                env=env,
             )
             if proc.stdout:
                 print(proc.stdout.strip())
@@ -1261,18 +1315,27 @@ def cmd_swarm(extra_args: list[str]) -> None:
             run_dir = Path(codex_run_file.read_text().strip())
             report = run_dir / "report.md"
             latest_output = run_dir / "latest_last_message.txt"
+            manifest = run_dir / "run_manifest.json"
+            handoff = run_dir / "morning_handoff.md"
             print(f"run_dir: {run_dir}\n")
+            if manifest.exists():
+                print("--- run manifest ---")
+                print(_tail(manifest, lines=80))
             if report.exists():
-                print("--- report tail ---")
+                print("\n--- report tail ---")
                 print(_tail(report, lines=80))
             if latest_output.exists():
                 print("\n--- latest last message ---")
                 print(_tail(latest_output, lines=80))
+            if handoff.exists():
+                print("\n--- morning handoff ---")
+                print(_tail(handoff, lines=80))
             return
 
         print(
             "Usage:\n"
-            "  dgc swarm codex-night start [HOURS]\n"
+            "  dgc swarm codex-night start [HOURS] [--yolo] [--mission-file PATH] [--model MODEL]\n"
+            "  dgc swarm codex-night yolo [HOURS]\n"
             "  dgc swarm codex-night stop\n"
             "  dgc swarm codex-night status\n"
             "  dgc swarm codex-night report\n"
@@ -1281,7 +1344,7 @@ def cmd_swarm(extra_args: list[str]) -> None:
     # --- Dispatch subcommands ---
 
     if extra_args and extra_args[0] == "yolo":
-        _overnight(["start", "10", "--aggressive"])
+        _codex_night(["yolo"])
         return
 
     if extra_args and extra_args[0] in ("codex-night", "codex-overnight"):
@@ -1375,6 +1438,32 @@ def cmd_stress(
     proc = subprocess.run(cmd, cwd=str(DHARMA_SWARM))
     if proc.returncode != 0:
         raise SystemExit(proc.returncode)
+
+
+def cmd_full_power_probe(
+    route_task: str,
+    context_search_query: str,
+    compose_task: str,
+    autonomy_action: str,
+    skip_sprint_probe: bool,
+    skip_stress: bool,
+    skip_pytest: bool,
+) -> None:
+    """Run the operator-facing full-power probe and emit artifact paths."""
+    from dharma_swarm.full_power_probe import run_full_power_probe
+
+    payload = run_full_power_probe(
+        python_executable=sys.executable,
+        route_task=route_task,
+        context_search_query=context_search_query,
+        compose_task=compose_task,
+        autonomy_action=autonomy_action,
+        include_sprint_probe=not skip_sprint_probe,
+        run_stress=not skip_stress,
+        run_pytest=not skip_pytest,
+    )
+    print(f"Report: {payload['report_markdown_path']}")
+    print(f"JSON:   {payload['report_json_path']}")
 
 
 # ---------------------------------------------------------------------------
@@ -1576,11 +1665,15 @@ def cmd_evolve_rollback(entry_id: str, reason: str = "Manual rollback") -> None:
 
 
 def cmd_evolve_auto(
-    files: list[str] | None, model: str, context: str
+    files: list[str] | None, model: str, context: str,
+    single_model: bool = False,
+    shadow: bool = False,
+    token_budget: int = 0,
 ) -> None:
     """LLM-powered autonomous evolution cycle."""
     async def _auto():
         from pathlib import Path
+        from dharma_swarm.models import ProviderType
 
         swarm = await _get_swarm()
         if swarm._engine is None:
@@ -1602,12 +1695,23 @@ def cmd_evolve_auto(
                 src / "context.py",
             ]
 
-        # Get the OpenRouter provider
-        provider = swarm._router.get_provider(
-            __import__("dharma_swarm.models", fromlist=["ProviderType"]).ProviderType.OPENROUTER
-        )
+        # Fallback provider (OpenRouter)
+        provider = swarm._router.get_provider(ProviderType.OPENROUTER)
 
-        print(f"Auto-evolving {len(source_files)} files with {model}...")
+        # Token budget
+        if token_budget > 0:
+            swarm._engine._max_cycle_tokens = token_budget
+            print(f"Token budget: {token_budget:,}")
+
+        # Multi-model mode (default) vs single-model
+        use_router = not single_model
+        if use_router:
+            from dharma_swarm.evolution_roster import roster_summary
+            print("Multi-model evolution enabled")
+            print(roster_summary())
+            print(f"\nEvolving {len(source_files)} files{' [SHADOW]' if shadow else ''}...")
+        else:
+            print(f"Auto-evolving {len(source_files)} files with {model}{' [SHADOW]' if shadow else ''}...")
         for sf in source_files:
             print(f"  {sf.name}")
         print()
@@ -1617,6 +1721,8 @@ def cmd_evolve_auto(
             source_files=source_files,
             model=model,
             context=context,
+            router=swarm._router if use_router else None,
+            shadow=shadow,
         )
 
         print(f"\n=== Auto-Evolution Results ===")
@@ -1638,7 +1744,10 @@ def cmd_evolve_auto(
 
 
 def cmd_evolve_daemon(
-    interval: float, threshold: float, model: str, cycles: int | None
+    interval: float, threshold: float, model: str, cycles: int | None,
+    single_model: bool = False,
+    shadow: bool = False,
+    token_budget: int = 0,
 ) -> None:
     """Run continuous autonomous evolution daemon."""
     async def _daemon():
@@ -1651,12 +1760,24 @@ def cmd_evolve_daemon(
         from dharma_swarm.models import ProviderType
 
         provider = swarm._router.get_provider(ProviderType.OPENROUTER)
+        use_router = not single_model
 
-        print(f"Darwin daemon starting")
-        print(f"  Model:     {model}")
+        # Token budget
+        if token_budget > 0:
+            swarm._engine._max_cycle_tokens = token_budget
+
+        print(f"Darwin daemon starting{' [SHADOW]' if shadow else ''}")
+        if use_router:
+            from dharma_swarm.evolution_roster import roster_summary
+            print(f"  Mode:      MULTI-MODEL (roster)")
+            print(roster_summary())
+        else:
+            print(f"  Model:     {model}")
         print(f"  Interval:  {interval:.0f}s ({interval/60:.0f}min)")
         print(f"  Threshold: {threshold}")
         print(f"  Cycles:    {'infinite' if cycles is None else cycles}")
+        if token_budget > 0:
+            print(f"  Token cap: {token_budget:,}")
         print(f"  Ctrl+C to stop\n")
 
         try:
@@ -1666,6 +1787,7 @@ def cmd_evolve_daemon(
                 interval=interval,
                 fitness_threshold=threshold,
                 max_cycles=cycles,
+                router=swarm._router if use_router else None,
             )
         except KeyboardInterrupt:
             pass
@@ -2790,6 +2912,7 @@ def cmd_sprint(
     local: bool = False,
     test_summary: str = "",
     prev_todo: str = "",
+    llm_timeout_sec: float = DEFAULT_SPRINT_LLM_TIMEOUT_SEC,
 ) -> None:
     """Generate today's adaptive 8-hour sprint prompt from live system state."""
     from datetime import date as _date
@@ -2832,9 +2955,10 @@ def cmd_sprint(
                 test_summary=test_summary,
                 prev_todo=prev_todo,
                 colm_days=colm_days,
+                llm_timeout_sec=llm_timeout_sec,
             ))
             mode = "LLM"
-        except RuntimeError as exc:
+        except Exception as exc:
             print(f"  LLM unavailable ({exc}), using local mode")
             prompt_text = generate_local_prompt(
                 test_summary=test_summary,
@@ -2946,6 +3070,435 @@ def cmd_ledger(
 
 
 # ---------------------------------------------------------------------------
+# Semantic Evolution Engine
+# ---------------------------------------------------------------------------
+
+_DEFAULT_GRAPH_PATH = DHARMA_STATE / "semantic" / "concept_graph.json"
+
+
+def _resolve_graph_path(graph_path: str | None) -> Path:
+    return Path(graph_path) if graph_path else _DEFAULT_GRAPH_PATH
+
+
+def cmd_semantic_digest(
+    *,
+    root: str,
+    output: str | None = None,
+    include_tests: bool = False,
+    max_files: int = 500,
+) -> None:
+    """Phase 1: Read codebase files and build the ConceptGraph."""
+    from dharma_swarm.semantic_digester import SemanticDigester
+
+    root_path = Path(root)
+    out_path = Path(output) if output else _DEFAULT_GRAPH_PATH
+
+    # Digest the dharma_swarm package directory
+    package_dir = root_path / "dharma_swarm"
+    if not package_dir.is_dir():
+        package_dir = root_path  # Fall back to root itself
+
+    print(f"[semantic digest] Scanning {package_dir}")
+    digester = SemanticDigester()
+    graph = digester.digest_directory(
+        package_dir,
+        include_tests=include_tests,
+        max_files=max_files,
+    )
+
+    print(f"  nodes: {graph.node_count}  edges: {graph.edge_count}")
+    _run(graph.save(out_path))
+    print(f"  graph saved to: {out_path}")
+
+
+def cmd_semantic_research(*, graph_path: str | None = None) -> None:
+    """Phase 2: Annotate the graph with external research connections."""
+    from dharma_swarm.semantic_gravity import ConceptGraph
+    from dharma_swarm.semantic_researcher import SemanticResearcher
+
+    gp = _resolve_graph_path(graph_path)
+    graph = _run(ConceptGraph.load(gp))
+    if graph.node_count == 0:
+        print("[semantic research] Empty graph — run 'dgc semantic digest' first.")
+        return
+
+    researcher = SemanticResearcher()
+    annotations = researcher.annotate_graph(graph)
+    for ann in annotations:
+        graph.add_annotation(ann)
+    print(f"[semantic research] {len(annotations)} annotations added")
+
+    coverage = researcher.coverage_report(graph)
+    print(f"  coverage: {coverage.get('coverage_pct', 0):.1f}%")
+
+    _run(graph.save(gp))
+    print(f"  graph updated: {gp}")
+
+
+def cmd_semantic_synthesize(
+    *, graph_path: str | None = None, max_clusters: int = 10,
+) -> None:
+    """Phase 3: Generate file cluster specs from concept intersections."""
+    from dharma_swarm.semantic_gravity import ConceptGraph
+    from dharma_swarm.semantic_synthesizer import SemanticSynthesizer
+
+    gp = _resolve_graph_path(graph_path)
+    graph = _run(ConceptGraph.load(gp))
+    if graph.node_count == 0:
+        print("[semantic synthesize] Empty graph — run digest first.")
+        return
+
+    synth = SemanticSynthesizer(max_clusters=max_clusters)
+    clusters = synth.synthesize(graph)
+
+    print(f"[semantic synthesize] {len(clusters)} cluster specs generated")
+    for c in clusters:
+        print(f"  • {c.name}: {len(c.files)} files ({c.intersection_type})")
+
+    gaps = synth.gap_analysis(graph)
+    if gaps.get("structures_uncovered"):
+        print(f"  uncovered structures: {', '.join(gaps['structures_uncovered'][:5])}")
+
+
+def cmd_semantic_harden(
+    *, graph_path: str | None = None, root: str = str(DHARMA_SWARM),
+) -> None:
+    """Phase 4: Run 6-angle hardening on synthesized clusters."""
+    from dharma_swarm.semantic_gravity import ConceptGraph
+    from dharma_swarm.semantic_hardener import SemanticHardener
+    from dharma_swarm.semantic_synthesizer import SemanticSynthesizer
+
+    gp = _resolve_graph_path(graph_path)
+    graph = _run(ConceptGraph.load(gp))
+    if graph.node_count == 0:
+        print("[semantic harden] Empty graph — run digest first.")
+        return
+
+    synth = SemanticSynthesizer()
+    clusters = synth.synthesize(graph)
+    if not clusters:
+        print("[semantic harden] No clusters to harden.")
+        return
+
+    hardener = SemanticHardener(project_root=Path(root))
+    reports = hardener.harden_batch(clusters, graph)
+    summary = hardener.summary(reports)
+
+    print(f"[semantic harden] {summary['total']} clusters tested")
+    print(f"  passed: {summary['passed']}  failed: {summary['failed']}")
+    print(f"  avg_score: {summary.get('avg_score', 0):.3f}")
+    for angle, stats in summary.get("angle_stats", {}).items():
+        print(f"  {angle}: score={stats['avg_score']:.3f} pass_rate={stats['pass_rate']:.0%}")
+
+
+def cmd_semantic_brief(
+    *,
+    graph_path: str | None = None,
+    root: str = str(DHARMA_SWARM),
+    max_briefs: int = 3,
+    json_output: str | None = None,
+    markdown_output: str | None = None,
+    state_dir: str | None = None,
+    campaign_path: str | None = None,
+) -> None:
+    """Compile hardened semantic clusters into campaign-grade briefs."""
+    from dharma_swarm.mission_contract import (
+        CampaignArtifact,
+        build_campaign_state,
+        default_campaign_state_path,
+        load_active_campaign_state,
+        load_active_mission_state,
+        save_campaign_state,
+    )
+    from dharma_swarm.semantic_briefs import build_brief_packet, write_brief_packet
+    from dharma_swarm.semantic_gravity import ConceptGraph
+    from dharma_swarm.semantic_hardener import SemanticHardener
+    from dharma_swarm.semantic_synthesizer import SemanticSynthesizer
+
+    gp = _resolve_graph_path(graph_path)
+    graph = _run(ConceptGraph.load(gp))
+    if graph.node_count == 0:
+        print("[semantic brief] Empty graph — run digest first.")
+        return
+
+    synth = SemanticSynthesizer(max_clusters=max(max_briefs * 2, max_briefs))
+    clusters = synth.synthesize(graph)
+    if not clusters:
+        print("[semantic brief] No clusters available — run research/synthesize first.")
+        return
+
+    hardener = SemanticHardener(project_root=Path(root))
+    reports = hardener.harden_batch(clusters, graph)
+    packet = build_brief_packet(
+        graph=graph,
+        clusters=clusters,
+        reports=reports,
+        graph_path=str(gp),
+        project_root=str(Path(root)),
+        max_briefs=max_briefs,
+    )
+
+    json_target = Path(json_output) if json_output else gp.with_name("semantic_brief_packet.json")
+    markdown_target = (
+        Path(markdown_output)
+        if markdown_output
+        else json_target.with_suffix(".md")
+    )
+    json_path, markdown_path = write_brief_packet(
+        packet,
+        json_path=json_target,
+        markdown_path=markdown_target,
+    )
+
+    state_root = Path(state_dir).expanduser() if state_dir else DHARMA_STATE
+    mission_artifact = load_active_mission_state(state_dir=state_root)
+    if mission_artifact is not None:
+        try:
+            previous_campaign_artifact = load_active_campaign_state(
+                state_dir=state_root,
+                path=campaign_path,
+            )
+        except ValueError:
+            previous_campaign_artifact = None
+        campaign_state = build_campaign_state(
+            mission_state=mission_artifact.state,
+            previous=previous_campaign_artifact.state if previous_campaign_artifact else None,
+            semantic_briefs=packet.semantic_briefs,
+            execution_briefs=packet.execution_briefs,
+            artifacts=[
+                CampaignArtifact(
+                    artifact_kind="semantic_brief_packet_json",
+                    title="semantic brief packet json",
+                    path=str(json_path),
+                    summary=f"{len(packet.semantic_briefs)} semantic briefs",
+                    source="cmd_semantic_brief",
+                ),
+                CampaignArtifact(
+                    artifact_kind="semantic_brief_packet_markdown",
+                    title="semantic brief packet markdown",
+                    path=str(markdown_path) if markdown_path else "",
+                    summary=f"{len(packet.execution_briefs)} execution briefs",
+                    source="cmd_semantic_brief",
+                ),
+            ],
+            evidence_paths=[str(gp), str(json_path), str(markdown_path) if markdown_path else ""],
+            metrics=dict(packet.metrics),
+        )
+        target_campaign = (
+            Path(campaign_path).expanduser()
+            if campaign_path
+            else default_campaign_state_path(state_root)
+        )
+        save_campaign_state(target_campaign, campaign_state)
+        print(f"[semantic brief] campaign updated: {target_campaign}")
+
+    print(f"[semantic brief] semantic briefs: {len(packet.semantic_briefs)}")
+    print(f"[semantic brief] execution briefs: {len(packet.execution_briefs)}")
+    print(f"  json: {json_path}")
+    if markdown_path:
+        print(f"  markdown: {markdown_path}")
+
+
+def cmd_semantic_proof(*, root: str = str(DHARMA_SWARM)) -> None:
+    """Run live end-to-end proof of the Semantic Evolution Engine."""
+    import subprocess
+
+    script = Path(root).parent / "scripts" / "semantic_proof.py"
+    if not script.exists():
+        script = Path(root) / "scripts" / "semantic_proof.py"
+    if not script.exists():
+        print(f"[semantic proof] Script not found: {script}")
+        raise SystemExit(2)
+
+    print(f"[semantic proof] Running {script}")
+    result = subprocess.run(
+        [sys.executable, str(script)],
+        cwd=str(Path(root).parent if (Path(root).parent / "scripts").is_dir() else root),
+    )
+    raise SystemExit(result.returncode)
+
+
+def cmd_semantic_status(*, graph_path: str | None = None) -> None:
+    """Show semantic graph status overview."""
+    from dharma_swarm.semantic_gravity import ConceptGraph
+
+    gp = _resolve_graph_path(graph_path)
+    if not gp.exists():
+        print(f"[semantic status] No graph found at {gp}")
+        print("  Run 'dgc semantic digest' to build one.")
+        return
+
+    graph = _run(ConceptGraph.load(gp))
+    components = graph.connected_components()
+
+    print(f"[semantic status] Graph: {gp}")
+    print(f"  nodes: {graph.node_count}")
+    print(f"  edges: {graph.edge_count}")
+    print(f"  annotations: {graph.annotation_count}")
+    print(f"  density: {graph.density():.4f}")
+    print(f"  connected components: {len(components)}")
+
+    # Category breakdown
+    categories: dict[str, int] = {}
+    for node in graph.all_nodes():
+        cat = node.category or "uncategorized"
+        categories[cat] = categories.get(cat, 0) + 1
+    for cat, count in sorted(categories.items(), key=lambda x: -x[1]):
+        print(f"    {cat}: {count}")
+
+    # High salience concepts
+    top = graph.high_salience_nodes(threshold=0.7)[:10]
+    if top:
+        print(f"  top concepts:")
+        for n in top:
+            print(f"    {n.name} (salience={n.salience:.2f}, {n.category})")
+
+
+def cmd_provider_smoke(
+    *,
+    ollama_model: str | None = None,
+    nim_model: str | None = None,
+    as_json: bool = False,
+) -> int:
+    """Run best-effort smoke tests for local and external provider lanes."""
+    from dharma_swarm.provider_smoke import run_provider_smoke
+
+    payload = run_provider_smoke(
+        ollama_model=ollama_model,
+        nim_model=nim_model,
+    )
+    if as_json:
+        print(json.dumps(payload, indent=2, sort_keys=True))
+        return 0
+
+    for label, block in payload.items():
+        print(
+            f"[{label}] status={block.get('status')} "
+            f"model={block.get('model') or block.get('configured_model')}"
+        )
+        if label == "ollama":
+            installed = block.get("installed_models") or []
+            if installed:
+                print(f"  installed={', '.join(installed[:10])}")
+            if block.get("strongest_installed"):
+                print(f"  strongest_installed={block['strongest_installed']}")
+            if block.get("root_issue"):
+                print(f"  root_issue={block['root_issue']}")
+        if block.get("strongest_verified"):
+            print(f"  strongest_verified={block['strongest_verified']}")
+        verified = block.get("verified_models") or []
+        if verified:
+            summary = ", ".join(
+                f"{item.get('model')}:{item.get('status')}" for item in verified[:6]
+            )
+            print(f"  verified={summary}")
+        if block.get("configured_base_url"):
+            print(f"  base_url={block['configured_base_url']}")
+        if block.get("response_preview"):
+            print(f"  preview={block['response_preview']}")
+        if block.get("error"):
+            print(f"  error={block['error']}")
+    return 0
+
+
+# ---------------------------------------------------------------------------
+# Bootstrap command
+# ---------------------------------------------------------------------------
+
+
+def cmd_bootstrap() -> None:
+    """Generate and display the bootstrap manifest (NOW.json)."""
+    from dharma_swarm.bootstrap import generate_manifest, print_manifest
+    manifest = generate_manifest()
+    print_manifest(manifest)
+
+
+# ---------------------------------------------------------------------------
+# D3 Field Intelligence commands
+# ---------------------------------------------------------------------------
+
+
+def cmd_field_scan() -> None:
+    """Run full D3 field intelligence scan."""
+    import subprocess
+
+    script = DHARMA_SWARM / "scripts" / "field_scan.py"
+    if not script.exists():
+        print(f"[field scan] Script not found: {script}")
+        raise SystemExit(2)
+    result = subprocess.run([sys.executable, str(script)], cwd=str(DHARMA_SWARM))
+    raise SystemExit(result.returncode)
+
+
+def cmd_field_gaps() -> None:
+    """Show DGC capability gaps vs external field."""
+    from dharma_swarm.field_graph import gap_report
+
+    gp = gap_report()
+    print(f"  {gp['title']}")
+    print(f"  Hard gaps: {gp['hard_gap_count']}  |  Integration opportunities: {gp['integration_count']}")
+    print()
+    for item in gp["hard_gaps"]:
+        print(f"  ✗ {item['id']} ({item['field']})")
+        print(f"    → {item['source']}")
+        print(f"    {item['relevance'][:140]}")
+        print()
+    for item in gp["integration_opportunities"]:
+        print(f"  ⊕ {item['id']} ({item['field']})")
+        print(f"    → {item['source']}")
+        print()
+
+
+def cmd_field_position() -> None:
+    """Show DGC competitive positioning."""
+    from dharma_swarm.field_graph import competitive_position
+
+    cp = competitive_position()
+    sa = cp["strategic_assessment"]
+    print(f"  {cp['title']}")
+    print(f"  Overall: {sa['overall']}  |  Moats: {sa['moat_count']}  "
+          f"Gaps: {sa['gap_count']}  Validated: {sa['validated_count']}  "
+          f"Threats: {sa['threat_count']}")
+    print()
+    for t in cp["competitive_threats"]:
+        print(f"  [{t['threat_level']}] {t['id']}: {t['source']}")
+    print()
+    for domain, info in cp["domain_coverage"].items():
+        print(f"  {domain:<24} [{info['strength']:<12}] "
+              f"unique={info['unique']} gaps={info['gaps']} validated={info['validated']}")
+
+
+def cmd_field_unique() -> None:
+    """Show DGC unique moats."""
+    from dharma_swarm.field_graph import uniqueness_report
+
+    un = uniqueness_report()
+    print(f"  {un['title']}")
+    print(f"  Moat count: {un['count']}")
+    print()
+    for item in un["moats"]:
+        print(f"  ★ {item['id']}")
+        print(f"    {item['summary'][:140]}")
+        print()
+
+
+def cmd_field_summary() -> None:
+    """Field KB summary statistics."""
+    from dharma_swarm.field_knowledge_base import field_summary
+
+    s = field_summary()
+    print(f"  D3 Field KB: {s['total_entries']} entries")
+    print(f"  Unique: {s['dgc_unique']}  Gaps: {s['dgc_gaps']}  Competitors: {s['dgc_competitors']}")
+    print()
+    print("  By relation:")
+    for r, c in sorted(s["by_relation"].items(), key=lambda x: -x[1]):
+        print(f"    {r:<16} {c}")
+    print("  By field:")
+    for f, c in sorted(s["by_field"].items(), key=lambda x: -x[1]):
+        print(f"    {f:<32} {c}")
+
+
+# ---------------------------------------------------------------------------
 # Argument parser
 # ---------------------------------------------------------------------------
 
@@ -3001,6 +3554,18 @@ def _build_parser() -> argparse.ArgumentParser:
         help="Explicit path to mission.json or thinkodynamic latest.json",
     )
     p_mbrief.add_argument(
+        "--state-dir",
+        default=None,
+        help="Override state root (defaults to ~/.dharma)",
+    )
+    p_cbrief = sub.add_parser("campaign-brief", help="Show active campaign continuity state")
+    p_cbrief.add_argument("--json", action="store_true", help="Emit campaign continuity as JSON")
+    p_cbrief.add_argument(
+        "--path",
+        default=None,
+        help="Explicit path to campaign.json",
+    )
+    p_cbrief.add_argument(
         "--state-dir",
         default=None,
         help="Override state root (defaults to ~/.dharma)",
@@ -3073,6 +3638,38 @@ def _build_parser() -> argparse.ArgumentParser:
     p_stress.add_argument("--orchestration-timeout-sec", type=int, default=240)
     p_stress.add_argument("--external-timeout-sec", type=int, default=120)
     p_stress.add_argument("--external-research", action="store_true")
+    p_probe = sub.add_parser(
+        "full-power-probe",
+        aliases=["probe"],
+        help="Run the reusable operator-facing full-power probe",
+    )
+    p_probe.add_argument(
+        "--route-task",
+        default="test the full power of dgc from inside the system and show what it can do",
+    )
+    p_probe.add_argument(
+        "--context-search-query",
+        default="mechanistic thread reports unfinished work active modules evidence paths",
+    )
+    p_probe.add_argument(
+        "--compose-task",
+        default=(
+            "Probe DGC full power from inside this workspace, verify the mechanistic "
+            "thread snapshot, and produce a concrete artifact"
+        ),
+    )
+    p_probe.add_argument(
+        "--autonomy-action",
+        default="run a broad but safe local full-power probe without mutating external systems",
+    )
+    p_probe.add_argument("--skip-sprint-probe", action="store_true")
+    p_probe.add_argument("--skip-stress", action="store_true")
+    p_probe.add_argument("--skip-pytest", action="store_true")
+
+    p_provider = sub.add_parser("provider-smoke", help="Probe local and external provider lanes")
+    p_provider.add_argument("--json", action="store_true", help="Emit machine-readable JSON")
+    p_provider.add_argument("--ollama-model", default=None, help="Override Ollama model")
+    p_provider.add_argument("--nim-model", default=None, help="Override NVIDIA NIM model")
 
     # -- context --
     p_ctx = sub.add_parser("context", help="Load context for a domain")
@@ -3168,12 +3765,18 @@ def _build_parser() -> argparse.ArgumentParser:
     p_eauto.add_argument("--files", nargs="*", help="Source files to evolve (default: core modules)")
     p_eauto.add_argument("--model", default="meta-llama/llama-3.3-70b-instruct")
     p_eauto.add_argument("--context", default="", help="Focus area or context for the LLM")
+    p_eauto.add_argument("--single-model", action="store_true", help="Use only --model instead of full roster")
+    p_eauto.add_argument("--shadow", action="store_true", help="Dry-run: generate proposals but don't apply diffs")
+    p_eauto.add_argument("--token-budget", type=int, default=0, help="Max tokens per session (0=unlimited)")
 
     p_edaemon = evolve_sub.add_parser("daemon", help="Run continuous autonomous evolution")
     p_edaemon.add_argument("--interval", type=float, default=1800.0, help="Seconds between cycles (default: 30min)")
     p_edaemon.add_argument("--threshold", type=float, default=0.6, help="Min fitness to auto-commit")
     p_edaemon.add_argument("--model", default="meta-llama/llama-3.3-70b-instruct")
     p_edaemon.add_argument("--cycles", type=int, default=None, help="Max cycles (default: infinite)")
+    p_edaemon.add_argument("--single-model", action="store_true", help="Use only --model instead of full roster")
+    p_edaemon.add_argument("--shadow", action="store_true", help="Dry-run: generate proposals but don't apply diffs")
+    p_edaemon.add_argument("--token-budget", type=int, default=0, help="Max tokens per session (0=unlimited)")
 
     # -- dharma --
     p_dharma = sub.add_parser("dharma", help="Dharma subsystem commands")
@@ -3430,6 +4033,12 @@ def _build_parser() -> argparse.ArgumentParser:
     )
     p_sprint.add_argument("--test-summary", default="", help="Test results to include")
     p_sprint.add_argument("--prev-todo", default="", help="Previous TODO items to include")
+    p_sprint.add_argument(
+        "--llm-timeout-sec",
+        type=float,
+        default=DEFAULT_SPRINT_LLM_TIMEOUT_SEC,
+        help="Timeout for remote sprint prompt generation before local fallback",
+    )
 
     # -- ledger --
     p_ledger = sub.add_parser("ledger", help="Inspect orchestrator session ledgers")
@@ -3443,6 +4052,63 @@ def _build_parser() -> argparse.ArgumentParser:
     )
 
     ledger_sub.add_parser("sessions", help="List recent sessions")
+
+    # -- semantic --
+    p_sem = sub.add_parser("semantic", help="Semantic Evolution Engine commands")
+    sem_sub = p_sem.add_subparsers(dest="semantic_cmd")
+
+    p_sd = sem_sub.add_parser("digest", help="Read codebase and build concept graph")
+    p_sd.add_argument("--root", default=str(DHARMA_SWARM), help="Project root")
+    p_sd.add_argument("--output", default=None, help="Graph output path")
+    p_sd.add_argument(
+        "--max-files",
+        type=int,
+        default=500,
+        help="Safety cap on files processed during digest",
+    )
+    p_sd.add_argument(
+        "--include-tests",
+        action="store_true",
+        help="Include test files in the digest",
+    )
+
+    p_sr = sem_sub.add_parser("research", help="Annotate graph with external research")
+    p_sr.add_argument("--graph", default=None, help="Path to concept graph JSON")
+
+    p_ss = sem_sub.add_parser("synthesize", help="Generate file cluster specs")
+    p_ss.add_argument("--graph", default=None, help="Path to concept graph JSON")
+    p_ss.add_argument("--max-clusters", type=int, default=10)
+
+    p_sh = sem_sub.add_parser("harden", help="Run 6-angle hardening on clusters")
+    p_sh.add_argument("--graph", default=None, help="Path to concept graph JSON")
+    p_sh.add_argument("--root", default=str(DHARMA_SWARM), help="Project root")
+
+    p_sb = sem_sub.add_parser("brief", help="Compile semantic clusters into campaign briefs")
+    p_sb.add_argument("--graph", default=None, help="Path to concept graph JSON")
+    p_sb.add_argument("--root", default=str(DHARMA_SWARM), help="Project root")
+    p_sb.add_argument("--max-briefs", type=int, default=3)
+    p_sb.add_argument("--json-output", default=None, help="Output path for brief packet JSON")
+    p_sb.add_argument("--markdown-output", default=None, help="Output path for brief packet markdown")
+    p_sb.add_argument("--state-dir", default=None, help="Override state root for campaign updates")
+    p_sb.add_argument("--campaign-path", default=None, help="Explicit campaign.json path")
+
+    p_sst = sem_sub.add_parser("status", help="Semantic graph status overview")
+    p_sst.add_argument("--graph", default=None, help="Path to concept graph JSON")
+
+    p_sp = sem_sub.add_parser("proof", help="Run live end-to-end proof of the semantic pipeline")
+    p_sp.add_argument("--root", default=str(DHARMA_SWARM), help="Project root")
+
+    # -- bootstrap --
+    sub.add_parser("bootstrap", help="Generate bootstrap manifest (NOW.json) — orients any new LLM instance")
+
+    # -- field (D3: External AI Field Intelligence) --
+    p_field = sub.add_parser("field", help="D3 External AI Field Intelligence Engine")
+    field_sub = p_field.add_subparsers(dest="field_cmd")
+    field_sub.add_parser("scan", help="Full D3 field intelligence scan with all reports")
+    field_sub.add_parser("gaps", help="Show DGC capability gaps vs external field")
+    field_sub.add_parser("position", help="Show DGC competitive positioning")
+    field_sub.add_parser("unique", help="Show DGC unique moats")
+    field_sub.add_parser("summary", help="Field KB summary statistics")
 
     return parser
 
@@ -3531,6 +4197,14 @@ def main() -> None:
             )
             if rc != 0:
                 raise SystemExit(rc)
+        case "campaign-brief":
+            rc = cmd_campaign_brief(
+                path=args.path,
+                state_dir=args.state_dir,
+                as_json=args.json,
+            )
+            if rc != 0:
+                raise SystemExit(rc)
         case "canonical-status":
             rc = cmd_canonical_status(as_json=args.json)
             if rc != 0:
@@ -3560,6 +4234,24 @@ def main() -> None:
                 external_research=args.external_research,
                 external_timeout_sec=args.external_timeout_sec,
             )
+        case "full-power-probe" | "probe":
+            cmd_full_power_probe(
+                route_task=args.route_task,
+                context_search_query=args.context_search_query,
+                compose_task=args.compose_task,
+                autonomy_action=args.autonomy_action,
+                skip_sprint_probe=args.skip_sprint_probe,
+                skip_stress=args.skip_stress,
+                skip_pytest=args.skip_pytest,
+            )
+        case "provider-smoke":
+            rc = cmd_provider_smoke(
+                ollama_model=args.ollama_model,
+                nim_model=args.nim_model,
+                as_json=args.json,
+            )
+            if rc != 0:
+                raise SystemExit(rc)
         case "context":
             cmd_context(args.domain)
         case "memory":
@@ -3617,9 +4309,19 @@ def main() -> None:
                 case "rollback":
                     cmd_evolve_rollback(args.entry_id, args.reason)
                 case "auto":
-                    cmd_evolve_auto(args.files, args.model, args.context)
+                    cmd_evolve_auto(
+                        args.files, args.model, args.context,
+                        single_model=args.single_model,
+                        shadow=args.shadow,
+                        token_budget=args.token_budget,
+                    )
                 case "daemon":
-                    cmd_evolve_daemon(args.interval, args.threshold, args.model, args.cycles)
+                    cmd_evolve_daemon(
+                        args.interval, args.threshold, args.model, args.cycles,
+                        single_model=args.single_model,
+                        shadow=args.shadow,
+                        token_budget=args.token_budget,
+                    )
                 case _:
                     parser.parse_args(["evolve", "--help"])
         case "run":
@@ -3804,6 +4506,7 @@ def main() -> None:
                 local=args.local,
                 test_summary=args.test_summary,
                 prev_todo=args.prev_todo,
+                llm_timeout_sec=args.llm_timeout_sec,
             )
         case "ledger":
             cmd_ledger(
@@ -3812,6 +4515,67 @@ def main() -> None:
                 session=getattr(args, "session", None),
                 kind=getattr(args, "kind", "all"),
             )
+        case "semantic":
+            try:
+                match args.semantic_cmd:
+                    case "digest":
+                        cmd_semantic_digest(
+                            root=args.root,
+                            output=args.output,
+                            include_tests=args.include_tests,
+                            max_files=args.max_files,
+                        )
+                    case "research":
+                        cmd_semantic_research(graph_path=args.graph)
+                    case "synthesize":
+                        cmd_semantic_synthesize(
+                            graph_path=args.graph,
+                            max_clusters=args.max_clusters,
+                        )
+                    case "harden":
+                        cmd_semantic_harden(
+                            graph_path=args.graph,
+                            root=args.root,
+                        )
+                    case "brief":
+                        cmd_semantic_brief(
+                            graph_path=args.graph,
+                            root=args.root,
+                            max_briefs=args.max_briefs,
+                            json_output=args.json_output,
+                            markdown_output=args.markdown_output,
+                            state_dir=args.state_dir,
+                            campaign_path=args.campaign_path,
+                        )
+                    case "status":
+                        cmd_semantic_status(graph_path=args.graph)
+                    case "proof":
+                        cmd_semantic_proof(root=args.root)
+                    case _:
+                        parser.parse_args(["semantic", "--help"])
+            except Exception as e:
+                print(f"Semantic command failed: {e}")
+                raise SystemExit(2)
+        case "bootstrap":
+            cmd_bootstrap()
+        case "field":
+            try:
+                match args.field_cmd:
+                    case "scan":
+                        cmd_field_scan()
+                    case "gaps":
+                        cmd_field_gaps()
+                    case "position":
+                        cmd_field_position()
+                    case "unique":
+                        cmd_field_unique()
+                    case "summary":
+                        cmd_field_summary()
+                    case _:
+                        parser.parse_args(["field", "--help"])
+            except Exception as e:
+                print(f"Field command failed: {e}")
+                raise SystemExit(2)
         case _:
             parser.print_help()
 

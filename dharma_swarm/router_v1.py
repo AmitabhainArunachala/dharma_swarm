@@ -14,6 +14,11 @@ from pathlib import Path
 import re
 
 from dharma_swarm.models import LLMRequest, ProviderType
+from dharma_swarm.ollama_config import (
+    OLLAMA_DEFAULT_CLOUD_MODEL,
+    OLLAMA_DEFAULT_LOCAL_MODEL,
+    ollama_prefers_cloud,
+)
 from dharma_swarm.provider_policy import ProviderRouteRequest
 
 
@@ -336,23 +341,51 @@ def model_hint_for_provider(
     signals: RoutingSignals,
 ) -> str | None:
     """Return provider-specific model hint with language/complexity overrides."""
+    nim_base_url = os.environ.get("NVIDIA_NIM_BASE_URL", "https://integrate.api.nvidia.com/v1").rstrip("/")
+    nim_self_hosted = nim_base_url != "https://integrate.api.nvidia.com/v1"
+    ollama_cloud = ollama_prefers_cloud()
+    effective_default_hint = default_hint
+
+    if provider == ProviderType.OLLAMA:
+        if ollama_cloud and default_hint in {None, "", OLLAMA_DEFAULT_LOCAL_MODEL}:
+            effective_default_hint = OLLAMA_DEFAULT_CLOUD_MODEL
+        elif not ollama_cloud and default_hint and default_hint.endswith(":cloud"):
+            effective_default_hint = OLLAMA_DEFAULT_LOCAL_MODEL
+
     if signals.context_tier in {"LONG", "VERY_LONG"}:
         if provider == ProviderType.OPENAI:
             return "gpt-4.1"
         if provider == ProviderType.ANTHROPIC:
             return "claude-sonnet-4-6"
+        if provider == ProviderType.OPENROUTER:
+            return "moonshotai/kimi-k2.5"
+        if provider == ProviderType.NVIDIA_NIM and nim_self_hosted:
+            return "moonshotai/kimi-k2.5"
+        if provider == ProviderType.OLLAMA and ollama_cloud:
+            return "kimi-k2.5:cloud"
 
     if signals.language_code in {"ja", "en_ja_mixed"}:
         if provider == ProviderType.OPENROUTER:
-            # Non-free high-quality Japanese default.
-            return "qwen/qwen3-32b"
+            return "moonshotai/kimi-k2.5"
         if provider == ProviderType.ANTHROPIC:
             return "claude-sonnet-4-6"
+        if provider == ProviderType.NVIDIA_NIM and nim_self_hosted:
+            return "moonshotai/kimi-k2.5"
+        if provider == ProviderType.OLLAMA and ollama_cloud:
+            return "kimi-k2.5:cloud"
 
     if signals.complexity_tier == "REASONING":
         if provider == ProviderType.ANTHROPIC:
             return "claude-opus-4-6"
         if provider == ProviderType.OPENAI:
             return "gpt-5"
+        if provider == ProviderType.OPENROUTER:
+            return "z-ai/glm-5"
+        if provider == ProviderType.NVIDIA_NIM:
+            if nim_self_hosted:
+                return "zai-org/GLM-5"
+            return "nvidia/llama-3.1-nemotron-ultra-253b-v1"
+        if provider == ProviderType.OLLAMA and ollama_cloud:
+            return "glm-5:cloud"
 
-    return default_hint
+    return effective_default_hint

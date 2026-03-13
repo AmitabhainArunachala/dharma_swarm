@@ -6,6 +6,7 @@ This module is decoupled from Textual. Every handler returns plain text
 
 from __future__ import annotations
 
+import difflib
 import json
 from datetime import datetime
 from pathlib import Path
@@ -13,6 +14,89 @@ from pathlib import Path
 HOME = Path.home()
 DHARMA_STATE = HOME / ".dharma"
 DHARMA_SWARM = Path(__file__).resolve().parent.parent.parent.parent
+INDIGO = "#9C7444"
+INDIGO_DIM = "#8C8278"
+VERDIGRIS = "#62725D"
+OCHRE = "#A17A47"
+BENGARA = "#8C5448"
+WISTERIA = "#74677D"
+
+_SYNC_COMMANDS = frozenset(
+    {
+        "help",
+        "clear",
+        "reset",
+        "cancel",
+        "chat",
+        "paste",
+        "copy",
+        "copylast",
+        "btw",
+        "net",
+        "plan",
+        "model",
+        "thread",
+        "notes",
+        "trishula",
+        "openclaw",
+        "moltbook",
+        "evidence",
+    }
+)
+_ASYNC_COMMANDS = frozenset(
+    {
+        "status",
+        "pulse",
+        "health",
+        "self",
+        "context",
+        "memory",
+        "witness",
+        "gates",
+        "agni",
+        "swarm",
+        "evolve",
+        "darwin",
+        "archive",
+        "logs",
+        "runtime",
+        "git",
+        "truth",
+        "dharma",
+        "corpus",
+        "stigmergy",
+        "hum",
+    }
+)
+_ALL_COMMANDS = _SYNC_COMMANDS | _ASYNC_COMMANDS
+_SAFE_AUTOCORRECT_COMMANDS = frozenset(
+    {
+        "status",
+        "pulse",
+        "health",
+        "self",
+        "context",
+        "memory",
+        "darwin",
+        "archive",
+        "logs",
+        "runtime",
+        "git",
+        "truth",
+        "dharma",
+        "corpus",
+        "stigmergy",
+        "hum",
+        "notes",
+        "trishula",
+        "openclaw",
+        "moltbook",
+        "evidence",
+    }
+)
+_COMMAND_ALIASES = {
+    "darkwin": "darwin",
+}
 
 
 def _read_json(path: Path) -> dict | None:
@@ -94,7 +178,9 @@ class SystemCommandHandler:
             elif mode in {"continue", "cont", "resume", "c", "r"}:
                 return "", "chat:continue"
             else:
-                return "[red]Usage: /chat [continue][/red]", None
+                return f"[{BENGARA}]Usage: /chat [continue][/{BENGARA}]", None
+        elif cmd == "btw":
+            return "", "btw:open"
         elif cmd in {"paste", "copy", "copylast"}:
             return "", cmd
         elif cmd == "net":
@@ -116,15 +202,49 @@ class SystemCommandHandler:
         elif cmd == "evidence":
             return self._handle_evidence(), None
         # Threaded commands (need @work in the app layer)
-        elif cmd in {
-            "status", "pulse", "health", "self", "context", "memory",
-            "witness", "gates", "agni", "swarm", "evolve", "darwin", "archive",
-            "logs", "runtime", "git", "truth", "dharma", "corpus",
-            "stigmergy", "hum",
-        }:
+        elif cmd in _ASYNC_COMMANDS:
             return "", f"async:{cmd}:{arg}"
         else:
-            return f"[red]Unknown command: /{cmd}[/red]  (try /help)", None
+            suggestion = self.suggest_command(cmd)
+            if suggestion:
+                return (
+                    f"[{BENGARA}]Unknown command: /{cmd}[/{BENGARA}]  "
+                    f"[{OCHRE}](did you mean /{suggestion}?)[/{OCHRE}]",
+                    None,
+                )
+            return f"[{BENGARA}]Unknown command: /{cmd}[/{BENGARA}]  (try /help)", None
+
+    def suggest_command(self, raw: str) -> str | None:
+        """Return the nearest known command for typo recovery, if any."""
+        cmd = raw.strip().lower()
+        if not cmd:
+            return None
+        alias = _COMMAND_ALIASES.get(cmd)
+        if alias:
+            return alias
+        if cmd in _ALL_COMMANDS:
+            return cmd
+        matches = difflib.get_close_matches(cmd, sorted(_ALL_COMMANDS), n=1, cutoff=0.8)
+        return matches[0] if matches else None
+
+    def resolve_bare_command(self, raw: str) -> tuple[str | None, str | None]:
+        """Resolve a bare single-word input into a slash command or suggestion."""
+        text = raw.strip()
+        if not text or text.startswith("/") or len(text.split()) != 1:
+            return None, None
+
+        cmd = text.lower()
+        if cmd in _ALL_COMMANDS:
+            return cmd, None
+
+        suggestion = self.suggest_command(cmd)
+        if not suggestion or suggestion == cmd:
+            return None, None
+
+        if suggestion in _SAFE_AUTOCORRECT_COMMANDS:
+            return suggestion, f"[dim]Assuming /{suggestion}.[/dim]"
+
+        return None, f"[{OCHRE}]Did you mean /{suggestion}?[/{OCHRE}]"
 
     # ------------------------------------------------------------------
     # Synchronous command implementations
@@ -132,54 +252,56 @@ class SystemCommandHandler:
 
     def _help(self) -> str:
         return (
-            "[bold cyan]--- System ---[/bold cyan]\n"
-            "  [cyan]/status[/cyan]          Full system status panel\n"
-            "  [cyan]/health[/cyan]          Ecosystem health check\n"
-            "  [cyan]/pulse[/cyan]           Run heartbeat\n"
-            "  [cyan]/self[/cyan]            System self-map (modules, tests, state)\n"
-            "  [cyan]/context[/cyan] [role]  Show agent context layers\n"
-            "\n[bold cyan]--- Memory & Witness ---[/bold cyan]\n"
-            "  [cyan]/memory[/cyan]          Strange loop memory + latent gold\n"
-            "  [cyan]/witness[/cyan] <msg>   Record observation\n"
-            "  [cyan]/notes[/cyan]           Shared agent notes\n"
-            "  [cyan]/archive[/cyan]         Evolution archive (last 10)\n"
-            "  [cyan]/darwin[/cyan]          Darwin experiment memory + trust ladder\n"
-            "  [cyan]/logs[/cyan]            Tail system logs\n"
-            "\n[bold cyan]--- Agents & Swarm ---[/bold cyan]\n"
-            "  [cyan]/swarm[/cyan] [op]      Swarm: status | start [h] | stop | report | yolo\n"
-            "  [cyan]/gates[/cyan] <action>  Test telos gates\n"
-            "  [cyan]/evolve[/cyan] <c> <d>  Darwin Engine evolution\n"
-            "  [cyan]/evolve status[/cyan]   Darwin operator visibility\n"
-            "  [cyan]/agni[/cyan] <cmd>      Run on AGNI VPS\n"
-            "  [cyan]/trishula[/cyan]        Trishula inbox\n"
-            "\n[bold cyan]--- Integrations ---[/bold cyan]\n"
-            "  [cyan]/openclaw[/cyan]        OpenClaw agent status\n"
-            "  [cyan]/evidence[/cyan]        Latest evidence bundle\n"
-            "  [cyan]/runtime[/cyan]         Live process/runtime matrix\n"
-            "  [cyan]/git[/cyan]             Repo branch/head/dirty counts\n"
-            "\n[bold cyan]--- Dharma & Living Layers ---[/bold cyan]\n"
-            "  [cyan]/dharma[/cyan] [status]  Dharma kernel/corpus status\n"
-            "  [cyan]/corpus[/cyan]          List corpus claims\n"
-            "  [cyan]/stigmergy[/cyan]       Hot paths and high salience marks\n"
-            "  [cyan]/hum[/cyan]             Subconscious dreams\n"
-            "\n[bold cyan]--- Chat & Control ---[/bold cyan]\n"
-            "  [cyan]/thread[/cyan] [name]   Show/set research thread\n"
-            "  [cyan]/net[/cyan] [on|off]    Internet mode for Claude\n"
-            "  [cyan]/plan[/cyan] [on|off]   Enforce plan-first mode policy\n"
-            "  [cyan]/model[/cyan] [op]      Model routing: status | list | set <alias|index> | auto on|off|responsive|cost|genius | metrics | cooldown status|clear\n"
-            "  [cyan]/chat[/cyan] [continue] Launch full Claude Code UI\n"
-            "  [cyan]/cancel[/cyan]          Cancel active Claude run\n"
-            "  [cyan]/reset[/cyan]           Reset conversation memory\n"
-            "  [cyan]/clear[/cyan]           Clear screen\n"
-            "  [cyan]/help[/cyan]            This help\n\n"
-            "[bold cyan]--- Keyboard ---[/bold cyan]\n"
-            "  [cyan]Ctrl+O[/cyan]          Cycle mode: N(ormal) → A(uto) → P(lan) → S(age)\n"
-            "  [cyan]Ctrl+L[/cyan]          Clear output\n"
-            "  [cyan]Ctrl+N[/cyan]          New session\n"
-            "  [cyan]Ctrl+C[/cyan]          Cancel active Claude run\n"
-            "  [cyan]Ctrl+P[/cyan]          Command palette\n"
-            "  [cyan]Shift+click[/cyan]     Select text for copy (terminal native)\n\n"
-            "[dim]Plain text (no /) talks to Claude via stream-json.[/dim]"
+            f"[bold {INDIGO}]--- System ---[/bold {INDIGO}]\n"
+            f"  [{INDIGO}]/status[/{INDIGO}]          Full system status panel\n"
+            f"  [{INDIGO}]/health[/{INDIGO}]          Ecosystem health check\n"
+            f"  [{INDIGO}]/pulse[/{INDIGO}]           Run heartbeat\n"
+            f"  [{INDIGO}]/self[/{INDIGO}]            System self-map (modules, tests, state)\n"
+            f"  [{INDIGO}]/context[/{INDIGO}] [role]  Show agent context layers\n"
+            f"\n[bold {INDIGO}]--- Memory & Witness ---[/bold {INDIGO}]\n"
+            f"  [{INDIGO}]/memory[/{INDIGO}]          Strange loop memory + latent gold\n"
+            f"  [{INDIGO}]/witness[/{INDIGO}] <msg>   Record observation\n"
+            f"  [{INDIGO}]/notes[/{INDIGO}]           Shared agent notes\n"
+            f"  [{INDIGO}]/archive[/{INDIGO}]         Evolution archive (last 10)\n"
+            f"  [{INDIGO}]/darwin[/{INDIGO}]          Darwin experiment memory + trust ladder\n"
+            f"  [{INDIGO}]/logs[/{INDIGO}]            Tail system logs\n"
+            f"\n[bold {INDIGO}]--- Agents & Swarm ---[/bold {INDIGO}]\n"
+            f"  [{INDIGO}]/swarm[/{INDIGO}] [op]      Swarm: status | start [h] | stop | report | yolo\n"
+            f"  [{INDIGO}]/gates[/{INDIGO}] <action>  Test telos gates\n"
+            f"  [{INDIGO}]/evolve[/{INDIGO}] <c> <d>  Darwin Engine evolution\n"
+            f"  [{INDIGO}]/evolve status[/{INDIGO}]   Darwin operator visibility\n"
+            f"  [{INDIGO}]/agni[/{INDIGO}] <cmd>      Run on AGNI VPS\n"
+            f"  [{INDIGO}]/trishula[/{INDIGO}]        Trishula inbox\n"
+            f"\n[bold {INDIGO}]--- Integrations ---[/bold {INDIGO}]\n"
+            f"  [{INDIGO}]/openclaw[/{INDIGO}]        OpenClaw agent status\n"
+            f"  [{INDIGO}]/evidence[/{INDIGO}]        Latest evidence bundle\n"
+            f"  [{INDIGO}]/runtime[/{INDIGO}]         Live process/runtime matrix\n"
+            f"  [{INDIGO}]/git[/{INDIGO}]             Repo branch/head/dirty counts\n"
+            f"\n[bold {INDIGO}]--- Dharma & Living Layers ---[/bold {INDIGO}]\n"
+            f"  [{INDIGO}]/dharma[/{INDIGO}] [status]  Dharma kernel/corpus status\n"
+            f"  [{INDIGO}]/corpus[/{INDIGO}]          List corpus claims\n"
+            f"  [{INDIGO}]/stigmergy[/{INDIGO}]       Hot paths and high salience marks\n"
+            f"  [{INDIGO}]/hum[/{INDIGO}]             Subconscious dreams\n"
+            f"\n[bold {INDIGO}]--- Chat & Control ---[/bold {INDIGO}]\n"
+            f"  [{INDIGO}]/thread[/{INDIGO}] [name]   Show/set research thread\n"
+            f"  [{INDIGO}]/net[/{INDIGO}] [on|off]    Internet access for the active route\n"
+            f"  [{INDIGO}]/plan[/{INDIGO}] [on|off]   Enforce plan-first mode policy\n"
+            f"  [{INDIGO}]/model[/{INDIGO}] [op]      Model routing: status | list | set <alias|index> | auto on|off|responsive|cost|genius | metrics | cooldown status|clear\n"
+            f"  [{INDIGO}]/chat[/{INDIGO}] [continue] Launch native Claude Code UI\n"
+            f"  [{INDIGO}]/btw[/{INDIGO}] [topic]     Open a parallel side-thread window with merge-back\n"
+            f"  [{INDIGO}]/cancel[/{INDIGO}]          Cancel active provider run\n"
+            f"  [{INDIGO}]/reset[/{INDIGO}]           Reset conversation memory\n"
+            f"  [{INDIGO}]/clear[/{INDIGO}]           Clear screen\n"
+            f"  [{INDIGO}]/help[/{INDIGO}]            This help\n\n"
+            f"[bold {INDIGO}]--- Keyboard ---[/bold {INDIGO}]\n"
+            f"  [{INDIGO}]Ctrl+O[/{INDIGO}]          Cycle mode: N(ormal) → A(uto) → P(lan) → S(age)\n"
+            f"  [{INDIGO}]Ctrl+L[/{INDIGO}]          Clear output\n"
+            f"  [{INDIGO}]Ctrl+N[/{INDIGO}]          New session\n"
+            f"  [{INDIGO}]Ctrl+C[/{INDIGO}]          Cancel active run / copy last reply when idle\n"
+            f"  [{INDIGO}]Ctrl+P[/{INDIGO}]          Command palette\n"
+            f"  [{INDIGO}]Ctrl+Y[/{INDIGO}]          Copy last reply\n"
+            f"  [{INDIGO}]Shift+click[/{INDIGO}]     Select text for copy (terminal native)\n\n"
+            "[dim]Plain text (no /) sends to the active route with live tools, usage, and cost telemetry.[/dim]"
         )
 
     def _handle_plan(self, arg: str) -> tuple[str, str | None]:
@@ -187,7 +309,7 @@ class SystemCommandHandler:
         mode = arg.strip().lower()
         if not mode or mode == "status":
             on = self._mode == "P"
-            color = "blue" if on else "yellow"
+            color = INDIGO if on else OCHRE
             state = "ON" if on else "OFF"
             return (
                 f"Plan mode: [{color}]{state}[/{color}] "
@@ -196,30 +318,30 @@ class SystemCommandHandler:
             )
         if mode in {"on", "enable", "1", "true"}:
             return (
-                "[blue]Plan mode enabled.[/blue] "
+                f"[{INDIGO}]Plan mode enabled.[/{INDIGO}] "
                 "Execution will wait for explicit approval.",
                 "mode:set:P",
             )
         if mode in {"off", "disable", "0", "false"}:
             return (
-                "[yellow]Plan mode disabled.[/yellow] Returning to Normal mode.",
+                f"[{OCHRE}]Plan mode disabled.[/{OCHRE}] Returning to Normal mode.",
                 "mode:set:N",
             )
-        return "[red]Usage: /plan [on|off|status][/red]", None
+        return f"[{BENGARA}]Usage: /plan [on|off|status][/{BENGARA}]", None
 
     def _handle_net(self, arg: str) -> str:
         mode = arg.strip().lower()
         if not mode or mode == "status":
             status = "ON" if self.internet_enabled else "OFF"
-            color = "green" if self.internet_enabled else "yellow"
+            color = VERDIGRIS if self.internet_enabled else OCHRE
             return f"Internet mode: [{color}]{status}[/{color}]"
         if mode in {"on", "enable", "1", "true"}:
             self.internet_enabled = True
-            return "[green]Internet mode enabled.[/green]"
+            return f"[{VERDIGRIS}]Internet mode enabled.[/{VERDIGRIS}]"
         if mode in {"off", "disable", "0", "false"}:
             self.internet_enabled = False
-            return "[yellow]Internet mode disabled.[/yellow]"
-        return "[red]Usage: /net [on|off|status][/red]"
+            return f"[{OCHRE}]Internet mode disabled.[/{OCHRE}]"
+        return f"[{BENGARA}]Usage: /net [on|off|status][/{BENGARA}]"
 
     def _handle_model(self, arg: str) -> tuple[str, str | None]:
         raw = arg.strip()
@@ -233,27 +355,27 @@ class SystemCommandHandler:
             mode = raw[9:].strip().lower()
             if mode in {"status", "clear"}:
                 return "", f"model:cooldown {mode}"
-            return "[red]Usage: /model cooldown [status|clear][/red]", None
+            return f"[{BENGARA}]Usage: /model cooldown [status|clear][/{BENGARA}]", None
         if raw.lower() in {"reset", "clear-cooldowns", "clear"}:
             return "", "model:cooldown clear"
         if raw.lower().startswith("set "):
             target = raw[4:].strip()
             if not target:
-                return "[red]Usage: /model set <alias|index>[/red]", None
+                return f"[{BENGARA}]Usage: /model set <alias|index>[/{BENGARA}]", None
             return "", f"model:set {target}"
         if raw.lower().startswith("auto "):
             mode = raw[5:].strip().lower()
             if mode in {"on", "off", "status", "responsive", "cost", "genius"}:
                 return "", f"model:auto {mode}"
             return (
-                "[red]Usage: /model auto [on|off|status|responsive|cost|genius][/red]",
+                f"[{BENGARA}]Usage: /model auto [on|off|status|responsive|cost|genius][/{BENGARA}]",
                 None,
             )
         if raw.lower().startswith("strategy "):
             mode = raw[9:].strip().lower()
             if mode in {"responsive", "cost", "genius"}:
                 return "", f"model:auto {mode}"
-            return "[red]Usage: /model strategy [responsive|cost|genius][/red]", None
+            return f"[{BENGARA}]Usage: /model strategy [responsive|cost|genius][/{BENGARA}]", None
         if raw.lower() in {"responsive", "cost", "genius"}:
             return "", f"model:auto {raw.lower()}"
         # Shortcut: /model opus
@@ -265,14 +387,17 @@ class SystemCommandHandler:
             if thread_file.exists():
                 try:
                     ts = json.loads(thread_file.read_text())
-                    return f"Active thread: [cyan]{ts.get('current_thread', 'unknown')}[/cyan]"
+                    return (
+                        f"Active thread: "
+                        f"[{INDIGO}]{ts.get('current_thread', 'unknown')}[/{INDIGO}]"
+                    )
                 except Exception:
                     return "[dim]Thread state unreadable.[/dim]"
             return "[dim]No active thread.[/dim]"
         focus_file = DHARMA_STATE / ".FOCUS"
         DHARMA_STATE.mkdir(parents=True, exist_ok=True)
         focus_file.write_text(arg.strip())
-        return f"Thread set to [cyan]{arg.strip()}[/cyan] (wrote .FOCUS)"
+        return f"Thread set to [{INDIGO}]{arg.strip()}[/{INDIGO}] (wrote .FOCUS)"
 
     def _handle_notes(self) -> str:
         shared = DHARMA_STATE / "shared"
@@ -285,7 +410,7 @@ class SystemCommandHandler:
             try:
                 content = f.read_text()[:300]
                 lines.append(
-                    f"[bold cyan]{f.name}[/bold cyan]  [dim]{_file_age_str(f)}[/dim]"
+                    f"[bold {INDIGO}]{f.name}[/bold {INDIGO}]  [dim]{_file_age_str(f)}[/dim]"
                 )
                 for line in content.split("\n")[:3]:
                     lines.append(f"  {line}")
@@ -303,7 +428,7 @@ class SystemCommandHandler:
             inbox.glob("*.md"), key=lambda p: p.stat().st_mtime, reverse=True
         )[:5]:
             try:
-                lines.append(f"[bold magenta]{f.name}[/bold magenta]")
+                lines.append(f"[bold {WISTERIA}]{f.name}[/bold {WISTERIA}]")
                 for line in f.read_text()[:200].split("\n")[:3]:
                     lines.append(f"  {line}")
                 found = True
@@ -326,7 +451,7 @@ class SystemCommandHandler:
         meta = oc.get("meta", {})
         if isinstance(meta, dict) and meta.get("lastTouchedVersion"):
             lines.append(
-                f"  [bold white]Version[/bold white]: {meta['lastTouchedVersion']}"
+                f"  [bold {INDIGO_DIM}]Version[/bold {INDIGO_DIM}]: {meta['lastTouchedVersion']}"
             )
 
         # Agents
@@ -336,13 +461,13 @@ class SystemCommandHandler:
             defaults = agents.get("defaults", {})
             primary = defaults.get("model", {}).get("primary", "?") if isinstance(defaults.get("model"), dict) else "?"
             lines.append(
-                f"  [bold white]Agents[/bold white]: {len(ag_list)}  "
-                f"(primary: [cyan]{primary}[/cyan])"
+                f"  [bold {INDIGO_DIM}]Agents[/bold {INDIGO_DIM}]: {len(ag_list)}  "
+                f"(primary: [{INDIGO}]{primary}[/{INDIGO}])"
             )
             for ag in ag_list[:5]:
                 name = ag.get("id", "?") if isinstance(ag, dict) else str(ag)
                 model = ag.get("model", "") if isinstance(ag, dict) else ""
-                lines.append(f"    [cyan]{name}[/cyan]  {model}")
+                lines.append(f"    [{INDIGO}]{name}[/{INDIGO}]  {model}")
 
         # Models/providers
         models = oc.get("models", {})
@@ -355,28 +480,28 @@ class SystemCommandHandler:
                     if isinstance(v, dict)
                 )
                 lines.append(
-                    f"  [bold white]Providers[/bold white]: {prov_summary}"
+                    f"  [bold {INDIGO_DIM}]Providers[/bold {INDIGO_DIM}]: {prov_summary}"
                 )
 
         # Skills
         skills = oc.get("skills", {})
         if isinstance(skills, dict) and skills:
             lines.append(
-                f"  [bold white]Skills[/bold white]: {len(skills)}"
+                f"  [bold {INDIGO_DIM}]Skills[/bold {INDIGO_DIM}]: {len(skills)}"
             )
 
         # Channels
         channels = oc.get("channels", {})
         if isinstance(channels, dict) and channels:
             lines.append(
-                f"  [bold white]Channels[/bold white]: {', '.join(channels.keys())}"
+                f"  [bold {INDIGO_DIM}]Channels[/bold {INDIGO_DIM}]: {', '.join(channels.keys())}"
             )
 
         # Gateway
         gw = oc.get("gateway", {})
         if isinstance(gw, dict) and gw.get("port"):
             lines.append(
-                f"  [bold white]Gateway[/bold white]: "
+                f"  [bold {INDIGO_DIM}]Gateway[/bold {INDIGO_DIM}]: "
                 f"port={gw['port']} mode={gw.get('mode', '?')}"
             )
 
@@ -387,10 +512,10 @@ class SystemCommandHandler:
         mb = _read_json(state_file)
         if mb:
             return (
-                f"  [bold white]Tracked posts[/bold white]: {mb.get('tracked', 0)}\n"
-                f"  [bold white]Our comments[/bold white]: {mb.get('comments', 0)}\n"
-                f"  [bold white]Engaged posts[/bold white]: {mb.get('engaged', 0)}\n"
-                f"  [bold white]Last heartbeat[/bold white]: {mb.get('heartbeat', 'never')}"
+                f"  [bold {INDIGO_DIM}]Tracked posts[/bold {INDIGO_DIM}]: {mb.get('tracked', 0)}\n"
+                f"  [bold {INDIGO_DIM}]Our comments[/bold {INDIGO_DIM}]: {mb.get('comments', 0)}\n"
+                f"  [bold {INDIGO_DIM}]Engaged posts[/bold {INDIGO_DIM}]: {mb.get('engaged', 0)}\n"
+                f"  [bold {INDIGO_DIM}]Last heartbeat[/bold {INDIGO_DIM}]: {mb.get('heartbeat', 'never')}"
             )
         return "[dim]Moltbook state not found.[/dim]"
 
@@ -406,7 +531,7 @@ class SystemCommandHandler:
         ev = _read_json(bundles[0])
         if ev:
             return (
-                f"  [bold white]Result[/bold white]: {ev.get('overall', 'n/a')}\n"
-                f"  [bold white]Hash[/bold white]: {ev.get('hash', 'n/a')}"
+                f"  [bold {INDIGO_DIM}]Result[/bold {INDIGO_DIM}]: {ev.get('overall', 'n/a')}\n"
+                f"  [bold {INDIGO_DIM}]Hash[/bold {INDIGO_DIM}]: {ev.get('hash', 'n/a')}"
             )
         return "[dim]Evidence bundle unreadable.[/dim]"

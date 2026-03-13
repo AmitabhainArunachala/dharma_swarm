@@ -1,5 +1,6 @@
 """Tests for dharma_swarm.evolution -- DarwinEngine orchestration loop."""
 
+import asyncio
 import sys
 import types
 
@@ -524,6 +525,9 @@ async def test_gate_check_review_proposal(engine):
 async def test_gate_check_logs_trace(engine):
     p = _safe_proposal()
     await engine.gate_check(p)
+    # Drain fire-and-forget trace tasks before checking
+    if engine._trace_tasks:
+        await asyncio.gather(*engine._trace_tasks)
     recent = await engine.traces.get_recent(limit=5)
     assert len(recent) >= 1
     actions = [t.action for t in recent]
@@ -798,6 +802,9 @@ async def test_archive_result_logs_trace(engine):
     await engine.evaluate(p, test_results={"pass_rate": 0.7})
     await engine.archive_result(p)
 
+    # Drain fire-and-forget trace tasks
+    if engine._trace_tasks:
+        await asyncio.gather(*engine._trace_tasks)
     recent = await engine.traces.get_recent(limit=10)
     actions = [t.action for t in recent]
     assert "archive_result" in actions

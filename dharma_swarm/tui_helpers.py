@@ -14,6 +14,11 @@ import sqlite3
 HOME = Path.home()
 DHARMA_STATE = HOME / ".dharma"
 DHARMA_SWARM = Path(__file__).resolve().parent.parent
+AI_DEEP = "#9C7444"
+VERDIGRIS = "#62725D"
+OCHRE = "#A17A47"
+BENGARA = "#8C5448"
+WISTERIA = "#74677D"
 
 
 def _read_json(path: Path) -> dict | None:
@@ -99,7 +104,7 @@ def build_status_text() -> str:
         Multi-line string with Rich markup suitable for writing into a
         StreamOutput or RichLog widget.
     """
-    lines: list[str] = ["[bold cyan]--- DGC System Status ---[/bold cyan]"]
+    lines: list[str] = [f"[bold {AI_DEEP}]--- DGC System Status ---[/bold {AI_DEEP}]"]
 
     # Active research thread
     thread_file = DHARMA_STATE / "thread_state.json"
@@ -107,7 +112,7 @@ def build_status_text() -> str:
         ts = _read_json(thread_file)
         if ts:
             lines.append(
-                f"  Thread: [cyan]{ts.get('current_thread', 'unknown')}[/cyan]"
+                f"  Thread: [{VERDIGRIS}]{ts.get('current_thread', 'unknown')}[/{VERDIGRIS}]"
             )
 
     # Last pulse timestamp
@@ -171,7 +176,7 @@ def build_runtime_status_text(
     runtime_db_path: Path | None = None,
 ) -> str:
     """Build a runtime control-plane summary from the canonical SQLite spine."""
-    lines: list[str] = ["[bold cyan]--- Runtime Control Plane ---[/bold cyan]"]
+    lines: list[str] = [f"[bold {AI_DEEP}]--- Runtime Control Plane ---[/bold {AI_DEEP}]"]
     db_path = runtime_db_path or _runtime_db_path()
 
     if db_path.exists():
@@ -224,7 +229,7 @@ def build_runtime_status_text(
                     (max(1, limit),),
                 ).fetchall()
                 if runs:
-                    lines.append("  [cyan]Active runs[/cyan]")
+                    lines.append(f"  [{AI_DEEP}]Active runs[/{AI_DEEP}]")
                     for row in runs:
                         artifact_id = str(row["current_artifact_id"] or "")
                         artifact_label = artifact_id[:8] if artifact_id else "-"
@@ -244,7 +249,7 @@ def build_runtime_status_text(
                     (max(1, limit),),
                 ).fetchall()
                 if artifacts:
-                    lines.append("  [cyan]Recent artifacts[/cyan]")
+                    lines.append(f"  [{AI_DEEP}]Recent artifacts[/{AI_DEEP}]")
                     for row in artifacts:
                         payload_name = Path(str(row["payload_path"] or "")).name or "-"
                         lines.append(
@@ -262,7 +267,7 @@ def build_runtime_status_text(
                     (max(1, limit),),
                 ).fetchall()
                 if actions:
-                    lines.append("  [cyan]Recent operator actions[/cyan]")
+                    lines.append(f"  [{AI_DEEP}]Recent operator actions[/{AI_DEEP}]")
                     for row in actions:
                         task_id = str(row["task_id"] or "")
                         task_label = task_id[:12] if task_id else "-"
@@ -273,11 +278,11 @@ def build_runtime_status_text(
                             f"task={task_label}"
                         )
         except sqlite3.Error as exc:
-            lines.append(f"  [red]Runtime DB unreadable: {exc}[/red]")
+            lines.append(f"  [{BENGARA}]Runtime DB unreadable: {exc}[/{BENGARA}]")
     else:
         lines.append(f"  [dim]No canonical runtime database found at {db_path}[/dim]")
 
-    lines.append("  [cyan]Toolchain[/cyan]")
+    lines.append(f"  [{AI_DEEP}]Toolchain[/{AI_DEEP}]")
     for prog in ("claude", "python3", "node"):
         lines.append(f"    {prog}: {shutil.which(prog) or 'not found'}")
 
@@ -294,7 +299,7 @@ def build_darwin_status_text(
     from dharma_swarm.experiment_log import ExperimentRecord
     from dharma_swarm.experiment_memory import ExperimentMemory
 
-    lines: list[str] = ["[bold cyan]--- Darwin Control ---[/bold cyan]"]
+    lines: list[str] = [f"[bold {AI_DEEP}]--- Darwin Control ---[/bold {AI_DEEP}]"]
     evo_dir = DHARMA_STATE / "evolution"
     experiments_path = evo_dir / "experiments.jsonl"
     archive_path = evo_dir / "archive.jsonl"
@@ -356,7 +361,7 @@ def build_darwin_status_text(
             )
 
         if snapshot.avoidance_hints:
-            lines.append("  [cyan]Avoidance hints[/cyan]")
+            lines.append(f"  [{AI_DEEP}]Avoidance hints[/{AI_DEEP}]")
             for hint in snapshot.avoidance_hints[:3]:
                 lines.append(f"    - {hint}")
     else:
@@ -364,7 +369,7 @@ def build_darwin_status_text(
 
     raw_entries = _load_jsonl_tail(archive_path, limit=archive_limit)
     if raw_entries:
-        lines.append("  [cyan]Recent archived mutations[/cyan]")
+        lines.append(f"  [{AI_DEEP}]Recent archived mutations[/{AI_DEEP}]")
         for entry in raw_entries[-archive_limit:]:
             fitness_payload = entry.get("fitness", {})
             try:
@@ -448,7 +453,7 @@ def build_darwin_status_text(
                         fresh_invalid_chain_count += 1
                 latest_reciprocity = reciprocity
 
-        lines.append("  [cyan]DSE observation stream[/cyan]")
+        lines.append(f"  [{AI_DEEP}]DSE observation stream[/{AI_DEEP}]")
         dse_summary = [f"observations={len(dse_rows)}"]
         if components:
             dse_summary.append(f"components={len(components)}")

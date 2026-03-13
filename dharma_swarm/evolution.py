@@ -11,11 +11,13 @@ from __future__ import annotations
 
 import asyncio
 from collections import defaultdict
+import hashlib
 import logging
 import re
 import shutil
 from tempfile import TemporaryDirectory
 import time
+from collections.abc import Callable
 from enum import Enum
 from pathlib import Path
 from typing import Any, Optional
@@ -198,6 +200,7 @@ class DarwinEngine:
         convergence_config: ConvergenceConfig | None = None,
         mutation_rate: float = 0.1,
         landscape_probe_interval: int = 5,
+        max_cycle_tokens: int = 0,
         landscape_probe_workspace: Path | None = None,
         landscape_probe_test_command: str = "python3 -m pytest tests/ -q --tb=short",
         landscape_probe_timeout: float = 60.0,
@@ -252,11 +255,25 @@ class DarwinEngine:
         self._router_drift_thresholds = router_drift_thresholds or DriftGuardThresholds()
         self._completed_cycles = 0
         self._adaptive_strategy = "explore"
+        self._max_cycle_tokens = max(0, int(max_cycle_tokens))
+        self._session_tokens_used = 0
         self.last_landscape_probe: LandscapeProbe | None = None
         self.last_experiment_memory: ExperimentMemorySnapshot | None = None
         self.landscape_mapper = FitnessLandscapeMapper(self)
         self._dse_integrator: Any | None = None
         self._initialized: bool = False
+        # Phase 4 velocity: content-hash skip for unchanged files
+        self._file_hashes: dict[str, str] = {}
+        # Phase 4 velocity: pending background trace tasks
+        self._trace_tasks: set[asyncio.Task[None]] = set()
+
+    # -- Phase 4: fire-and-forget trace helper --------------------------------
+
+    def _trace_bg(self, entry: TraceEntry) -> None:
+        """Log a trace entry in the background without blocking the caller."""
+        task = asyncio.create_task(self.traces.log_entry(entry))
+        self._trace_tasks.add(task)
+        task.add_done_callback(self._trace_tasks.discard)
 
     def get_fitness_weights(self) -> dict[str, float]:
         """Return the active normalized fitness weights."""
@@ -822,7 +839,7 @@ class DarwinEngine:
         result.adaptive_strategy = strategy
 
         if self._initialized:
-            await self.traces.log_entry(
+            self._trace_bg(
                 TraceEntry(
                     agent="darwin_engine",
                     action="landscape_probe",
@@ -1031,7 +1048,7 @@ class DarwinEngine:
             f"Circuit breaker tripped after {count} repeated failures "
             f"for signature={sig}. Strategy pivot required."
         )
-        await self.traces.log_entry(
+        self._trace_bg(
             TraceEntry(
                 agent="darwin_executor",
                 action="circuit_breaker",
@@ -1098,7 +1115,7 @@ class DarwinEngine:
                     proposal.id,
                     outcome.attempts,
                 )
-                await self.traces.log_entry(
+                self._trace_bg(
                     TraceEntry(
                         agent="darwin_engine",
                         action="witness_reroute",
@@ -1127,8 +1144,8 @@ class DarwinEngine:
                     result.reason,
                 )
 
-            # Log trace for gate check
-            await self.traces.log_entry(
+            # Log trace for gate check (fire-and-forget)
+            self._trace_bg(
                 TraceEntry(
                     agent="darwin_engine",
                     action="gate_check",
@@ -1494,6 +1511,8 @@ class DarwinEngine:
         proposal_by_id = {p.id: p for p in proposals}
         failure_streaks: dict[str, int] = defaultdict(int)
 
+        # Stage execution context for all proposals
+        ordered_proposals: list[Proposal] = []
         for proposal_id in plan.ordered_proposal_ids:
             proposal = proposal_by_id[proposal_id]
             self._stage_execution_context(
@@ -1507,8 +1526,14 @@ class DarwinEngine:
                 ),
                 cycle_id=result.cycle_id,
             )
-            # Gate check
-            await self.gate_check(proposal)
+            ordered_proposals.append(proposal)
+
+        # Phase 4: parallel gate-check all proposals
+        await asyncio.gather(
+            *(self.gate_check(p) for p in ordered_proposals)
+        )
+
+        for proposal in ordered_proposals:
             if proposal.status == EvolutionStatus.REJECTED:
                 await self._trip_circuit_breaker_if_needed(
                     proposal=proposal,
@@ -1634,8 +1659,8 @@ class DarwinEngine:
             timeout=timeout,
         )
 
-        # Log trace
-        await self.traces.log_entry(
+        # Log trace (fire-and-forget)
+        self._trace_bg(
             TraceEntry(
                 agent="darwin_engine",
                 action="apply_diff_and_test",
@@ -1699,8 +1724,8 @@ class DarwinEngine:
             proposal.status = EvolutionStatus.TESTING
             result = await sandbox.execute(test_command, timeout=timeout)
 
-            # Log trace
-            await self.traces.log_entry(
+            # Log trace (fire-and-forget)
+            self._trace_bg(
                 TraceEntry(
                     agent="darwin_engine",
                     action="sandbox_test",
@@ -1751,6 +1776,9 @@ class DarwinEngine:
         proposal_by_id = {p.id: p for p in proposals}
         failure_streaks: dict[str, int] = defaultdict(int)
 
+        # Stage execution context and resolve targets for all proposals
+        ordered_proposals: list[Proposal] = []
+        proposal_targets: dict[str, Any] = {}
         for proposal_id in plan.ordered_proposal_ids:
             proposal = proposal_by_id[proposal_id]
             target = self.resolve_execution_target(
@@ -1763,8 +1791,15 @@ class DarwinEngine:
                 fallback_rollback_policy="revert_patch",
             )
             self._stage_execution_context(proposal, target, cycle_id=result.cycle_id)
-            # Gate check
-            await self.gate_check(proposal)
+            ordered_proposals.append(proposal)
+            proposal_targets[proposal.id] = target
+
+        # Phase 4: parallel gate-check all proposals
+        await asyncio.gather(
+            *(self.gate_check(p) for p in ordered_proposals)
+        )
+
+        for proposal in ordered_proposals:
             if proposal.status == EvolutionStatus.REJECTED:
                 await self._trip_circuit_breaker_if_needed(
                     proposal=proposal,
@@ -1774,6 +1809,7 @@ class DarwinEngine:
                 continue
 
             result.proposals_gated += 1
+            target = proposal_targets[proposal.id]
 
             # Apply diff (if present) then sandbox test
             if proposal.diff.strip():
@@ -2118,6 +2154,15 @@ class DarwinEngine:
             return None
 
         source = source_file.read_text(encoding="utf-8")
+
+        # Phase 4: content-hash skip — don't re-propose for unchanged files
+        source_hash = hashlib.sha256(source.encode()).hexdigest()
+        file_key = str(source_file.resolve())
+        if self._file_hashes.get(file_key) == source_hash:
+            logger.debug("Skipping unchanged file: %s", source_file.name)
+            return None
+        self._file_hashes[file_key] = source_hash
+
         if len(source) > 15_000:
             source = source[:15_000] + "\n# ... truncated ..."
 
@@ -2163,11 +2208,37 @@ class DarwinEngine:
             temperature=min(1.0, max(0.3, 0.4 + mutation_rate)),
         )
 
+        # Token budget check
+        if (
+            self._max_cycle_tokens > 0
+            and self._session_tokens_used >= self._max_cycle_tokens
+        ):
+            logger.warning(
+                "Token budget exhausted (%d/%d) — skipping proposal for %s",
+                self._session_tokens_used,
+                self._max_cycle_tokens,
+                source_file.name,
+            )
+            return None
+
         try:
             response = await provider.complete(request)
         except Exception as exc:
             logger.error("LLM proposal generation failed: %s", exc)
             return None
+
+        # Track token usage
+        tokens_used = int(
+            response.usage.get("total_tokens")
+            or (
+                response.usage.get("prompt_tokens", 0)
+                + response.usage.get("completion_tokens", 0)
+                + response.usage.get("input_tokens", 0)
+                + response.usage.get("output_tokens", 0)
+            )
+            or 0
+        )
+        self._session_tokens_used += tokens_used
 
         fields = self._parse_llm_proposal(response.content)
 
@@ -2189,7 +2260,7 @@ class DarwinEngine:
             think_notes=think,
         )
 
-        await self.traces.log_entry(
+        self._trace_bg(
             TraceEntry(
                 agent="darwin_engine",
                 action="llm_generate_proposal",
@@ -2222,47 +2293,136 @@ class DarwinEngine:
         test_command: str = "python3 -m pytest tests/ -q --tb=short -x --timeout=10",
         timeout: float = 60.0,
         context: str = "",
+        router: Any | None = None,
+        shadow: bool = False,
+        on_progress: Callable[[str, dict[str, Any]], None] | None = None,
     ) -> CycleResult:
         """Autonomous evolution: LLM proposes improvements, engine evaluates them.
 
         For each source file, generates a proposal via LLM, then runs the
         full gate → test → evaluate → archive pipeline.
 
+        When *router* is provided, the engine uses the evolution roster to
+        assign a different model (and provider) to each source file based
+        on the current adaptive strategy.  This produces more diverse
+        proposals across frontier, strong, fast, free, and local tiers.
+
+        When *shadow* is True, proposals are generated, gated, and evaluated,
+        but diffs are NOT applied to the real codebase.  Useful for safe
+        experimentation and cost estimation.
+
         Args:
-            provider: An LLM provider with async ``complete()`` method.
+            provider: Fallback LLM provider with async ``complete()`` method.
             source_files: List of Python files to propose improvements for.
-            model: Model identifier for the provider.
+            model: Fallback model identifier (used when roster is unavailable).
             test_command: Shell command for testing proposals.
             timeout: Fallback timeout for component test execution.
             context: Extra context to guide the LLM (focus areas, recent errors).
+            router: Optional ModelRouter for multi-model roster selection.
+            shadow: If True, do not apply diffs — evaluate proposals in dry-run mode.
+            on_progress: Optional callback ``(event_name, data)`` for real-time UX.
 
         Returns:
             A CycleResult summarizing the autonomous evolution cycle.
         """
+        _emit = on_progress or (lambda _e, _d: None)
+
         await self.refresh_experiment_memory()
-        proposals: list[Proposal] = []
-        for sf in source_files:
-            proposal = await self.generate_proposal(
-                provider=provider,
+        _emit("cycle_start", {
+            "files": [str(sf) for sf in source_files],
+            "shadow": shadow,
+            "strategy": self._current_adaptive_strategy(),
+        })
+
+        # ── Multi-model roster selection ──────────────────────────────
+        if router is not None:
+            from dharma_swarm.evolution_roster import select_models_for_cycle
+            strategy = self._current_adaptive_strategy()
+            slots = select_models_for_cycle(
+                n=len(source_files), strategy=strategy,
+            )
+            file_assignments = list(zip(source_files, slots))
+            logger.info(
+                "Multi-model cycle (strategy=%s): %s",
+                strategy,
+                ", ".join(
+                    f"{sf.name}→{slot.display_name}"
+                    for sf, slot in file_assignments
+                ),
+            )
+        else:
+            file_assignments = None
+
+        # Phase 4: parallel LLM dispatch — all files hit providers simultaneously
+        async def _generate_one(idx: int, sf: Path) -> Proposal | None:
+            if file_assignments is not None:
+                _, slot = file_assignments[idx]
+                try:
+                    file_provider = router.get_provider(slot.provider)
+                    file_model = slot.model_id
+                except KeyError:
+                    logger.warning(
+                        "Provider %s unavailable for %s — falling back",
+                        slot.provider.value, slot.display_name,
+                    )
+                    file_provider = provider
+                    file_model = model
+            else:
+                file_provider = provider
+                file_model = model
+
+            return await self.generate_proposal(
+                provider=file_provider,
                 source_file=sf,
                 context=context,
-                model=model,
+                model=file_model,
             )
-            if proposal is not None:
-                proposals.append(proposal)
+
+        _emit("proposals_generating", {"count": len(source_files)})
+        results = await asyncio.gather(
+            *(_generate_one(idx, sf) for idx, sf in enumerate(source_files)),
+            return_exceptions=True,
+        )
+        proposals: list[Proposal] = []
+        for r in results:
+            if isinstance(r, BaseException):
+                logger.error("Parallel proposal generation failed: %s", r)
+            elif r is not None:
+                proposals.append(r)
+
+        _emit("proposals_generated", {
+            "count": len(proposals),
+            "skipped": len(source_files) - len(proposals),
+        })
 
         if not proposals:
             logger.info("No proposals generated — nothing to evolve")
             return CycleResult(proposals_submitted=0)
 
-        result = await self.run_cycle_with_sandbox(
-            proposals,
-            test_command=test_command,
-            timeout=timeout,
-        )
+        if shadow:
+            # Shadow mode: gate and evaluate without applying diffs
+            logger.info("Shadow mode: evaluating %d proposals (no diffs applied)", len(proposals))
+            for p in proposals:
+                p.diff = ""  # Strip diffs so sandbox doesn't apply them
+            result = await self.run_cycle(proposals)
+        else:
+            result = await self.run_cycle_with_sandbox(
+                proposals,
+                test_command=test_command,
+                timeout=timeout,
+            )
 
+        _emit("cycle_complete", {
+            "proposals": result.proposals_submitted,
+            "archived": result.proposals_archived,
+            "best_fitness": result.best_fitness,
+            "duration": result.duration_seconds,
+            "tokens": self._session_tokens_used,
+            "shadow": shadow,
+        })
         logger.info(
-            "Auto-evolve complete: %d files → %d proposals → %d archived (best=%.3f)",
+            "Auto-evolve complete%s: %d files → %d proposals → %d archived (best=%.3f)",
+            " [SHADOW]" if shadow else "",
             len(source_files),
             result.proposals_submitted,
             result.proposals_archived,
@@ -2272,8 +2432,8 @@ class DarwinEngine:
 
     # -- auto-commit ---------------------------------------------------------
 
-    @staticmethod
     async def commit_if_worthy(
+        self,
         proposal: Proposal,
         fitness_threshold: float = 0.6,
         workspace: Path | None = None,
@@ -2357,33 +2517,48 @@ class DarwinEngine:
         interval: float = 1800.0,
         fitness_threshold: float = 0.6,
         max_cycles: int | None = None,
+        router: Any | None = None,
+        shadow: bool = False,
+        on_progress: Callable[[str, dict[str, Any]], None] | None = None,
     ) -> None:
         """Run autonomous evolution continuously.
 
         Each cycle:
         1. Pick source files to evolve
-        2. Generate proposals via LLM (cheap, OpenRouter)
+        2. Generate proposals via LLM — multi-model when router is provided
         3. Gate-check, apply diffs, run tests
         4. Evaluate fitness, archive
-        5. Auto-commit if fitness > threshold
+        5. Auto-commit if fitness > threshold (skipped in shadow mode)
         6. Sleep, repeat
 
         Args:
-            think_provider: LLM provider for proposal generation (OpenRouter).
+            think_provider: Fallback LLM provider for proposal generation.
             source_dir: Directory containing Python source files.
-            model: Model for proposal generation.
+            model: Fallback model for proposal generation.
             interval: Seconds between cycles.
             fitness_threshold: Minimum fitness to auto-commit.
             max_cycles: Stop after N cycles (None = run forever).
+            router: Optional ModelRouter for multi-model roster selection.
+            shadow: If True, do not apply diffs or commit.
+            on_progress: Optional callback ``(event_name, data)`` for real-time UX.
         """
         src = source_dir or (Path.home() / "dharma_swarm" / "dharma_swarm")
         cycle_count = 0
         context_parts: list[str] = []
 
-        logger.info(
-            "Darwin daemon starting: interval=%.0fs, threshold=%.2f, src=%s",
-            interval, fitness_threshold, src,
-        )
+        if router is not None:
+            from dharma_swarm.evolution_roster import roster_summary
+            logger.info(
+                "Darwin daemon starting (MULTI-MODEL): interval=%.0fs, "
+                "threshold=%.2f, src=%s\n%s",
+                interval, fitness_threshold, src, roster_summary(),
+            )
+        else:
+            logger.info(
+                "Darwin daemon starting: interval=%.0fs, threshold=%.2f, "
+                "model=%s, src=%s",
+                interval, fitness_threshold, model, src,
+            )
 
         while True:
             cycle_count += 1
@@ -2432,35 +2607,51 @@ class DarwinEngine:
                     source_files=files,
                     model=model,
                     context=context,
+                    router=router,
+                    shadow=shadow,
+                    on_progress=on_progress,
                 )
 
-                # Auto-commit winning proposals
+                # Auto-commit winning proposals (skip in shadow mode)
                 committed = 0
-                recent = await self.archive.get_latest(result.proposals_archived)
-                for entry in recent:
-                    if self.score_fitness(entry.fitness) >= fitness_threshold:
-                        # Re-create a minimal proposal for commit
-                        p = Proposal(
-                            component=entry.component,
-                            change_type=entry.change_type,
-                            description=entry.description,
-                            diff=entry.diff,
-                            actual_fitness=entry.fitness,
-                        )
-                        commit = await self.commit_if_worthy(
-                            p, fitness_threshold=fitness_threshold
-                        )
-                        if commit:
-                            committed += 1
+                if not shadow and result.proposals_archived > 0:
+                    recent = await self.archive.get_latest(result.proposals_archived)
+                    for entry in recent:
+                        if self.score_fitness(entry.fitness) >= fitness_threshold:
+                            p = Proposal(
+                                component=entry.component,
+                                change_type=entry.change_type,
+                                description=entry.description,
+                                diff=entry.diff,
+                                actual_fitness=entry.fitness,
+                            )
+                            commit = await self.commit_if_worthy(
+                                p, fitness_threshold=fitness_threshold
+                            )
+                            if commit:
+                                committed += 1
+
+                # Check token budget exhaustion
+                if (
+                    self._max_cycle_tokens > 0
+                    and self._session_tokens_used >= self._max_cycle_tokens
+                ):
+                    logger.info(
+                        "Token budget exhausted (%d/%d) — stopping daemon",
+                        self._session_tokens_used,
+                        self._max_cycle_tokens,
+                    )
+                    break
 
                 logger.info(
                     "Daemon cycle %d complete: %d proposals, %d archived, "
-                    "%d committed, best=%.3f",
+                    "%d committed, best=%.3f, tokens=%d",
                     cycle_count,
                     result.proposals_submitted,
                     result.proposals_archived,
                     committed,
                     result.best_fitness,
+                    self._session_tokens_used,
                 )
 
             except Exception as exc:

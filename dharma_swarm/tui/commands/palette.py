@@ -56,10 +56,10 @@ DGC_COMMANDS: tuple[DGCCommand, ...] = (
     DGCCommand("HUM Dreams", "Subconscious dreams", "/hum", "dharma"),
     # Chat
     DGCCommand("Launch Claude", "Launch native Claude Code UI", "/chat", "chat"),
-    DGCCommand("Continue Session", "Continue last Claude session", "/chat continue", "chat"),
+    DGCCommand("Continue Session", "Continue last Claude Code session", "/chat continue", "chat"),
     DGCCommand("New Session", "Start new chat session", "/reset", "chat"),
     DGCCommand("Clear Screen", "Clear output", "/clear", "chat"),
-    DGCCommand("Cancel Run", "Cancel active Claude run", "/cancel", "chat"),
+    DGCCommand("Cancel Run", "Cancel active provider run", "/cancel", "chat"),
 )
 
 

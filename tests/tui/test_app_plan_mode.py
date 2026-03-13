@@ -68,6 +68,11 @@ class _DummyStore:
     def latest_session(self, **kwargs: Any) -> dict[str, Any] | None:
         return self._meta
 
+    def load_meta(self, session_id: str) -> dict[str, Any]:
+        if self._meta is None:
+            raise FileNotFoundError(session_id)
+        return dict(self._meta)
+
 
 def test_send_to_claude_plan_mode_uses_strict_prompt_and_default_permissions(
     monkeypatch,
@@ -181,6 +186,79 @@ def test_send_to_claude_blocks_when_actively_running(monkeypatch) -> None:
     assert runner.mark_end_calls == 0
     assert len(runner.calls) == 0
     assert any("already running" in line for line in main.stream_output.errors)
+
+
+def test_send_to_claude_recovers_running_lock_from_completed_session_meta(monkeypatch) -> None:
+    app = DGCApp()
+    runner = _DummyRunner()
+    runner.is_running = True
+    app._provider_runner = runner  # type: ignore[assignment]
+    app._session.session_id = "sid-meta-stale"
+    app._session_store = _DummyStore({"status": "completed"})  # type: ignore[assignment]
+    app._set_mode("N")
+
+    main = _DummyMain(running=True)
+    monkeypatch.setattr(app, "_get_main_screen", lambda: main)
+    monkeypatch.setattr(app, "_get_state_context", lambda: "")
+
+    app._send_to_claude("resume after stale completion")
+
+    assert runner.mark_end_calls == 1
+    assert len(runner.calls) == 1
+    assert any(
+        "Recovered stale provider lock from persisted session status=completed"
+        in line
+        for line in main.stream_output.system
+    )
+
+
+def test_report_provider_inactivity_recovers_from_completed_session_meta(monkeypatch) -> None:
+    app = DGCApp()
+    runner = _DummyRunner()
+    runner.is_running = True
+    app._provider_runner = runner  # type: ignore[assignment]
+    app._session.session_id = "sid-meta-inactivity"
+    app._session_store = _DummyStore({"status": "completed"})  # type: ignore[assignment]
+    app._active_provider = "codex"
+    app._active_model = "gpt-5.4"
+    app._last_provider_event_ts = 0.0
+
+    main = _DummyMain(running=True)
+    monkeypatch.setattr(app, "_get_main_screen", lambda: main)
+
+    app._report_provider_inactivity()
+
+    assert runner.mark_end_calls == 1
+    assert main.status_bar.is_running is False
+    assert not any("No new events from" in line for line in main.stream_output.system)
+    assert any(
+        "Recovered stale provider lock from persisted session status=completed"
+        in line
+        for line in main.stream_output.system
+    )
+
+
+def test_report_provider_inactivity_explains_codex_offstream_gap(monkeypatch) -> None:
+    app = DGCApp()
+    runner = _DummyRunner()
+    runner.is_running = True
+    app._provider_runner = runner  # type: ignore[assignment]
+    app._active_provider = "codex"
+    app._active_model = "gpt-5.4"
+    app._last_provider_event_ts = 0.0
+    app._last_provider_event_label = "tool shell finished"
+
+    main = _DummyMain(running=True)
+    monkeypatch.setattr(app, "_get_main_screen", lambda: main)
+    monkeypatch.setattr(app, "_recover_stale_provider_lock_from_session_meta", lambda: False)
+
+    app._report_provider_inactivity()
+
+    assert any(
+        "reasoning off-stream after the last tool result" in line
+        for line in main.stream_output.system
+    )
+    assert any("/cancel" in line for line in main.stream_output.system)
 
 
 def test_restore_last_session_context_populates_resume_state(monkeypatch) -> None:

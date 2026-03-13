@@ -53,9 +53,9 @@ class ToolCallCard(Widget):
     }
 
     STATUS_COLORS: dict[str, str] = {
-        "running": "#C2956B",   # Kitsurubami
-        "success": "#6E8B74",   # Rokusho
-        "error": "#B5564E",     # Bengara
+        "running": "#B0895A",   # Kitsurubami
+        "success": "#738C78",   # Rokusho
+        "error": "#9A5E55",     # Bengara
     }
 
     def on_mount(self) -> None:

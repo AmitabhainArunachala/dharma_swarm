@@ -10,7 +10,15 @@ import pytest
 
 from dharma_swarm.tui.engine.adapters.base import CompletionRequest, ProviderConfig
 from dharma_swarm.tui.engine.adapters.codex import CodexAdapter
-from dharma_swarm.tui.engine.events import ErrorEvent, SessionEnd, SessionStart, TextComplete
+from dharma_swarm.tui.engine.events import (
+    ErrorEvent,
+    SessionEnd,
+    SessionStart,
+    TextComplete,
+    ToolCallComplete,
+    ToolResult,
+    UsageReport,
+)
 
 
 def _j(obj: dict) -> str:
@@ -195,3 +203,108 @@ async def test_codex_stream_handles_large_json_event_without_readline_limit(
         for e in events
     )
     assert any(isinstance(e, SessionEnd) and e.success for e in events)
+
+
+@pytest.mark.asyncio
+async def test_codex_stream_surfaces_progress_and_command_execution(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    adapter = CodexAdapter(
+        config=ProviderConfig(provider_id="codex", default_model="gpt-5.4")
+    )
+
+    async def _fake_spawn(cmd: list[str], env: dict[str, str]) -> _FakeProc:
+        output_path = Path(cmd[cmd.index("-o") + 1])
+        output_path.write_text("/Users/dhyana/dharma_swarm\n", encoding="utf-8")
+        return _FakeProc(
+            [
+                _j({"type": "thread.started", "thread_id": "thread-tools"}),
+                _j(
+                    {
+                        "type": "item.completed",
+                        "item": {
+                            "id": "item_0",
+                            "type": "agent_message",
+                            "text": "Running `pwd` to verify the current working directory.",
+                        },
+                    }
+                ),
+                _j(
+                    {
+                        "type": "item.started",
+                        "item": {
+                            "id": "item_1",
+                            "type": "command_execution",
+                            "command": "/bin/zsh -lc pwd",
+                            "status": "in_progress",
+                        },
+                    }
+                ),
+                _j(
+                    {
+                        "type": "item.completed",
+                        "item": {
+                            "id": "item_1",
+                            "type": "command_execution",
+                            "command": "/bin/zsh -lc pwd",
+                            "aggregated_output": "/Users/dhyana/dharma_swarm\n",
+                            "exit_code": 0,
+                            "status": "completed",
+                        },
+                    }
+                ),
+                _j(
+                    {
+                        "type": "turn.completed",
+                        "usage": {
+                            "input_tokens": 16582,
+                            "cached_input_tokens": 14080,
+                            "output_tokens": 280,
+                        },
+                    }
+                ),
+            ],
+            exit_code=0,
+        )
+
+    monkeypatch.setattr(adapter, "_spawn_process", _fake_spawn)
+
+    req = CompletionRequest(messages=[{"role": "user", "content": "pwd"}])
+    events = [e async for e in adapter.stream(req, session_id="sid-codex-tools")]
+
+    start = next((e for e in events if isinstance(e, SessionStart)), None)
+    assert isinstance(start, SessionStart)
+    assert start.tools_available == ["shell"]
+
+    progress = next(
+        (
+            e for e in events
+            if isinstance(e, TextComplete)
+            and e.role == "commentary"
+            and "Running `pwd`" in e.content
+        ),
+        None,
+    )
+    assert isinstance(progress, TextComplete)
+
+    tool_call = next((e for e in events if isinstance(e, ToolCallComplete)), None)
+    assert isinstance(tool_call, ToolCallComplete)
+    assert tool_call.tool_name == "shell"
+    assert "pwd" in tool_call.arguments
+
+    tool_result = next((e for e in events if isinstance(e, ToolResult)), None)
+    assert isinstance(tool_result, ToolResult)
+    assert tool_result.tool_name == "shell"
+    assert tool_result.is_error is False
+    assert tool_result.content == "/Users/dhyana/dharma_swarm"
+
+    usage = next((e for e in events if isinstance(e, UsageReport)), None)
+    assert isinstance(usage, UsageReport)
+    assert usage.input_tokens == 16582
+    assert usage.output_tokens == 280
+
+    final_text = [
+        e for e in events if isinstance(e, TextComplete) and e.role == "assistant"
+    ]
+    assert len(final_text) == 1
+    assert final_text[0].content == "/Users/dhyana/dharma_swarm"

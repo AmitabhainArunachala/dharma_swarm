@@ -22,27 +22,27 @@ from textual.theme import Theme
 
 DharmaDarkTheme = Theme(
     name="dharma-dark",
-    primary="#4A7B9D",       # Ai-iro — Hokusai's signature indigo
-    secondary="#8A7263",     # Kitsune-iro — fox-brown, warm muted earth
-    accent="#5D8C6E",        # Rokusho — verdigris green, temple patina
-    warning="#C2956B",       # Kitsurubami — persimmon-tan
-    error="#C25B52",         # Bengara — iron oxide red-ochre
-    success="#5D8C6E",       # Rokusho — verdigris for harmony
-    surface="#18171A",       # Sumi-iro — deep charcoal with cool undertone
-    panel="#131215",         # Kuro-cha — blackened tea
+    primary="#46525B",
+    secondary="#A17A47",
+    accent="#62725D",
+    warning="#A17A47",
+    error="#8C5448",
+    success="#62725D",
+    surface="#121117",
+    panel="#0F1014",         # Kuro-cha — blackened tea
     dark=True,
     variables={
-        "bg-base": "#0E0D10",       # Ro-iro — lacquer black, true dark
-        "bg-elevated": "#18171A",   # Sumi-iro — ink wash
-        "bg-surface": "#1F1E22",    # Hai-iro — ash grey surface
-        "bg-overlay": "#272630",    # Nezumi — mouse grey with indigo tint
-        "text-primary": "#DCD5C4",  # Torinoko — aged washi cream
-        "text-secondary": "#9B928A", # Usuzumi — dilute ink
-        "text-disabled": "#5A5560", # Nibi-iro — dull grey-purple
-        "accent-bright": "#6B9BB5", # Hanada — washed indigo, brighter
-        "accent-dim": "#4A7B9D",    # Ai-iro — Hokusai blue
-        "accent-subtle": "#2D3D4F", # Kachi — dark victory indigo
-        "thinking": "#9B85B8",      # Fuji-iro — wisteria purple
-        "info": "#6B9BB5",          # Hanada — washed indigo
+        "bg-base": "#090A0F",        # Ro-iro — lacquer black
+        "bg-elevated": "#121117",
+        "bg-surface": "#18171C",
+        "bg-overlay": "#201E24",
+        "text-primary": "#DCCFBD",
+        "text-secondary": "#A89A8B",
+        "text-disabled": "#676062",  # Nibi-iro — dull grey-purple
+        "accent-bright": "#6A7A62",
+        "accent-dim": "#46525B",
+        "accent-subtle": "#313B37",
+        "thinking": "#74677D",
+        "info": "#46525B",
     },
 )

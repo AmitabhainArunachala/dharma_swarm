@@ -472,6 +472,7 @@ async def generate_evolved_prompt(
     cycle_number: int = 0,
     colm_days: int | None = None,
     history_depth: int = 5,
+    llm_timeout_sec: float = 12.0,
 ) -> str:
     """Generate evolved prompt using OpenRouter with the 3-layer system.
 
@@ -489,6 +490,7 @@ async def generate_evolved_prompt(
         cycle_number: Current cycle number.
         colm_days: Days until COLM deadline.
         history_depth: How many past cycles to analyze.
+        llm_timeout_sec: Timeout for the OpenRouter call before callers may fall back.
 
     Returns:
         The generated evolved prompt text.
@@ -560,7 +562,7 @@ async def generate_evolved_prompt(
         prompt_text += "\n\n## ADDITIONAL CONTEXT\n\n" + "\n\n".join(extras)
 
     # Use Sonnet for meta-level prompt engineering (cheaper than Opus, fast)
-    async with httpx.AsyncClient(timeout=180.0) as client:
+    async with httpx.AsyncClient(timeout=httpx.Timeout(llm_timeout_sec)) as client:
         resp = await client.post(
             "https://openrouter.ai/api/v1/chat/completions",
             json={

@@ -26,7 +26,7 @@
       "minute": 30
     },
     "model": "opus",
-    "prompt": "Generate a morning briefing for Dhyana (4:30 AM WITA). Check:\n1. AGNI state (~/agni-workspace/WORKING.md)\n2. Trishula inbox count and any non-ack messages\n3. DGC memory developments from overnight\n4. R_V paper status (~/mech-interp-latent-lab-phase1/R_V_PAPER/)\n5. Any blocked items anywhere in the system\n6. DREAM JOURNAL: read ~/.dharma/subconscious/journal/LATEST_JOURNAL.md — if it exists, include the HOT-temperature ideas from last night's subconscious layer as a section called 'From the Subconscious'. Flag any publishable-relevant or experiment-relevant seeds.\n\nWrite brief, actionable summary to ~/dgc-core/daemon/morning_brief.md",
+    "prompt": "Generate a morning briefing for Dhyana (4:30 AM WITA). Check:\n1. AGNI state (~/agni-workspace/WORKING.md)\n2. Trishula inbox count and any non-ack messages\n3. DGC memory developments from overnight\n4. R_V paper status (~/mech-interp-latent-lab-phase1/R_V_PAPER/)\n5. Any blocked items anywhere in the system\n6. DREAM JOURNAL: read ~/.dharma/subconscious/journal/LATEST_JOURNAL.md — if it exists, include the HOT-temperature ideas from last night's subconscious layer as a section called 'From the Subconscious'. Flag any publishable-relevant or experiment-relevant seeds.\n7. JAGAT KALYAN: Read ~/.dharma/shared/jk_pulse.md for momentum status. Read ~/.dharma/shared/jk_alert.md if it exists — include any HIGH URGENCY items (grant deadlines, partner moves). Check ~/jagat_kalyan/EVOLUTION_LOG.md for overnight codebase changes. Include a 'Jagat Kalyan' section in the brief.\n\nWrite brief, actionable summary to ~/dgc-core/daemon/morning_brief.md",
     "enabled": true
   },
   {
@@ -112,5 +112,38 @@
     "model": "sonnet",
     "enabled": false,
     "prompt": "Run subconscious fleet with 6 parallel agents.\n\nExecute:\ncd ~/dharma_swarm && python3 -c \"\nimport asyncio, json\nfrom dharma_swarm.subconscious_fleet import run_fleet\nresult = asyncio.run(run_fleet(fleet_size=6))\nhigh = result.get('high_salience', [])\nprint(f'Fleet done: {result[\\\"fleet_size\\\"]} agents, {len(result[\\\"dreams\\\"])} dreams, {len(high)} high-salience')\nfor d in high[:5]:\n    print(f'  [{d.get(\\\"resonance_type\\\",\\\"?\\\")}] {d.get(\\\"salience\\\",0):.2f}: {str(d.get(\\\"description\\\",\\\"\\\"))[:160]}')\nprint(\\\"Provider breakdown:\\\", result.get(\\\"provider_breakdown\\\", {}))\n\"\n\nWrite results to ~/.dharma/witness/fleet_$(date +%Y%m%d_%H%M).md with: agents used, dreams found, high-salience items, provider breakdown."
+  },
+  {
+    "id": "jk_scout",
+    "name": "Jagat Kalyan Scout",
+    "trigger": "cron",
+    "schedule": {
+      "hour": 7,
+      "minute": 0
+    },
+    "model": "sonnet",
+    "enabled": true,
+    "prompt": "You are the Jagat Kalyan Scout. Your job: find developments that advance the JK loop.\n\nSearch for (use web search):\n1. Carbon market news — Verra updates, Gold Standard changes, ICVCM decisions, new dMRV pilots\n2. AI company carbon pledges — any new commitments from Anthropic, Microsoft, Google, Meta, OpenAI, Amazon\n3. Grant deadlines — Anthropic Economic Futures (rolling, $10-50K), Microsoft Climate Innovation Fund, Bezos Earth Fund, Google.org Impact Challenge\n4. Ecological restoration breakthroughs — mangrove, reforestation, soil carbon projects seeking funding\n5. AI displacement data — new reports on job losses, just transition programs, workforce development\n6. Policy changes — EU carbon border adjustments, Article 6 implementations, national offset regulations\n\nCross-reference against ~/jagat_kalyan/PARTNER_RESEARCH.md — are any listed partners making moves?\n\nFor each finding:\n- URGENCY: HIGH (act within 7 days) / MEDIUM (act within 30 days) / LOW (background awareness)\n- RELEVANCE: How directly does this connect to the JK loop?\n- ACTION: What should Dhyana do about it?\n\nAppend findings to ~/jagat_kalyan/SCOUT_LOG.md (create if not exists, prepend today's date header).\nIf any HIGH URGENCY items, also write to ~/.dharma/shared/jk_alert.md for morning brief pickup.\n\nMax 500 words per scout run. No theater. Only real findings."
+  },
+  {
+    "id": "jk_evolve",
+    "name": "Jagat Kalyan Codebase Evolution",
+    "trigger": "cron",
+    "schedule": {
+      "hour": 2,
+      "minute": 0
+    },
+    "model": "sonnet",
+    "enabled": true,
+    "prompt": "You are the Jagat Kalyan Evolution Agent. Your job: make the JK codebase better every week.\n\nRead the current state:\n1. ~/jagat_kalyan/app.py — FastAPI application\n2. ~/jagat_kalyan/matching.py — Claude API matching engine\n3. ~/jagat_kalyan/models.py — SQLAlchemy models\n4. ~/jagat_kalyan/seed_data.py — Seed data\n5. ~/jagat_kalyan/WELFARE_TONS_SPEC.md — The mathematical spec\n6. ~/jagat_kalyan/EVOLUTION_LOG.md — Previous evolutions (if exists)\n\nPick ONE improvement from this priority list:\n- P0: Missing tests (create tests/test_matching.py, tests/test_models.py)\n- P0: Welfare-ton calculation endpoint (implement the W = C*E*A*B*V*P formula from spec)\n- P1: API documentation (OpenAPI descriptions for all endpoints)\n- P1: Carbon attribution middleware (per-request carbon estimate)\n- P2: Better seed data (more realistic projects from PARTNER_RESEARCH.md orgs)\n- P2: Health check endpoint (/health with DB status)\n- P3: Export endpoints (CSV/JSON of matches for reporting)\n- P3: Webhook for new match notifications\n\nFor the ONE improvement you pick:\n1. Write the code change\n2. Verify it doesn't break imports: cd ~/jagat_kalyan && source .venv/bin/activate && python -c 'from app import app; print(\"OK\")'\n3. Log what you did to ~/jagat_kalyan/EVOLUTION_LOG.md with date, what changed, why\n\nRules:\n- ONE change per run. Small, testable, shippable.\n- Don't break existing functionality.\n- Follow existing code style.\n- No sprawl. Edit existing files when possible."
+  },
+  {
+    "id": "jk_pulse",
+    "name": "Jagat Kalyan Pulse",
+    "trigger": "interval",
+    "interval_seconds": 21600,
+    "model": "flash",
+    "enabled": true,
+    "prompt": "You are the Jagat Kalyan Pulse. Quick health check:\n\n1. Does ~/jagat_kalyan/ exist with app.py, matching.py, models.py? (basic sanity)\n2. Is ~/jagat_kalyan/jagat_kalyan.db present and has data? (sqlite3 ... 'SELECT COUNT(*) FROM projects')\n3. When was ~/jagat_kalyan/SCOUT_LOG.md last modified? (days since last scout)\n4. When was ~/jagat_kalyan/EVOLUTION_LOG.md last modified? (days since last evolution)\n5. Any files in ~/.dharma/shared/jk_alert.md? (unread alerts)\n\nCompute MOMENTUM SCORE:\n- days_since_scout + days_since_evolution + days_since_any_jk_file_changed / 3\n- GREEN: <3 days avg | YELLOW: 3-7 days | RED: >7 days\n\nWrite one-line status to ~/.dharma/shared/jk_pulse.md:\nJK PULSE [DATE] [GREEN/YELLOW/RED] — [one sentence summary]\n\nMax 50 words total. This is a heartbeat, not a report."
   }
 ]

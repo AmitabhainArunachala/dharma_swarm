@@ -304,6 +304,45 @@ async def test_ollama_complete_uses_chat_api(monkeypatch):
 
 
 @pytest.mark.asyncio
+async def test_ollama_cloud_complete_uses_auth_headers(monkeypatch):
+    monkeypatch.setenv("OLLAMA_API_KEY", "ollama-cloud-key")
+    monkeypatch.setenv("OLLAMA_BASE_URL", "http://localhost:11434")
+    provider = OllamaProvider()
+    req = LLMRequest(
+        model="kimi-k2.5:cloud",
+        messages=[{"role": "user", "content": "hello"}],
+    )
+    captured = {}
+
+    class _Resp:
+        status_code = 200
+
+        @staticmethod
+        def json():
+            return {
+                "message": {"content": "OK"},
+                "prompt_eval_count": 1,
+                "eval_count": 1,
+                "done_reason": "stop",
+            }
+
+    class _Client:
+        async def post(self, url, json, headers=None):
+            captured["url"] = url
+            captured["json"] = json
+            captured["headers"] = headers
+            return _Resp()
+
+    monkeypatch.setattr(provider, "_get_client", lambda: _Client())
+    out = await provider.complete(req)
+    assert out.content == "OK"
+    assert provider.base_url == "https://ollama.com"
+    assert provider.transport_mode == "cloud_api"
+    assert captured["url"] == "https://ollama.com/api/chat"
+    assert captured["headers"] == {"Authorization": "Bearer ollama-cloud-key"}
+
+
+@pytest.mark.asyncio
 async def test_ollama_complete_falls_back_to_generate(monkeypatch):
     provider = OllamaProvider(base_url="http://ollama.local", model="llama3.2")
     req = LLMRequest(

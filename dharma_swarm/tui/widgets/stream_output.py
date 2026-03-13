@@ -19,6 +19,7 @@ uses native terminal selection for arbitrary text.
 from __future__ import annotations
 
 import subprocess
+from datetime import datetime
 
 from textual import events
 from textual.timer import Timer
@@ -80,9 +81,16 @@ class StreamOutput(RichLog):
     """
 
     FLUSH_FPS: float = 15.0
+    AI_DEEP = "#62725D"
+    VERDIGRIS_DEEP = "#62725D"
+    OCHRE_DEEP = "#A17A47"
+    BENGARA_DEEP = "#8C5448"
+    WISTERIA_DEEP = "#74677D"
+    PAPER_SOFT = "#DCCFBD"
+    ASH = "#A29789"
 
     def __init__(self, **kwargs: object) -> None:
-        super().__init__(wrap=True, highlight=True, markup=True, **kwargs)
+        super().__init__(wrap=True, highlight=False, markup=True, **kwargs)
         self._text_buffer: str = ""
         self._thinking_buffer: str = ""
         self._flush_timer: Timer | None = None
@@ -186,6 +194,13 @@ class StreamOutput(RichLog):
         except Exception:
             return False
 
+    @staticmethod
+    def _ts() -> str:
+        return datetime.now().strftime("%H:%M:%S")
+
+    def _prefixed_markup(self, label: str, color: str, msg: str) -> str:
+        return f"[dim {color}]{self._ts()} {label}[/dim {color}] {msg}"
+
     # ── Event handlers ────────────────────────────────────────────────
 
     def handle_stream_delta(self, delta: StreamDelta) -> None:
@@ -215,7 +230,7 @@ class StreamOutput(RichLog):
                 tool_panel = Panel(
                     Syntax(tool_input, "json", theme="monokai", word_wrap=True),
                     title=f"[bold]Tool: {block.get('name', 'unknown')}[/bold]",
-                    border_style="#C2956B",
+                    border_style=self.OCHRE_DEEP,
                     subtitle=f"id: {block.get('id', '?')[:12]}...",
                 )
                 self._smart_write(tool_panel)
@@ -225,7 +240,7 @@ class StreamOutput(RichLog):
                     Panel(
                         Text(block.get("thinking", ""), style="dim"),
                         title="[dim]Thinking[/dim]",
-                        border_style="#9B85B8",
+                        border_style=self.WISTERIA_DEEP,
                         expand=False,
                     )
                 )
@@ -235,7 +250,7 @@ class StreamOutput(RichLog):
     def handle_tool_result(self, result: ToolResult) -> None:
         """Render a tool execution result with success/error styling."""
         self._flush_buffer()
-        style = "#C25B52" if result.is_error else "#5D8C6E"
+        style = self.BENGARA_DEEP if result.is_error else self.VERDIGRIS_DEEP
         icon = "\u2717" if result.is_error else "\u2713"
         duration = f" ({result.duration_ms}ms)" if result.duration_ms else ""
         content = result.content
@@ -256,7 +271,7 @@ class StreamOutput(RichLog):
             Text(
                 f"  \u23f3 {progress.tool_name} running... "
                 f"({progress.elapsed_seconds:.1f}s)",
-                style="dim #C2956B",
+                style=f"dim {self.OCHRE_DEEP}",
             )
         )
 
@@ -275,7 +290,7 @@ class StreamOutput(RichLog):
             self._smart_write(
                 Text(
                     f"\n\u2717 Error: {result.subtype} -- {error_detail}",
-                    style="bold #C25B52",
+                    style=f"bold {self.BENGARA_DEEP}",
                 )
             )
         else:
@@ -284,7 +299,7 @@ class StreamOutput(RichLog):
                     f"\n\u2713 Done -- {result.num_turns} turns, "
                     f"${result.total_cost_usd:.4f}, "
                     f"{result.duration_ms / 1000:.1f}s",
-                    style="dim #5D8C6E",
+                    style=f"dim {self.VERDIGRIS_DEEP}",
                 )
             )
 
@@ -296,6 +311,16 @@ class StreamOutput(RichLog):
 
     def handle_text_complete(self, msg: CanonicalTextComplete) -> None:
         self._flush_buffer()
+        if msg.role != "assistant":
+            note = msg.content.strip()
+            if note:
+                self._smart_write(
+                    Text(
+                        f"  · {note}",
+                        style=f"dim {self.ASH}",
+                    )
+                )
+            return
         self._smart_write(Markdown(msg.content))
         # Save complete reply
         self._last_reply_text = msg.content
@@ -312,7 +337,7 @@ class StreamOutput(RichLog):
                 Panel(
                     Text("[redacted thinking]", style="dim"),
                     title=title,
-                    border_style="#9B85B8",
+                    border_style=self.WISTERIA_DEEP,
                     expand=False,
                 )
             )
@@ -321,7 +346,7 @@ class StreamOutput(RichLog):
             Panel(
                 Text(msg.content, style="dim"),
                 title=title,
-                border_style="#9B85B8",
+                border_style=self.WISTERIA_DEEP,
                 expand=False,
             )
         )
@@ -338,14 +363,14 @@ class StreamOutput(RichLog):
             Panel(
                 Syntax(args, "json", theme="monokai", word_wrap=True),
                 title=f"[bold]Tool: {tool_call.tool_name or 'unknown'}[/bold]",
-                border_style="#C2956B",
+                border_style=self.OCHRE_DEEP,
                 subtitle=subtitle,
             )
         )
 
     def handle_tool_result_canonical(self, result: CanonicalToolResult) -> None:
         self._flush_buffer()
-        style = "#C25B52" if result.is_error else "#5D8C6E"
+        style = self.BENGARA_DEEP if result.is_error else self.VERDIGRIS_DEEP
         icon = "\u2717" if result.is_error else "\u2713"
         duration = f" ({result.duration_ms}ms)" if result.duration_ms else ""
         content = result.content
@@ -365,7 +390,7 @@ class StreamOutput(RichLog):
             Text(
                 f"  \u23f3 {progress.tool_name} running... "
                 f"({progress.elapsed_seconds:.1f}s)",
-                style="dim #C2956B",
+                style=f"dim {self.OCHRE_DEEP}",
             )
         )
 
@@ -377,7 +402,7 @@ class StreamOutput(RichLog):
             Text(
                 f"  [usage] in={usage.input_tokens} out={usage.output_tokens} "
                 f"cost=${usage.total_cost_usd:.4f}",
-                style="dim #5D8C6E",
+                style=f"dim {self.VERDIGRIS_DEEP}",
             )
         )
 
@@ -385,17 +410,22 @@ class StreamOutput(RichLog):
 
     def write_system(self, msg: str) -> None:
         """Write a system/status message. Callers should include Rich markup."""
-        self._smart_write(msg)
+        self._smart_write(self._prefixed_markup("SYS", self.ASH, msg))
 
     def write_user(self, msg: str) -> None:
         """Write the user's prompt with a bold indicator."""
-        self._smart_write(Text(f"\n> {msg}", style="bold"))
+        self._smart_write(
+            Text.assemble(
+                (f"{self._ts()} YOU ", f"bold {self.AI_DEEP}"),
+                (msg, f"bold {self.PAPER_SOFT}"),
+            )
+        )
         # Reset reply accumulator for new turn
         self._current_reply_accumulator = ""
 
     def write_error(self, msg: str) -> None:
         """Write an error message. Callers should include Rich markup."""
-        self._smart_write(msg)
+        self._smart_write(self._prefixed_markup("ERR", self.BENGARA_DEEP, msg))
 
     # ── Internal ──────────────────────────────────────────────────────
 

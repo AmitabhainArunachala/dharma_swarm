@@ -1,0 +1,281 @@
+[
+  {
+    "id": "openai_introducing_codex_2025",
+    "kind": "official_blog",
+    "publisher": "OpenAI",
+    "themes": ["coding_agents", "software_engineering", "autonomy"],
+    "title": "Introducing Codex",
+    "url": "https://openai.com/index/introducing-codex/",
+    "year": 2025
+  },
+  {
+    "id": "openai_codex_app_2026",
+    "kind": "official_blog",
+    "publisher": "OpenAI",
+    "themes": ["coding_agents", "multi_agent_ops", "productization"],
+    "title": "Introducing the Codex App",
+    "url": "https://openai.com/index/introducing-the-codex-app/",
+    "year": 2026
+  },
+  {
+    "id": "openai_codex_upgrades_2025",
+    "kind": "official_blog",
+    "publisher": "OpenAI",
+    "themes": ["coding_agents", "iteration", "software_delivery"],
+    "title": "Codex Upgrades",
+    "url": "https://openai.com/index/codex-upgrades/",
+    "year": 2025
+  },
+  {
+    "id": "openai_gpt52_codex_2025",
+    "kind": "official_blog",
+    "publisher": "OpenAI",
+    "themes": ["coding_agents", "models", "software_engineering"],
+    "title": "Introducing GPT-5.2-Codex",
+    "url": "https://openai.com/index/introducing-gpt-5-2-codex/",
+    "year": 2025
+  },
+  {
+    "id": "openai_responses_tools_2025",
+    "kind": "official_blog",
+    "publisher": "OpenAI",
+    "themes": ["agents", "tools", "background_jobs"],
+    "title": "New Tools and Features in the Responses API",
+    "url": "https://openai.com/index/new-tools-and-features-in-the-responses-api/",
+    "year": 2025
+  },
+  {
+    "id": "openai_background_mode_docs_2026",
+    "kind": "official_docs",
+    "publisher": "OpenAI",
+    "themes": ["background_jobs", "agents", "runtime"],
+    "title": "Background Mode Guide",
+    "url": "https://developers.openai.com/api/docs/guides/background",
+    "year": 2026
+  },
+  {
+    "id": "openai_codex_cloud_docs_2026",
+    "kind": "official_docs",
+    "publisher": "OpenAI",
+    "themes": ["coding_agents", "cloud_execution", "runtime"],
+    "title": "Codex Cloud",
+    "url": "https://developers.openai.com/codex/cloud",
+    "year": 2026
+  },
+  {
+    "id": "openai_codex_internet_access_2026",
+    "kind": "official_docs",
+    "publisher": "OpenAI",
+    "themes": ["web_research", "coding_agents", "sandboxing"],
+    "title": "Internet Access in Codex Cloud",
+    "url": "https://developers.openai.com/codex/cloud/internet-access",
+    "year": 2026
+  },
+  {
+    "id": "openai_mcp_connectors_docs_2026",
+    "kind": "official_docs",
+    "publisher": "OpenAI",
+    "themes": ["mcp", "tooling", "interop"],
+    "title": "Connectors and MCP Tools",
+    "url": "https://developers.openai.com/api/docs/guides/tools-connectors-mcp",
+    "year": 2026
+  },
+  {
+    "id": "openai_web_search_docs_2026",
+    "kind": "official_docs",
+    "publisher": "OpenAI",
+    "themes": ["web_research", "agents", "retrieval"],
+    "title": "Web Search Tool Guide",
+    "url": "https://developers.openai.com/api/docs/guides/tools-web-search",
+    "year": 2026
+  },
+  {
+    "id": "openai_multi_agents_concepts_2026",
+    "kind": "official_docs",
+    "publisher": "OpenAI",
+    "themes": ["multi_agent", "coordination", "coding_agents"],
+    "title": "Codex Concepts: Multi-Agents",
+    "url": "https://developers.openai.com/codex/concepts/multi-agents",
+    "year": 2026
+  },
+  {
+    "id": "openai_multi_agent_coding_2026",
+    "kind": "official_docs",
+    "publisher": "OpenAI",
+    "themes": ["multi_agent", "software_engineering", "workflow"],
+    "title": "Multi-Agent Coding Guide",
+    "url": "https://developers.openai.com/codex/multi-agent",
+    "year": 2026
+  },
+  {
+    "id": "openai_codex_sdk_2026",
+    "kind": "official_docs",
+    "publisher": "OpenAI",
+    "themes": ["sdk", "coding_agents", "automation"],
+    "title": "Codex SDK",
+    "url": "https://developers.openai.com/codex/sdk",
+    "year": 2026
+  },
+  {
+    "id": "anthropic_multi_agent_research_system_2025",
+    "kind": "official_blog",
+    "publisher": "Anthropic",
+    "themes": ["multi_agent", "research", "coordination"],
+    "title": "How We Built Our Multi-Agent Research System",
+    "url": "https://www.anthropic.com/engineering/multi-agent-research-system",
+    "year": 2025
+  },
+  {
+    "id": "claude_code_overview_2026",
+    "kind": "official_docs",
+    "publisher": "Anthropic",
+    "themes": ["coding_agents", "runtime", "tooling"],
+    "title": "Claude Code Overview",
+    "url": "https://code.claude.com/docs/en/overview",
+    "year": 2026
+  },
+  {
+    "id": "claude_code_sub_agents_2026",
+    "kind": "official_docs",
+    "publisher": "Anthropic",
+    "themes": ["multi_agent", "subagents", "coding_agents"],
+    "title": "Claude Code Sub-Agents",
+    "url": "https://code.claude.com/docs/en/sub-agents",
+    "year": 2026
+  },
+  {
+    "id": "claude_code_agent_teams_2026",
+    "kind": "official_docs",
+    "publisher": "Anthropic",
+    "themes": ["multi_agent", "agent_teams", "workflow"],
+    "title": "Claude Code Agent Teams",
+    "url": "https://code.claude.com/docs/en/agent-teams",
+    "year": 2026
+  },
+  {
+    "id": "claude_code_mcp_2026",
+    "kind": "official_docs",
+    "publisher": "Anthropic",
+    "themes": ["mcp", "tooling", "interop"],
+    "title": "Claude Code MCP",
+    "url": "https://code.claude.com/docs/en/mcp",
+    "year": 2026
+  },
+  {
+    "id": "claude_code_hooks_guide_2026",
+    "kind": "official_docs",
+    "publisher": "Anthropic",
+    "themes": ["hooks", "policy", "automation"],
+    "title": "Claude Code Hooks Guide",
+    "url": "https://code.claude.com/docs/en/hooks-guide",
+    "year": 2026
+  },
+  {
+    "id": "anthropic_economic_index_2026",
+    "kind": "official_program",
+    "publisher": "Anthropic",
+    "themes": ["economic_transition", "labor", "public_benefit"],
+    "title": "Anthropic Economic Index",
+    "url": "https://www.anthropic.com/economic-index",
+    "year": 2026
+  },
+  {
+    "id": "anthropic_economic_futures_2026",
+    "kind": "official_program",
+    "publisher": "Anthropic",
+    "themes": ["economic_transition", "policy", "public_benefit"],
+    "title": "Anthropic Economic Futures",
+    "url": "https://www.anthropic.com/economic-futures",
+    "year": 2026
+  },
+  {
+    "id": "anthropic_labor_market_impacts_2025",
+    "kind": "official_research",
+    "publisher": "Anthropic",
+    "themes": ["labor", "economic_transition", "measurement"],
+    "title": "Labor Market Impacts of Generative AI",
+    "url": "https://www.anthropic.com/research/labor-market-impacts",
+    "year": 2025
+  },
+  {
+    "id": "google_a2a_protocol_2025",
+    "kind": "official_blog",
+    "publisher": "Google",
+    "themes": ["interop", "multi_agent", "protocols"],
+    "title": "A2A: A New Era of Agent Interoperability",
+    "url": "https://developers.googleblog.com/en/a2a-a-new-era-of-agent-interoperability/",
+    "year": 2025
+  },
+  {
+    "id": "google_notebooklm_app_2025",
+    "kind": "official_blog",
+    "publisher": "Google",
+    "themes": ["knowledge_work", "retrieval", "notebooks"],
+    "title": "NotebookLM App",
+    "url": "https://blog.google/innovation-and-ai/products/notebooklm-app/",
+    "year": 2025
+  },
+  {
+    "id": "mcp_versioning_spec_2025",
+    "kind": "spec",
+    "publisher": "Model Context Protocol",
+    "themes": ["mcp", "protocols", "versioning"],
+    "title": "Model Context Protocol Specification: Versioning",
+    "url": "https://modelcontextprotocol.io/specification/versioning",
+    "year": 2025
+  },
+  {
+    "id": "mcp_lifecycle_spec_2025",
+    "kind": "spec",
+    "publisher": "Model Context Protocol",
+    "themes": ["mcp", "protocols", "lifecycle"],
+    "title": "Model Context Protocol Specification: Lifecycle",
+    "url": "https://modelcontextprotocol.io/specification/2025-11-25/basic/lifecycle",
+    "year": 2025
+  },
+  {
+    "id": "mcp_registry_preview_2025",
+    "kind": "official_blog",
+    "publisher": "Model Context Protocol",
+    "themes": ["mcp", "registries", "interop"],
+    "title": "MCP Registry Preview",
+    "url": "https://blog.modelcontextprotocol.io/posts/2025-09-08-mcp-registry-preview/",
+    "year": 2025
+  },
+  {
+    "id": "mcp_governance_2025",
+    "kind": "official_blog",
+    "publisher": "Model Context Protocol",
+    "themes": ["mcp", "governance", "protocols"],
+    "title": "Governance for MCP",
+    "url": "https://blog.modelcontextprotocol.io/posts/2025-07-31-governance-for-mcp/",
+    "year": 2025
+  },
+  {
+    "id": "swebench_home_2026",
+    "kind": "benchmark",
+    "publisher": "SWE-bench",
+    "themes": ["software_engineering", "evaluation", "coding_agents"],
+    "title": "SWE-bench",
+    "url": "https://www.swebench.com/",
+    "year": 2026
+  },
+  {
+    "id": "openhands_repo_2026",
+    "kind": "repo",
+    "publisher": "All Hands AI",
+    "themes": ["coding_agents", "automation", "software_engineering"],
+    "title": "OpenHands",
+    "url": "https://github.com/All-Hands-AI/OpenHands",
+    "year": 2026
+  },
+  {
+    "id": "langgraph_repo_2026",
+    "kind": "repo",
+    "publisher": "LangChain",
+    "themes": ["multi_agent", "stateful_workflows", "orchestration"],
+    "title": "LangGraph",
+    "url": "https://github.com/langchain-ai/langgraph",
+    "year": 2026
+  }
+]

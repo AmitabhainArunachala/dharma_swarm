@@ -1,0 +1,60 @@
+{
+  "blockers": [],
+  "contract_version": "1.0.0",
+  "delegated_task_ids": [
+    "51bf2e1286e94198",
+    "cc086bc333ff4e19",
+    "19bcabdb74b94c58"
+  ],
+  "last_cycle_id": "1773390917",
+  "last_cycle_ts": "2026-03-13T08:36:29Z",
+  "mission_theme": "execution_brief",
+  "mission_thesis": "Grounds the intersection of [CechCohomology, to_sheaf_coordination] via [cohomology, sheaf] Core concepts: CechCohomology, to_sheaf_coordination.",
+  "mission_title": "Cohomology \u2014 Cechcohomology \u2014 To Sheaf Coordination build brief",
+  "previous_missions": [
+    {
+      "cycle_id": "1773384201",
+      "status": "delegated",
+      "title": "# Dual-Engine Massive Swarm Mission"
+    },
+    {
+      "cycle_id": "1773385767",
+      "status": "planned",
+      "title": "Cohomology \u2014 Cechcohomology \u2014 To Sheaf Coordination build brief"
+    },
+    {
+      "cycle_id": "1773385824",
+      "status": "delegated",
+      "title": "Cohomology \u2014 Cechcohomology \u2014 To Sheaf Coordination build brief"
+    },
+    {
+      "cycle_id": "1773385934",
+      "status": "delegated",
+      "title": "Cohomology \u2014 Cechcohomology \u2014 To Sheaf Coordination build brief"
+    },
+    {
+      "cycle_id": "1773386044",
+      "status": "delegated",
+      "title": "Cohomology \u2014 Cechcohomology \u2014 To Sheaf Coordination build brief"
+    },
+    {
+      "cycle_id": "1773390556",
+      "status": "delegated",
+      "title": "Cohomology \u2014 Cechcohomology \u2014 To Sheaf Coordination build brief"
+    },
+    {
+      "cycle_id": "1773390782",
+      "status": "delegated",
+      "title": "Cohomology \u2014 Cechcohomology \u2014 To Sheaf Coordination build brief"
+    }
+  ],
+  "rapid_ascent": true,
+  "review_summary": "",
+  "status": "delegated",
+  "task_count": 3,
+  "task_titles": [
+    "Implement or revise dharma_swarm/cohomology_cechcohomology_to_sheaf_coord.py.",
+    "Write or refresh docs/clusters/cohomology_cechcohomology_to_sheaf_coord_spec.md.",
+    "Add or update verification in tests/test_cohomology_cechcohomology_to_sheaf_coord.py."
+  ]
+}

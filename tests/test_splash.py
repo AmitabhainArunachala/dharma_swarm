@@ -8,6 +8,7 @@ from dharma_swarm.splash import (
     _build_compact,
     _build_splash,
     get_splash,
+    render_splash_field,
 )
 
 
@@ -131,6 +132,15 @@ def test_get_splash_default_returns_full():
     assert result is SPLASH
 
 
+def test_get_splash_epic_contains_core_text():
+    result = get_splash(variant="epic")
+    plain = result.plain
+    assert "Dharmic Godel Claw" in plain
+    assert "Telos: Moksha" in plain
+    assert "WHAT WE TEND BECOMES THE WORLD" in plain
+    assert "WITNESS" in plain
+
+
 def test_get_splash_compact_true():
     result = get_splash(compact=True)
     assert result is SPLASH_COMPACT
@@ -160,3 +170,18 @@ def test_module_splash_not_empty():
 
 def test_module_splash_compact_not_empty():
     assert len(SPLASH_COMPACT.plain) > 50
+
+
+def test_render_splash_field_matches_viewport_dimensions():
+    result = render_splash_field(width=120, height=32, variant="epic")
+    assert isinstance(result, Text)
+    lines = result.plain.splitlines()
+    assert len(lines) == 32
+    assert max(len(line) for line in lines) == 120
+
+
+def test_render_splash_field_contains_prompt_and_core_text():
+    result = render_splash_field(width=96, height=30, variant="medium")
+    plain = result.plain
+    assert "Press Enter to cross the threshold" in plain
+    assert "Dharmic Godel Claw" in plain

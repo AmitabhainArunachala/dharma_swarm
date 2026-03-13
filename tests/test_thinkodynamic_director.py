@@ -6,10 +6,12 @@ from unittest.mock import patch
 
 import pytest
 
+from dharma_swarm.engine.conversation_memory import ConversationMemoryStore
 from dharma_swarm.models import TaskStatus
 from dharma_swarm.thinkodynamic_director import (
     ThinkodynamicDirector,
     _detect_task_repetitions,
+    _parse_mission_deliverables,
     _read_recent_task_titles,
 )
 
@@ -110,6 +112,45 @@ def test_build_opportunities_biases_to_autonomy_director(
     assert "director" in primary.title.lower()
 
 
+def test_sense_can_promote_latent_gold_without_file_signals(tmp_path: Path) -> None:
+    repo_root = tmp_path / "repo"
+    state_dir = tmp_path / ".dharma"
+    repo_root.mkdir(parents=True, exist_ok=True)
+
+    store = ConversationMemoryStore(state_dir / "db" / "memory_plane.db")
+    store.record_turn(
+        session_id="sess-latent",
+        task_id="task-memory",
+        role="user",
+        content=(
+            "We could build a memory palace index for task recall and retrieval.\n"
+            "Maybe resurface abandoned branches automatically when they become relevant."
+        ),
+        turn_index=1,
+    )
+    store.mark_task_outcome("task-memory", outcome="success")
+
+    director = ThinkodynamicDirector(
+        repo_root=repo_root,
+        state_dir=state_dir,
+        scan_roots=(),
+        external_roots=(),
+        mission_brief="Choose the next highest-leverage mission.",
+        signal_limit=6,
+        max_candidates=8,
+        max_active_tasks=4,
+    )
+
+    sense = director.sense()
+
+    assert sense["signals"] == []
+    assert sense["latent_gold"]
+    primary = sense["primary"]
+    assert primary is not None
+    assert primary.theme == "memory"
+    assert "Latent gold:" in primary.why_now
+
+
 def test_plan_workflow_creates_dependent_execution_spine(
     director: ThinkodynamicDirector,
 ) -> None:
@@ -175,6 +216,11 @@ async def test_run_cycle_writes_artifacts_and_respects_preview_mode(
     assert "selected_opportunity" in snapshot
     tasks = await director.list_director_tasks()
     assert tasks == []
+    campaign = director.state_dir / "campaign.json"
+    assert campaign.exists()
+    payload = json.loads(campaign.read_text(encoding="utf-8"))
+    assert payload["mission_title"]
+    assert payload["artifacts"]
 
 
 @pytest.mark.asyncio
@@ -350,7 +396,7 @@ def test_compile_workflow_filters_repeated_tasks(
 async def test_execute_pending_tasks_runs_and_produces_artifacts(
     director: ThinkodynamicDirector,
 ) -> None:
-    """Worker loop should pick up pending tasks, execute them, and write artifacts."""
+    """Worker loop should execute dependency-ready tasks and write artifacts."""
     await director.init()
     primary = director.choose_primary(director.build_opportunities(director.rank_file_signals()))
     workflow = director.plan_workflow(primary, cycle_id="worker-test-1")
@@ -373,7 +419,7 @@ async def test_execute_pending_tasks_runs_and_produces_artifacts(
     director.spawn_agent = _fake_spawn  # type: ignore[assignment]
 
     results = await director.execute_pending_tasks(max_concurrent=2)
-    assert len(results) == 2
+    assert len(results) == 1
     assert all(r["success"] for r in results)
     assert all(r["provider"] == "test-mock" for r in results)
 
@@ -390,7 +436,7 @@ async def test_execute_pending_tasks_runs_and_produces_artifacts(
         t for t in await director.list_director_tasks()
         if t.status == TaskStatus.COMPLETED
     ]
-    assert len(completed_tasks) == 2
+    assert len(completed_tasks) == 1
 
 
 @pytest.mark.asyncio
@@ -426,3 +472,373 @@ async def test_execute_pending_tasks_handles_blocked(
         if t.status == TaskStatus.FAILED
     ]
     assert len(failed_tasks) >= 1
+
+
+@pytest.mark.asyncio
+async def test_execute_pending_tasks_can_scope_to_cycle_id(
+    director: ThinkodynamicDirector,
+) -> None:
+    await director.init()
+    primary = director.choose_primary(director.build_opportunities(director.rank_file_signals()))
+    older = director.plan_workflow(primary, cycle_id="cycle-old")
+    newer = director.plan_workflow(primary, cycle_id="cycle-new")
+    await director.enqueue_workflow(older)
+    await director.enqueue_workflow(newer)
+
+    async def _fake_spawn(task_plan, wf, *, model="sonnet", timeout=600):
+        return {
+            "task_key": task_plan.key,
+            "title": task_plan.title,
+            "success": True,
+            "output_length": 24,
+            "output": f"Completed: {wf.cycle_id}",
+            "blocked": False,
+            "rapid": True,
+            "provider": "test-mock",
+        }
+
+    director.spawn_agent = _fake_spawn  # type: ignore[assignment]
+
+    results = await director.execute_pending_tasks(max_concurrent=4, cycle_id="cycle-new")
+
+    assert results
+    assert all("cycle-new" in Path(result["artifact"]).read_text() for result in results)
+    completed = [
+        task for task in await director.list_director_tasks()
+        if task.status == TaskStatus.COMPLETED
+    ]
+    assert completed
+    assert all(
+        str(task.metadata.get("director_cycle_id", "")) == "cycle-new"
+        for task in completed
+    )
+
+
+@pytest.mark.asyncio
+async def test_execute_pending_tasks_can_scope_to_specific_task_ids(
+    director: ThinkodynamicDirector,
+) -> None:
+    await director.init()
+    primary = director.choose_primary(director.build_opportunities(director.rank_file_signals()))
+    workflow = director.plan_workflow(primary, cycle_id="cycle-explicit")
+    tasks = await director.enqueue_workflow(workflow)
+
+    async def _fake_spawn(task_plan, wf, *, model="sonnet", timeout=600):
+        return {
+            "task_key": task_plan.key,
+            "title": task_plan.title,
+            "success": True,
+            "output_length": 16,
+            "output": f"Completed: {task_plan.title}",
+            "blocked": False,
+            "rapid": True,
+            "provider": "test-mock",
+        }
+
+    director.spawn_agent = _fake_spawn  # type: ignore[assignment]
+
+    results = await director.execute_pending_tasks(
+        max_concurrent=4,
+        task_ids=[tasks[1].id],
+    )
+
+    assert results == []
+
+
+# ------------------------------------------------------------------
+# Mission-driven task decomposition (Gap #1 fix)
+# ------------------------------------------------------------------
+
+
+def test_parse_mission_deliverables_extracts_bullets():
+    """Bullet-point deliverables should become task specs."""
+    brief = (
+        "Advance Jagat Kalyan in the highest-leverage way.\n"
+        "- Produce a thesis document on AI carbon offsets\n"
+        "- Build a ledger module for carbon accounting\n"
+        "- Draft a partner outreach brief\n"
+    )
+    tasks = _parse_mission_deliverables(brief)
+    assert len(tasks) == 3
+    assert tasks[0]["title"] == "Produce a thesis document on AI carbon offsets"
+    assert tasks[1]["title"] == "Build a ledger module for carbon accounting"
+    assert tasks[2]["title"] == "Draft a partner outreach brief"
+
+
+def test_parse_mission_deliverables_extracts_numbered():
+    """Numbered list deliverables should become task specs."""
+    brief = (
+        "Complete the research sprint:\n"
+        "1. Research existing offset protocols\n"
+        "2. Analyze competitor landscape\n"
+        "3. Design the integration API\n"
+    )
+    tasks = _parse_mission_deliverables(brief)
+    assert len(tasks) == 3
+    assert "Research existing offset protocols" in tasks[0]["title"]
+    assert tasks[1]["role"] == "researcher"  # "analyze" → researcher
+    assert tasks[2]["role"] == "architect"   # "design" → architect
+
+
+def test_parse_mission_deliverables_returns_empty_for_default_mission():
+    """The default mission has no structured deliverables."""
+    from dharma_swarm.thinkodynamic_director import DEFAULT_MISSION
+    tasks = _parse_mission_deliverables(DEFAULT_MISSION)
+    assert tasks == []
+
+
+def test_parse_mission_deliverables_returns_empty_for_prose():
+    """Plain prose without bullets/numbers/imperatives yields no tasks."""
+    brief = "Think about the best way to help the world."
+    tasks = _parse_mission_deliverables(brief)
+    assert tasks == []
+
+
+def test_parse_mission_deliverables_extracts_imperative_verbs():
+    """Imperative verb lines should be captured even without bullets."""
+    brief = (
+        "Create a dashboard for monitoring\n"
+        "Investigate the failing pipeline\n"
+        "Deploy the updated service\n"
+    )
+    tasks = _parse_mission_deliverables(brief)
+    assert len(tasks) == 3
+    assert tasks[0]["title"] == "Create a dashboard for monitoring"
+    assert tasks[1]["role"] == "researcher"  # "investigate" → researcher
+
+
+def test_parse_mission_deliverables_prefers_deliverables_section():
+    """When a deliverables section exists, hard rules should not become tasks."""
+    brief = (
+        "# Mission\n"
+        "Hard rules:\n"
+        "- Do not idle\n"
+        "- Prefer artifacts\n"
+        "\n"
+        "Deliverables:\n"
+        "1. Build the semantic graph\n"
+        "2. Generate the staged hyperfiles\n"
+    )
+    tasks = _parse_mission_deliverables(brief)
+    assert len(tasks) == 2
+    assert tasks[0]["title"] == "Build the semantic graph"
+    assert tasks[1]["title"] == "Generate the staged hyperfiles"
+
+
+def test_compile_workflow_uses_mission_deliverables(
+    director: ThinkodynamicDirector,
+) -> None:
+    """When mission_brief has explicit deliverables, compile_workflow should
+    use those as tasks instead of vision-proposed or opportunity-scored tasks."""
+    director.mission_brief = (
+        "Fix the carbon accounting system:\n"
+        "- Audit the ledger module for bugs\n"
+        "- Implement double-entry validation\n"
+        "- Write integration tests for the ledger\n"
+    )
+
+    # Vision and sense results are irrelevant — mission deliverables win
+    vision_result = {
+        "proposed_tasks": [
+            {"title": "Something the LLM proposed", "description": "x"},
+            {"title": "Another LLM idea", "description": "y"},
+        ],
+        "vision_text": "LLM vision text",
+    }
+    sense_result = {"primary": None, "signals": [], "opportunities": []}
+
+    workflow = director.compile_workflow_from_vision(
+        vision_result, sense_result, cycle_id="mission-test-1",
+    )
+
+    assert workflow.theme == "mission"
+    assert "mission" in workflow.workflow_id
+    assert len(workflow.tasks) == 3
+    assert workflow.tasks[0].title == "Audit the ledger module for bugs"
+    assert workflow.tasks[1].title == "Implement double-entry validation"
+    assert workflow.tasks[2].title == "Write integration tests for the ledger"
+    # LLM-proposed tasks are NOT in the workflow
+    task_titles = {t.title for t in workflow.tasks}
+    assert "Something the LLM proposed" not in task_titles
+
+
+def test_compile_workflow_promotes_campaign_execution_brief(
+    director: ThinkodynamicDirector,
+) -> None:
+    campaign = director.state_dir / "campaign.json"
+    campaign.parent.mkdir(parents=True, exist_ok=True)
+    campaign.write_text(
+        json.dumps(
+            {
+                "campaign_id": "campaign-brief-test",
+                "mission_title": "Semantic execution brief",
+                "mission_thesis": "Promote the hardened brief",
+                "mission_theme": "semantic",
+                "last_cycle_id": "cycle-0",
+                "last_cycle_ts": "2026-03-13T00:00:00Z",
+                "status": "planned",
+                "task_count": 0,
+                "task_titles": [],
+                "delegated_task_ids": [],
+                "review_summary": "",
+                "blockers": [],
+                "rapid_ascent": False,
+                "evidence_paths": ["docs/reports/semantic.md"],
+                "semantic_briefs": [],
+                "execution_briefs": [
+                    {
+                        "brief_id": "execution-semantic-a",
+                        "title": "Semantic bridge build brief",
+                        "goal": "Promote the hardened semantic bridge into executable work.",
+                        "readiness_score": 0.93,
+                        "task_titles": [
+                            "Map semantic bridge evidence",
+                            "Implement semantic memory bridge improvements",
+                            "Verify semantic bridge regressions",
+                        ],
+                        "acceptance": [
+                            "Produce a real artifact.",
+                            "Verify the touched path with evidence.",
+                        ],
+                        "evidence_paths": ["dharma_swarm/semantic_memory_bridge.py"],
+                        "depends_on_briefs": ["semantic-a"],
+                        "metadata": {"semantic_brief_id": "semantic-a"},
+                    }
+                ],
+                "artifacts": [],
+                "metrics": {},
+                "previous_missions": [],
+            },
+            indent=2,
+        ),
+        encoding="utf-8",
+    )
+
+    workflow = director.compile_workflow_from_vision(
+        {"proposed_tasks": [], "vision_text": "ignore"},
+        {"primary": None, "signals": [], "opportunities": []},
+        cycle_id="brief-test-1",
+    )
+
+    assert workflow.theme == "execution_brief"
+    assert workflow.opportunity_id == "execution-semantic-a"
+    assert [task.title for task in workflow.tasks] == [
+        "Map semantic bridge evidence",
+        "Implement semantic memory bridge improvements",
+        "Verify semantic bridge regressions",
+    ]
+
+
+def test_compile_workflow_falls_through_without_deliverables(
+    director: ThinkodynamicDirector,
+) -> None:
+    """With default mission (no deliverables), compile_workflow should use
+    the standard vision/opportunity pipeline."""
+    # director fixture uses default mission_brief
+    vision_result = {
+        "proposed_tasks": [
+            {"title": "Audit test coverage", "description": "Map modules"},
+            {"title": "Write missing tests", "description": "Add tests"},
+        ],
+        "vision_text": "Build test system",
+    }
+    sense_result = {"primary": None, "signals": [], "opportunities": []}
+
+    workflow = director.compile_workflow_from_vision(
+        vision_result, sense_result, cycle_id="fallthrough-1",
+    )
+
+    # Should use vision-proposed tasks, not mission path
+    assert workflow.theme != "mission"
+    assert "vision" in workflow.workflow_id
+    assert len(workflow.tasks) == 2
+
+
+@pytest.mark.asyncio
+async def test_enqueue_workflow_dedupes_execution_brief_tasks(
+    director: ThinkodynamicDirector,
+) -> None:
+    await director.init()
+    workflow = director.workflow_from_execution_brief(
+        brief=type("Brief", (), {
+            "brief_id": "execution-semantic-a",
+            "title": "Semantic bridge build brief",
+            "goal": "Promote the hardened semantic bridge into executable work.",
+            "readiness_score": 0.93,
+            "task_titles": [
+                "Map semantic bridge evidence",
+                "Implement semantic memory bridge improvements",
+                "Verify semantic bridge regressions",
+            ],
+            "acceptance": [
+                "Produce a real artifact.",
+                "Verify the touched path with evidence.",
+            ],
+            "evidence_paths": ["dharma_swarm/semantic_memory_bridge.py"],
+        })(),
+        cycle_id="brief-test-2",
+    )
+
+    first = await director.enqueue_workflow(workflow)
+    second = await director.enqueue_workflow(workflow)
+
+    assert len(first) == 3
+    assert [task.id for task in second] == [task.id for task in first]
+    assert len(await director.list_director_tasks()) == 3
+
+
+@pytest.mark.asyncio
+async def test_enqueue_workflow_requeues_failed_execution_brief_tasks(
+    director: ThinkodynamicDirector,
+) -> None:
+    await director.init()
+    workflow = director.workflow_from_execution_brief(
+        brief=type("Brief", (), {
+            "brief_id": "execution-semantic-b",
+            "title": "Retry semantic bridge build brief",
+            "goal": "Retry the hardened semantic bridge execution lane.",
+            "readiness_score": 0.91,
+            "task_titles": [
+                "Map semantic bridge evidence",
+                "Implement semantic memory bridge improvements",
+            ],
+            "acceptance": [
+                "Produce a real artifact.",
+                "Verify the touched path with evidence.",
+            ],
+            "evidence_paths": ["dharma_swarm/semantic_memory_bridge.py"],
+        })(),
+        cycle_id="brief-test-retry-1",
+    )
+
+    first = await director.enqueue_workflow(workflow)
+    await director._task_board.assign(first[0].id, "worker-loop")
+    await director._task_board.start(first[0].id)
+    await director._task_board.fail(first[0].id, error="BLOCKED: retry me")
+
+    retried_workflow = director.workflow_from_execution_brief(
+        brief=type("Brief", (), {
+            "brief_id": "execution-semantic-b",
+            "title": "Retry semantic bridge build brief",
+            "goal": "Retry the hardened semantic bridge execution lane.",
+            "readiness_score": 0.91,
+            "task_titles": [
+                "Map semantic bridge evidence",
+                "Implement semantic memory bridge improvements",
+            ],
+            "acceptance": [
+                "Produce a real artifact.",
+                "Verify the touched path with evidence.",
+            ],
+            "evidence_paths": ["dharma_swarm/semantic_memory_bridge.py"],
+        })(),
+        cycle_id="brief-test-retry-2",
+    )
+
+    retried = await director.enqueue_workflow(retried_workflow)
+
+    assert [task.id for task in retried] == [task.id for task in first]
+    refreshed = await director._task_board.get(first[0].id)
+    assert refreshed is not None
+    assert refreshed.status == TaskStatus.PENDING
+    assert refreshed.metadata["director_cycle_id"] == "brief-test-retry-2"

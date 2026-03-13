@@ -9,7 +9,15 @@ import pytest
 
 import dharma_swarm.tui.app as tui_app
 from dharma_swarm.tui.app import DGCApp
-from dharma_swarm.tui.engine.events import SessionEnd, SessionStart, TextComplete
+from dharma_swarm.tui.screens.btw import BTWScreen
+from dharma_swarm.tui.engine.events import (
+    SessionEnd,
+    SessionStart,
+    TextComplete,
+    ToolCallComplete,
+    ToolResult,
+    UsageReport,
+)
 
 
 @pytest.fixture(autouse=True)
@@ -121,3 +129,295 @@ async def test_tui_renders_provider_events_after_submit() -> None:
         assert main.status_bar.model == "codex:gpt-5.4"
         assert main.status_bar.turn_count == 1
         assert main.status_bar.is_running is False
+
+
+@pytest.mark.asyncio
+async def test_tui_codex_progress_notes_do_not_count_as_turns() -> None:
+    app = DGCApp()
+    app._restore_last_session_context = lambda: None
+    app._run_status_on_startup = lambda: None
+
+    async with app.run_test() as pilot:
+        await pilot.pause()
+        await pilot.press("enter")
+        await pilot.pause()
+
+        main = app._get_main_screen()
+        assert main is not None
+        runner = app._provider_runner
+        assert runner is not None
+
+        def fake_run_provider(request, *, session_id: str, provider_id: str = "claude") -> None:
+            app.post_message(runner.ProcessStarted())
+            app.post_message(
+                runner.AgentEvent(
+                    SessionStart(
+                        provider_id="codex",
+                        session_id=session_id,
+                        model="gpt-5.4",
+                        capabilities=["streaming", "tool_use", "cancel"],
+                        tools_available=["shell"],
+                    )
+                )
+            )
+            app.post_message(
+                runner.AgentEvent(
+                    TextComplete(
+                        provider_id="codex",
+                        session_id=session_id,
+                        content="Running `pwd` to verify the current working directory.",
+                        role="commentary",
+                    )
+                )
+            )
+            app.post_message(
+                runner.AgentEvent(
+                    ToolCallComplete(
+                        provider_id="codex",
+                        session_id=session_id,
+                        tool_call_id="tool-1",
+                        tool_name="shell",
+                        arguments='{"command":"/bin/zsh -lc pwd"}',
+                    )
+                )
+            )
+            app.post_message(
+                runner.AgentEvent(
+                    ToolResult(
+                        provider_id="codex",
+                        session_id=session_id,
+                        tool_call_id="tool-1",
+                        tool_name="shell",
+                        content="/Users/dhyana/dharma_swarm",
+                        is_error=False,
+                        duration_ms=23,
+                    )
+                )
+            )
+            app.post_message(
+                runner.AgentEvent(
+                    TextComplete(
+                        provider_id="codex",
+                        session_id=session_id,
+                        content="/Users/dhyana/dharma_swarm",
+                        role="assistant",
+                    )
+                )
+            )
+            app.post_message(
+                runner.AgentEvent(
+                    SessionEnd(
+                        provider_id="codex",
+                        session_id=session_id,
+                        success=True,
+                    )
+                )
+            )
+            app.post_message(runner.ProcessExited(0, was_cancelled=False))
+
+        runner.run_provider = fake_run_provider  # type: ignore[method-assign]
+
+        await pilot.press("p", "w", "d", "enter")
+        await pilot.pause()
+        await pilot.pause()
+
+        assert main.stream_output.get_last_reply() == "/Users/dhyana/dharma_swarm"
+        assert main.status_bar.turn_count == 1
+        assert main.status_bar.tool_count == 1
+        assert main.status_bar.last_tool == "shell"
+
+
+@pytest.mark.asyncio
+async def test_tui_status_bar_tracks_activity_tools_and_usage() -> None:
+    app = DGCApp()
+    app._restore_last_session_context = lambda: None
+    app._run_status_on_startup = lambda: None
+
+    async with app.run_test() as pilot:
+        await pilot.pause()
+        await pilot.press("enter")
+        await pilot.pause()
+
+        main = app._get_main_screen()
+        assert main is not None
+        runner = app._provider_runner
+        assert runner is not None
+
+        def fake_run_provider(request, *, session_id: str, provider_id: str = "claude") -> None:
+            app.post_message(runner.ProcessStarted())
+            app.post_message(
+                runner.AgentEvent(
+                    SessionStart(
+                        provider_id="codex",
+                        session_id=session_id,
+                        model="gpt-5.4",
+                        provider_session_id="codex-session-1234",
+                        capabilities=["cancel"],
+                        tools_available=["shell"],
+                    )
+                )
+            )
+            app.post_message(
+                runner.AgentEvent(
+                    ToolCallComplete(
+                        provider_id="codex",
+                        session_id=session_id,
+                        tool_call_id="tool-1",
+                        tool_name="shell",
+                        arguments='{"cmd":"echo hi"}',
+                    )
+                )
+            )
+            app.post_message(
+                runner.AgentEvent(
+                    ToolResult(
+                        provider_id="codex",
+                        session_id=session_id,
+                        tool_call_id="tool-1",
+                        tool_name="shell",
+                        content="hi",
+                        is_error=False,
+                        duration_ms=23,
+                    )
+                )
+            )
+            app.post_message(
+                runner.AgentEvent(
+                    UsageReport(
+                        provider_id="codex",
+                        session_id=session_id,
+                        input_tokens=1234,
+                        output_tokens=456,
+                        total_cost_usd=0.0312,
+                    )
+                )
+            )
+            app.post_message(
+                runner.AgentEvent(
+                    TextComplete(
+                        provider_id="codex",
+                        session_id=session_id,
+                        content="done",
+                        role="assistant",
+                    )
+                )
+            )
+            app.post_message(
+                runner.AgentEvent(
+                    SessionEnd(
+                        provider_id="codex",
+                        session_id=session_id,
+                        success=True,
+                    )
+                )
+            )
+            app.post_message(runner.ProcessExited(0, was_cancelled=False))
+
+        runner.run_provider = fake_run_provider  # type: ignore[method-assign]
+
+        await pilot.press("r", "u", "n", "enter")
+        await pilot.pause()
+        await pilot.pause()
+
+        assert main.status_bar.session_name == "codex-se"
+        assert main.status_bar.tool_count == 1
+        assert main.status_bar.last_tool == "shell"
+        assert main.status_bar.input_tokens == 1234
+        assert main.status_bar.output_tokens == 456
+        assert main.status_bar.cost_usd == pytest.approx(0.0312)
+        assert main.status_bar.activity == "complete"
+
+
+@pytest.mark.asyncio
+async def test_tui_bare_darwin_runs_system_command_not_chat() -> None:
+    app = DGCApp()
+    app._restore_last_session_context = lambda: None
+    app._run_status_on_startup = lambda: None
+
+    async with app.run_test() as pilot:
+        await pilot.pause()
+        await pilot.press("enter")
+        await pilot.pause()
+
+        async_calls: list[tuple[str, str]] = []
+        chat_calls: list[str] = []
+
+        app._run_async_command = lambda cmd, arg: async_calls.append((cmd, arg))  # type: ignore[method-assign]
+        app._send_to_claude = lambda text: chat_calls.append(text)  # type: ignore[method-assign]
+
+        await pilot.press("d", "a", "r", "w", "i", "n", "enter")
+        await pilot.pause()
+
+        assert async_calls == [("darwin", "")]
+        assert chat_calls == []
+
+
+@pytest.mark.asyncio
+async def test_tui_slash_btw_opens_parallel_overlay() -> None:
+    app = DGCApp()
+    app._restore_last_session_context = lambda: None
+    app._run_status_on_startup = lambda: None
+
+    async with app.run_test() as pilot:
+        await pilot.pause()
+        await pilot.press("enter")
+        await pilot.pause()
+
+        await pilot.press("/", "b", "t", "w", "enter")
+        await pilot.pause()
+        await pilot.pause()
+
+        assert isinstance(app.screen, BTWScreen)
+
+
+@pytest.mark.asyncio
+async def test_btw_merge_adds_context_to_main_chat_history() -> None:
+    app = DGCApp()
+    app._restore_last_session_context = lambda: None
+    app._run_status_on_startup = lambda: None
+
+    async with app.run_test() as pilot:
+        await pilot.pause()
+        await pilot.press("enter")
+        await pilot.pause()
+
+        app._open_btw_screen()
+        await pilot.pause()
+
+        btw = app.screen
+        assert isinstance(btw, BTWScreen)
+        btw._transcript = [
+            {"role": "user", "content": "Look into the side issue."},
+            {"role": "assistant", "content": "The side issue traces back to model routing."},
+        ]
+
+        btw._merge_into_main(extra_note="Only apply if it helps the active task.")
+        await pilot.pause()
+
+        assert app._chat_history
+        assert "[BTW merge from parallel thread" in app._chat_history[-1]["content"]
+        assert "model routing" in app._chat_history[-1]["content"]
+
+
+@pytest.mark.asyncio
+async def test_tui_darkwin_autocorrects_to_darwin_command() -> None:
+    app = DGCApp()
+    app._restore_last_session_context = lambda: None
+    app._run_status_on_startup = lambda: None
+
+    async with app.run_test() as pilot:
+        await pilot.pause()
+        await pilot.press("enter")
+        await pilot.pause()
+
+        async_calls: list[tuple[str, str]] = []
+        chat_calls: list[str] = []
+
+        app._run_async_command = lambda cmd, arg: async_calls.append((cmd, arg))  # type: ignore[method-assign]
+        app._send_to_claude = lambda text: chat_calls.append(text)  # type: ignore[method-assign]
+
+        await pilot.press("d", "a", "r", "k", "w", "i", "n", "enter")
+        await pilot.pause()
+
+        assert async_calls == [("darwin", "")]
+        assert chat_calls == []

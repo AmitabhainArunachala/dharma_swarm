@@ -22,6 +22,18 @@ def test_dgc_cli_mission_brief_command_dispatch():
             assert mock.call_args.kwargs["as_json"] is True
 
 
+def test_dgc_cli_campaign_brief_command_dispatch():
+    from dharma_swarm.dgc_cli import main
+
+    with patch("sys.argv", ["dgc", "campaign-brief", "--json", "--path", "/tmp/campaign.json"]):
+        with patch("dharma_swarm.dgc_cli.cmd_campaign_brief", return_value=0) as mock:
+            main()
+            mock.assert_called_once()
+            assert mock.call_args.kwargs["path"] == "/tmp/campaign.json"
+            assert mock.call_args.kwargs["state_dir"] is None
+            assert mock.call_args.kwargs["as_json"] is True
+
+
 def test_dgc_cli_mission_brief_nonzero_exits():
     from dharma_swarm.dgc_cli import main
 
@@ -82,3 +94,30 @@ def test_cmd_mission_brief_renders_json(tmp_path, capsys):
     assert rc == 0
     assert payload["source_kind"] == "mission_file"
     assert payload["state"]["mission_title"] == "Emit mission JSON"
+
+
+def test_cmd_campaign_brief_renders_text(tmp_path, capsys):
+    import dharma_swarm.dgc_cli as cli
+
+    state_dir = tmp_path / "state"
+    state_dir.mkdir(parents=True, exist_ok=True)
+    (state_dir / "campaign.json").write_text(
+        json.dumps(
+            {
+                "campaign_id": "campaign-2002",
+                "mission_title": "Dual engine",
+                "mission_theme": "autonomy",
+                "status": "delegated",
+                "semantic_briefs": [{"brief_id": "semantic-a", "title": "Semantic hub"}],
+                "execution_briefs": [{"brief_id": "exec-a", "title": "Build hub"}],
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    rc = cli.cmd_campaign_brief(state_dir=str(state_dir))
+
+    out = capsys.readouterr().out
+    assert rc == 0
+    assert "Campaign: Dual engine" in out
+    assert "Semantic briefs: 1" in out

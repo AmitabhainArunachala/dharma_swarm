@@ -1,0 +1,59 @@
+{
+  "mission_title": "# PSMV Hyperfile Branch Mission",
+  "mission_thesis": "# PSMV Hyperfile Branch Mission\n\nBranch the current mission. Do not cancel, rewrite, or replace the existing live ecology queue.\n\nNorth star:\n\n- Turn the `Persistent-Semantic-Memory-Vault` into a staged, industry-grade hyperfile factory that can translate the strongest corpus ideas into research packets, build briefs, and agent-executable next steps.\n\nHard rules:\n\n- Continue operating until `2026-03-13 14:00 JST`.\n- Do not idle. If the current slice closes early, read more corpus, run another se",
+  "mission_theme": "mission",
+  "last_cycle_id": "1773368370",
+  "last_cycle_ts": "2026-03-13T02:19:44Z",
+  "status": "planned",
+  "task_count": 8,
+  "task_titles": [
+    "Turn the `Persistent-Semantic-Memory-Vault` into a staged, industry-grade hyperfile factory that can translate the stron",
+    "Continue operating until `2026-03-13 14:00 JST`.",
+    "Do not idle. If the current slice closes early, read more corpus, run another semantic pass, deepen the staged packets, ",
+    "Prefer artifacts over commentary.",
+    "Do not write into `~/Persistent-Semantic-Memory-Vault` from this branch. Stage outputs inside the repo workspace for lat",
+    "Preserve the distinction between internal self-modeling and external corpus-metabolizing work, but keep bridging them.",
+    "Build or refresh repo and PSMV semantic graphs, then emit summaries and cluster surfaces into `reports/psmv_hyperfiles_2",
+    "Generate `20-50` staged hyperfiles in `reports/psmv_hyperfiles_20260313/hyperfiles/`, each with at least `20` internal l"
+  ],
+  "delegated_task_ids": [],
+  "review_summary": "Workflow hit failures; escalate blockers and resynthesize.",
+  "blockers": [
+    "BLOCKED: ",
+    "BLOCKED: ",
+    "BLOCKED: "
+  ],
+  "rapid_ascent": false,
+  "previous_missions": [
+    {
+      "title": "# PSMV Hyperfile Branch Mission",
+      "cycle_id": "1773368056",
+      "status": "delegated"
+    },
+    {
+      "title": "# PSMV Hyperfile Branch Mission",
+      "cycle_id": "1773368106",
+      "status": "delegated"
+    },
+    {
+      "title": "# PSMV Hyperfile Branch Mission",
+      "cycle_id": "1773368158",
+      "status": "delegated"
+    },
+    {
+      "title": "# PSMV Hyperfile Branch Mission",
+      "cycle_id": "1773368213",
+      "status": "delegated"
+    },
+    {
+      "title": "# PSMV Hyperfile Branch Mission",
+      "cycle_id": "1773368264",
+      "status": "delegated"
+    },
+    {
+      "title": "# PSMV Hyperfile Branch Mission",
+      "cycle_id": "1773368312",
+      "status": "planned"
+    }
+  ]
+}

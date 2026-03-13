@@ -236,6 +236,7 @@ def _check_provider_env(checks: list[DoctorCheck]) -> None:
         "OPENAI_API_KEY",
         "OPENROUTER_API_KEY",
         "NVIDIA_NIM_API_KEY",
+        "OLLAMA_API_KEY",
     )
     present: list[str] = []
     for key in provider_keys:

@@ -8,15 +8,27 @@ import json
 import os
 from pathlib import Path
 import tempfile
+import time
 from typing import Any, AsyncIterator
 
 from .base import Capability, CompletionRequest, ModelProfile, ProviderAdapter, ProviderConfig
-from ..events import ErrorEvent, SessionEnd, SessionStart, TextComplete, UsageReport
+from ..events import (
+    ErrorEvent,
+    SessionEnd,
+    SessionStart,
+    TextComplete,
+    ThinkingComplete,
+    ToolCallComplete,
+    ToolResult,
+    UsageReport,
+)
 
 DHARMA_SWARM = Path(__file__).resolve().parents[4]
 
 CODEX_CAPABILITIES = (
-    Capability.SYSTEM_PROMPT
+    Capability.STREAMING
+    | Capability.TOOL_USE
+    | Capability.SYSTEM_PROMPT
     | Capability.CANCEL
 )
 
@@ -49,6 +61,8 @@ class CodexAdapter(ProviderAdapter):
         self._cli_path = cli_path
         self._workdir = workdir or DHARMA_SWARM
         self._proc: asyncio.subprocess.Process | None = None
+        self._pending_agent_message: str | None = None
+        self._tool_started_at: dict[str, float] = {}
         self._profiles: dict[str, ModelProfile] = {
             "gpt-5.4": ModelProfile(
                 provider_id=self.provider_id,
@@ -81,6 +95,8 @@ class CodexAdapter(ProviderAdapter):
         emitted_text = False
         last_error: ErrorEvent | None = None
 
+        self._pending_agent_message = None
+        self._tool_started_at.clear()
         proc = await self._spawn_process(cmd, env)
         self._proc = proc
 
@@ -118,7 +134,7 @@ class CodexAdapter(ProviderAdapter):
                     ):
                         if isinstance(event, SessionStart):
                             emitted_session_start = True
-                        elif isinstance(event, TextComplete):
+                        elif isinstance(event, TextComplete) and event.role == "assistant":
                             emitted_text = True
                         elif isinstance(event, ErrorEvent):
                             last_error = event
@@ -144,13 +160,22 @@ class CodexAdapter(ProviderAdapter):
                 return
 
             exit_code = await proc.wait()
+            if self._pending_agent_message and not emitted_text:
+                emitted_text = True
+                yield TextComplete(
+                    provider_id=self.provider_id,
+                    session_id=session_id,
+                    content=self._pending_agent_message,
+                    role="assistant",
+                )
+                self._pending_agent_message = None
             if not emitted_session_start:
                 yield SessionStart(
                     provider_id=self.provider_id,
                     session_id=session_id,
                     model=profile.model_id,
                     capabilities=_capability_names(profile.capabilities),
-                    tools_available=[],
+                    tools_available=_default_tools_available(),
                     system_info={"cli_path": self._cli_path, "cwd": str(self._workdir)},
                 )
 
@@ -193,6 +218,8 @@ class CodexAdapter(ProviderAdapter):
             )
         finally:
             self._proc = None
+            self._pending_agent_message = None
+            self._tool_started_at.clear()
             with contextlib.suppress(Exception):
                 output_path.unlink()
 
@@ -331,7 +358,15 @@ class CodexAdapter(ProviderAdapter):
         *,
         session_id: str,
         profile: ModelProfile,
-    ) -> list[SessionStart | TextComplete | UsageReport | ErrorEvent]:
+    ) -> list[
+        SessionStart
+        | TextComplete
+        | ThinkingComplete
+        | ToolCallComplete
+        | ToolResult
+        | UsageReport
+        | ErrorEvent
+    ]:
         try:
             raw: dict[str, Any] = json.loads(raw_line)
         except Exception:
@@ -351,34 +386,130 @@ class CodexAdapter(ProviderAdapter):
                     model=profile.model_id,
                     provider_session_id=provider_session_id,
                     capabilities=_capability_names(profile.capabilities),
-                    tools_available=[],
+                    tools_available=_default_tools_available(),
                     system_info={"cli_path": self._cli_path, "cwd": str(self._workdir)},
                 )
             ]
+        if event_type == "item.started":
+            item = raw.get("item")
+            if isinstance(item, dict):
+                item_type = str(item.get("type", "") or "")
+                if item_type == "command_execution":
+                    events: list[
+                        SessionStart
+                        | TextComplete
+                        | ThinkingComplete
+                        | ToolCallComplete
+                        | ToolResult
+                        | UsageReport
+                        | ErrorEvent
+                    ] = self._flush_pending_agent_message(
+                        base=base,
+                        role="commentary",
+                    )
+                    item_id = str(item.get("id", "") or "")
+                    if item_id:
+                        self._tool_started_at[item_id] = time.monotonic()
+                    command = str(item.get("command", "") or "").strip()
+                    events.append(
+                        ToolCallComplete(
+                            **base,
+                            tool_call_id=item_id,
+                            tool_name="shell",
+                            arguments=json.dumps(
+                                {"command": command},
+                                separators=(",", ":"),
+                            ),
+                            provider_options={
+                                "codex_item_type": item_type,
+                                "status": str(item.get("status", "") or ""),
+                            },
+                        )
+                    )
+                    return events
         if event_type == "item.completed":
             item = raw.get("item")
             if isinstance(item, dict):
                 item_type = str(item.get("type", "") or "")
-                if item_type == "message":
+                if item_type in {"message", "agent_message"}:
                     content = _extract_message_text(item)
                     if content:
-                        return [TextComplete(**base, content=content, role="assistant")]
+                        self._pending_agent_message = content
+                    return []
+                if item_type == "command_execution":
+                    events = self._flush_pending_agent_message(
+                        base=base,
+                        role="commentary",
+                    )
+                    item_id = str(item.get("id", "") or "")
+                    output = str(item.get("aggregated_output", "") or "")
+                    exit_code = item.get("exit_code")
+                    started_at = self._tool_started_at.pop(item_id, None)
+                    duration_ms = None
+                    if started_at is not None:
+                        duration_ms = max(1, int((time.monotonic() - started_at) * 1000))
+                    content = output.rstrip()
+                    if not content:
+                        if exit_code in (None, 0):
+                            content = "(no output)"
+                        else:
+                            content = f"(command exited with code {exit_code})"
+                    events.append(
+                        ToolResult(
+                            **base,
+                            tool_call_id=item_id,
+                            tool_name="shell",
+                            content=content,
+                            is_error=exit_code not in (None, 0),
+                            duration_ms=duration_ms,
+                            structured_result={
+                                "command": str(item.get("command", "") or ""),
+                                "exit_code": exit_code,
+                                "status": str(item.get("status", "") or ""),
+                            },
+                        )
+                    )
+                    return events
+                if item_type in {"thinking", "reasoning", "reasoning_summary"}:
+                    content = _extract_message_text(item)
+                    if content:
+                        events = self._flush_pending_agent_message(
+                            base=base,
+                            role="commentary",
+                        )
+                        events.append(
+                            ThinkingComplete(
+                                **base,
+                                content=content,
+                                is_redacted=False,
+                            )
+                        )
+                        return events
                 if item_type == "error":
+                    events = self._flush_pending_agent_message(
+                        base=base,
+                        role="commentary",
+                    )
                     message = str(item.get("message", "") or "").strip()
                     if message:
                         code, retryable = _classify_error(message)
-                        return [
+                        events.append(
                             ErrorEvent(
                                 **base,
                                 code=code,
                                 message=message,
                                 retryable=retryable,
                             )
-                        ]
+                        )
+                        return events
         if event_type == "turn.completed":
+            events = self._flush_pending_agent_message(
+                base=base,
+                role="assistant",
+            )
             usage = raw.get("usage")
             if isinstance(usage, dict):
-                return [
+                events.append(
                     UsageReport(
                         **base,
                         input_tokens=int(usage.get("input_tokens", 0) or 0),
@@ -386,20 +517,38 @@ class CodexAdapter(ProviderAdapter):
                         total_cost_usd=_coerce_float(usage.get("total_cost_usd")),
                         model_breakdown=usage,
                     )
-                ]
+                )
+            return events
         if event_type == "error":
+            events = self._flush_pending_agent_message(
+                base=base,
+                role="commentary",
+            )
             message = str(raw.get("message", "") or "").strip()
             if message:
                 code, retryable = _classify_error(message)
-                return [
+                events.append(
                     ErrorEvent(
                         **base,
                         code=code,
                         message=message,
                         retryable=retryable,
                     )
-                ]
+                )
+            return events
         return []
+
+    def _flush_pending_agent_message(
+        self,
+        *,
+        base: dict[str, Any],
+        role: str,
+    ) -> list[TextComplete]:
+        if not self._pending_agent_message:
+            return []
+        content = self._pending_agent_message
+        self._pending_agent_message = None
+        return [TextComplete(**base, content=content, role=role)]
 
 
 def _coerce_float(value: Any) -> float | None:
@@ -425,6 +574,8 @@ def _classify_error(message: str) -> tuple[str, bool]:
 
 
 def _extract_message_text(item: dict[str, Any]) -> str:
+    if isinstance(item.get("text"), str):
+        return str(item["text"]).strip()
     content = item.get("content")
     if isinstance(content, str):
         return content.strip()
@@ -445,3 +596,7 @@ def _extract_message_text(item: dict[str, Any]) -> str:
                 if isinstance(nested, dict) and isinstance(nested.get("text"), str):
                     chunks.append(nested["text"])
     return "\n".join(chunk for chunk in chunks if chunk).strip()
+
+
+def _default_tools_available() -> list[str]:
+    return ["shell"]

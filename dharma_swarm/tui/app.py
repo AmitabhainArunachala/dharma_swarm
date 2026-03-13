@@ -11,6 +11,7 @@ This is the central hub that:
 
 from __future__ import annotations
 
+import asyncio
 import contextlib
 import json
 import os
@@ -26,6 +27,7 @@ from typing import Any
 from textual import work
 from textual.app import App, ComposeResult
 from textual.binding import Binding
+from textual.timer import Timer
 
 from .engine.adapters import CompletionRequest
 from .engine.events import (
@@ -48,6 +50,7 @@ from .engine.events import (
 from .engine.provider_runner import ProviderRunner
 from .engine.session_store import SessionStore
 from .engine.session_state import SessionState
+from .screens.btw import BTWScreen
 from .screens.main import MainScreen
 from .screens.splash import SplashScreen
 from .widgets.prompt_input import PromptInput
@@ -76,6 +79,10 @@ DHARMA_STATE = HOME / ".dharma"
 MODEL_POLICY_PATH = DHARMA_STATE / "tui_model_policy.json"
 MODEL_STATS_PATH = DHARMA_STATE / "tui_model_stats.json"
 MODEL_COOLDOWN_SEC = max(30, int(os.getenv("DGC_MODEL_COOLDOWN_SEC", "300")))
+INDIGO = "#9C7444"
+VERDIGRIS = "#62725D"
+OCHRE = "#A17A47"
+BENGARA = "#8C5448"
 
 _MODE_NAMES: dict[str, str] = {
     "N": "normal",
@@ -149,6 +156,10 @@ class DGCApp(App):
         self._last_session_success: bool | None = None
         self._pending_fallback: bool = False
         self._provider_event_seen: bool = False
+        self._provider_idle_timer: Timer | None = None
+        self._last_provider_event_ts: float | None = None
+        self._last_provider_event_label: str = ""
+        self._last_idle_notice_ts: float = 0.0
         # State context cache (same 60s TTL as old TUI)
         self._state_cache: str = ""
         self._state_cache_time: float = 0.0
@@ -167,6 +178,9 @@ class DGCApp(App):
 
     def on_mount(self) -> None:
         """Push screens and register theme on startup."""
+        self._load_model_policy()
+        self._load_model_stats()
+
         # Push main screen first (it becomes the base), then splash on top.
         # The callback fires when the *pushed* screen is dismissed, so attach
         # it to SplashScreen — when the user presses Enter/Esc/Space on the
@@ -183,18 +197,16 @@ class DGCApp(App):
         except Exception:
             pass  # Textual version may not support custom themes
 
-        self._load_model_policy()
-        self._load_model_stats()
-
     def _on_main_ready(self, result: Any = None) -> None:
         """Called when splash is dismissed and main screen becomes active."""
         main = self._get_main_screen()
         if main:
+            self._init_status_bar(main.status_bar, model=self._status_model_label())  # type: ignore[arg-type]
             main.stream_output.write_system(
-                "[bold #7B9DAD]DGC[/bold #7B9DAD] -- Mission console ready. "
-                f"Active route: {self._status_model_label()}. Type /help for system commands.\n"
+                f"[bold {INDIGO}]DGC[/bold {INDIGO}] mission console ready. "
+                f"Route: [bold]{self._status_model_label()}[/bold]. "
+                "Use /help for commands.\n"
             )
-            main.status_bar.model = self._status_model_label()  # type: ignore[union-attr]
             self._restore_last_session_context()
             self._run_status_on_startup()
 
@@ -207,12 +219,153 @@ class DGCApp(App):
                 return screen
         return None
 
+    def _get_btw_screen(self) -> BTWScreen | None:
+        for screen in self.screen_stack:
+            if isinstance(screen, BTWScreen):
+                return screen
+        return None
+
     def _status_model_label(self) -> str:
-        return (
-            self._active_model
-            if self._active_provider == "claude"
-            else f"{self._active_provider}:{self._active_model}"
-        )
+        return f"{self._active_provider}:{self._active_model}"
+
+    def _open_btw_screen(self, *, initial_text: str = "") -> None:
+        existing = self._get_btw_screen()
+        if existing is not None:
+            if initial_text:
+                existing.chat_output.write_system(  # type: ignore[union-attr]
+                    "[dim]BTW overlay already open. Paste the next prompt there or /merge it back.[/dim]"
+                )
+            return
+        self.push_screen(BTWScreen(initial_text=initial_text))
+
+    def merge_btw_thread(
+        self,
+        *,
+        transcript: list[dict[str, str]],
+        source_session_id: str,
+        note: str | None = None,
+    ) -> None:
+        if not transcript:
+            main = self._get_main_screen()
+            if main:
+                main.stream_output.write_system(  # type: ignore[union-attr]
+                    "[dim]BTW merge skipped: thread was empty.[/dim]"
+                )
+            return
+
+        excerpt_lines: list[str] = []
+        for item in transcript[-8:]:
+            role = str(item.get("role", "note")).strip().upper()
+            content = str(item.get("content", "")).strip()
+            if not content:
+                continue
+            excerpt_lines.append(f"{role}: {content}")
+        if note:
+            excerpt_lines.append(f"MERGE_NOTE: {note.strip()}")
+        payload = (
+            f"[BTW merge from parallel thread {source_session_id}]\n"
+            "Fold this context into the main task only if relevant.\n\n"
+            + "\n\n".join(excerpt_lines)
+        )[:6000]
+        self._append_chat(role="user", content=payload)
+        main = self._get_main_screen()
+        if main:
+            main.stream_output.write_system(  # type: ignore[union-attr]
+                "[dim]BTW thread merged into main context for the next turn.[/dim]"
+            )
+
+    def _reset_status_runtime(
+        self,
+        status: StatusBar,
+        *,
+        activity: str = "ready",
+    ) -> None:
+        """Reset live per-run telemetry while keeping session counters intact."""
+        status.activity = activity
+        status.tool_count = 0
+        status.last_tool = ""
+        status.input_tokens = 0
+        status.output_tokens = 0
+        status.is_running = False
+
+    def _init_status_bar(
+        self,
+        status: StatusBar,
+        *,
+        model: str = "",
+        session_name: str = "",
+    ) -> None:
+        """Initialize the status widget, including light test doubles."""
+        if hasattr(status, "update_from_init"):
+            status.update_from_init(model=model, session_name=session_name)  # type: ignore[call-arg]
+            return
+        if model:
+            status.model = model
+        if session_name:
+            status.session_name = session_name
+        self._reset_status_runtime(status)
+
+    def _set_status_activity(
+        self,
+        status: StatusBar,
+        activity: str,
+        *,
+        tool_name: str | None = None,
+        increment_tools: bool = False,
+    ) -> None:
+        """Update the live status banner with the latest execution phase."""
+        status.activity = activity
+        if increment_tools:
+            status.tool_count = int(getattr(status, "tool_count", 0)) + 1
+        if tool_name:
+            status.last_tool = tool_name
+
+    def _recover_stale_provider_lock_from_session_meta(self) -> bool:
+        """Release a stale provider lock when persisted session metadata says the run ended."""
+        if not self._provider_runner or not self._provider_runner.is_running:
+            return False
+
+        local_session_id = self._session.session_id
+        if not local_session_id:
+            return False
+
+        try:
+            meta = self._session_store.load_meta(local_session_id)
+        except Exception:
+            return False
+
+        persisted_status = str(meta.get("status", "") or "").strip().lower()
+        if persisted_status in {"", "running"}:
+            return False
+
+        main = self._get_main_screen()
+        status_bar = getattr(main, "status_bar", None)
+        if status_bar is not None:
+            status_bar.is_running = False
+            if persisted_status == "completed":
+                self._set_status_activity(status_bar, "complete")
+            elif persisted_status == "cancelled":
+                self._set_status_activity(status_bar, "cancelled")
+            else:
+                self._set_status_activity(status_bar, persisted_status)
+
+        self._stop_provider_idle_watch()
+        self._session.is_running = False
+        self._last_session_success = persisted_status == "completed"
+        self._pending_fallback = False
+        self._provider_event_seen = False
+        self._inflight_provider = None
+        self._inflight_model = None
+        self._inflight_started_ts = None
+        with contextlib.suppress(Exception):
+            self._provider_runner.mark_session_end()  # type: ignore[union-attr]
+
+        if main is not None:
+            main.stream_output.write_system(  # type: ignore[union-attr]
+                "[dim]Recovered stale provider lock from persisted session "
+                f"status={persisted_status}.[/dim]"
+            )
+        return True
 
     def _set_active_model(
         self,
@@ -246,7 +399,7 @@ class DGCApp(App):
             if announce:
                 suffix = f" ({reason})" if reason else ""
                 main.stream_output.write_system(  # type: ignore[union-attr]
-                    "[dim]Model switched -> "
+                    f"[dim {INDIGO}]Model switched -> "
                     f"{self._active_provider}:{self._active_model}{suffix}[/dim]"
                 )
 
@@ -467,7 +620,7 @@ class DGCApp(App):
             lat = float(stats.get("ema_latency_ms", 0.0) or 0.0)
             err = str(stats.get("last_error", "") or "-")
             lines.append(
-                f"[cyan]{alias}[/cyan] ok={ok} fail={bad} "
+                f"[{INDIGO}]{alias}[/{INDIGO}] ok={ok} fail={bad} "
                 f"streak={consecutive} latency~{lat:.0f}ms last_error={err}"
             )
         return "\n".join(lines)
@@ -497,7 +650,7 @@ class DGCApp(App):
 
         if next_target is None:
             output.write_error(
-                "[red]Auto-fallback exhausted; no route is currently available.[/red]"
+                f"[{BENGARA}]Auto-fallback exhausted; no route is currently available.[/{BENGARA}]"
             )
             self._pending_fallback = False
             return False
@@ -516,7 +669,7 @@ class DGCApp(App):
             persist_preference=promote_preference,
         )
         output.write_system(
-            "[yellow]Auto-fallback[/yellow]: "
+            f"[{OCHRE}]Auto-fallback[/{OCHRE}]: "
             f"{prev} -> {provider_id}:{model_id} [dim]({reason})[/dim]"
         )
         if promote_preference:
@@ -699,10 +852,14 @@ class DGCApp(App):
             self._session.total_cost_usd = float(meta.get("total_cost_usd", 0.0) or 0.0)
 
         status: StatusBar = main.status_bar  # type: ignore[assignment]
-        status.session_name = provider_sid[:8]
-        status.model = self._status_model_label()
+        self._init_status_bar(
+            status,
+            model=self._status_model_label(),
+            session_name=provider_sid[:8],
+        )
         status.turn_count = self._session.turn_count
         status.cost_usd = self._session.total_cost_usd
+        status.activity = "resumed"
         main.stream_output.write_system(  # type: ignore[union-attr]
             "[dim]Restored prior Claude context: "
             f"{provider_sid[:12]}... (turns={status.turn_count}). "
@@ -721,11 +878,17 @@ class DGCApp(App):
         """Route canonical provider events to display widgets."""
         ev = event.event
         self._provider_event_seen = True
+        self._last_provider_event_ts = time.time()
+        self._last_provider_event_label = self._provider_event_label(ev)
         self._session.handle_event(ev)
 
         main = self._get_main_screen()
         if not main:
             return
+
+        btw = self._get_btw_screen()
+        if btw is not None:
+            btw.notify_main_event(ev)
 
         output: StreamOutput = main.stream_output  # type: ignore[assignment]
         status: StatusBar = main.status_bar  # type: ignore[assignment]
@@ -733,13 +896,17 @@ class DGCApp(App):
         if isinstance(ev, SessionStart):
             self._active_provider = ev.provider_id or self._active_provider
             self._active_model = ev.model or self._active_model
-            status.model = self._status_model_label()
-            status.session_name = (
-                (ev.provider_session_id or ev.session_id)[:8]
-                if (ev.provider_session_id or ev.session_id)
-                else "dgc"
+            self._init_status_bar(
+                status,
+                model=self._status_model_label(),
+                session_name=(
+                    (ev.provider_session_id or ev.session_id)[:8]
+                    if (ev.provider_session_id or ev.session_id)
+                    else "dgc"
+                ),
             )
             status.is_running = True
+            self._set_status_activity(status, "connected")
             if ev.provider_session_id:
                 self._provider_session_id = ev.provider_session_id
             output.write_system(
@@ -748,36 +915,64 @@ class DGCApp(App):
             )
 
         elif isinstance(ev, TextDelta):
+            self._set_status_activity(status, "answering")
             output.handle_text_delta(ev)
 
         elif isinstance(ev, TextComplete):
             output.handle_text_complete(ev)
             if ev.role == "assistant":
                 status.turn_count = self._session.turn_count
+                self._set_status_activity(status, "assistant")
                 self._append_chat(role="assistant", content=ev.content)
+            else:
+                self._set_status_activity(status, "progress")
 
         elif isinstance(ev, ThinkingDelta):
+            self._set_status_activity(status, "thinking")
             output.handle_thinking_delta(ev)
 
         elif isinstance(ev, ThinkingComplete):
+            self._set_status_activity(status, "reasoned")
             output.handle_thinking_complete(ev)
 
         elif isinstance(ev, ToolCallComplete):
+            tool_name = ev.tool_name or "tool"
+            self._set_status_activity(
+                status,
+                f"tool:{tool_name}",
+                tool_name=tool_name,
+                increment_tools=True,
+            )
             output.handle_tool_call_complete(ev)
 
         elif isinstance(ev, ToolProgress):
+            tool_name = ev.tool_name or status.last_tool or "tool"
+            self._set_status_activity(
+                status,
+                f"{tool_name} {ev.elapsed_seconds:.1f}s",
+                tool_name=tool_name,
+            )
             output.handle_tool_progress_canonical(ev)
 
         elif isinstance(ev, ToolResult):
+            tool_name = ev.tool_name or status.last_tool or "tool"
+            self._set_status_activity(
+                status,
+                f"{tool_name} {'err' if ev.is_error else 'ok'}",
+                tool_name=tool_name,
+            )
             output.handle_tool_result_canonical(ev)
 
         elif isinstance(ev, UsageReport):
             output.handle_usage_report(ev)
+            status.input_tokens = ev.input_tokens
+            status.output_tokens = ev.output_tokens
             if ev.total_cost_usd is not None:
                 status.cost_usd = ev.total_cost_usd
 
         elif isinstance(ev, SessionEnd):
             status.is_running = False
+            self._stop_provider_idle_watch()
             self._last_session_success = ev.success
             if not ev.success:
                 self._last_error_code = ev.error_code or self._last_error_code
@@ -795,23 +990,37 @@ class DGCApp(App):
                 target = target_for_route(self._active_provider, self._active_model)
                 if target:
                     self._cooldown_until_by_alias.pop(target.alias, None)
+                self._set_status_activity(status, "complete")
                 output.write_system("[dim]\u2713 Session complete.[/dim]")
                 self._pending_fallback = False
             else:
                 detail = f"{ev.error_code}: {ev.error_message}" if ev.error_code else (
                     ev.error_message or "unknown provider failure"
                 )
-                output.write_error(f"[red]\u2717 Session failed -- {detail}[/red]")
+                self._set_status_activity(
+                    status,
+                    f"failed:{(ev.error_code or 'error')[:12]}",
+                )
+                detail = f"{ev.error_code}: {ev.error_message}" if ev.error_code else (
+                    ev.error_message or "unknown provider failure"
+                )
+                output.write_error(f"[{BENGARA}]\u2717 Session failed -- {detail}[/{BENGARA}]")
 
         elif isinstance(ev, TaskStarted):
+            self._set_status_activity(status, "agent:start")
             output.write_system(
                 f"[dim]Subagent started: {ev.description}[/dim]"
             )
 
         elif isinstance(ev, TaskProgress):
+            self._set_status_activity(status, "agent:work")
             output.write_system(f"[dim]Subagent progress: {ev.summary}[/dim]")
 
         elif isinstance(ev, TaskComplete):
+            self._set_status_activity(
+                status,
+                f"agent:{'done' if ev.success else 'fail'}",
+            )
             state = "ok" if ev.success else "error"
             output.write_system(
                 f"[dim]Subagent complete ({state}): {ev.summary}[/dim]"
@@ -830,12 +1039,14 @@ class DGCApp(App):
                         self._auto_model_fallback
                         and self._last_user_prompt is not None
                     )
-            output.write_system(f"[yellow]{msg}[/yellow]")
+            self._set_status_activity(status, "rate-limited")
+            output.write_system(f"[{OCHRE}]{msg}[/{OCHRE}]")
 
         elif isinstance(ev, ErrorEvent):
             self._last_error_code = ev.code or self._last_error_code
             self._last_error_message = ev.message or self._last_error_message
-            output.write_error(f"[red]{ev.code}: {ev.message}[/red]")
+            self._set_status_activity(status, f"error:{(ev.code or 'provider')[:12]}")
+            output.write_error(f"[{BENGARA}]{ev.code}: {ev.message}[/{BENGARA}]")
 
     def on_provider_runner_process_started(
         self, event: ProviderRunner.ProcessStarted
@@ -843,18 +1054,24 @@ class DGCApp(App):
         """Update status bar when provider stream starts."""
         main = self._get_main_screen()
         if main:
-            main.status_bar.is_running = True  # type: ignore[union-attr]
+            status: StatusBar = main.status_bar  # type: ignore[assignment]
+            status.is_running = True
+            self._set_status_activity(status, "starting")
             route = self._status_model_label()
             if self._inflight_provider == "codex":
                 main.stream_output.write_system(  # type: ignore[union-attr]
                     "[dim]Starting Codex session on "
-                    f"{route}. Output may appear after the first model event; Ctrl+C cancels.[/dim]"
+                    f"{route}. Live tools, usage, and cost will stream here; Ctrl+C cancels.[/dim]"
                 )
             else:
                 main.stream_output.write_system(  # type: ignore[union-attr]
                     f"[dim]Starting {route}...[/dim]"
                 )
+            self._start_provider_idle_watch()
             self.set_timer(1.5, self._report_slow_provider_start)
+        btw = self._get_btw_screen()
+        if btw is not None:
+            btw.notify_main_process_started(self._status_model_label())
 
     def _report_slow_provider_start(self) -> None:
         """Surface a hint when a provider has not emitted any event yet."""
@@ -868,10 +1085,105 @@ class DGCApp(App):
         if not main:
             return
         route = self._status_model_label()
+        self._set_status_activity(main.status_bar, "waiting")  # type: ignore[arg-type]
         main.stream_output.write_system(  # type: ignore[union-attr]
             "[dim]Still waiting for "
-            f"{route} to emit its first event. This route can be quieter than Claude; Ctrl+C cancels.[/dim]"
+            f"{route} to emit its first event. Startup can be quiet for a few seconds; Ctrl+C cancels.[/dim]"
         )
+
+    def _start_provider_idle_watch(self) -> None:
+        self._stop_provider_idle_watch()
+        try:
+            asyncio.get_running_loop()
+        except RuntimeError:
+            self._provider_idle_timer = None
+            return
+        self._last_provider_event_ts = time.time()
+        self._last_provider_event_label = "process started"
+        self._last_idle_notice_ts = 0.0
+        self._provider_idle_timer = self.set_interval(5.0, self._report_provider_inactivity)
+
+    def _stop_provider_idle_watch(self) -> None:
+        if self._provider_idle_timer is not None:
+            self._provider_idle_timer.stop()
+            self._provider_idle_timer = None
+
+    def _provider_event_label(self, ev: Any) -> str:
+        if isinstance(ev, SessionStart):
+            return "session connected"
+        if isinstance(ev, TextDelta):
+            return "assistant text"
+        if isinstance(ev, TextComplete):
+            return "assistant reply" if ev.role == "assistant" else "codex progress note"
+        if isinstance(ev, ThinkingDelta | ThinkingComplete):
+            return "thinking"
+        if isinstance(ev, ToolCallComplete):
+            return f"tool {ev.tool_name or 'shell'} started"
+        if isinstance(ev, ToolProgress):
+            return f"tool {ev.tool_name or 'shell'} running"
+        if isinstance(ev, ToolResult):
+            return f"tool {ev.tool_name or 'shell'} finished"
+        if isinstance(ev, UsageReport):
+            return "usage update"
+        if isinstance(ev, ErrorEvent):
+            return f"error {ev.code or 'provider'}"
+        if isinstance(ev, SessionEnd):
+            return "session complete"
+        if isinstance(ev, TaskStarted):
+            return "subagent started"
+        if isinstance(ev, TaskProgress):
+            return "subagent progress"
+        if isinstance(ev, TaskComplete):
+            return "subagent complete"
+        return getattr(ev, "type", "provider event")
+
+    def _report_provider_inactivity(self) -> None:
+        if not self._provider_runner or not self._provider_runner.is_running:
+            self._stop_provider_idle_watch()
+            return
+        if self._recover_stale_provider_lock_from_session_meta():
+            return
+        if self._last_provider_event_ts is None:
+            return
+        idle_for = time.time() - self._last_provider_event_ts
+        if idle_for < 8:
+            return
+        now = time.time()
+        if (now - self._last_idle_notice_ts) < 10:
+            return
+        main = self._get_main_screen()
+        if not main:
+            return
+        route = self._status_model_label()
+        self._set_status_activity(main.status_bar, "waiting")  # type: ignore[arg-type]
+        detail = (
+            f"No new events from {route} for {int(idle_for)}s. "
+            f"Last activity: {self._last_provider_event_label or 'startup'}."
+        )
+        if self._active_provider == "codex":
+            if self._last_provider_event_label.startswith("tool ") and self._last_provider_event_label.endswith(" finished"):
+                detail += (
+                    " Codex may still be reasoning off-stream after the last tool result; "
+                    "DGC only sees new output when Codex emits another JSON event or exits."
+                )
+            else:
+                detail += (
+                    " Codex can stay silent between JSON events; "
+                    "DGC only sees new output when Codex emits another event or exits."
+                )
+            if idle_for >= 120:
+                detail += " If this keeps stretching, Ctrl+C or /cancel recovers the lane."
+            else:
+                detail += " Ctrl+C or /cancel cancels."
+        else:
+            if idle_for >= 120:
+                detail += " If this keeps stretching, Ctrl+C or /cancel recovers the lane."
+            else:
+                detail += " Ctrl+C or /cancel cancels."
+        main.stream_output.write_system(  # type: ignore[union-attr]
+            f"[dim]{detail}[/dim]"
+        )
+        self._last_idle_notice_ts = now
 
     def on_provider_runner_process_exited(
         self, event: ProviderRunner.ProcessExited
@@ -881,11 +1193,17 @@ class DGCApp(App):
         if not main:
             return
 
-        main.status_bar.is_running = False  # type: ignore[union-attr]
+        status: StatusBar = main.status_bar  # type: ignore[assignment]
+        status.is_running = False
         output: StreamOutput = main.stream_output  # type: ignore[assignment]
+        self._stop_provider_idle_watch()
+        btw = self._get_btw_screen()
+        if btw is not None:
+            btw.notify_main_process_exited(event.exit_code, event.was_cancelled)
 
         if event.was_cancelled:
-            output.write_system("[yellow]Cancelled.[/yellow]")
+            self._set_status_activity(status, "cancelled")
+            output.write_system(f"[{OCHRE}]Cancelled.[/{OCHRE}]")
             self._inflight_provider = None
             self._inflight_model = None
             self._inflight_started_ts = None
@@ -917,8 +1235,9 @@ class DGCApp(App):
             self._provider_event_seen = False
 
         if (not event.was_cancelled) and event.exit_code != 0:
+            self._set_status_activity(status, f"process:{event.exit_code}")
             output.write_error(
-                f"[red]Process exited with code {event.exit_code}[/red]"
+                f"[{BENGARA}]Process exited with code {event.exit_code}[/{BENGARA}]"
             )
         needs_fallback = (not event.was_cancelled) and (
             self._pending_fallback
@@ -978,19 +1297,31 @@ class DGCApp(App):
 
         if text.startswith("/"):
             cmd_text = text[1:]
-            output.write_system(f"[dim]/{cmd_text}[/dim]")
-            out_text, action = self._commands.handle(cmd_text)
-
-            if out_text:
-                output.write(out_text)
-
-            if action:
-                self._handle_action(action, cmd_text)
+            self._dispatch_system_command(cmd_text, output)
         else:
+            bare_cmd, notice = self._commands.resolve_bare_command(text)
+            if notice:
+                output.write_system(notice)
+            if bare_cmd:
+                self._dispatch_system_command(bare_cmd, output)
+                return
+            if notice:
+                return
             output.write_user(text)
             if self._maybe_handle_inline_model_switch(text):
                 return
             self._send_to_claude(text)
+
+    def _dispatch_system_command(self, cmd_text: str, output: StreamOutput) -> None:
+        """Echo and execute a system command from prompt input."""
+        output.write_system(f"[dim]/{cmd_text}[/dim]")
+        out_text, action = self._commands.handle(cmd_text)
+
+        if out_text:
+            output.write(out_text)
+
+        if action:
+            self._handle_action(action, cmd_text)
 
     def _handle_action(self, action: str, raw_cmd: str) -> None:
         """Dispatch action signals returned by SystemCommandHandler."""
@@ -1006,7 +1337,7 @@ class DGCApp(App):
         elif action == "cancel":
             if self._provider_runner and self._provider_runner.is_running:
                 self._provider_runner.cancel()
-                output.write_system("[yellow]Cancel signal sent.[/yellow]")
+                output.write_system(f"[{OCHRE}]Cancel signal sent.[/{OCHRE}]")
             else:
                 output.write_system("[dim]No active provider run.[/dim]")
 
@@ -1022,13 +1353,17 @@ class DGCApp(App):
         elif action in {"copy", "copylast"}:
             self._copy_last_reply()
 
+        elif action == "btw:open":
+            _, _, arg = raw_cmd.partition(" ")
+            self._open_btw_screen(initial_text=arg.strip())
+
         elif action.startswith("mode:set:"):
             target_mode = action.split(":", 2)[2] if ":" in action else ""
             if self._set_mode(target_mode):
                 mode_name = _MODE_NAMES[self._mode].title()
                 output.write_system(f"[dim]Mode set to [{self._mode}] {mode_name}.[/dim]")
             else:
-                output.write_error(f"[red]Unknown mode: {target_mode}[/red]")
+                output.write_error(f"[{BENGARA}]Unknown mode: {target_mode}[/{BENGARA}]")
 
         elif action == "model:status":
             output.write(
@@ -1073,7 +1408,7 @@ class DGCApp(App):
                 output.write_system("[dim]Model cooldowns cleared.[/dim]")
             else:
                 output.write_error(
-                    "[red]Usage: /model cooldown [status|clear][/red]"
+                    f"[{BENGARA}]Usage: /model cooldown [status|clear][/{BENGARA}]"
                 )
 
         elif action.startswith("model:set "):
@@ -1081,7 +1416,7 @@ class DGCApp(App):
             target = self._parse_model_set_target(raw)
             if target is None:
                 output.write_error(
-                    f"[red]Unknown model '{raw}'. Use /model list.[/red]"
+                    f"[{BENGARA}]Unknown model '{raw}'. Use /model list.[/{BENGARA}]"
                 )
                 return
             self._set_active_model(
@@ -1118,8 +1453,9 @@ class DGCApp(App):
                 )
             else:
                 output.write_error(
-                    "[red]Usage: /model auto "
-                    "[on|off|status|responsive|cost|genius][/red]"
+                    f"[{BENGARA}]Usage: /model auto "
+                    "[on|off|status|responsive|cost|genius]"
+                    f"[/{BENGARA}]"
                 )
 
         elif action.startswith("async:"):
@@ -1170,7 +1506,13 @@ class DGCApp(App):
 
         if self._provider_runner.is_running:
             main = self._get_main_screen()
-            if main and not main.status_bar.is_running:  # type: ignore[union-attr]
+            if self._recover_stale_provider_lock_from_session_meta():
+                main = self._get_main_screen()
+            if (
+                self._provider_runner.is_running
+                and main
+                and not main.status_bar.is_running  # type: ignore[union-attr]
+            ):
                 # Stale lock recovery: semantic session ended, worker finalization
                 # may still be winding down. Unlock and continue.
                 with contextlib.suppress(Exception):
@@ -1183,7 +1525,7 @@ class DGCApp(App):
             if self._provider_runner.is_running:
                 if main:
                     main.stream_output.write_error(  # type: ignore[union-attr]
-                        "[yellow]Provider is already running. Use /cancel first.[/yellow]"
+                        f"[{OCHRE}]Provider is already running. Use /cancel first.[/{OCHRE}]"
                     )
                 return
 
@@ -1221,7 +1563,7 @@ class DGCApp(App):
             ):
                 if main:
                     main.stream_output.write_error(  # type: ignore[union-attr]
-                        "[red]No available model route. Check /model list and credentials.[/red]"
+                        f"[{BENGARA}]No available model route. Check /model list and credentials.[/{BENGARA}]"
                     )
                 return
 
@@ -1258,6 +1600,13 @@ class DGCApp(App):
                 "permission_mode": self._resolve_permission_mode(),
             },
         )
+        main = self._get_main_screen()
+        if main:
+            status: StatusBar = main.status_bar  # type: ignore[assignment]
+            status.model = self._status_model_label()
+            status.session_name = local_session_id[:8]
+            self._reset_status_runtime(status, activity="queued")
+            status.is_running = True
         self._inflight_provider = self._active_provider
         self._inflight_model = self._active_model
         self._inflight_started_ts = time.time()
@@ -1360,7 +1709,7 @@ class DGCApp(App):
         except Exception as exc:
             if main:
                 main.stream_output.write_error(  # type: ignore[union-attr]
-                    f"[red]/chat failed: {exc}[/red]"
+                    f"[{BENGARA}]/chat failed: {exc}[/{BENGARA}]"
                 )
         finally:
             if main:
@@ -1384,7 +1733,7 @@ class DGCApp(App):
         try:
             self._dispatch_async(cmd, arg, out)
         except Exception as exc:
-            out(f"[red]Command error: {exc}[/red]")
+            out(f"[{BENGARA}]Command error: {exc}[/{BENGARA}]")
 
     def _dispatch_async(
         self,
@@ -1411,7 +1760,7 @@ class DGCApp(App):
             result = str(pulse())[:2000]
             for line in result.split("\n"):
                 out(f"  {line}")
-            out("[green]Pulse done.[/green]")
+            out(f"[{VERDIGRIS}]Pulse done.[/{VERDIGRIS}]")
 
         elif cmd == "health":
             out("[dim]Checking health...[/dim]")
@@ -1420,10 +1769,13 @@ class DGCApp(App):
             eco = scan_ecosystem()
             ok = sum(1 for v in eco.values() if v.get("exists"))
             missing = sum(1 for v in eco.values() if not v.get("exists"))
-            out(f"  [green]{ok} OK[/green]  [red]{missing} missing[/red]")
+            out(
+                f"  [{VERDIGRIS}]{ok} OK[/{VERDIGRIS}]  "
+                f"[{BENGARA}]{missing} missing[/{BENGARA}]"
+            )
             for name, info in eco.items():
                 if not info.get("exists"):
-                    out(f"  [red]MISSING[/red] {name} -- {info.get('path', '?')}")
+                    out(f"  [{BENGARA}]MISSING[/{BENGARA}] {name} -- {info.get('path', '?')}")
 
         elif cmd == "memory":
             out("[dim]Loading memory...[/dim]")
@@ -1434,13 +1786,13 @@ class DGCApp(App):
                 out(f"  {line}")
             latent = read_latent_gold_overview(state_dir=DHARMA_STATE, limit=5)
             if latent:
-                out("  [cyan]Latent gold[/cyan]")
+                out(f"  [{INDIGO}]Latent gold[/{INDIGO}]")
                 for line in latent.split("\n")[:10]:
                     out(f"  {line}")
 
         elif cmd == "witness":
             if not arg:
-                out("[red]Usage: /witness <observation>[/red]")
+                out(f"[{BENGARA}]Usage: /witness <observation>[/{BENGARA}]")
             else:
                 from datetime import datetime, timezone
 
@@ -1455,7 +1807,7 @@ class DGCApp(App):
                 }
                 with open(log_file, "a") as fh:
                     fh.write(json.dumps(entry) + "\n")
-                out(f"  [green]Witnessed[/green] -> {log_file.name}")
+                out(f"  [{VERDIGRIS}]Witnessed[/{VERDIGRIS}] -> {log_file.name}")
 
         elif cmd == "gates":
             action = arg or "echo test"
@@ -1469,7 +1821,7 @@ class DGCApp(App):
 
         elif cmd == "agni":
             if not arg:
-                out("[red]Usage: /agni <command>[/red]")
+                out(f"[{BENGARA}]Usage: /agni <command>[/{BENGARA}]")
             else:
                 from dharma_swarm.telos_gates import check_with_reflective_reroute
 
@@ -1486,7 +1838,7 @@ class DGCApp(App):
                     requirement_refs=["agni:remote_exec"],
                 )
                 if gate.result.decision.value == "block":
-                    out(f"[red]TELOS BLOCK[/red]: {gate.result.reason}")
+                    out(f"[{BENGARA}]TELOS BLOCK[/{BENGARA}]: {gate.result.reason}")
                     return
                 if gate.attempts:
                     out(
@@ -1514,7 +1866,7 @@ class DGCApp(App):
                     for line in proc.stdout.split("\n")[:30]:
                         out(f"  {line}")
                 if proc.stderr:
-                    out(f"  [red]{proc.stderr.strip()[:200]}[/red]")
+                    out(f"  [{BENGARA}]{proc.stderr.strip()[:200]}[/{BENGARA}]")
 
         elif cmd == "swarm":
             out(f"[dim]swarm {arg}[/dim]")
@@ -1536,7 +1888,7 @@ class DGCApp(App):
 
                 out(build_darwin_status_text())
             elif not arg or len(arg.split(None, 1)) < 2:
-                out("[red]Usage: /evolve <component> <description>[/red]")
+                out(f"[{BENGARA}]Usage: /evolve <component> <description>[/{BENGARA}]")
             else:
                 parts = arg.split(None, 1)
                 out(f"[dim]Evolving {parts[0]}...[/dim]")
@@ -1547,9 +1899,9 @@ class DGCApp(App):
 
                     mgr = SwarmManager()
                     result = asyncio.run(mgr.evolve(parts[0], parts[1]))
-                    out(f"  [green]Evolution result: {result}[/green]")
+                    out(f"  [{VERDIGRIS}]Evolution result: {result}[/{VERDIGRIS}]")
                 except Exception as exc:
-                    out(f"  [red]Evolution failed: {exc}[/red]")
+                    out(f"  [{BENGARA}]Evolution failed: {exc}[/{BENGARA}]")
 
         elif cmd == "darwin":
             from dharma_swarm.tui_helpers import build_darwin_status_text
@@ -1622,7 +1974,7 @@ class DGCApp(App):
                 for line in ctx.split("\n")[:40]:
                     out(f"  {line}")
             except Exception as exc:
-                out(f"  [red]Context failed: {exc}[/red]")
+                out(f"  [{BENGARA}]Context failed: {exc}[/{BENGARA}]")
 
         elif cmd == "runtime":
             from dharma_swarm.tui_helpers import build_runtime_status_text
@@ -1665,11 +2017,11 @@ class DGCApp(App):
                     out(f"  Axioms: {len(k.principles)}")
                     out(f"  Integrity: {k.verify_integrity()}")
                 except Exception as exc:
-                    out(f"  [red]Dharma kernel: {exc}[/red]")
+                    out(f"  [{BENGARA}]Dharma kernel: {exc}[/{BENGARA}]")
             elif subcmd == "corpus":
                 self._dispatch_async("corpus", "", out)
             else:
-                out("[red]Usage: /dharma [status|corpus][/red]")
+                out(f"[{BENGARA}]Usage: /dharma [status|corpus][/{BENGARA}]")
 
         elif cmd == "corpus":
             out("[dim]Corpus claims...[/dim]")
@@ -1684,7 +2036,7 @@ class DGCApp(App):
                 for c in claims[:10]:
                     out(f"  [{c.status.value}] {c.statement[:60]}")
             except Exception as exc:
-                out(f"  [red]Corpus: {exc}[/red]")
+                out(f"  [{BENGARA}]Corpus: {exc}[/{BENGARA}]")
 
         elif cmd == "stigmergy":
             out("[dim]Stigmergy...[/dim]")
@@ -1708,7 +2060,7 @@ class DGCApp(App):
                         f"(s={m.salience:.2f})"
                     )
             except Exception as exc:
-                out(f"  [red]Stigmergy: {exc}[/red]")
+                out(f"  [{BENGARA}]Stigmergy: {exc}[/{BENGARA}]")
 
         elif cmd == "hum":
             out("[dim]Subconscious dreams...[/dim]")
@@ -1728,10 +2080,10 @@ class DGCApp(App):
                         f"{d.resonance_type} ({d.strength:.2f})"
                     )
             except Exception as exc:
-                out(f"  [red]HUM: {exc}[/red]")
+                out(f"  [{BENGARA}]HUM: {exc}[/{BENGARA}]")
 
         else:
-            out(f"[red]Unknown async command: {cmd}[/red]")
+            out(f"[{BENGARA}]Unknown async command: {cmd}[/{BENGARA}]")
 
     @work(thread=True)
     def _run_status_on_startup(self) -> None:
@@ -1770,7 +2122,7 @@ class DGCApp(App):
             if hasattr(output, "copy_last_reply_to_clipboard"):
                 if output.copy_last_reply_to_clipboard():
                     output.write_system(
-                        "[dim #6B9BB5]Copied last reply to clipboard.[/dim #6B9BB5]"
+                        f"[dim {INDIGO}]Copied last reply to clipboard.[/dim {INDIGO}]"
                     )
                 else:
                     output.write_system(
@@ -1816,10 +2168,11 @@ class DGCApp(App):
                 "[dim]New session started.[/dim]"
             )
             status: StatusBar = main.status_bar  # type: ignore[assignment]
+            self._init_status_bar(status, model=self._status_model_label())
             status.session_name = ""
             status.cost_usd = 0.0
             status.turn_count = 0
-            status.model = self._status_model_label()
+            self._reset_status_runtime(status)
 
     # ─── Clipboard ───────────────────────────────────────────────────
 
@@ -1850,7 +2203,7 @@ class DGCApp(App):
             if hasattr(output, "copy_last_reply_to_clipboard"):
                 if output.copy_last_reply_to_clipboard():
                     output.write_system(
-                        "[dim #6B9BB5]Copied last reply to clipboard.[/dim #6B9BB5]"
+                        f"[dim {INDIGO}]Copied last reply to clipboard.[/dim {INDIGO}]"
                     )
                     return
             output.write_system(  # type: ignore[union-attr]

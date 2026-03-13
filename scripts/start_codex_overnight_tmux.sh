@@ -10,6 +10,8 @@ CYCLE_TIMEOUT="${CYCLE_TIMEOUT:-5400}"
 MAX_CYCLES="${MAX_CYCLES:-0}"
 MODEL="${DGC_CODEX_NIGHT_MODEL:-}"
 MISSION_FILE="${DGC_CODEX_NIGHT_MISSION_FILE:-}"
+LABEL="${DGC_CODEX_NIGHT_LABEL:-}"
+YOLO="${DGC_CODEX_NIGHT_YOLO:-0}"
 USE_CAFFEINATE="${USE_CAFFEINATE:-1}"
 
 if tmux has-session -t "${SESSION}" 2>/dev/null; then
@@ -19,6 +21,21 @@ fi
 
 if [[ "${HOURS}" == "forever" ]]; then
   HOURS="0"
+fi
+
+if [[ "${YOLO}" == "1" ]]; then
+  if [[ "${HOURS}" == "8" ]]; then
+    HOURS="10"
+  fi
+  if [[ -z "${POLL_SECONDS:-}" || "${POLL_SECONDS}" == "60" ]]; then
+    POLL_SECONDS="20"
+  fi
+  if [[ -z "${CYCLE_TIMEOUT:-}" || "${CYCLE_TIMEOUT}" == "5400" ]]; then
+    CYCLE_TIMEOUT="7200"
+  fi
+  if [[ -z "${LABEL}" ]]; then
+    LABEL="allnight-yolo"
+  fi
 fi
 
 mkdir -p "${STATE_DIR}"
@@ -32,6 +49,9 @@ if [[ -n "${MODEL}" ]]; then
 fi
 if [[ -n "${MISSION_FILE}" ]]; then
   runner="${runner} --mission-file '${MISSION_FILE}'"
+fi
+if [[ -n "${LABEL}" ]]; then
+  runner="${runner} --label '${LABEL}'"
 fi
 
 if [[ "${USE_CAFFEINATE}" == "1" ]] && command -v caffeinate >/dev/null 2>&1; then
@@ -50,4 +70,9 @@ fi
 echo "Poll seconds: ${POLL_SECONDS}"
 echo "Cycle timeout: ${CYCLE_TIMEOUT}"
 echo "Model: ${MODEL:-default}"
+echo "Label: ${LABEL:-codex-overnight}"
+echo "Mode: $([[ "${YOLO}" == "1" ]] && echo "YOLO" || echo "default")"
+if [[ -n "${MISSION_FILE}" ]]; then
+  echo "Mission file: ${MISSION_FILE}"
+fi
 echo "Use: scripts/status_codex_overnight_tmux.sh"

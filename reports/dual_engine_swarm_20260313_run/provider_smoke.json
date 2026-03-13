@@ -1,0 +1,23 @@
+{
+  "nvidia_nim": {
+    "base_url": "https://integrate.api.nvidia.com/v1",
+    "configured_base_url": "https://integrate.api.nvidia.com/v1",
+    "configured_model": "meta/llama-3.3-70b-instruct",
+    "model": "meta/llama-3.3-70b-instruct",
+    "response_preview": "OK",
+    "status": "ok",
+    "usage": {
+      "completion_tokens": 2,
+      "prompt_tokens": 40,
+      "total_tokens": 42
+    }
+  },
+  "ollama": {
+    "configured_base_url": "http://localhost:11434",
+    "error": "Ollama error 500: {\"error\":\"mkdir /Users/dhyana/.ollama: file exists: ensure path elements are traversable\"}",
+    "installed_models": [],
+    "model": "llama3.2",
+    "status": "error",
+    "strongest_installed": null
+  }
+}

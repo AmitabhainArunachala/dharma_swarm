@@ -22,6 +22,15 @@ import httpx
 
 from dharma_swarm.models import LLMRequest, LLMResponse, ProviderType
 from dharma_swarm.jikoku_instrumentation import jikoku_traced_provider  # type: ignore
+from dharma_swarm.ollama_config import (
+    OLLAMA_DEFAULT_CLOUD_MODEL,
+    OLLAMA_DEFAULT_LOCAL_MODEL,
+    OLLAMA_LOCAL_BASE_URL,
+    build_ollama_headers,
+    ollama_transport_mode,
+    resolve_ollama_base_url,
+    resolve_ollama_model,
+)
 from dharma_swarm.provider_policy import (
     ProviderPolicyRouter,
     ProviderRouteDecision,
@@ -261,6 +270,7 @@ class NVIDIANIMProvider(LLMProvider):
             or "https://integrate.api.nvidia.com/v1"
         ).rstrip("/")
         self._default_model = default_model
+        self._client: httpx.AsyncClient | None = None
 
     @staticmethod
     def _build_messages(request: LLMRequest) -> list[dict[str, str]]:
@@ -278,6 +288,18 @@ class NVIDIANIMProvider(LLMProvider):
             "Content-Type": "application/json",
         }
 
+    def _get_client(self) -> httpx.AsyncClient:
+        """Return a persistent httpx client, creating one if needed."""
+        if self._client is None or self._client.is_closed:
+            self._client = httpx.AsyncClient(timeout=120.0)
+        return self._client
+
+    async def close(self) -> None:
+        """Close the persistent HTTP client."""
+        if self._client is not None and not self._client.is_closed:
+            await self._client.aclose()
+            self._client = None
+
     @jikoku_traced_provider
     async def complete(self, request: LLMRequest) -> LLMResponse:
         payload = {
@@ -290,17 +312,17 @@ class NVIDIANIMProvider(LLMProvider):
         if request.tools:
             payload["tools"] = request.tools
 
-        async with httpx.AsyncClient(timeout=120.0) as client:
-            resp = await client.post(
-                f"{self._base_url}/chat/completions",
-                json=payload,
-                headers=self._headers_or_raise(),
+        client = self._get_client()
+        resp = await client.post(
+            f"{self._base_url}/chat/completions",
+            json=payload,
+            headers=self._headers_or_raise(),
+        )
+        if resp.status_code != 200:
+            raise RuntimeError(
+                f"NVIDIA NIM error {resp.status_code}: {resp.text[:300]}"
             )
-            if resp.status_code != 200:
-                raise RuntimeError(
-                    f"NVIDIA NIM error {resp.status_code}: {resp.text[:300]}"
-                )
-            data = resp.json()
+        data = resp.json()
 
         choices = data.get("choices") or []
         message = (choices[0].get("message") if choices else {}) or {}
@@ -558,22 +580,47 @@ class OpenRouterFreeProvider(LLMProvider):
 
 
 class OllamaProvider(LLMProvider):
-    """Provider for local Ollama inference via REST API."""
+    """Provider for Ollama local or cloud inference via the native REST API."""
 
-    DEFAULT_BASE_URL = "http://localhost:11434"
-    DEFAULT_MODEL = "llama3.2"
+    DEFAULT_BASE_URL = OLLAMA_LOCAL_BASE_URL
+    DEFAULT_MODEL = OLLAMA_DEFAULT_LOCAL_MODEL
+    DEFAULT_CLOUD_MODEL = OLLAMA_DEFAULT_CLOUD_MODEL
 
     def __init__(
         self,
         base_url: str | None = None,
-        model: str = DEFAULT_MODEL,
+        model: str | None = None,
+        api_key: str | None = None,
     ) -> None:
-        self._base_url = (
-            base_url
-            or os.environ.get("OLLAMA_BASE_URL")
-            or self.DEFAULT_BASE_URL
-        ).rstrip("/")
-        self._model = model
+        self._api_key = api_key or os.environ.get("OLLAMA_API_KEY")
+        self._base_url = resolve_ollama_base_url(base_url=base_url, api_key=self._api_key)
+        self._model = resolve_ollama_model(model, base_url=self._base_url, api_key=self._api_key)
+        self._transport_mode = ollama_transport_mode(base_url=self._base_url, api_key=self._api_key)
+        self._client: httpx.AsyncClient | None = None
+
+    @property
+    def base_url(self) -> str:
+        return self._base_url
+
+    @property
+    def default_model(self) -> str:
+        return self._model
+
+    @property
+    def transport_mode(self) -> str:
+        return self._transport_mode
+
+    def _get_client(self) -> httpx.AsyncClient:
+        """Return a persistent httpx client, creating one if needed."""
+        if self._client is None or self._client.is_closed:
+            self._client = httpx.AsyncClient(timeout=120.0)
+        return self._client
+
+    async def close(self) -> None:
+        """Close the persistent HTTP client."""
+        if self._client is not None and not self._client.is_closed:
+            await self._client.aclose()
+            self._client = None
 
     @staticmethod
     def _build_messages(request: LLMRequest) -> list[dict[str, str]]:
@@ -592,6 +639,9 @@ class OllamaProvider(LLMProvider):
             out.append(f"{role}: {content}")
         return "\n\n".join(out)
 
+    def _headers_or_raise(self) -> dict[str, str]:
+        return build_ollama_headers(base_url=self._base_url, api_key=self._api_key)
+
     @jikoku_traced_provider
     async def complete(self, request: LLMRequest) -> LLMResponse:
         model = request.model or self._model
@@ -605,25 +655,29 @@ class OllamaProvider(LLMProvider):
                 "num_predict": request.max_tokens,
             },
         }
-        async with httpx.AsyncClient(timeout=120.0) as client:
-            resp = await client.post(f"{self._base_url}/api/chat", json=payload)
-            if resp.status_code in {404, 405}:
-                # Back-compat for older Ollama instances.
-                generate_payload = {
-                    "model": model,
-                    "prompt": self._build_prompt_from_messages(messages),
-                    "stream": False,
-                    "options": payload["options"],
-                }
-                resp = await client.post(
-                    f"{self._base_url}/api/generate",
-                    json=generate_payload,
-                )
-            if resp.status_code != 200:
-                raise RuntimeError(
-                    f"Ollama error {resp.status_code}: {resp.text[:300]}"
-                )
-            data = resp.json()
+        client = self._get_client()
+        request_kwargs: dict[str, Any] = {"json": payload}
+        headers = self._headers_or_raise()
+        if headers:
+            request_kwargs["headers"] = headers
+        resp = await client.post(f"{self._base_url}/api/chat", **request_kwargs)
+        if resp.status_code in {404, 405}:
+            # Back-compat for older Ollama instances.
+            generate_payload = {
+                "model": model,
+                "prompt": self._build_prompt_from_messages(messages),
+                "stream": False,
+                "options": payload["options"],
+            }
+            generate_kwargs: dict[str, Any] = {"json": generate_payload}
+            if headers:
+                generate_kwargs["headers"] = headers
+            resp = await client.post(f"{self._base_url}/api/generate", **generate_kwargs)
+        if resp.status_code != 200:
+            raise RuntimeError(
+                f"Ollama error {resp.status_code}: {resp.text[:300]}"
+            )
+        data = resp.json()
 
         if "message" in data:
             content = ((data.get("message") or {}).get("content") or "").strip()
@@ -654,12 +708,16 @@ class OllamaProvider(LLMProvider):
                 "num_predict": request.max_tokens,
             },
         }
-        async with httpx.AsyncClient(timeout=120.0) as client:
-            async with client.stream(
-                "POST",
-                f"{self._base_url}/api/chat",
-                json=payload,
-            ) as resp:
+        client = self._get_client()
+        stream_kwargs: dict[str, Any] = {"json": payload}
+        headers = self._headers_or_raise()
+        if headers:
+            stream_kwargs["headers"] = headers
+        async with client.stream(
+            "POST",
+            f"{self._base_url}/api/chat",
+            **stream_kwargs,
+        ) as resp:
                 if resp.status_code != 200:
                     raise RuntimeError(
                         f"Ollama stream error {resp.status_code}: {await resp.aread()}"

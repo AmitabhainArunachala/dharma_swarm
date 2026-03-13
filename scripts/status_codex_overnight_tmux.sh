@@ -14,7 +14,8 @@ fi
 
 if [[ -f "${RUN_FILE}" ]]; then
   echo
-  echo "Run dir: $(cat "${RUN_FILE}")"
+  RUN_DIR="$(cat "${RUN_FILE}")"
+  echo "Run dir: ${RUN_DIR}"
 fi
 
 if [[ -f "${HEARTBEAT_FILE}" ]]; then
@@ -23,9 +24,23 @@ if [[ -f "${HEARTBEAT_FILE}" ]]; then
   cat "${HEARTBEAT_FILE}"
 fi
 
-LATEST_JSON="${STATE_DIR}/logs/codex_overnight/$(basename "$(cat "${RUN_FILE}" 2>/dev/null || echo "")")/latest.json"
+LATEST_JSON="${STATE_DIR}/logs/codex_overnight/$(basename "${RUN_DIR:-}")/latest.json"
 if [[ -f "${LATEST_JSON}" ]]; then
   echo
   echo "Latest snapshot:"
   cat "${LATEST_JSON}"
+fi
+
+MANIFEST_FILE="${RUN_DIR:-}/run_manifest.json"
+if [[ -f "${MANIFEST_FILE}" ]]; then
+  echo
+  echo "Run manifest:"
+  cat "${MANIFEST_FILE}"
+fi
+
+HANDOFF_FILE="${RUN_DIR:-}/morning_handoff.md"
+if [[ -f "${HANDOFF_FILE}" ]]; then
+  echo
+  echo "Morning handoff:"
+  cat "${HANDOFF_FILE}"
 fi

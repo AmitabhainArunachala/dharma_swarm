@@ -63,7 +63,7 @@ def test_enrich_route_request_promotes_quality_for_japanese() -> None:
     assert out.context["complexity_tier"] == "REASONING"
 
 
-def test_model_hint_for_provider_prefers_qwen_for_japanese() -> None:
+def test_model_hint_for_provider_prefers_kimi_for_japanese() -> None:
     request = LLMRequest(
         model="x",
         messages=[{"role": "user", "content": "日本語で実装の改善を説明して"}],
@@ -74,7 +74,86 @@ def test_model_hint_for_provider_prefers_qwen_for_japanese() -> None:
         default_hint="openai/gpt-5-codex",
         signals=signals,
     )
-    assert hint == "qwen/qwen3-32b"
+    assert hint == "moonshotai/kimi-k2.5"
+
+
+def test_model_hint_for_provider_prefers_glm_and_nemotron_for_reasoning() -> None:
+    request = LLMRequest(
+        model="x",
+        messages=[{"role": "user", "content": "Analyze the failure chain step by step and reason carefully."}],
+    )
+    signals = build_routing_signals(request)
+
+    openrouter_hint = model_hint_for_provider(
+        ProviderType.OPENROUTER,
+        default_hint="openai/gpt-5-codex",
+        signals=signals,
+    )
+    nim_hint = model_hint_for_provider(
+        ProviderType.NVIDIA_NIM,
+        default_hint="meta/llama-3.3-70b-instruct",
+        signals=signals,
+    )
+
+    assert openrouter_hint == "z-ai/glm-5"
+    assert nim_hint == "nvidia/llama-3.1-nemotron-ultra-253b-v1"
+
+
+def test_model_hint_for_provider_prefers_self_hosted_nim_frontier(monkeypatch) -> None:
+    monkeypatch.setenv("NVIDIA_NIM_BASE_URL", "http://nim.local:8000/v1")
+    request = LLMRequest(
+        model="x",
+        messages=[{"role": "user", "content": "日本語で長い設計の分析をしてください。理由も説明して。"}],
+    )
+    signals = build_routing_signals(request)
+
+    jp_hint = model_hint_for_provider(
+        ProviderType.NVIDIA_NIM,
+        default_hint="meta/llama-3.3-70b-instruct",
+        signals=signals,
+    )
+    assert jp_hint == "moonshotai/kimi-k2.5"
+
+    reasoning_request = LLMRequest(
+        model="x",
+        messages=[{"role": "user", "content": "Analyze the system carefully and reason step by step."}],
+    )
+    reasoning_signals = build_routing_signals(reasoning_request)
+    reasoning_hint = model_hint_for_provider(
+        ProviderType.NVIDIA_NIM,
+        default_hint="meta/llama-3.3-70b-instruct",
+        signals=reasoning_signals,
+    )
+    assert reasoning_hint == "zai-org/GLM-5"
+
+
+def test_model_hint_for_provider_prefers_ollama_cloud_frontier(monkeypatch) -> None:
+    monkeypatch.setenv("OLLAMA_API_KEY", "ollama-cloud-key")
+    monkeypatch.setenv("OLLAMA_BASE_URL", "http://localhost:11434")
+
+    jp_request = LLMRequest(
+        model="x",
+        messages=[{"role": "user", "content": "日本語で設計の全体像を説明して"}],
+    )
+    jp_signals = build_routing_signals(jp_request)
+    jp_hint = model_hint_for_provider(
+        ProviderType.OLLAMA,
+        default_hint="llama3.2",
+        signals=jp_signals,
+    )
+    assert jp_hint == "kimi-k2.5:cloud"
+
+    reasoning_request = LLMRequest(
+        model="x",
+        messages=[{"role": "user", "content": "Analyze the architecture carefully and reason step by step."}],
+    )
+    reasoning_signals = build_routing_signals(reasoning_request)
+    reasoning_hint = model_hint_for_provider(
+        ProviderType.OLLAMA,
+        default_hint="llama3.2",
+        signals=reasoning_signals,
+    )
+    assert reasoning_hint == "glm-5:cloud"
 
 
 def test_classify_context_tier_thresholds() -> None:

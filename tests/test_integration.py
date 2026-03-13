@@ -219,6 +219,9 @@ async def test_trace_logging_during_evolution_cycle(tmp_path: Path) -> None:
     )
     await engine.run_cycle([proposal])
 
+    # Drain fire-and-forget trace tasks
+    if engine._trace_tasks:
+        await asyncio.gather(*engine._trace_tasks)
     recent = await engine.traces.get_recent(limit=50)
     assert len(recent) >= 2
     actions = {e.action for e in recent}
@@ -287,6 +290,9 @@ async def test_harmful_proposal_gate_blocks_trace_logged(tmp_path: Path) -> None
     assert proposal.status == EvolutionStatus.REJECTED
     assert proposal.gate_decision == GateDecision.BLOCK.value
 
+    # Drain fire-and-forget trace tasks
+    if engine._trace_tasks:
+        await asyncio.gather(*engine._trace_tasks)
     recent = await engine.traces.get_recent(limit=10)
     gate_traces = [e for e in recent if e.action == "gate_check"]
     assert len(gate_traces) >= 1

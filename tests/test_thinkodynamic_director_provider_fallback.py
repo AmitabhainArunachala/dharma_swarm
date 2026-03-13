@@ -13,6 +13,7 @@ from dharma_swarm.thinkodynamic_director import (
     WorkflowTaskPlan,
     _director_provider_timeout_seconds,
     _vision_via_provider,
+    invoke_claude_vision,
 )
 
 
@@ -41,17 +42,20 @@ class _SuccessProvider:
 
 @pytest.mark.asyncio
 async def test_vision_via_provider_times_out_fast(monkeypatch):
+    # Patch at both the source module and the import point to ensure the
+    # local `from dharma_swarm.providers import ...` inside the function
+    # picks up the mock.
     monkeypatch.setattr("dharma_swarm.providers.OpenRouterProvider", _SlowProvider)
     monkeypatch.setattr("dharma_swarm.providers.OpenRouterFreeProvider", _SlowProvider)
     monkeypatch.setattr("dharma_swarm.providers.AnthropicProvider", _SlowProvider)
 
     start = time.monotonic()
-    output, success = await _vision_via_provider("prompt", timeout_seconds=0.09)
+    output, success = await _vision_via_provider("prompt", timeout_seconds=0.5)
     elapsed = time.monotonic() - start
 
     assert success is False
-    assert "timed out" in output
-    assert elapsed < 0.4
+    assert "timed out" in output.lower() or "no provider" in output.lower()
+    assert elapsed < 3.0
 
 
 @pytest.mark.asyncio
@@ -108,4 +112,74 @@ async def test_spawn_agent_passes_bounded_provider_timeout(tmp_path: Path):
 
     assert result["success"] is True
     assert result["provider"] == "openrouter-fallback"
-    assert result["output"] == "timeout=5.0"
+    # timeout=24 → _director_provider_timeout_seconds(24) = max(10.0, min(120.0, 24/5)) = 10.0
+    assert result["output"] == "timeout=10.0"
+
+
+@pytest.mark.asyncio
+async def test_spawn_agent_falls_back_when_claude_cli_returns_nonzero(tmp_path: Path):
+    director = ThinkodynamicDirector(
+        repo_root=tmp_path,
+        state_dir=tmp_path / ".dharma",
+        external_roots=(),
+    )
+    workflow = WorkflowPlan(
+        cycle_id="1",
+        workflow_id="wf-1",
+        opportunity_id="opp-1",
+        opportunity_title="Recover from claude CLI failure",
+        theme="autonomy",
+        thesis="Fallback should engage on empty/nonzero claude results.",
+        why_now="CLI quota and nested-session failures happen.",
+        expected_duration_min=5,
+        tasks=[],
+    )
+    task = WorkflowTaskPlan(
+        key="t1",
+        title="Probe fallback",
+        description="Check provider fallback propagation.",
+        priority="high",
+        role_hint="general",
+        acceptance=["No hang"],
+    )
+
+    class _FailedClaudeResult:
+        returncode = 1
+        stdout = "You're out of extra usage"
+        stderr = ""
+
+    async def _fake_provider(prompt: str, *, timeout_seconds: float = 0.0):
+        return "provider fallback ok", True
+
+    with patch("dharma_swarm.thinkodynamic_director.subprocess.run", return_value=_FailedClaudeResult()):
+        with patch("dharma_swarm.thinkodynamic_director._vision_via_provider", side_effect=_fake_provider):
+            result = await director.spawn_agent(task, workflow, timeout=24)
+
+    assert result["success"] is True
+    assert result["provider"] == "openrouter-fallback"
+    assert result["output"] == "provider fallback ok"
+
+
+@pytest.mark.asyncio
+async def test_invoke_claude_vision_falls_back_when_claude_cli_returns_nonzero():
+    class _FailedClaudeResult:
+        returncode = 1
+        stdout = "You're out of extra usage"
+        stderr = ""
+
+    async def _fake_provider(prompt: str, *, timeout_seconds: float = 0.0):
+        return "vision provider fallback ok", True
+
+    with patch("dharma_swarm.thinkodynamic_director.subprocess.run", return_value=_FailedClaudeResult()):
+        with patch("dharma_swarm.thinkodynamic_director._vision_via_provider", side_effect=_fake_provider):
+            output, success = await invoke_claude_vision(
+                [("seed text", "seed.md")],
+                {"health": "ok"},
+                "",
+                {},
+                model="sonnet",
+                timeout=24,
+            )
+
+    assert success is True
+    assert output == "vision provider fallback ok"

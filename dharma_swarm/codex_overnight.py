@@ -35,6 +35,16 @@ class GitSnapshot:
     untracked_count: int
 
 
+@dataclass(slots=True)
+class RunSettings:
+    label: str
+    hours: float
+    poll_seconds: int
+    cycle_timeout: int
+    max_cycles: int
+    model: str
+
+
 def utc_ts() -> str:
     return datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
 
@@ -105,6 +115,140 @@ def _resolve_cycle_summary(*, output_file: Path, stdout: str) -> str:
         if summary_text:
             return summary_text
     return stdout.strip()
+
+
+def parse_summary_fields(summary_text: str) -> dict[str, str]:
+    fields = {
+        "result": "",
+        "files": "",
+        "tests": "",
+        "blockers": "",
+    }
+    for line in summary_text.splitlines():
+        if ":" not in line:
+            continue
+        key, value = line.split(":", 1)
+        normalized = key.strip().lower()
+        if normalized in fields:
+            fields[normalized] = value.strip()
+    return fields
+
+
+def _parse_files_field(raw_value: str) -> list[str]:
+    value = raw_value.strip()
+    if not value or value.lower() == "none":
+        return []
+    return [part.strip() for part in value.split(",") if part.strip()]
+
+
+def _read_json(path: Path) -> dict[str, Any]:
+    if not path.exists():
+        return {}
+    try:
+        return json.loads(path.read_text(encoding="utf-8"))
+    except Exception:
+        return {}
+
+
+def _write_run_manifest(
+    *,
+    run_dir: Path,
+    repo_root: Path,
+    state_dir: Path,
+    mission: str,
+    settings: RunSettings,
+    initial_snapshot: GitSnapshot,
+) -> Path:
+    mission_file = run_dir / "mission_brief.md"
+    mission_file.write_text(mission.rstrip() + "\n", encoding="utf-8")
+    manifest_file = run_dir / "run_manifest.json"
+    payload = {
+        "run_id": run_dir.name,
+        "label": settings.label,
+        "created_at": utc_ts(),
+        "repo_root": str(repo_root),
+        "state_dir": str(state_dir),
+        "mission_file": str(mission_file),
+        "mission_excerpt": _safe_text(mission, limit=300),
+        "settings": asdict(settings),
+        "initial_git_snapshot": asdict(initial_snapshot),
+    }
+    write_json(manifest_file, payload)
+    return manifest_file
+
+
+def _update_run_manifest(
+    manifest_file: Path,
+    *,
+    latest_cycle: dict[str, Any],
+    cycle_count: int,
+) -> None:
+    payload = _read_json(manifest_file)
+    payload["updated_at"] = utc_ts()
+    payload["cycles_completed"] = cycle_count
+    payload["latest_cycle"] = latest_cycle
+    payload["latest_summary_fields"] = latest_cycle.get("summary_fields", {})
+    payload["final_git_snapshot"] = latest_cycle.get("after", {})
+    write_json(manifest_file, payload)
+
+
+def write_morning_handoff(
+    *,
+    run_dir: Path,
+    state_dir: Path,
+    mission: str,
+    settings: RunSettings,
+    snapshots: Sequence[dict[str, Any]],
+) -> Path:
+    latest = snapshots[-1] if snapshots else {}
+    summary_fields = latest.get("summary_fields", {})
+    files = _parse_files_field(str(summary_fields.get("files", "")))
+    lines = [
+        "# Codex Overnight Handoff",
+        "",
+        f"- updated_at: {utc_ts()}",
+        f"- label: {settings.label}",
+        f"- run_dir: {run_dir}",
+        f"- cycles_completed: {len(snapshots)}",
+        f"- mission: {_safe_text(mission, limit=220)}",
+    ]
+    if latest:
+        lines.extend(
+            [
+                f"- latest_cycle: {latest.get('cycle', 0)}",
+                f"- latest_rc: {latest.get('rc', 1)}",
+                f"- latest_timed_out: {latest.get('timed_out', False)}",
+                "",
+                "## Latest Result",
+                "",
+                f"- result: {summary_fields.get('result', '') or '(missing)'}",
+                f"- files: {', '.join(files) if files else 'none'}",
+                f"- tests: {summary_fields.get('tests', '') or 'not reported'}",
+                f"- blockers: {summary_fields.get('blockers', '') or 'none'}",
+                "",
+                "## Recent Cycles",
+                "",
+            ]
+        )
+        recent = list(snapshots)[-5:]
+        for snapshot in recent:
+            recent_fields = snapshot.get("summary_fields", {})
+            lines.append(
+                f"- cycle {snapshot.get('cycle', 0):03d}: "
+                f"rc={snapshot.get('rc', 1)} "
+                f"timed_out={snapshot.get('timed_out', False)} "
+                f"result={recent_fields.get('result', '') or '(missing)'}"
+            )
+    else:
+        lines.extend(["", "No cycles completed yet."])
+
+    handoff_text = "\n".join(lines) + "\n"
+    handoff_file = run_dir / "morning_handoff.md"
+    handoff_file.write_text(handoff_text, encoding="utf-8")
+    shared_handoff = state_dir / "shared" / "codex_overnight_handoff.md"
+    shared_handoff.parent.mkdir(parents=True, exist_ok=True)
+    shared_handoff.write_text(handoff_text, encoding="utf-8")
+    return handoff_file
 
 
 def _read_mission(args: argparse.Namespace) -> str:
@@ -350,6 +494,7 @@ def run_cycle(
         output_file.write_text("", encoding="utf-8")
 
     summary_text = _resolve_cycle_summary(output_file=output_file, stdout=stdout)
+    summary_fields = parse_summary_fields(summary_text)
     (run_dir / "latest_last_message.txt").write_text(summary_text + "\n", encoding="utf-8")
 
     after = gather_git_snapshot(repo_root)
@@ -378,6 +523,7 @@ def run_cycle(
         "output_file": str(output_file),
         "stdout_file": str(stdout_file),
         "summary_text": summary_text,
+        "summary_fields": summary_fields,
         "before": asdict(before),
         "after": asdict(after),
     }
@@ -393,6 +539,8 @@ def run_cycle(
             "rc": rc,
             "timed_out": timed_out,
             "report_file": str(report_file),
+            "result": summary_fields.get("result", ""),
+            "blockers": summary_fields.get("blockers", ""),
         },
     )
     return snapshot
@@ -409,6 +557,7 @@ def build_arg_parser() -> argparse.ArgumentParser:
     parser.add_argument("--mission-brief", default="", help="Inline mission brief override.")
     parser.add_argument("--mission-file", default="", help="Read mission brief from a file.")
     parser.add_argument("--model", default="", help="Optional Codex model override.")
+    parser.add_argument("--label", default="codex-overnight", help="Short operator label for this run.")
     parser.add_argument("--once", action="store_true", help="Run one cycle and exit.")
     return parser
 
@@ -424,6 +573,23 @@ def main(argv: Sequence[str] | None = None) -> int:
     run_file.write_text(str(run_dir), encoding="utf-8")
 
     mission = _read_mission(args)
+    settings = RunSettings(
+        label=args.label.strip() or "codex-overnight",
+        hours=args.hours,
+        poll_seconds=args.poll_seconds,
+        cycle_timeout=args.cycle_timeout,
+        max_cycles=args.max_cycles,
+        model=args.model.strip(),
+    )
+    initial_snapshot = gather_git_snapshot(repo_root)
+    manifest_file = _write_run_manifest(
+        run_dir=run_dir,
+        repo_root=repo_root,
+        state_dir=state_dir,
+        mission=mission,
+        settings=settings,
+        initial_snapshot=initial_snapshot,
+    )
     append_text(
         run_dir / "report.md",
         "\n".join(
@@ -432,7 +598,9 @@ def main(argv: Sequence[str] | None = None) -> int:
                 "",
                 f"- repo_root: {repo_root}",
                 f"- state_dir: {state_dir}",
+                f"- label: {settings.label}",
                 f"- mission: {_safe_text(mission, limit=300)}",
+                f"- manifest: {manifest_file}",
                 "",
             ]
         ),
@@ -441,6 +609,7 @@ def main(argv: Sequence[str] | None = None) -> int:
     end_at = time.time() + (args.hours * 3600.0) if args.hours > 0 else None
     cycle = 0
     latest: dict[str, Any] = {}
+    cycle_snapshots: list[dict[str, Any]] = []
     while True:
         cycle += 1
         latest = run_cycle(
@@ -451,6 +620,19 @@ def main(argv: Sequence[str] | None = None) -> int:
             mission=mission,
             model=args.model,
             timeout=args.cycle_timeout,
+        )
+        cycle_snapshots.append(latest)
+        _update_run_manifest(
+            manifest_file,
+            latest_cycle=latest,
+            cycle_count=len(cycle_snapshots),
+        )
+        write_morning_handoff(
+            run_dir=run_dir,
+            state_dir=state_dir,
+            mission=mission,
+            settings=settings,
+            snapshots=cycle_snapshots,
         )
         if args.once:
             break
@@ -471,10 +653,13 @@ def main(argv: Sequence[str] | None = None) -> int:
 __all__ = [
     "DEFAULT_MISSION",
     "GitSnapshot",
+    "RunSettings",
     "build_arg_parser",
     "build_codex_exec_command",
     "build_cycle_prompt",
     "gather_git_snapshot",
     "main",
+    "parse_summary_fields",
     "render_git_snapshot",
+    "write_morning_handoff",
 ]

@@ -35,6 +35,15 @@ from pathlib import Path
 from typing import Any, Iterable, Sequence
 
 from dharma_swarm.jikoku_samaya import JikokuTracer
+from dharma_swarm.mission_contract import (
+    CampaignArtifact,
+    ExecutionBrief,
+    MissionState,
+    build_campaign_state,
+    load_active_campaign_state,
+    save_campaign_state,
+    save_mission_state,
+)
 from dharma_swarm.models import Task, TaskPriority, TaskStatus
 from dharma_swarm.task_board import TaskBoard
 
@@ -425,6 +434,17 @@ class FileSignal:
 
 
 @dataclass(slots=True)
+class LatentGoldSignal:
+    shard_id: str
+    state: str
+    salience: float
+    summary: str
+    theme_scores: dict[str, float]
+    source_task_id: str = ""
+    created_at: str = ""
+
+
+@dataclass(slots=True)
 class DirectorOpportunity:
     opportunity_id: str
     theme: str
@@ -549,6 +569,13 @@ def _extract_summary(text: str, path: Path) -> str:
             continue
         return line[:180]
     return path.name
+
+
+def _truncate_summary(text: str, *, limit: int = 180) -> str:
+    cleaned = " ".join(text.split())
+    if len(cleaned) <= limit:
+        return cleaned
+    return cleaned[: limit - 3] + "..."
 
 
 def _theme_scores_from_text(text: str) -> dict[str, float]:
@@ -768,6 +795,110 @@ def _director_provider_timeout_seconds(timeout: int | float | None = None) -> fl
     return max(10.0, min(120.0, float(timeout) / 5.0))
 
 
+def _mission_directive_block(mission_brief: str) -> str:
+    """Build a prompt block that foregrounds the human's mission directive."""
+    if not mission_brief or mission_brief.strip() == DEFAULT_MISSION.strip():
+        return ""
+    return f"""
+=== HUMAN MISSION DIRECTIVE (HIGHEST PRIORITY) ===
+The human has set an explicit mission. Your vision and workflow MUST serve this
+directive. Do NOT override it with your own opportunity scoring. Decompose the
+mission into concrete tasks that produce the deliverables requested below.
+
+MISSION: {mission_brief}
+=== END DIRECTIVE ===
+"""
+
+
+def _parse_mission_deliverables(
+    mission_brief: str,
+) -> list[dict[str, Any]]:
+    """Extract explicit deliverables from a mission brief.
+
+    Detects bullet points, numbered lists, and imperative directives
+    (produce, create, build, write, draft, design, map, audit, identify).
+    Returns a list of task-spec dicts ready for ``compile_workflow_from_vision``.
+
+    If the brief is the DEFAULT_MISSION or contains no structured
+    deliverables, returns [].
+    """
+    if not mission_brief or mission_brief.strip() == DEFAULT_MISSION.strip():
+        return []
+
+    # Split into lines, strip whitespace
+    lines = [ln.strip() for ln in mission_brief.splitlines() if ln.strip()]
+    deliverables_heading_re = re.compile(r"^(?:#+\s*)?deliverables\b:?\s*$", re.IGNORECASE)
+    deliverables_start = next(
+        (idx for idx, line in enumerate(lines) if deliverables_heading_re.match(line)),
+        None,
+    )
+    if deliverables_start is not None:
+        lines = lines[deliverables_start + 1 :]
+
+    # Detect structured deliverables:
+    #   - bullet points (-, *, •)
+    #   - numbered items (1., 2), a))
+    #   - imperative verbs at line start
+    _BULLET_RE = re.compile(r"^[-*•]\s+(.+)")
+    _NUMBERED_RE = re.compile(r"^\d+[.)]\s+(.+)")
+    _IMPERATIVE_RE = re.compile(
+        r"^(produce|create|build|write|draft|design|map|audit|identify|analyze|"
+        r"implement|deploy|test|validate|define|extract|compile|generate|deliver|"
+        r"prepare|research|investigate|develop|assess)\b\s+(.+)",
+        re.IGNORECASE,
+    )
+
+    deliverables: list[str] = []
+    for line in lines:
+        m = _BULLET_RE.match(line) or _NUMBERED_RE.match(line)
+        if m:
+            deliverables.append(m.group(1).strip())
+            continue
+        m = _IMPERATIVE_RE.match(line)
+        if m:
+            deliverables.append(line.strip())
+            continue
+
+    if not deliverables:
+        return []
+
+    # Convert to task specs
+    _ROLE_HINTS = {
+        "research": "researcher",
+        "investigat": "researcher",
+        "analyz": "researcher",
+        "map": "cartographer",
+        "audit": "validator",
+        "validat": "validator",
+        "test": "validator",
+        "design": "architect",
+        "architect": "architect",
+        "build": "general",
+        "implement": "general",
+        "deploy": "general",
+        "write": "general",
+        "draft": "general",
+    }
+
+    tasks: list[dict[str, Any]] = []
+    for idx, deliverable in enumerate(deliverables[:8]):  # cap at 8
+        role = "general"
+        lower = deliverable.lower()
+        for keyword, hint in _ROLE_HINTS.items():
+            if lower.startswith(keyword) or keyword in lower[:30]:
+                role = hint
+                break
+        tasks.append({
+            "title": deliverable[:120],
+            "description": f"Mission deliverable: {deliverable}",
+            "role": role,
+            "estimated_minutes": 60,
+            "acceptance": [f"Artifact produced for: {deliverable[:80]}"],
+        })
+
+    return tasks
+
+
 def _usable_provider_content(content: str | None) -> bool:
     text = (content or "").strip()
     if not text:
@@ -783,6 +914,7 @@ async def invoke_claude_vision(
     *,
     model: str = "sonnet",
     timeout: int = 300,
+    mission_brief: str = "",
 ) -> tuple[str, bool]:
     """Call ``claude -p`` with the contemplative seeds + ecosystem state.
 
@@ -833,6 +965,7 @@ Current ecosystem state:
 Available meta-task archetypes (use as anchors, not constraints):
 {meta_text}
 {anti_target_block}
+{_mission_directive_block(mission_brief)}
 From the highest vantage you can reach:
 
 1. VISION: What is the single most important thing that wants to exist right now?
@@ -869,15 +1002,18 @@ End with: NEXT_VISION: [one sentence about what to think about next cycle]"""
         )
         if proc.returncode == 0 and proc.stdout.strip():
             return proc.stdout.strip(), True
-        cli_err = proc.stderr or ""
-        # Nested session or other failure → fall through to provider path
-        if "nested" not in cli_err.lower():
-            return f"(Claude returned rc={proc.returncode}: {cli_err[:200]})", False
-        logger.info("Claude CLI unavailable (nested session), trying provider fallback")
+        cli_err = (proc.stderr or "").strip()
+        cli_out = (proc.stdout or "").strip()
+        logger.info(
+            "Claude CLI unusable (rc=%s, stdout=%r, stderr=%r), trying provider fallback",
+            proc.returncode,
+            cli_out[:120],
+            cli_err[:200],
+        )
     except FileNotFoundError:
         logger.info("Claude CLI not found, trying provider fallback")
     except subprocess.TimeoutExpired:
-        return f"(Claude timed out after {timeout}s)", False
+        logger.info("Claude CLI timed out after %ss, trying provider fallback", timeout)
 
     # --- Fallback path: direct LLM provider (works inside nested sessions) ---
     return await _vision_via_provider(
@@ -893,9 +1029,10 @@ async def _vision_via_provider(
 ) -> tuple[str, bool]:
     """Fallback vision using direct LLM provider (no subprocess).
 
-    Provider cascade with retry: OpenRouter paid (70B then 24B fallback),
-    then free tier, then Anthropic. Each attempt gets generous time.
-    Works inside nested Claude Code sessions where ``claude -p`` cannot launch.
+    Provider cascade with retry: strong OpenRouter semantic/reasoning lanes,
+    then NVIDIA NIM, then cheaper OpenRouter fallbacks, then free tier, then
+    Anthropic. Works inside nested Claude Code sessions where ``claude -p``
+    cannot launch.
     """
     from dharma_swarm.models import LLMRequest
 
@@ -927,12 +1064,13 @@ async def _vision_via_provider(
         logger.debug("%s returned unusable content", label)
         return None
 
-    # Provider cascade — each gets generous time, total bounded by deadline
-    # Mistral 24B is fastest and most reliable; Llama 70B is smarter but slower
     attempts: list[tuple[str, str, float]] = [
-        # (label, model, per_attempt_max)
-        ("OpenRouter/mistral-24b", "mistralai/mistral-small-3.1-24b-instruct", 30.0),
+        ("OpenRouter/kimi-k2.5", "moonshotai/kimi-k2.5", 40.0),
+        ("OpenRouter/glm-5", "z-ai/glm-5", 40.0),
+        ("OpenRouter/gpt-5-codex", "openai/gpt-5-codex", 40.0),
+        ("OpenRouter/deepseek-r1", "deepseek/deepseek-r1", 35.0),
         ("OpenRouter/llama-70b", "meta-llama/llama-3.3-70b-instruct", 45.0),
+        ("OpenRouter/mistral-24b", "mistralai/mistral-small-3.1-24b-instruct", 30.0),
     ]
 
     try:
@@ -954,6 +1092,42 @@ async def _vision_via_provider(
                 return result
     except Exception as exc:
         logger.debug("OpenRouterProvider setup failed: %s", exc)
+
+    try:
+        from dharma_swarm.providers import NVIDIANIMProvider
+
+        nim_base_url = os.environ.get("NVIDIA_NIM_BASE_URL", "https://integrate.api.nvidia.com/v1").rstrip("/")
+        nim_attempts: list[tuple[str, str, float]] = []
+        if nim_base_url != "https://integrate.api.nvidia.com/v1":
+            nim_attempts.extend(
+                [
+                    ("NIM/kimi-k2.5", "moonshotai/kimi-k2.5", 40.0),
+                    ("NIM/glm-5", "zai-org/GLM-5", 40.0),
+                ]
+            )
+        nim_attempts.extend(
+            [
+                ("NIM/nemotron-ultra-253b", "nvidia/llama-3.1-nemotron-ultra-253b-v1", 35.0),
+                ("NIM/llama-70b", "meta/llama-3.3-70b-instruct", 25.0),
+            ]
+        )
+
+        for label, model, max_t in nim_attempts:
+            result = await _attempt(
+                label,
+                NVIDIANIMProvider(default_model=model),
+                LLMRequest(
+                    messages=[{"role": "user", "content": prompt}],
+                    system=sys_msg,
+                    model=model,
+                    max_tokens=4096,
+                ),
+                per_attempt_max=max_t,
+            )
+            if result is not None:
+                return result
+    except Exception as exc:
+        logger.debug("NVIDIANIMProvider setup failed: %s", exc)
 
     # Free tier (zero cost, rate-limited)
     try:
@@ -1290,6 +1464,74 @@ class ThinkodynamicDirector:
         return {theme: round(score, 3) for theme, score in totals.items()}
 
     @staticmethod
+    def _aggregate_latent_gold_themes(
+        latent_gold: Sequence[LatentGoldSignal],
+    ) -> dict[str, float]:
+        totals: dict[str, float] = defaultdict(float)
+        for signal in latent_gold:
+            for theme, score in signal.theme_scores.items():
+                totals[theme] += score
+        return {theme: round(score, 3) for theme, score in totals.items()}
+
+    def rank_latent_gold(
+        self,
+        *,
+        limit: int = 6,
+        min_salience: float = 0.58,
+    ) -> list[LatentGoldSignal]:
+        plane_path = self.state_dir / "db" / "memory_plane.db"
+        if not plane_path.exists():
+            return []
+
+        try:
+            from dharma_swarm.engine.conversation_memory import ConversationMemoryStore
+
+            store = ConversationMemoryStore(plane_path)
+            shards = store.latent_gold("", limit=max(20, limit * 4))
+        except Exception:
+            return []
+
+        state_weights = {
+            "orphaned": 0.45,
+            "deferred": 0.35,
+            "proposed": 0.20,
+            "connected": 0.15,
+        }
+        signals: list[LatentGoldSignal] = []
+        for shard in shards:
+            salience = float(shard.salience)
+            if salience < min_salience:
+                continue
+            raw_scores = _theme_scores_from_text(shard.text)
+            if not raw_scores:
+                continue
+            multiplier = 0.25 + state_weights.get(shard.state, 0.15) + min(0.75, salience)
+            theme_scores = {
+                theme: round(score * multiplier, 3)
+                for theme, score in raw_scores.items()
+            }
+            signals.append(
+                LatentGoldSignal(
+                    shard_id=shard.shard_id,
+                    state=shard.state,
+                    salience=round(salience, 3),
+                    summary=_truncate_summary(shard.text),
+                    theme_scores=theme_scores,
+                    source_task_id=shard.task_id,
+                    created_at=shard.created_at.isoformat(),
+                )
+            )
+        signals.sort(
+            key=lambda item: (
+                sum(item.theme_scores.values()),
+                item.salience,
+                item.created_at,
+            ),
+            reverse=True,
+        )
+        return signals[:limit]
+
+    @staticmethod
     def _theme_evidence(
         signals: Sequence[FileSignal],
         theme: str,
@@ -1307,13 +1549,37 @@ class ThinkodynamicDirector:
         )
         return [signal.path for signal in themed[:limit]]
 
+    @staticmethod
+    def _latent_gold_evidence(
+        latent_gold: Sequence[LatentGoldSignal],
+        theme: str,
+        *,
+        limit: int = 2,
+    ) -> list[str]:
+        themed = sorted(
+            (
+                signal
+                for signal in latent_gold
+                if signal.theme_scores.get(theme, 0.0) > 0.0
+            ),
+            key=lambda signal: signal.theme_scores.get(theme, 0.0),
+            reverse=True,
+        )
+        return [
+            f"[{signal.state}] s={signal.salience:.2f} :: {signal.summary}"
+            for signal in themed[:limit]
+        ]
+
     def build_opportunities(
         self,
         signals: Sequence[FileSignal],
         *,
+        latent_gold: Sequence[LatentGoldSignal] = (),
         limit: int = 3,
     ) -> list[DirectorOpportunity]:
         totals = self._aggregate_themes(signals)
+        for theme, boost in self._aggregate_latent_gold_themes(latent_gold).items():
+            totals[theme] = round(totals.get(theme, 0.0) + boost, 3)
         for theme, boost in self._mission_theme_boosts().items():
             totals[theme] = round(totals.get(theme, 0.0) + boost, 3)
 
@@ -1340,11 +1606,17 @@ class ThinkodynamicDirector:
             if template is None:
                 continue
             evidence = self._theme_evidence(signals, theme)
+            latent_evidence = self._latent_gold_evidence(latent_gold, theme)
             why_now = template.why_now
             if evidence:
                 why_now = (
                     f"{template.why_now} Evidence: "
                     + ", ".join(Path(path).name for path in evidence[:3])
+                )
+            if latent_evidence:
+                why_now = (
+                    f"{why_now} Latent gold: "
+                    + "; ".join(latent_evidence[:2])
                 )
             opportunities.append(
                 DirectorOpportunity(
@@ -1353,7 +1625,10 @@ class ThinkodynamicDirector:
                     title=template.title,
                     thesis=template.thesis,
                     why_now=why_now,
-                    score=round(score + len(evidence) * 1.5, 3),
+                    score=round(
+                        score + len(evidence) * 1.5 + len(latent_evidence) * 1.0,
+                        3,
+                    ),
                     expected_duration_min=template.expected_duration_min,
                     evidence_paths=evidence,
                     role_sequence=list(template.roles),
@@ -1370,6 +1645,79 @@ class ThinkodynamicDirector:
     @staticmethod
     def _task_priority(index: int) -> str:
         return TaskPriority.HIGH.value if index < 2 else TaskPriority.NORMAL.value
+
+    @staticmethod
+    def _execution_role_hint(title: str, index: int) -> str:
+        low = title.lower()
+        if any(token in low for token in ("test", "verify", "validate", "check", "prove")):
+            return "validator"
+        if any(token in low for token in ("map", "audit", "inventory", "trace", "catalog")):
+            return "cartographer"
+        if any(token in low for token in ("design", "spec", "architecture", "schema")):
+            return "architect"
+        if any(token in low for token in ("implement", "build", "fix", "wire", "refactor", "integrate")):
+            return "surgeon"
+        if any(token in low for token in ("research", "investigate", "compare", "write", "draft", "synthesize")):
+            return "researcher"
+        role_cycle = ("cartographer", "architect", "surgeon", "validator")
+        return role_cycle[min(index, len(role_cycle) - 1)]
+
+    def workflow_from_execution_brief(
+        self,
+        brief: ExecutionBrief,
+        *,
+        cycle_id: str,
+    ) -> WorkflowPlan:
+        evidence_block = (
+            "\n".join(f"- {path}" for path in brief.evidence_paths)
+            if brief.evidence_paths
+            else "- No explicit evidence paths recorded in the campaign ledger."
+        )
+        task_titles = list(brief.task_titles) or [brief.goal or brief.title or brief.brief_id]
+        tasks: list[WorkflowTaskPlan] = []
+        previous_key = ""
+        for index, title in enumerate(task_titles[:6]):
+            key = _safe_slug(title)[:30]
+            description = (
+                f"Campaign execution brief: {brief.title or brief.brief_id}\n\n"
+                f"Goal:\n{brief.goal}\n\n"
+                f"Readiness:\n{brief.readiness_score:.2f}\n\n"
+                f"Acceptance criteria:\n"
+                + "\n".join(f"- {item}" for item in brief.acceptance)
+                + "\n\n"
+                f"Evidence paths:\n{evidence_block}\n\n"
+                "This work is promoted directly from campaign memory. Produce a "
+                "real artifact and route the result back into the shared ledger."
+            )
+            tasks.append(
+                WorkflowTaskPlan(
+                    key=key,
+                    title=title,
+                    description=description,
+                    priority=self._task_priority(index),
+                    role_hint=self._execution_role_hint(title, index),
+                    depends_on_keys=[previous_key] if previous_key else [],
+                    acceptance=list(brief.acceptance),
+                )
+            )
+            previous_key = key
+
+        return WorkflowPlan(
+            cycle_id=cycle_id,
+            workflow_id=f"wf-brief-{_safe_slug(brief.brief_id or brief.title)}-{cycle_id}",
+            opportunity_id=brief.brief_id,
+            opportunity_title=brief.title or brief.brief_id or "Campaign execution brief",
+            theme="execution_brief",
+            thesis=brief.goal,
+            why_now=(
+                "Campaign ledger already contains a hardened execution brief for this work. "
+                f"Promote it directly instead of generating a new generic workflow. "
+                f"Readiness={brief.readiness_score:.2f}."
+            ),
+            expected_duration_min=max(45, len(tasks) * 45),
+            evidence_paths=list(brief.evidence_paths),
+            tasks=tasks,
+        )
 
     def plan_workflow(
         self,
@@ -1513,6 +1861,7 @@ class ThinkodynamicDirector:
             previous_visions=previous,
             meta_tasks=META_TASKS,
             model=model,
+            mission_brief=self.mission_brief,
         )
 
         # Determine best meta-task fallback from ecosystem signals
@@ -1573,9 +1922,11 @@ class ThinkodynamicDirector:
     def sense(self) -> dict[str, Any]:
         """Rank file signals and build opportunities from the ecosystem."""
         signals = self.rank_file_signals()
-        opportunities = self.build_opportunities(signals)
+        latent_gold = self.rank_latent_gold()
+        opportunities = self.build_opportunities(signals, latent_gold=latent_gold)
         return {
             "signals": signals,
+            "latent_gold": latent_gold,
             "opportunities": opportunities,
             "primary": self.choose_primary(opportunities) if opportunities else None,
         }
@@ -1593,9 +1944,78 @@ class ThinkodynamicDirector:
     ) -> WorkflowPlan:
         """Compile a workflow from vision output + ecosystem signals.
 
-        If vision produced concrete tasks, use those directly.
-        Otherwise fall back to the theme-based planner.
+        Priority order:
+        1. Mission deliverables (explicit human directive) — ALWAYS win
+        2. Vision-proposed tasks (LLM decomposition)
+        3. Theme-based planner (opportunity scoring)
+        4. Meta-task fallback
         """
+        # --- MISSION DELIVERABLE PRIORITY (Gap #1 fix) ---
+        # When the human sets explicit deliverables in mission_brief,
+        # those become first-class tasks. The vision/opportunity pipeline
+        # is subordinate to the human directive.
+        mission_tasks = _parse_mission_deliverables(self.mission_brief)
+        if mission_tasks:
+            logger.info(
+                "Mission-driven workflow: %d deliverables parsed from brief",
+                len(mission_tasks),
+            )
+            workflow_id = f"wf-mission-{cycle_id}"
+            tasks: list[WorkflowTaskPlan] = []
+            for idx, spec in enumerate(mission_tasks):
+                key = _safe_slug(spec.get("title", f"deliverable-{idx}"))[:30]
+                tasks.append(WorkflowTaskPlan(
+                    key=key,
+                    title=spec["title"],
+                    description=spec.get("description", ""),
+                    priority=TaskPriority.HIGH.value,
+                    role_hint=spec.get("role", "general"),
+                    depends_on_keys=[],
+                    acceptance=spec.get("acceptance", []),
+                ))
+
+            # Use the first line of mission_brief as title,
+            # full brief as thesis
+            brief_lines = [
+                ln.strip() for ln in self.mission_brief.splitlines()
+                if ln.strip()
+            ]
+            title = brief_lines[0][:120] if brief_lines else "Mission-directed workflow"
+            return WorkflowPlan(
+                cycle_id=cycle_id,
+                workflow_id=workflow_id,
+                opportunity_id=f"mission-{cycle_id}",
+                opportunity_title=title,
+                theme="mission",
+                thesis=self.mission_brief[:500],
+                why_now="Human directive — mission brief contains explicit deliverables.",
+                expected_duration_min=len(mission_tasks) * 60,
+                evidence_paths=[],
+                tasks=tasks,
+            )
+
+        try:
+            active_campaign = load_active_campaign_state(state_dir=self.state_dir)
+        except ValueError:
+            active_campaign = None
+        if active_campaign and active_campaign.state.execution_briefs:
+            ranked_briefs = sorted(
+                active_campaign.state.execution_briefs,
+                key=lambda brief: brief.readiness_score,
+                reverse=True,
+            )
+            promoted = next(
+                (brief for brief in ranked_briefs if brief.task_titles or brief.goal or brief.title),
+                None,
+            )
+            if promoted is not None:
+                logger.info(
+                    "Campaign-driven workflow: promoting execution brief %s",
+                    promoted.brief_id or promoted.title,
+                )
+                return self.workflow_from_execution_brief(promoted, cycle_id=cycle_id)
+
+        # --- Standard pipeline (no explicit deliverables) ---
         proposed = vision_result.get("proposed_tasks", [])
         primary = sense_result.get("primary")
 
@@ -1723,31 +2143,26 @@ class ThinkodynamicDirector:
                     "title": task_plan.title,
                     "success": True,
                     "output_length": len(output),
-                    "output": output[:2000],
+                    "output": output,
                     "blocked": "BLOCKED" in output.upper(),
                     "rapid": True,
                     "provider": "claude-cli",
                 }
-            stderr = proc.stderr or ""
-            if "nested" not in stderr.lower():
-                return {
-                    "task_key": task_plan.key,
-                    "title": task_plan.title,
-                    "success": False,
-                    "error": stderr[:200],
-                    "blocked": True,
-                }
-            logger.info("Agent spawn: claude -p unavailable (nested), using provider fallback")
+            stderr = (proc.stderr or "").strip()
+            stdout = (proc.stdout or "").strip()
+            logger.info(
+                "Agent spawn: claude -p unusable (rc=%s, stdout=%r, stderr=%r), using provider fallback",
+                proc.returncode,
+                stdout[:120],
+                stderr[:200],
+            )
         except FileNotFoundError:
             logger.info("Agent spawn: claude -p not found, using provider fallback")
         except subprocess.TimeoutExpired:
-            return {
-                "task_key": task_plan.key,
-                "title": task_plan.title,
-                "success": False,
-                "error": f"Timeout after {timeout}s",
-                "blocked": True,
-            }
+            logger.info(
+                "Agent spawn: claude -p timed out after %ss, using provider fallback",
+                timeout,
+            )
 
         # --- Fallback: direct LLM provider ---
         output, success = await _vision_via_provider(
@@ -1759,7 +2174,7 @@ class ThinkodynamicDirector:
             "title": task_plan.title,
             "success": success and bool(output),
             "output_length": len(output) if output else 0,
-            "output": (output or "")[:2000],
+            "output": output or "",
             "blocked": "BLOCKED" in (output or "").upper(),
             "rapid": success,
             "provider": "openrouter-fallback",
@@ -1783,6 +2198,55 @@ class ThinkodynamicDirector:
         return sum(1 for task in tasks if task.status in active)
 
     async def enqueue_workflow(self, workflow: WorkflowPlan) -> list[Task]:
+        if workflow.theme == "execution_brief" and workflow.opportunity_id:
+            existing = [
+                task
+                for task in await self.list_director_tasks(limit=800)
+                if str(task.metadata.get("director_opportunity_id", "")) == workflow.opportunity_id
+            ]
+            if existing:
+                existing.sort(key=lambda task: task.created_at)
+                live_statuses = {
+                    TaskStatus.ASSIGNED,
+                    TaskStatus.RUNNING,
+                }
+                if any(task.status in live_statuses for task in existing):
+                    return existing
+                if all(task.status == TaskStatus.COMPLETED for task in existing):
+                    return existing
+
+                refreshed: list[Task] = []
+                for task in existing:
+                    merged_metadata = dict(task.metadata or {})
+                    merged_metadata.update({
+                        "director_cycle_id": workflow.cycle_id,
+                        "director_workflow_id": workflow.workflow_id,
+                        "director_opportunity_title": workflow.opportunity_title,
+                        "director_theme": workflow.theme,
+                        "director_source_kind": workflow.theme,
+                        "director_expected_duration_min": workflow.expected_duration_min,
+                        "director_evidence_paths": list(workflow.evidence_paths),
+                        "director_thesis": workflow.thesis,
+                        "director_why_now": workflow.why_now,
+                    })
+                    if task.status in {TaskStatus.FAILED, TaskStatus.CANCELLED}:
+                        refreshed.append(
+                            await self._task_board.requeue(
+                                task.id,
+                                reason=f"Director retry for cycle {workflow.cycle_id}",
+                                metadata=merged_metadata,
+                            )
+                        )
+                    else:
+                        await self._task_board.update_task(
+                            task.id,
+                            metadata=merged_metadata,
+                        )
+                        current = await self._task_board.get(task.id)
+                        if current is not None:
+                            refreshed.append(current)
+                return refreshed
+
         created: list[Task] = []
         by_key: dict[str, Task] = {}
         for task_plan in workflow.tasks:
@@ -1798,6 +2262,7 @@ class ThinkodynamicDirector:
                 "director_opportunity_id": workflow.opportunity_id,
                 "director_opportunity_title": workflow.opportunity_title,
                 "director_theme": workflow.theme,
+                "director_source_kind": workflow.theme,
                 "director_role_hint": task_plan.role_hint,
                 "director_expected_duration_min": workflow.expected_duration_min,
                 "director_task_key": task_plan.key,
@@ -1916,6 +2381,8 @@ class ThinkodynamicDirector:
         max_concurrent: int = 3,
         model: str = "sonnet",
         timeout: int = 600,
+        cycle_id: str | None = None,
+        task_ids: Sequence[str] | None = None,
     ) -> list[dict[str, Any]]:
         """Pick up pending director tasks and execute them via spawn_agent.
 
@@ -1925,11 +2392,23 @@ class ThinkodynamicDirector:
         """
         await self.init()
         tasks = await self.list_director_tasks()
+        ready = await self._task_board.get_ready_tasks()
+        ready_ids = {task.id for task in ready}
         actionable = {TaskStatus.PENDING, TaskStatus.ASSIGNED, TaskStatus.RUNNING}
         pending = [
             t for t in tasks
-            if t.status in actionable
+            if t.status in actionable and (t.status != TaskStatus.PENDING or t.id in ready_ids)
         ]
+        if task_ids is not None:
+            allowed = {str(task_id) for task_id in task_ids if str(task_id)}
+            pending = [task for task in pending if task.id in allowed]
+        elif cycle_id:
+            scoped = [
+                task
+                for task in pending
+                if str(task.metadata.get("director_cycle_id", "")) == cycle_id
+            ]
+            pending = scoped
         if not pending:
             logger.info("Worker loop: no pending tasks")
             return []
@@ -1978,6 +2457,8 @@ class ThinkodynamicDirector:
             output_text = agent_result.get("output", "")
             blocked = agent_result.get("blocked", False)
             success = agent_result.get("success", False)
+            error_text = agent_result.get("error", "")
+            rendered_output = output_text or (f"ERROR: {error_text}" if error_text else "(no output)")
 
             # Write artifact
             ts = _utc_ts().replace(":", "-")
@@ -1997,7 +2478,7 @@ class ThinkodynamicDirector:
                 f"",
                 f"## Output",
                 f"",
-                output_text or "(no output)",
+                rendered_output,
             ]
             artifact_path.write_text("\n".join(artifact_content), encoding="utf-8")
 
@@ -2041,6 +2522,7 @@ class ThinkodynamicDirector:
         *,
         cycle_id: str,
         signals: Sequence[FileSignal],
+        latent_gold: Sequence[LatentGoldSignal],
         opportunities: Sequence[DirectorOpportunity],
         workflow: WorkflowPlan,
         delegated_tasks: Sequence[Task],
@@ -2072,6 +2554,23 @@ class ThinkodynamicDirector:
                 )
         else:
             lines.append("- No high-salience signals found.")
+
+        lines.extend(["", "## Latent Gold", ""])
+        if latent_gold:
+            for signal in latent_gold:
+                theme_text = ", ".join(
+                    f"{theme}={score:.1f}"
+                    for theme, score in sorted(
+                        signal.theme_scores.items(),
+                        key=lambda item: item[1],
+                        reverse=True,
+                    )
+                ) or "none"
+                lines.append(
+                    f"- [{signal.state}] s={signal.salience:.2f} :: {signal.summary} :: {theme_text}",
+                )
+        else:
+            lines.append("- No unresolved latent gold above threshold.")
 
         lines.extend(["", "## Opportunities", ""])
         for opp in opportunities:
@@ -2265,11 +2764,13 @@ class ThinkodynamicDirector:
         )
         sense_result = self.sense()
         signals = sense_result["signals"]
+        latent_gold = sense_result.get("latent_gold", [])
         opportunities = sense_result["opportunities"]
         primary = sense_result["primary"]
         self._tracer.end(
             sense_span,
             signal_count=len(signals),
+            latent_gold_count=len(latent_gold),
             opportunity=primary.title if primary else "none",
         )
 
@@ -2325,6 +2826,7 @@ class ThinkodynamicDirector:
         summary_path = self._write_cycle_markdown(
             cycle_id=cycle_id,
             signals=signals,
+            latent_gold=latent_gold,
             opportunities=opportunities,
             workflow=workflow,
             delegated_tasks=delegated_tasks,
@@ -2343,6 +2845,7 @@ class ThinkodynamicDirector:
                 "proposed_task_count": len(vision_result["proposed_tasks"]),
                 "vision_file": vision_result["vision_file"],
             },
+            "latent_gold": [asdict(signal) for signal in latent_gold],
             "selected_opportunity": asdict(primary) if primary else None,
             "workflow": asdict(workflow),
             "delegated": delegated,
@@ -2379,7 +2882,57 @@ class ThinkodynamicDirector:
                 },
             ])[-10:] if previous_mission else [],
         }
-        _write_json(mission_file, mission_state)
+        mission_contract_state = MissionState.model_validate(mission_state)
+        save_mission_state(mission_file, mission_contract_state)
+
+        try:
+            previous_campaign = load_active_campaign_state(state_dir=self.state_dir)
+        except ValueError:
+            previous_campaign = None
+        campaign_artifacts = [
+            CampaignArtifact(
+                artifact_kind="director_cycle_summary",
+                title=f"director cycle {cycle_id}",
+                path=str(summary_path),
+                summary=f"{workflow.opportunity_title} cycle summary",
+                source="thinkodynamic_director",
+            ),
+        ]
+        if handoff_path:
+            campaign_artifacts.append(
+                CampaignArtifact(
+                    artifact_kind="director_handoff",
+                    title=f"director handoff {cycle_id}",
+                    path=str(handoff_path),
+                    summary=review.note if review else "",
+                    source="thinkodynamic_director",
+                )
+            )
+        vision_file = str(vision_result.get("vision_file") or "").strip()
+        if vision_file:
+            campaign_artifacts.append(
+                CampaignArtifact(
+                    artifact_kind="director_vision",
+                    title=f"director vision {cycle_id}",
+                    path=vision_file,
+                    summary=f"{len(vision_result.get('proposed_tasks', []))} proposed tasks",
+                    source="thinkodynamic_director",
+                )
+            )
+
+        campaign_state = build_campaign_state(
+            mission_state=mission_contract_state,
+            previous=previous_campaign.state if previous_campaign else None,
+            artifacts=campaign_artifacts,
+            evidence_paths=list(workflow.evidence_paths) + [str(summary_path), vision_file],
+            metrics={
+                "cycle_elapsed_min": round(cycle_elapsed_min, 2),
+                "workflow_task_count": len(workflow.tasks),
+                "delegated_task_count": len(delegated_tasks),
+                "rapid_ascent": rapid_ascent,
+            },
+        )
+        save_campaign_state(self.state_dir / "campaign.json", campaign_state)
 
         return snapshot
 
@@ -2409,7 +2962,11 @@ class ThinkodynamicDirector:
             if delegate and snapshot.get("delegated"):
                 try:
                     worker_results = await self.execute_pending_tasks(
-                        max_concurrent=3, model=model, timeout=600,
+                        max_concurrent=3,
+                        model=model,
+                        timeout=600,
+                        cycle_id=snapshot["cycle_id"],
+                        task_ids=snapshot.get("delegated_task_ids", []),
                     )
                     snapshot["worker_results"] = worker_results
                     done = sum(1 for r in worker_results if r["success"] and not r["blocked"])
@@ -2592,6 +3149,7 @@ def main(argv: Sequence[str] | None = None) -> int:
 __all__ = [
     "DirectorOpportunity",
     "FileSignal",
+    "LatentGoldSignal",
     "META_TASKS",
     "ThinkodynamicDirector",
     "ThemeTemplate",
@@ -2606,3 +3164,7 @@ __all__ = [
     "read_previous_visions",
     "read_random_seeds",
 ]
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

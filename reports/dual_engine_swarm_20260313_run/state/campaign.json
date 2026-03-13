@@ -1,0 +1,286 @@
+{
+  "artifacts": [
+    {
+      "artifact_kind": "director_cycle_summary",
+      "citations": [],
+      "depends_on": [],
+      "metadata": {},
+      "path": "/Users/dhyana/dharma_swarm/reports/dual_engine_swarm_20260313_run/state/shared/thinkodynamic_director_latest.md",
+      "source": "thinkodynamic_director",
+      "summary": "Cohomology \u2014 Cechcohomology \u2014 To Sheaf Coordination build brief cycle summary",
+      "title": "director cycle 1773390917"
+    },
+    {
+      "artifact_kind": "director_vision",
+      "citations": [],
+      "depends_on": [],
+      "metadata": {},
+      "path": "/Users/dhyana/dharma_swarm/reports/dual_engine_swarm_20260313_run/state/shared/thinkodynamic_director_vision_2026-03-13T08-36-29Z.md",
+      "source": "thinkodynamic_director",
+      "summary": "4 proposed tasks",
+      "title": "director vision 1773390917"
+    }
+  ],
+  "blockers": [],
+  "campaign_id": "campaign-1773385767",
+  "contract_version": "1.0.0",
+  "delegated_task_ids": [
+    "51bf2e1286e94198",
+    "cc086bc333ff4e19",
+    "19bcabdb74b94c58"
+  ],
+  "evidence_paths": [
+    "dharma_swarm/sheaf.py",
+    "dharma_swarm/gaia_verification.py",
+    "dharma_swarm/cohomology_cechcohomology_to_sheaf_coord.py",
+    "docs/clusters/cohomology_cechcohomology_to_sheaf_coord_spec.md",
+    "tests/test_cohomology_cechcohomology_to_sheaf_coord.py",
+    "/Users/dhyana/dharma_swarm/reports/dual_engine_swarm_20260313_run/state/shared/thinkodynamic_director_latest.md",
+    "/Users/dhyana/dharma_swarm/reports/dual_engine_swarm_20260313_run/state/shared/thinkodynamic_director_vision_2026-03-13T08-36-29Z.md",
+    "dharma_swarm/ouroboros.py",
+    "dharma_swarm/sleep_cycle.py",
+    "dharma_swarm/participation_ratio_colony_rv_reading_ru.py",
+    "docs/clusters/participation_ratio_colony_rv_reading_ru_spec.md",
+    "tests/test_participation_ratio_colony_rv_reading_ru.py",
+    "dharma_swarm/dse_integration.py",
+    "dharma_swarm/coalgebra_dseintegrator_dse_integration.py",
+    "docs/clusters/coalgebra_dseintegrator_dse_integration_spec.md",
+    "tests/test_coalgebra_dseintegrator_dse_integration.py",
+    "/Users/dhyana/dharma_swarm/reports/dual_engine_swarm_20260313_run/state/shared/thinkodynamic_director_vision_2026-03-13T08-33-18Z.md",
+    "/Users/dhyana/dharma_swarm/reports/dual_engine_swarm_20260313_run/state/shared/thinkodynamic_director_vision_2026-03-13T08-29-27Z.md",
+    "/Users/dhyana/dharma_swarm/reports/dual_engine_swarm_20260313_run/state/shared/thinkodynamic_director_handoff.md",
+    "/Users/dhyana/dharma_swarm/reports/dual_engine_swarm_20260313_run/state/shared/thinkodynamic_director_vision_2026-03-13T07-14-15Z.md",
+    "/Users/dhyana/dharma_swarm/reports/dual_engine_swarm_20260313_run/state/shared/thinkodynamic_director_vision_2026-03-13T07-12-25Z.md",
+    "/Users/dhyana/dharma_swarm/reports/dual_engine_swarm_20260313_run/state/shared/thinkodynamic_director_vision_2026-03-13T07-10-35Z.md",
+    "/Users/dhyana/dharma_swarm/reports/dual_engine_swarm_20260313_run/state/shared/thinkodynamic_director_vision_2026-03-13T07-09-39Z.md",
+    "reports/dual_engine_swarm_20260313_run/semantic_graph.json",
+    "reports/dual_engine_swarm_20260313_run/semantic_brief_packet.json",
+    "reports/dual_engine_swarm_20260313_run/semantic_brief_packet.md",
+    "reports/dual_engine_swarm_20260313_run/state/shared/thinkodynamic_director_latest.md",
+    "reports/dual_engine_swarm_20260313_run/state/shared/thinkodynamic_director_vision_2026-03-13T06-43-34Z.md"
+  ],
+  "execution_briefs": [
+    {
+      "acceptance": [
+        "Produce at least one artifact tied to the cluster thesis.",
+        "Verify touched code or docs with concrete evidence.",
+        "Archive the resulting artifact back into campaign memory.",
+        "Address the top hardening gap: Import target missing: dharma_swarm/cohomology_cechcohomology_to_sheaf_coord.py"
+      ],
+      "brief_id": "execution-semantic-85e885bbba494be6",
+      "depends_on_briefs": [
+        "semantic-85e885bbba494be6"
+      ],
+      "evidence_paths": [
+        "dharma_swarm/sheaf.py",
+        "dharma_swarm/gaia_verification.py",
+        "dharma_swarm/cohomology_cechcohomology_to_sheaf_coord.py",
+        "docs/clusters/cohomology_cechcohomology_to_sheaf_coord_spec.md",
+        "tests/test_cohomology_cechcohomology_to_sheaf_coord.py"
+      ],
+      "goal": "Grounds the intersection of [CechCohomology, to_sheaf_coordination] via [cohomology, sheaf] Core concepts: CechCohomology, to_sheaf_coordination.",
+      "metadata": {
+        "cluster_id": "85e885bbba494be6",
+        "semantic_brief_id": "semantic-85e885bbba494be6"
+      },
+      "readiness_score": 0.647,
+      "task_titles": [
+        "Implement or revise dharma_swarm/cohomology_cechcohomology_to_sheaf_coord.py.",
+        "Write or refresh docs/clusters/cohomology_cechcohomology_to_sheaf_coord_spec.md.",
+        "Add or update verification in tests/test_cohomology_cechcohomology_to_sheaf_coord.py."
+      ],
+      "title": "Cohomology \u2014 Cechcohomology \u2014 To Sheaf Coordination build brief"
+    },
+    {
+      "acceptance": [
+        "Produce at least one artifact tied to the cluster thesis.",
+        "Verify touched code or docs with concrete evidence.",
+        "Archive the resulting artifact back into campaign memory.",
+        "Address the top hardening gap: Import target missing: dharma_swarm/participation_ratio_colony_rv_reading_ru.py"
+      ],
+      "brief_id": "execution-semantic-d65d4bd88094428e",
+      "depends_on_briefs": [
+        "semantic-d65d4bd88094428e"
+      ],
+      "evidence_paths": [
+        "dharma_swarm/ouroboros.py",
+        "dharma_swarm/sleep_cycle.py",
+        "dharma_swarm/participation_ratio_colony_rv_reading_ru.py",
+        "docs/clusters/participation_ratio_colony_rv_reading_ru_spec.md",
+        "tests/test_participation_ratio_colony_rv_reading_ru.py"
+      ],
+      "goal": "Grounds the intersection of [colony_rv_reading, run_full_cycle] via [participation_ratio, stigmergy] Core concepts: colony_rv_reading, run_full_cycle.",
+      "metadata": {
+        "cluster_id": "d65d4bd88094428e",
+        "semantic_brief_id": "semantic-d65d4bd88094428e"
+      },
+      "readiness_score": 0.638,
+      "task_titles": [
+        "Implement or revise dharma_swarm/participation_ratio_colony_rv_reading_ru.py.",
+        "Write or refresh docs/clusters/participation_ratio_colony_rv_reading_ru_spec.md.",
+        "Add or update verification in tests/test_participation_ratio_colony_rv_reading_ru.py."
+      ],
+      "title": "Participation Ratio \u2014 Colony Rv Reading \u2014 Run Full Cycle build brief"
+    },
+    {
+      "acceptance": [
+        "Produce at least one artifact tied to the cluster thesis.",
+        "Verify touched code or docs with concrete evidence.",
+        "Archive the resulting artifact back into campaign memory.",
+        "Address the top hardening gap: Import target missing: dharma_swarm/coalgebra_dseintegrator_dse_integration.py"
+      ],
+      "brief_id": "execution-semantic-35b47feef6c64de8",
+      "depends_on_briefs": [
+        "semantic-35b47feef6c64de8"
+      ],
+      "evidence_paths": [
+        "dharma_swarm/dse_integration.py",
+        "dharma_swarm/coalgebra_dseintegrator_dse_integration.py",
+        "docs/clusters/coalgebra_dseintegrator_dse_integration_spec.md",
+        "tests/test_coalgebra_dseintegrator_dse_integration.py"
+      ],
+      "goal": "Grounds the intersection of [DSEIntegrator, dse_integration] via [coalgebra, sheaf, monad] Core concepts: DSEIntegrator, dse_integration.",
+      "metadata": {
+        "cluster_id": "35b47feef6c64de8",
+        "semantic_brief_id": "semantic-35b47feef6c64de8"
+      },
+      "readiness_score": 0.634,
+      "task_titles": [
+        "Implement or revise dharma_swarm/coalgebra_dseintegrator_dse_integration.py.",
+        "Write or refresh docs/clusters/coalgebra_dseintegrator_dse_integration_spec.md.",
+        "Add or update verification in tests/test_coalgebra_dseintegrator_dse_integration.py."
+      ],
+      "title": "Coalgebra \u2014 Dseintegrator \u2014 Dse Integration build brief"
+    }
+  ],
+  "last_cycle_id": "1773390917",
+  "last_cycle_ts": "2026-03-13T08:36:29Z",
+  "metrics": {
+    "avg_readiness": 0.64,
+    "clusters_considered": 3,
+    "cycle_elapsed_min": 1.19,
+    "delegated_task_count": 3,
+    "execution_briefs": 3,
+    "rapid_ascent": true,
+    "reports_considered": 3,
+    "semantic_briefs": 3,
+    "workflow_task_count": 3
+  },
+  "mission_theme": "execution_brief",
+  "mission_thesis": "Grounds the intersection of [CechCohomology, to_sheaf_coordination] via [cohomology, sheaf] Core concepts: CechCohomology, to_sheaf_coordination.",
+  "mission_title": "Cohomology \u2014 Cechcohomology \u2014 To Sheaf Coordination build brief",
+  "previous_missions": [],
+  "rapid_ascent": true,
+  "review_summary": "",
+  "semantic_briefs": [
+    {
+      "brief_id": "semantic-85e885bbba494be6",
+      "citations": [],
+      "cluster_name": "Cohomology \u2014 Cechcohomology \u2014 To Sheaf Coordination",
+      "concept_names": [
+        "CechCohomology",
+        "to_sheaf_coordination"
+      ],
+      "evidence_paths": [
+        "dharma_swarm/sheaf.py",
+        "dharma_swarm/gaia_verification.py",
+        "dharma_swarm/cohomology_cechcohomology_to_sheaf_coord.py",
+        "docs/clusters/cohomology_cechcohomology_to_sheaf_coord_spec.md",
+        "tests/test_cohomology_cechcohomology_to_sheaf_coord.py"
+      ],
+      "gaps": [
+        "Import target missing: dharma_swarm/cohomology_cechcohomology_to_sheaf_coord.py",
+        "Concept 'CechCohomology' entropy 1.000 outside healthy range [0.3, 0.9]",
+        "Concept 'to_sheaf_coordination' entropy 0.996 outside healthy range [0.3, 0.9]"
+      ],
+      "metadata": {
+        "cluster_id": "85e885bbba494be6",
+        "intersection_type": "formal_structure",
+        "overall_score": 0.918,
+        "passed": true
+      },
+      "next_actions": [
+        "Implement the cluster scaffold for Cohomology \u2014 Cechcohomology \u2014 To Sheaf Coordination.",
+        "Write the grounding spec for Cohomology \u2014 Cechcohomology \u2014 To Sheaf Coordination.",
+        "Verify the cluster with targeted tests."
+      ],
+      "readiness_score": 0.647,
+      "thesis": "Grounds the intersection of [CechCohomology, to_sheaf_coordination] via [cohomology, sheaf] Core concepts: CechCohomology, to_sheaf_coordination.",
+      "title": "Cohomology \u2014 Cechcohomology \u2014 To Sheaf Coordination"
+    },
+    {
+      "brief_id": "semantic-d65d4bd88094428e",
+      "citations": [],
+      "cluster_name": "Participation Ratio \u2014 Colony Rv Reading \u2014 Run Full Cycle",
+      "concept_names": [
+        "colony_rv_reading",
+        "run_full_cycle"
+      ],
+      "evidence_paths": [
+        "dharma_swarm/ouroboros.py",
+        "dharma_swarm/sleep_cycle.py",
+        "dharma_swarm/participation_ratio_colony_rv_reading_ru.py",
+        "docs/clusters/participation_ratio_colony_rv_reading_ru_spec.md",
+        "tests/test_participation_ratio_colony_rv_reading_ru.py"
+      ],
+      "gaps": [
+        "Import target missing: dharma_swarm/participation_ratio_colony_rv_reading_ru.py",
+        "Concept 'colony_rv_reading' entropy 0.967 outside healthy range [0.3, 0.9]",
+        "Concept 'run_full_cycle' entropy 0.981 outside healthy range [0.3, 0.9]"
+      ],
+      "metadata": {
+        "cluster_id": "d65d4bd88094428e",
+        "intersection_type": "formal_structure",
+        "overall_score": 0.905,
+        "passed": true
+      },
+      "next_actions": [
+        "Implement the cluster scaffold for Participation Ratio \u2014 Colony Rv Reading \u2014 Run Full Cycle.",
+        "Write the grounding spec for Participation Ratio \u2014 Colony Rv Reading \u2014 Run Full Cycle.",
+        "Verify the cluster with targeted tests."
+      ],
+      "readiness_score": 0.638,
+      "thesis": "Grounds the intersection of [colony_rv_reading, run_full_cycle] via [participation_ratio, stigmergy] Core concepts: colony_rv_reading, run_full_cycle.",
+      "title": "Participation Ratio \u2014 Colony Rv Reading \u2014 Run Full Cycle"
+    },
+    {
+      "brief_id": "semantic-35b47feef6c64de8",
+      "citations": [],
+      "cluster_name": "Coalgebra \u2014 Dseintegrator \u2014 Dse Integration",
+      "concept_names": [
+        "DSEIntegrator",
+        "dse_integration"
+      ],
+      "evidence_paths": [
+        "dharma_swarm/dse_integration.py",
+        "dharma_swarm/coalgebra_dseintegrator_dse_integration.py",
+        "docs/clusters/coalgebra_dseintegrator_dse_integration_spec.md",
+        "tests/test_coalgebra_dseintegrator_dse_integration.py"
+      ],
+      "gaps": [
+        "Import target missing: dharma_swarm/coalgebra_dseintegrator_dse_integration.py",
+        "Concept 'DSEIntegrator' entropy 0.991 outside healthy range [0.3, 0.9]",
+        "Concept 'dse_integration' entropy 0.975 outside healthy range [0.3, 0.9]"
+      ],
+      "metadata": {
+        "cluster_id": "35b47feef6c64de8",
+        "intersection_type": "formal_structure",
+        "overall_score": 0.899,
+        "passed": true
+      },
+      "next_actions": [
+        "[computational] Improve: Import target missing: dharma_swarm/coalgebra_dseintegrator_dse_integration.py"
+      ],
+      "readiness_score": 0.634,
+      "thesis": "Grounds the intersection of [DSEIntegrator, dse_integration] via [coalgebra, sheaf, monad] Core concepts: DSEIntegrator, dse_integration.",
+      "title": "Coalgebra \u2014 Dseintegrator \u2014 Dse Integration"
+    }
+  ],
+  "status": "delegated",
+  "task_count": 3,
+  "task_titles": [
+    "Implement or revise dharma_swarm/cohomology_cechcohomology_to_sheaf_coord.py.",
+    "Write or refresh docs/clusters/cohomology_cechcohomology_to_sheaf_coord_spec.md.",
+    "Add or update verification in tests/test_cohomology_cechcohomology_to_sheaf_coord.py."
+  ]
+}

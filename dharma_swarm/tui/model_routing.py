@@ -6,6 +6,12 @@ from dataclasses import dataclass, field
 import re
 import time
 
+INDIGO = "#9C7444"
+VERDIGRIS = "#62725D"
+OCHRE = "#A17A47"
+BENGARA = "#8C5448"
+WISTERIA = "#74677D"
+
 
 @dataclass(frozen=True, slots=True)
 class ModelTarget:
@@ -200,18 +206,18 @@ def format_model_list(
         )
         key = route_key(t.provider_id, t.model_id)
         preferred = preferred_key == key
-        mark = "[green]*[/green]" if active else " "
+        mark = f"[{VERDIGRIS}]*[/{VERDIGRIS}]" if active else " "
         remain = _cooldown_remaining_seconds(
             alias=t.alias,
             cooldown_until=cooldown_until,
             now_ts=now,
         )
         if remain > 0:
-            readiness = f"[yellow]cooldown {remain}s[/yellow]"
+            readiness = f"[{OCHRE}]cooldown {remain}s[/{OCHRE}]"
         elif available_keys is not None and key not in available_keys:
-            readiness = "[red]blocked[/red]"
+            readiness = f"[{BENGARA}]blocked[/{BENGARA}]"
         else:
-            readiness = "[green]ready[/green]"
+            readiness = f"[{VERDIGRIS}]ready[/{VERDIGRIS}]"
         stats_suffix = ""
         if model_stats_by_alias:
             stats = model_stats_by_alias.get(t.alias, {})
@@ -223,9 +229,9 @@ def format_model_list(
                     stats_suffix = f" [dim]ok:{ok} fail:{bad} ~{latency:.0f}ms[/dim]"
                 else:
                     stats_suffix = f" [dim]ok:{ok} fail:{bad}[/dim]"
-        pref = " [magenta](preferred)[/magenta]" if preferred else ""
+        pref = f" [{WISTERIA}](preferred)[/{WISTERIA}]" if preferred else ""
         lines.append(
-            f"{mark} [bold]{idx:02d}[/bold] [cyan]{t.alias}[/cyan] -> {t.label}"
+            f"{mark} [bold]{idx:02d}[/bold] [{INDIGO}]{t.alias}[/{INDIGO}] -> {t.label}"
             f"{pref} {readiness} [dim]({key})[/dim]{stats_suffix}"
         )
     lines.append("")
@@ -258,12 +264,12 @@ def format_model_status(
     resolved_strategy = resolve_strategy(strategy) or "responsive"
     preferred_label = preferred.label if preferred else "unset"
     return (
-        f"Current model: [cyan]{label}[/cyan]\n"
+        f"Current model: [{INDIGO}]{label}[/{INDIGO}]\n"
         f"Provider/model: [dim]{current_provider}:{current_model}[/dim]\n"
-        f"Auto-fallback: [yellow]{state}[/yellow]\n"
-        f"Strategy: [yellow]{resolved_strategy}[/yellow]\n"
-        f"Preferred model: [cyan]{preferred_label}[/cyan]\n"
-        f"Cooling models: [yellow]{cooldown_count}[/yellow]"
+        f"Auto-fallback: [{OCHRE}]{state}[/{OCHRE}]\n"
+        f"Strategy: [{OCHRE}]{resolved_strategy}[/{OCHRE}]\n"
+        f"Preferred model: [{INDIGO}]{preferred_label}[/{INDIGO}]\n"
+        f"Cooling models: [{OCHRE}]{cooldown_count}[/{OCHRE}]"
     )
 
 

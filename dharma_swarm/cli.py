@@ -534,6 +534,10 @@ def sprint(
     local: bool = typer.Option(False, "--local", help="Generate locally without LLM call (offline mode)"),
     test_summary: str = typer.Option("", help="Test results to include"),
     prev_todo: str = typer.Option("", help="Previous TODO items to include"),
+    llm_timeout_sec: float = typer.Option(
+        12.0,
+        help="Timeout for remote sprint prompt generation before local fallback",
+    ),
 ):
     """Generate today's adaptive 8-hour sprint prompt from live system state.
 
@@ -577,9 +581,10 @@ def sprint(
                     test_summary=test_summary,
                     prev_todo=prev_todo,
                     colm_days=colm_days,
+                    llm_timeout_sec=llm_timeout_sec,
                 )
                 mode = "LLM"
-            except RuntimeError as e:
+            except Exception as e:
                 console.print(f"[yellow]LLM unavailable ({e}), falling back to local mode[/yellow]")
                 prompt_text = generate_local_prompt(
                     test_summary=test_summary,

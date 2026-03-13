@@ -97,8 +97,42 @@ def test_darwin_command_routes_to_async_handler() -> None:
     assert action == "async:darwin:"
 
 
+def test_btw_command_opens_parallel_overlay() -> None:
+    handler = SystemCommandHandler()
+    out, action = handler.handle("btw investigate the side quest")
+    assert out == ""
+    assert action == "btw:open"
+
+
+def test_unknown_command_suggests_darwin_for_darkwin() -> None:
+    handler = SystemCommandHandler()
+    out, action = handler.handle("darkwin")
+    assert "/darwin" in out
+    assert action is None
+
+
+def test_resolve_bare_darkwin_autocorrects_to_darwin() -> None:
+    handler = SystemCommandHandler()
+    cmd, notice = handler.resolve_bare_command("darkwin")
+    assert cmd == "darwin"
+    assert notice is not None
+    assert "/darwin" in notice
+
+
 def test_evolve_status_routes_to_async_handler() -> None:
     handler = SystemCommandHandler()
     out, action = handler.handle("evolve status")
     assert out == ""
     assert action == "async:evolve:status"
+
+
+def test_help_text_is_provider_neutral_and_transparent() -> None:
+    handler = SystemCommandHandler()
+
+    out, action = handler.handle("help")
+
+    assert action is None
+    assert "Internet access for the active route" in out
+    assert "Cancel active provider run" in out
+    assert "Ctrl+Y" in out
+    assert "live tools, usage, and cost telemetry" in out

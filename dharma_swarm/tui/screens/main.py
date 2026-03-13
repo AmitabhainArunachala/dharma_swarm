@@ -92,7 +92,7 @@ class MainScreen(Screen):
             else:
                 yield RichLog(
                     id="stream-output",
-                    highlight=True,
+                    highlight=False,
                     markup=True,
                     wrap=True,
                 )

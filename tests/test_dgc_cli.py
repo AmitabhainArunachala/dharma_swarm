@@ -20,6 +20,7 @@ def test_dgc_cli_module_imports():
     assert hasattr(dgc_cli, "cmd_runtime_status")
     assert hasattr(dgc_cli, "cmd_canonical_status")
     assert hasattr(dgc_cli, "cmd_pulse")
+    assert hasattr(dgc_cli, "cmd_full_power_probe")
     assert hasattr(dgc_cli, "cmd_gates")
     assert hasattr(dgc_cli, "cmd_health")
     assert hasattr(dgc_cli, "cmd_swarm")
@@ -242,6 +243,61 @@ def test_cmd_swarm_codex_night_start_dispatches_tmux_script():
     assert cmd[2] == "2"
 
 
+def test_cmd_swarm_codex_night_yolo_forwards_preset_env():
+    """`dgc swarm codex-night yolo` should set the aggressive Codex env."""
+    from dharma_swarm.dgc_cli import cmd_swarm
+
+    with patch("dharma_swarm.dgc_cli.subprocess.run") as mock_run:
+        mock_run.return_value.returncode = 0
+        mock_run.return_value.stdout = "Started session"
+        mock_run.return_value.stderr = ""
+
+        cmd_swarm(
+            [
+                "codex-night",
+                "yolo",
+                "2",
+                "--mission-file",
+                "/tmp/mission.md",
+                "--model",
+                "gpt-5.4",
+                "--max-cycles",
+                "3",
+                "--label",
+                "allnight-yolo",
+            ]
+        )
+
+    cmd = mock_run.call_args.args[0]
+    env = mock_run.call_args.kwargs["env"]
+    assert cmd[0] == "bash"
+    assert Path(cmd[1]).name == "start_codex_overnight_tmux.sh"
+    assert cmd[2] == "2"
+    assert env["DGC_CODEX_NIGHT_YOLO"] == "1"
+    assert env["DGC_CODEX_NIGHT_MISSION_FILE"] == "/tmp/mission.md"
+    assert env["DGC_CODEX_NIGHT_MODEL"] == "gpt-5.4"
+    assert env["MAX_CYCLES"] == "3"
+    assert env["DGC_CODEX_NIGHT_LABEL"] == "allnight-yolo"
+
+
+def test_cmd_swarm_yolo_alias_routes_to_codex_lane():
+    """`dgc swarm yolo` should use the Codex overnight launcher now."""
+    from dharma_swarm.dgc_cli import cmd_swarm
+
+    with patch("dharma_swarm.dgc_cli.subprocess.run") as mock_run:
+        mock_run.return_value.returncode = 0
+        mock_run.return_value.stdout = "Started session"
+        mock_run.return_value.stderr = ""
+
+        cmd_swarm(["yolo"])
+
+    cmd = mock_run.call_args.args[0]
+    env = mock_run.call_args.kwargs["env"]
+    assert cmd[0] == "bash"
+    assert Path(cmd[1]).name == "start_codex_overnight_tmux.sh"
+    assert env["DGC_CODEX_NIGHT_YOLO"] == "1"
+
+
 def test_cmd_swarm_codex_night_status_dispatches_status_script():
     """`dgc swarm codex-night status` should invoke the status helper."""
     from dharma_swarm.dgc_cli import cmd_swarm
@@ -264,8 +320,10 @@ def test_cmd_swarm_codex_night_report_reads_run_artifacts(tmp_path, capsys):
 
     run_dir = tmp_path / "logs" / "codex_overnight" / "run-1"
     run_dir.mkdir(parents=True)
+    (run_dir / "run_manifest.json").write_text('{"label":"allnight-yolo"}\n', encoding="utf-8")
     (run_dir / "report.md").write_text("# report\ncycle ok\n", encoding="utf-8")
     (run_dir / "latest_last_message.txt").write_text("RESULT: done\n", encoding="utf-8")
+    (run_dir / "morning_handoff.md").write_text("# handoff\nshipped\n", encoding="utf-8")
     run_file = tmp_path / "codex_overnight_run_dir.txt"
     run_file.write_text(str(run_dir), encoding="utf-8")
 
@@ -274,8 +332,10 @@ def test_cmd_swarm_codex_night_report_reads_run_artifacts(tmp_path, capsys):
 
     out = capsys.readouterr().out
     assert "run_dir:" in out
+    assert "allnight-yolo" in out
     assert "cycle ok" in out
     assert "RESULT: done" in out
+    assert "shipped" in out
 
 
 def test_dgc_cli_rag_health_dispatch():
@@ -1576,6 +1636,29 @@ def test_dgc_cli_stress_dispatch():
             assert kwargs["external_timeout_sec"] == 120
 
 
+def test_dgc_cli_full_power_probe_dispatch():
+    """main() dispatches full-power-probe flags to cmd_full_power_probe."""
+    from dharma_swarm.dgc_cli import main
+
+    with patch(
+        "sys.argv",
+        [
+            "dgc",
+            "full-power-probe",
+            "--skip-stress",
+            "--skip-pytest",
+            "--skip-sprint-probe",
+        ],
+    ):
+        with patch("dharma_swarm.dgc_cli.cmd_full_power_probe") as mock_cmd:
+            main()
+            mock_cmd.assert_called_once()
+            kwargs = mock_cmd.call_args.kwargs
+            assert kwargs["skip_stress"] is True
+            assert kwargs["skip_pytest"] is True
+            assert kwargs["skip_sprint_probe"] is True
+
+
 def test_cmd_stress_invokes_harness_subprocess(tmp_path):
     """cmd_stress should execute scripts/dgc_max_stress.py with forwarded args."""
     import dharma_swarm.dgc_cli as cli
@@ -1612,3 +1695,84 @@ def test_cmd_stress_invokes_harness_subprocess(tmp_path):
             assert "--external-research" in cmd
             assert "--external-timeout-sec" in cmd
             assert "45" in cmd
+
+
+def test_cmd_full_power_probe_invokes_runner(capsys):
+    """cmd_full_power_probe should call the reusable probe module."""
+    import dharma_swarm.dgc_cli as cli
+
+    payload = {
+        "report_markdown_path": "/tmp/probe.md",
+        "report_json_path": "/tmp/probe.json",
+    }
+    with patch("dharma_swarm.full_power_probe.run_full_power_probe", return_value=payload) as mock_run:
+        cli.cmd_full_power_probe(
+            route_task="route me",
+            context_search_query="find me",
+            compose_task="compose me",
+            autonomy_action="approve me",
+            skip_sprint_probe=True,
+            skip_stress=True,
+            skip_pytest=True,
+        )
+        mock_run.assert_called_once()
+        kwargs = mock_run.call_args.kwargs
+        assert kwargs["python_executable"] == sys.executable
+        assert kwargs["include_sprint_probe"] is False
+        assert kwargs["run_stress"] is False
+        assert kwargs["run_pytest"] is False
+
+    out = capsys.readouterr().out
+    assert "/tmp/probe.md" in out
+    assert "/tmp/probe.json" in out
+
+
+def test_cmd_sprint_falls_back_to_local_on_non_runtime_error(
+    tmp_path,
+    monkeypatch,
+    capsys,
+):
+    """cmd_sprint should fall back locally for network/transport failures too."""
+    import dharma_swarm.dgc_cli as cli
+
+    monkeypatch.setattr(
+        "dharma_swarm.master_prompt_engineer.gather_system_state",
+        lambda: {
+            "live_signals": {
+                "morning_brief": "brief",
+                "dream_seeds": "dreams",
+                "sprint_handoff": "handoff",
+            }
+        },
+        raising=True,
+    )
+    monkeypatch.setattr(
+        "dharma_swarm.master_prompt_engineer._days_to_colm",
+        lambda: (14, 19),
+        raising=True,
+    )
+    monkeypatch.setattr(
+        "dharma_swarm.master_prompt_engineer.generate_local_prompt",
+        lambda **_: "LOCAL SPRINT",
+        raising=True,
+    )
+
+    async def _boom(**_: object) -> str:
+        raise ValueError("network blocked")
+
+    monkeypatch.setattr(
+        "dharma_swarm.master_prompt_engineer.generate_evolved_prompt",
+        _boom,
+        raising=True,
+    )
+
+    output = tmp_path / "SPRINT.md"
+    cli.cmd_sprint(output=str(output))
+
+    out = capsys.readouterr().out
+    assert "network blocked" in out
+    assert "using local mode" in out
+
+    contents = output.read_text()
+    assert "Mode**: local (fallback)" in contents
+    assert "LOCAL SPRINT" in contents
