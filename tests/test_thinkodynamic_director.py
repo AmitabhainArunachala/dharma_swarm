@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import json
 from pathlib import Path
 from types import SimpleNamespace
@@ -10,6 +11,7 @@ import pytest
 from dharma_swarm.engine.conversation_memory import ConversationMemoryStore
 from dharma_swarm.models import AgentRole, AgentState, AgentStatus, ProviderType, TaskStatus
 from dharma_swarm.thinkodynamic_director import (
+    DirectorMindSpec,
     ThinkodynamicDirector,
     WorkflowPlan,
     WorkflowTaskPlan,
@@ -276,6 +278,54 @@ async def test_deliberate_council_writes_heuristic_dialogue_without_swarm(
     assert "Director Council Dialogue" in dialogue
     assert "codex-primus" in dialogue
     assert "opus-primus" in dialogue
+
+
+@pytest.mark.asyncio
+async def test_query_council_member_times_out_named_runner(
+    director: ThinkodynamicDirector,
+    monkeypatch,
+) -> None:
+    class _SlowRunner:
+        async def run_task(self, task):
+            await asyncio.sleep(0.2)
+            return "late"
+
+    monkeypatch.setenv("DGC_THINKODYNAMIC_SWARM_RUNNER_TIMEOUT", "0.01")
+
+    async def _fake_find_swarm_runner(name: str):
+        return _SlowRunner()
+
+    director._find_swarm_runner = _fake_find_swarm_runner  # type: ignore[assignment]
+
+    member = DirectorMindSpec(
+        name="codex-primus",
+        role="meta",
+        provider="openai",
+        model="codex-test",
+        backend="codex-cli",
+        purpose="meta",
+    )
+    workflow = WorkflowPlan(
+        cycle_id="council-timeout",
+        workflow_id="wf-council-timeout",
+        opportunity_id="opp-council-timeout",
+        opportunity_title="Timeout council lane",
+        theme="autonomy",
+        thesis="Bound stuck runners.",
+        why_now="Council should not hang forever.",
+        expected_duration_min=5,
+        tasks=[],
+    )
+
+    turn = await director._query_council_member(
+        member,
+        workflow,
+        vision_result={"vision_text": "Keep moving."},
+        sense_result={"opportunities": []},
+    )
+
+    assert turn.success is False
+    assert "timed out" in turn.error
 
 
 @pytest.mark.asyncio
@@ -626,7 +676,7 @@ async def test_execute_pending_tasks_can_delegate_follow_on_work(
                 ),
                 "blocked": False,
                 "rapid": True,
-                "provider": "test-mock",
+                "provider": "codex-cli",
             }
         return {
             "task_key": task_plan.key,
@@ -636,7 +686,7 @@ async def test_execute_pending_tasks_can_delegate_follow_on_work(
             "output": f"Completed child task: {task_plan.title}",
             "blocked": False,
             "rapid": True,
-            "provider": "test-mock",
+            "provider": "codex-cli",
         }
 
     director.spawn_agent = _fanout_spawn  # type: ignore[assignment]
@@ -651,6 +701,63 @@ async def test_execute_pending_tasks_can_delegate_follow_on_work(
         if task.metadata.get("director_source_kind") == "dynamic_delegation"
     ]
     assert len(child_tasks) == 1
+
+
+@pytest.mark.asyncio
+async def test_execute_pending_tasks_suppresses_untrusted_fallback_delegations(
+    director: ThinkodynamicDirector,
+) -> None:
+    await director.init()
+    workflow = WorkflowPlan(
+        cycle_id="fallback-delegation",
+        workflow_id="wf-fallback-delegation",
+        opportunity_id="opp-fallback-delegation",
+        opportunity_title="Fallback delegation guard",
+        theme="reliability",
+        thesis="Fallback prose should not spawn new tasks.",
+        why_now="Provider fallback can invent follow-on work.",
+        expected_duration_min=15,
+        tasks=[
+            WorkflowTaskPlan(
+                key="guard-fallback",
+                title="Guard fallback output",
+                description="Complete work without trusting fallback delegations.",
+                priority="high",
+                role_hint="validator",
+                acceptance=["No untrusted child tasks created."],
+            )
+        ],
+    )
+    await director.enqueue_workflow(workflow)
+
+    async def _fallback_spawn(task_plan, wf, *, model="sonnet", timeout=600):
+        return {
+            "task_key": task_plan.key,
+            "title": task_plan.title,
+            "success": True,
+            "output_length": 120,
+            "output": (
+                "Completed via fallback.\n\n"
+                "## DELEGATIONS\n"
+                "- [surgeon] Invented child task :: This should not be trusted.\n"
+            ),
+            "blocked": False,
+            "rapid": True,
+            "provider": "openrouter-fallback",
+        }
+
+    director.spawn_agent = _fallback_spawn  # type: ignore[assignment]
+
+    results = await director.execute_pending_tasks(max_concurrent=1)
+
+    assert len(results) == 1
+    assert results[0]["delegation_trusted"] is False
+    assert results[0]["delegated_child_task_ids"] == []
+    child_tasks = [
+        task for task in await director.list_director_tasks()
+        if task.metadata.get("director_source_kind") == "dynamic_delegation"
+    ]
+    assert child_tasks == []
 
 
 @pytest.mark.asyncio

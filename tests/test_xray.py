@@ -9,14 +9,19 @@ import pytest
 from dharma_swarm.xray import (
     FileInfo,
     FunctionInfo,
+    MAX_RISK_FLAGS,
     RiskFlag,
     XRayReport,
     analyze_python_file,
     analyze_js_file,
     analyze_repo,
+    analyze_repo_summary,
+    build_service_packet,
     discover_files,
     render_markdown,
+    render_service_brief,
     run_xray,
+    run_xray_packet,
 )
 
 
@@ -309,3 +314,99 @@ class TestRunXray:
         assert report.total_lines > 10000
         assert "python" in report.language_breakdown
         assert report.test_file_count > 20
+
+    def test_exclude_patterns(self, synthetic_repo):
+        out = run_xray(synthetic_repo, exclude_patterns={"tests"})
+        content = out.read_text()
+        assert "Repo X-Ray" in content
+
+
+class TestServicePacket:
+    def test_build_service_packet(self, synthetic_repo):
+        report = analyze_repo(synthetic_repo)
+        packet = build_service_packet(report, buyer="Technical founder")
+
+        assert packet.repo_name == synthetic_repo.name
+        assert packet.buyer == "Technical founder"
+        assert packet.sprint_name == "Repo X-Ray Sprint"
+        assert packet.price_floor_usd > 0
+        assert packet.price_target_usd >= packet.price_floor_usd
+        assert packet.swarm_plan
+
+    def test_render_service_brief(self, synthetic_repo):
+        report = analyze_repo(synthetic_repo)
+        packet = build_service_packet(report)
+        md = render_service_brief(packet)
+
+        assert "# Repo X-Ray Sprint Brief:" in md
+        assert "## Swarm Plan" in md
+        assert "codex-primus" in md
+        assert "## Fixed-Scope Offer" in md
+
+    def test_run_xray_packet(self, synthetic_repo, tmp_path):
+        out_dir = tmp_path / "packet"
+        outputs = run_xray_packet(synthetic_repo, output_dir=out_dir, buyer="CTO")
+
+        assert outputs["output_dir"] == out_dir
+        assert outputs["report_markdown"].exists()
+        assert outputs["report_json"].exists()
+        assert outputs["service_brief"].exists()
+        assert outputs["service_packet"].exists()
+        assert outputs["mission_brief"].exists()
+        assert "Swarm Mission" in outputs["mission_brief"].read_text()
+
+
+# ── Exclude Patterns ─────────────────────────────────────────────────
+
+
+class TestExcludePatterns:
+    def test_discover_respects_exclude(self, synthetic_repo):
+        all_files = discover_files(synthetic_repo)
+        excluded = discover_files(synthetic_repo, exclude_patterns={"tests"})
+        assert len(excluded) < len(all_files)
+        assert not any("tests" in str(f) for f in excluded)
+
+    def test_analyze_repo_with_exclude(self, synthetic_repo):
+        full = analyze_repo(synthetic_repo)
+        partial = analyze_repo(synthetic_repo, exclude_patterns={"tests"})
+        assert partial.total_files <= full.total_files
+        assert partial.test_file_count <= full.test_file_count
+
+
+# ── Capped Risk Flags ────────────────────────────────────────────────
+
+
+class TestCappedRisks:
+    def test_risk_flags_capped(self, synthetic_repo):
+        report = analyze_repo(synthetic_repo)
+        assert len(report.risk_flags) <= MAX_RISK_FLAGS
+
+
+# ── Summary Function ─────────────────────────────────────────────────
+
+
+class TestAnalyzeRepoSummary:
+    def test_returns_expected_keys(self, synthetic_repo):
+        summary = analyze_repo_summary(synthetic_repo)
+        assert "grade" in summary
+        assert "score" in summary
+        assert "dimensions" in summary
+        assert "top_risks" in summary
+        assert "top_actions" in summary
+        assert summary["grade"] in ("A", "B", "C", "D", "F")
+        assert 0.0 <= summary["score"] <= 1.0
+
+    def test_dimensions_present(self, synthetic_repo):
+        summary = analyze_repo_summary(synthetic_repo)
+        dims = summary["dimensions"]
+        assert "has_tests" in dims
+        assert "documented" in dims
+
+    def test_invalid_path_returns_error(self):
+        summary = analyze_repo_summary("/nonexistent/path")
+        assert summary["grade"] == "F"
+        assert "error" in summary
+
+    def test_with_exclude(self, synthetic_repo):
+        summary = analyze_repo_summary(synthetic_repo, exclude_patterns={"tests"})
+        assert summary["grade"] in ("A", "B", "C", "D", "F")

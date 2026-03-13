@@ -209,6 +209,23 @@ def test_dgc_cli_health_command():
             mock.assert_called_once()
 
 
+def test_dgc_cli_xray_packet_command_dispatch():
+    """main() dispatches xray packet flags to cmd_xray."""
+    from dharma_swarm.dgc_cli import main
+
+    with patch(
+        "sys.argv",
+        ["dgc", "xray", ".", "--packet", "--buyer", "CTO", "--output", "/tmp/xray-packet"],
+    ):
+        with patch("dharma_swarm.dgc_cli.cmd_xray") as mock:
+            main()
+            mock.assert_called_once()
+            assert mock.call_args.kwargs["repo_path"] == "."
+            assert mock.call_args.kwargs["packet"] is True
+            assert mock.call_args.kwargs["buyer"] == "CTO"
+            assert mock.call_args.kwargs["output"] == "/tmp/xray-packet"
+
+
 def test_dgc_cli_pulse_command():
     """main() dispatches 'pulse' to cmd_pulse."""
     from dharma_swarm.dgc_cli import main

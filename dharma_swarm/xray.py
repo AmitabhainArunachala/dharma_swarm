@@ -134,6 +134,29 @@ class XRayReport(BaseModel):
     recommendations: list[str] = Field(default_factory=list)
 
 
+class XRayServicePacket(BaseModel):
+    """Productized service packet derived from a repo X-Ray."""
+
+    repo_name: str
+    repo_path: str
+    generated_at: str = Field(default_factory=lambda: _utc_now().isoformat())
+    buyer: str
+    grade: str
+    quality_score: float
+    summary: str
+    diagnosis: list[str] = Field(default_factory=list)
+    proof_points: list[str] = Field(default_factory=list)
+    sprint_name: str = "Repo X-Ray Sprint"
+    sprint_duration_days: int = 5
+    sprint_outcome: str = ""
+    deliverables: list[str] = Field(default_factory=list)
+    swarm_plan: list[str] = Field(default_factory=list)
+    price_floor_usd: int = 0
+    price_target_usd: int = 0
+    top_risks: list[str] = Field(default_factory=list)
+    recommended_next_step: str = ""
+
+
 # ── File Discovery ───────────────────────────────────────────────────
 
 
@@ -837,6 +860,221 @@ def render_markdown(report: XRayReport) -> str:
     return "\n".join(lines)
 
 
+def _quality_score_and_grade(report: XRayReport) -> tuple[float, str]:
+    score = (
+        (min(report.test_ratio, 1.0) * 0.3)
+        + (report.avg_docstring_ratio * 0.2)
+        + (report.avg_naming_score * 0.15)
+        + (report.type_annotation_rate * 0.15)
+        + (max(0.0, 1.0 - report.avg_complexity / 50.0) * 0.2)
+    )
+    grade = (
+        "A" if score >= 0.8 else
+        "B" if score >= 0.6 else
+        "C" if score >= 0.4 else
+        "D" if score >= 0.2 else "F"
+    )
+    return round(score, 3), grade
+
+
+def build_service_packet(
+    report: XRayReport,
+    *,
+    buyer: str = "CTO or founder under shipping pressure",
+) -> XRayServicePacket:
+    """Translate an X-Ray report into a sellable fixed-scope service packet."""
+
+    quality_score, grade = _quality_score_and_grade(report)
+    diagnosis: list[str] = []
+    proof_points: list[str] = []
+
+    src_files = max(1, report.total_files - report.test_file_count)
+    proof_points.append(
+        f"Analyzed {report.total_files} files and {report.total_non_blank_lines:,} non-blank lines."
+    )
+    proof_points.append(
+        f"Test surface: {report.test_file_count} test files for roughly {src_files} non-test files "
+        f"({report.test_ratio:.0%} ratio)."
+    )
+    proof_points.append(
+        f"Quality grade {grade} with score {quality_score:.3f}; average complexity {report.avg_complexity:.1f}."
+    )
+    if report.complexity_hotspots:
+        hotspot = report.complexity_hotspots[0]
+        proof_points.append(
+            f"Top hotspot: {hotspot.name} in {hotspot.file}:{hotspot.line} "
+            f"(complexity {hotspot.complexity})."
+        )
+    if report.largest_files:
+        largest = report.largest_files[0]
+        proof_points.append(
+            f"Largest file: {largest['path']} at {largest['lines']:,} non-blank lines."
+        )
+
+    if report.test_ratio < 0.3:
+        diagnosis.append(
+            "Release risk is elevated because the test surface is too thin for confident iteration."
+        )
+    if report.avg_complexity >= 12:
+        diagnosis.append(
+            "Change velocity is being taxed by concentrated complexity in a few functions or modules."
+        )
+    if report.largest_files and report.largest_files[0]["lines"] > 400:
+        diagnosis.append(
+            "Context is trapped in oversized files, which slows onboarding, review, and safe edits."
+        )
+    if report.internal_coupling and report.internal_coupling[0]["internal_imports"] >= 5:
+        diagnosis.append(
+            "Internal coupling suggests small changes may ripple across the codebase."
+        )
+    if not diagnosis:
+        diagnosis.append(
+            "The repo is healthy enough that the highest-value offer is optimization and proof-hardening, not rescue work."
+        )
+
+    severity_score = 0
+    severity_score += sum(2 for risk in report.risk_flags if risk.severity == "error")
+    severity_score += sum(1 for risk in report.risk_flags if risk.severity == "warning")
+    severity_score += 2 if report.test_ratio < 0.2 else 0
+    severity_score += 2 if report.avg_complexity >= 15 else 0
+    severity_score += 1 if report.largest_files and report.largest_files[0]["lines"] > 500 else 0
+    price_floor = min(18000, 3500 + severity_score * 750)
+    price_target = min(25000, price_floor + 3000 + max(0, len(report.risk_flags) - 3) * 250)
+
+    sprint_outcome = (
+        "Deliver a source-grounded risk map, a prioritized remediation brief, "
+        "one verified implementation slice, and a buyer-ready next-step recommendation."
+    )
+    deliverables = [
+        "repo_xray_report.md",
+        "service_brief.md",
+        "mission_brief.md",
+        "risk_register.json",
+        "verified_change_slice.md",
+    ]
+    if report.test_ratio < 0.5:
+        deliverables.append("focused_regression_plan.md")
+    if report.complexity_hotspots:
+        deliverables.append("hotspot_refactor_plan.md")
+
+    swarm_plan = [
+        "codex-primus: lead builder, patch closer, and implementation owner",
+        "opus-primus: diagnosis, contradiction hunting, and scope control",
+        "glm-researcher: dependency and evidence synthesis",
+        "kimi-cartographer: file graph and artifact mapping",
+        "qwen-builder: broad low-cost implementation support",
+        "nim-validator: verification, regression checks, and result gating",
+    ]
+
+    summary = (
+        f"{report.repo_name} is a viable fixed-scope Repo X-Ray Sprint candidate for {buyer}. "
+        f"The repo currently grades {grade} and shows {len(report.risk_flags)} visible risk signals, "
+        "which is enough to justify a paid hardening sprint instead of a generic advisory call."
+    )
+
+    top_risks = [
+        f"{risk.category}: {risk.message}" + (f" ({risk.file})" if risk.file else "")
+        for risk in report.risk_flags[:5]
+    ]
+    recommended_next_step = (
+        "Run the paid Repo X-Ray Sprint on the live repository, then convert the first verified fix "
+        "into a case study and recurring maintenance offer."
+    )
+
+    return XRayServicePacket(
+        repo_name=report.repo_name,
+        repo_path=report.repo_path,
+        buyer=buyer,
+        grade=grade,
+        quality_score=quality_score,
+        summary=summary,
+        diagnosis=diagnosis,
+        proof_points=proof_points,
+        sprint_outcome=sprint_outcome,
+        deliverables=deliverables,
+        swarm_plan=swarm_plan,
+        price_floor_usd=price_floor,
+        price_target_usd=price_target,
+        top_risks=top_risks,
+        recommended_next_step=recommended_next_step,
+    )
+
+
+def render_service_brief(packet: XRayServicePacket) -> str:
+    """Render a buyer-facing service brief from a service packet."""
+
+    lines = [
+        f"# Repo X-Ray Sprint Brief: {packet.repo_name}",
+        f"*Generated {packet.generated_at[:19]} UTC*",
+        "",
+        "## Executive Summary",
+        packet.summary,
+        "",
+        "## Buyer",
+        f"- {packet.buyer}",
+        "",
+        "## Diagnosis",
+    ]
+    for item in packet.diagnosis:
+        lines.append(f"- {item}")
+    lines.extend(["", "## Proof Points"])
+    for item in packet.proof_points:
+        lines.append(f"- {item}")
+    lines.extend(
+        [
+            "",
+            "## Fixed-Scope Offer",
+            f"- Name: {packet.sprint_name}",
+            f"- Duration: {packet.sprint_duration_days} business days",
+            f"- Outcome: {packet.sprint_outcome}",
+            f"- Price floor: ${packet.price_floor_usd:,}",
+            f"- Target price: ${packet.price_target_usd:,}",
+            "",
+            "## Deliverables",
+        ]
+    )
+    for item in packet.deliverables:
+        lines.append(f"- {item}")
+    lines.extend(["", "## Swarm Plan"])
+    for item in packet.swarm_plan:
+        lines.append(f"- {item}")
+    lines.extend(["", "## Top Risks"])
+    for item in packet.top_risks:
+        lines.append(f"- {item}")
+    lines.extend(["", "## Next Step", packet.recommended_next_step, ""])
+    return "\n".join(lines)
+
+
+def render_swarm_mission(packet: XRayServicePacket) -> str:
+    """Render the swarm mission brief for delivering the X-Ray sprint."""
+
+    lines = [
+        f"# Swarm Mission: {packet.sprint_name} for {packet.repo_name}",
+        "",
+        "## Objective",
+        (
+            "Turn static repo evidence into a buyer-ready diagnostic, a verified implementation slice, "
+            "and the shortest credible path to a paid follow-on sprint."
+        ),
+        "",
+        "## Success Criteria",
+        "- Source-grounded X-Ray completed",
+        "- Service brief written",
+        "- Top risks ranked and scoped",
+        "- One verified implementation slice proposed or shipped",
+        "- Clear next paid step identified",
+        "",
+        "## Agent Lanes",
+    ]
+    for item in packet.swarm_plan:
+        lines.append(f"- {item}")
+    lines.extend(["", "## Proof Surfaces"])
+    for item in packet.proof_points:
+        lines.append(f"- {item}")
+    lines.extend(["", "## Close Condition", packet.recommended_next_step, ""])
+    return "\n".join(lines)
+
+
 # ── Public API ───────────────────────────────────────────────────────
 
 
@@ -844,6 +1082,7 @@ def run_xray(
     repo_path: Path | str,
     output_path: Path | str | None = None,
     as_json: bool = False,
+    exclude_patterns: set[str] | None = None,
 ) -> Path:
     """Run a full X-Ray analysis on a repository.
 
@@ -851,6 +1090,7 @@ def run_xray(
         repo_path: Path to the repository root.
         output_path: Where to save the report. Defaults to xray_report.md in the repo.
         as_json: If True, output JSON instead of markdown.
+        exclude_patterns: Directory names to skip.
 
     Returns:
         Path to the generated report file.
@@ -860,7 +1100,7 @@ def run_xray(
         raise ValueError(f"Not a directory: {repo}")
 
     logger.info("Running X-Ray on %s", repo)
-    report = analyze_repo(repo)
+    report = analyze_repo(repo, exclude_patterns=exclude_patterns)
 
     if as_json:
         ext = ".json"
@@ -880,6 +1120,47 @@ def run_xray(
     return out
 
 
+def run_xray_packet(
+    repo_path: Path | str,
+    output_dir: Path | str | None = None,
+    *,
+    buyer: str = "CTO or founder under shipping pressure",
+    exclude_patterns: set[str] | None = None,
+) -> dict[str, Path]:
+    """Generate a productized X-Ray packet suitable for a paid service offer."""
+
+    repo = Path(repo_path).resolve()
+    if not repo.is_dir():
+        raise ValueError(f"Not a directory: {repo}")
+
+    report = analyze_repo(repo, exclude_patterns=exclude_patterns)
+    packet = build_service_packet(report, buyer=buyer)
+
+    out_dir = Path(output_dir) if output_dir else repo / "xray_packet"
+    out_dir.mkdir(parents=True, exist_ok=True)
+
+    report_md = out_dir / "xray_report.md"
+    report_json = out_dir / "xray_report.json"
+    service_md = out_dir / "service_brief.md"
+    packet_json = out_dir / "service_packet.json"
+    mission_md = out_dir / "mission_brief.md"
+
+    report_md.write_text(render_markdown(report), encoding="utf-8")
+    report_json.write_text(report.model_dump_json(indent=2), encoding="utf-8")
+    service_md.write_text(render_service_brief(packet), encoding="utf-8")
+    packet_json.write_text(packet.model_dump_json(indent=2), encoding="utf-8")
+    mission_md.write_text(render_swarm_mission(packet), encoding="utf-8")
+
+    return {
+        "output_dir": out_dir,
+        "report_markdown": report_md,
+        "report_json": report_json,
+        "service_brief": service_md,
+        "service_packet": packet_json,
+        "mission_brief": mission_md,
+    }
+
+
 def analyze_repo_summary(
     repo_path: Path | str,
     exclude_patterns: set[str] | None = None,
@@ -896,20 +1177,7 @@ def analyze_repo_summary(
 
     report = analyze_repo(repo, exclude_patterns=exclude_patterns)
 
-    # Compute quality grade (same formula as render_markdown)
-    quality_score = (
-        (min(report.test_ratio, 1.0) * 0.3)
-        + (report.avg_docstring_ratio * 0.2)
-        + (report.avg_naming_score * 0.15)
-        + (report.type_annotation_rate * 0.15)
-        + (max(0, 1.0 - report.avg_complexity / 50) * 0.2)
-    )
-    grade = (
-        "A" if quality_score >= 0.8 else
-        "B" if quality_score >= 0.6 else
-        "C" if quality_score >= 0.4 else
-        "D" if quality_score >= 0.2 else "F"
-    )
+    quality_score, grade = _quality_score_and_grade(report)
 
     # Count files with error handling (try/except or raise)
     error_handling_count = 0
@@ -928,7 +1196,7 @@ def analyze_repo_summary(
         "repo_name": report.repo_name,
         "repo_path": report.repo_path,
         "grade": grade,
-        "score": round(quality_score, 3),
+        "score": quality_score,
         "total_files": report.total_files,
         "total_lines": report.total_lines,
         "dimensions": {

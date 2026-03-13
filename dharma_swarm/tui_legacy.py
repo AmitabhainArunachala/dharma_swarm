@@ -840,7 +840,7 @@ class DGCApp(App):
                 "  [cyan]/truth[/cyan]           Canonical truth report\n"
                 "\n[bold cyan]━━━ Dharma & Living Layers ━━━[/bold cyan]\n"
                 "  [cyan]/dharma[/cyan] [status]  Dharma kernel/corpus status\n"
-                "  [cyan]/corpus[/cyan]          List corpus claims\n"
+                "  [cyan]/corpus[/cyan] [--status S]  List corpus claims (filter by status)\n"
                 "  [cyan]/stigmergy[/cyan]       Hot paths and high salience marks\n"
                 "  [cyan]/hum[/cyan]             Subconscious dreams\n"
                 "\n[bold cyan]━━━ Chat & Control ━━━[/bold cyan]\n"
@@ -1066,12 +1066,13 @@ class DGCApp(App):
             if subcmd == "status":
                 self._run_dharma_status()
             elif subcmd == "corpus":
-                self._run_dharma_corpus()
+                corpus_arg = sub[1] if len(sub) > 1 else ""
+                self._run_dharma_corpus(corpus_arg)
             else:
                 self._out("[red]Usage: /dharma [status|corpus][/red]")
 
         elif cmd == "corpus":
-            self._run_dharma_corpus()
+            self._run_dharma_corpus(arg)
 
         elif cmd == "stigmergy":
             self._run_stigmergy(arg)
@@ -1636,25 +1637,41 @@ class DGCApp(App):
             self._out_thread(f"[red]Dharma status error: {e}[/red]")
 
     @work(thread=True)
-    def _run_dharma_corpus(self) -> None:
+    def _run_dharma_corpus(self, arg: str = "") -> None:
         try:
             import asyncio
+            from dharma_swarm.dharma_corpus import ClaimStatus
             from dharma_swarm.dgc_cli import _get_swarm
+
+            # Parse --status STATUS filter
+            status_filter: ClaimStatus | None = None
+            parts = arg.split()
+            for i, tok in enumerate(parts):
+                if tok == "--status" and i + 1 < len(parts):
+                    raw = parts[i + 1].lower()
+                    try:
+                        status_filter = ClaimStatus(raw)
+                    except ValueError:
+                        valid = ", ".join(s.value for s in ClaimStatus)
+                        self._out_thread(f"[red]Unknown status '{raw}'. Valid: {valid}[/red]")
+                        return
 
             async def _corpus():
                 swarm = await _get_swarm()
                 if swarm._corpus is None:
                     return []
-                claims = await swarm._corpus.list_claims()
+                claims = await swarm._corpus.list_claims(status=status_filter)
                 await swarm.shutdown()
                 return claims
 
             claims = asyncio.run(_corpus())
             if not claims:
-                self._out_thread("[dim]No claims in corpus.[/dim]")
+                label = f" (status={status_filter.value})" if status_filter else ""
+                self._out_thread(f"[dim]No claims in corpus{label}.[/dim]")
             else:
-                self._out_thread(f"[bold cyan]Dharma Corpus ({len(claims)} claims)[/bold cyan]")
-                for cl in claims[:10]:
+                label = f" [{status_filter.value}]" if status_filter else ""
+                self._out_thread(f"[bold cyan]Dharma Corpus{label} ({len(claims)} claims)[/bold cyan]")
+                for cl in claims[:20]:
                     self._out_thread(f"  [bold white]{cl.id}[/bold white] [{cl.status.value}] {cl.statement[:60]}")
         except Exception as e:
             self._out_thread(f"[red]Corpus error: {e}[/red]")

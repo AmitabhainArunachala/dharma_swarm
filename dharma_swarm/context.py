@@ -287,6 +287,7 @@ def _read_memory_plane_context(
     limit: int = 5,
     consumer: str = "context.read_memory_context",
     task_id: str | None = None,
+    allow_semantic_search: bool = True,
 ) -> str:
     from dharma_swarm.engine.hybrid_retriever import HybridRetriever
     from dharma_swarm.engine.retrieval_feedback import RetrievalFeedbackStore
@@ -295,7 +296,7 @@ def _read_memory_plane_context(
     index = UnifiedIndex(plane_path)
     retriever = HybridRetriever(index)
     retrieval_query = (query or "memory runtime lessons task note context event").strip()
-    if retrieval_query:
+    if retrieval_query and allow_semantic_search:
         hits = retriever.search_with_temporal_query(
             retrieval_query,
             limit=limit,
@@ -323,6 +324,7 @@ def read_memory_context(
     limit: int = 5,
     consumer: str = "context.read_memory_context",
     task_id: str | None = None,
+    allow_semantic_search: bool = True,
 ) -> str:
     """Get recent or query-specific memory from dharma_swarm state."""
     base_dir = state_dir or STATE_DIR
@@ -336,6 +338,7 @@ def read_memory_context(
                 limit=limit,
                 consumer=consumer,
                 task_id=task_id,
+                allow_semantic_search=allow_semantic_search,
             )
             if plane_result:
                 return plane_result
@@ -351,6 +354,7 @@ def read_memory_context(
                     limit=limit,
                     consumer=consumer,
                     task_id=task_id,
+                    allow_semantic_search=allow_semantic_search,
                 )
                 if plane_result:
                     return plane_result
@@ -376,6 +380,7 @@ def read_memory_context(
                         limit=limit,
                         consumer=consumer,
                         task_id=task_id,
+                        allow_semantic_search=allow_semantic_search,
                     )
                     if plane_result:
                         return plane_result

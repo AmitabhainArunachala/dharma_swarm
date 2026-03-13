@@ -45,9 +45,9 @@ class TestInitiativeModel:
             title="Test",
             has_tests=1.0,
             tests_pass=1.0,
-            integrated=0.5,
+            error_handling=0.5,
             documented=0.5,
-            real_usage=0.0,
+            edge_cases_covered=0.0,
         )
         q = init.compute_quality()
         assert q == pytest.approx(0.6, abs=0.001)
@@ -170,9 +170,9 @@ class TestIterationLedger:
                 quality_updates={
                     "has_tests": 1.0,
                     "tests_pass": 1.0,
-                    "integrated": 0.8,
+                    "error_handling": 0.8,
                     "documented": 0.5,
-                    "real_usage": 0.5,
+                    "edge_cases_covered": 0.5,
                 },
             )
 
@@ -191,9 +191,9 @@ class TestIterationLedger:
                 quality_updates={
                     "has_tests": 1.0,
                     "tests_pass": 1.0,
-                    "integrated": 0.8,
+                    "error_handling": 0.8,
                     "documented": 0.7,
-                    "real_usage": 0.8,
+                    "edge_cases_covered": 0.8,
                 },
             )
         ledger.promote(init.id)

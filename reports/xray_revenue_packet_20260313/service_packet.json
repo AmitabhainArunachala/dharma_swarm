@@ -1,0 +1,50 @@
+{
+  "repo_name": "dharma_swarm",
+  "repo_path": "/Users/dhyana/dharma_swarm",
+  "generated_at": "2026-03-13T15:07:21.863826+00:00",
+  "buyer": "AI-native founder or CTO buying a fixed-scope repo hardening sprint",
+  "grade": "C",
+  "quality_score": 0.529,
+  "summary": "dharma_swarm is a viable fixed-scope Repo X-Ray Sprint candidate for AI-native founder or CTO buying a fixed-scope repo hardening sprint. The repo currently grades C and shows 15 visible risk signals, which is enough to justify a paid hardening sprint instead of a generic advisory call.",
+  "diagnosis": [
+    "Change velocity is being taxed by concentrated complexity in a few functions or modules.",
+    "Context is trapped in oversized files, which slows onboarding, review, and safe edits.",
+    "Internal coupling suggests small changes may ripple across the codebase."
+  ],
+  "proof_points": [
+    "Analyzed 446 files and 128,909 non-blank lines.",
+    "Test surface: 199 test files for roughly 247 non-test files (81% ratio).",
+    "Quality grade C with score 0.529; average complexity 48.1.",
+    "Top hotspot: execute_single_step in scripts/strange_loop.py:1007 (complexity 95).",
+    "Largest file: dharma_swarm/dgc_cli.py at 4,591 non-blank lines."
+  ],
+  "sprint_name": "Repo X-Ray Sprint",
+  "sprint_duration_days": 5,
+  "sprint_outcome": "Deliver a source-grounded risk map, a prioritized remediation brief, one verified implementation slice, and a buyer-ready next-step recommendation.",
+  "deliverables": [
+    "repo_xray_report.md",
+    "service_brief.md",
+    "mission_brief.md",
+    "risk_register.json",
+    "verified_change_slice.md",
+    "hotspot_refactor_plan.md"
+  ],
+  "swarm_plan": [
+    "codex-primus: lead builder, patch closer, and implementation owner",
+    "opus-primus: diagnosis, contradiction hunting, and scope control",
+    "glm-researcher: dependency and evidence synthesis",
+    "kimi-cartographer: file graph and artifact mapping",
+    "qwen-builder: broad low-cost implementation support",
+    "nim-validator: verification, regression checks, and result gating"
+  ],
+  "price_floor_usd": 17000,
+  "price_target_usd": 23000,
+  "top_risks": [
+    "size: Large file (596 lines). Consider splitting. (tests/test_monitor.py)",
+    "size: Large file (523 lines). Consider splitting. (tests/test_semantic_evolution.py)",
+    "size: Large file (1056 lines). Consider splitting. (tests/test_thinkodynamic_director.py)",
+    "size: Large file (893 lines). Consider splitting. (tests/test_gaia.py)",
+    "size: Large file (750 lines). Consider splitting. (tests/test_orchestrator.py)"
+  ],
+  "recommended_next_step": "Run the paid Repo X-Ray Sprint on the live repository, then convert the first verified fix into a case study and recurring maintenance offer."
+}

@@ -1,12 +1,13 @@
 """Tests for dharma_swarm.agent_runner."""
 
+import builtins
 import re
 
 import pytest
 from unittest.mock import AsyncMock
 
 from dharma_swarm.models import AgentConfig, AgentRole, AgentStatus, Task
-from dharma_swarm.agent_runner import AgentPool, AgentRunner
+from dharma_swarm.agent_runner import AgentPool, AgentRunner, _build_prompt
 
 
 @pytest.fixture
@@ -32,6 +33,43 @@ async def test_runner_mock_task(config):
     assert "Write tests" in result
     assert runner.state.status == AgentStatus.IDLE
     assert runner.state.tasks_completed == 1
+
+
+def test_build_prompt_uses_recent_only_memory_recall_by_default(config, monkeypatch):
+    recorded: dict[str, object] = {}
+
+    def _fake_memory(**kwargs):
+        recorded.update(kwargs)
+        return "No memory database yet."
+
+    monkeypatch.setattr("dharma_swarm.context.read_memory_context", _fake_memory, raising=True)
+    monkeypatch.setattr("dharma_swarm.context.read_latent_gold_context", lambda **_: "", raising=True)
+
+    _build_prompt(Task(title="Build prompt", description="Use memory carefully"), config)
+
+    assert recorded["allow_semantic_search"] is False
+
+
+def test_build_prompt_handles_memory_context_import_failure(config, monkeypatch):
+    original_import = builtins.__import__
+
+    def _fake_import(name, globals=None, locals=None, fromlist=(), level=0):
+        if name == "dharma_swarm.context":
+            raise ImportError("context unavailable")
+        return original_import(name, globals, locals, fromlist, level)
+
+    monkeypatch.setattr(builtins, "__import__", _fake_import)
+    monkeypatch.setenv("DGC_AGENT_PROMPT_MEMORY_MODE", "off")
+
+    request = _build_prompt(
+        Task(title="Build prompt", description="Handle missing context import"),
+        config,
+    )
+
+    content = request.messages[0]["content"]
+    assert "## Task: Build prompt" in content
+    assert "## Memory Recall" not in content
+    assert "## Latent Gold" not in content
 
 
 @pytest.mark.asyncio

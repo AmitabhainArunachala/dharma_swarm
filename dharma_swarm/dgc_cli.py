@@ -1627,48 +1627,132 @@ def cmd_evolve_trend(component: str | None) -> None:
 
 
 def cmd_dharma_status() -> None:
-    """Show Dharma subsystem status."""
-    async def _status():
-        swarm = await _get_swarm()
-        status = await swarm.dharma_status()
-        print("=== Dharma Status ===")
-        for key, val in status.items():
-            print(f"  {key}: {val}")
-        await swarm.shutdown()
+    """Show kernel integrity, principle count, and corpus claim counts by status."""
+    async def _status() -> None:
+        from dharma_swarm.dharma_kernel import KernelGuard
+        from dharma_swarm.dharma_corpus import DharmaCorpus, ClaimStatus
+        from dharma_swarm.stigmergy import StigmergyStore
+        from collections import Counter
+
+        print("=== Dharma Kernel ===")
+        guard = KernelGuard(kernel_path=DHARMA_STATE / "kernel.json")
+        try:
+            kernel = await guard.load()
+            integrity = kernel.verify_integrity()
+            print(f"  Integrity:  {'OK' if integrity else 'TAMPERED'}")
+            print(f"  Principles: {len(kernel.principles)}")
+            print(f"  Signature:  {kernel.signature[:16]}...")
+            critical = [p for p in kernel.principles.values() if p.severity == "critical"]
+            print(f"  Critical:   {len(critical)}  High: {len(kernel.principles) - len(critical)}")
+        except FileNotFoundError:
+            print("  Kernel not initialized (run swarm init to create default)")
+        except ValueError as exc:
+            print(f"  Kernel INVALID: {exc}")
+
+        print("\n=== Dharma Corpus ===")
+        corpus = DharmaCorpus(path=DHARMA_STATE / "corpus.jsonl")
+        await corpus.load()
+        all_claims = await corpus.list_claims()
+        if not all_claims:
+            print("  No claims in corpus.")
+        else:
+            counts: Counter[str] = Counter()
+            for cl in all_claims:
+                counts[cl.status.value] += 1
+            print(f"  Total claims: {len(all_claims)}")
+            for status_val in ClaimStatus:
+                c = counts.get(status_val.value, 0)
+                if c > 0:
+                    print(f"    {status_val.value:<14} {c}")
+
+        print("\n=== Stigmergy ===")
+        store = StigmergyStore(base_path=DHARMA_STATE / "stigmergy")
+        density = store.density()
+        print(f"  Mark density: {density}")
+        if density > 0:
+            hot = await store.hot_paths(window_hours=48, min_marks=2)
+            print(f"  Hot paths (48h): {len(hot)}")
+
     _run(_status())
 
 
 def cmd_dharma_corpus(status_filter: str | None = None, category_filter: str | None = None) -> None:
-    """List corpus claims."""
-    async def _corpus():
-        swarm = await _get_swarm()
-        # Access corpus directly for listing
-        if swarm._corpus is None:
-            print("Corpus not initialized")
-            await swarm.shutdown()
-            return
-        from dharma_swarm.dharma_corpus import ClaimStatus, ClaimCategory
+    """List corpus claims with optional status/category filters."""
+    async def _corpus() -> None:
+        from dharma_swarm.dharma_corpus import DharmaCorpus, ClaimStatus, ClaimCategory
+
+        corpus = DharmaCorpus(path=DHARMA_STATE / "corpus.jsonl")
+        await corpus.load()
         s = ClaimStatus(status_filter) if status_filter else None
         c = ClaimCategory(category_filter) if category_filter else None
-        claims = await swarm._corpus.list_claims(status=s, category=c)
+        claims = await corpus.list_claims(status=s, category=c)
         if not claims:
             print("No claims found.")
         else:
-            print(f"{'ID':<16}  {'STATUS':<12}  {'CAT':<16}  STATEMENT")
-            print("-" * 70)
+            print(f"{'ID':<16}  {'STATUS':<14}  {'CAT':<18}  {'CONF':>4}  STATEMENT")
+            print("-" * 80)
             for cl in claims:
-                print(f"{cl.id:<16}  {cl.status.value:<12}  {cl.category.value:<16}  {cl.statement[:40]}")
-        await swarm.shutdown()
+                print(
+                    f"{cl.id:<16}  {cl.status.value:<14}  {cl.category.value:<18}  "
+                    f"{cl.confidence:.1f}   {cl.statement[:40]}"
+                )
+            print(f"\n{len(claims)} claim(s) shown.")
     _run(_corpus())
 
 
 def cmd_dharma_review(claim_id: str) -> None:
-    """Review a claim."""
-    async def _review():
-        swarm = await _get_swarm()
-        result = await swarm.review_claim(claim_id, reviewer="cli-user", action="review", comment="Reviewed via CLI")
-        print(f"Reviewed: {result['id']} -> {result['status']}")
-        await swarm.shutdown()
+    """Show full claim details for review."""
+    async def _review() -> None:
+        from dharma_swarm.dharma_corpus import DharmaCorpus
+
+        corpus = DharmaCorpus(path=DHARMA_STATE / "corpus.jsonl")
+        await corpus.load()
+        claim = await corpus.get(claim_id)
+        if claim is None:
+            print(f"Claim not found: {claim_id}")
+            return
+
+        print(f"=== Claim {claim.id} ===")
+        print(f"  Status:     {claim.status.value}")
+        print(f"  Category:   {claim.category.value}")
+        print(f"  Confidence: {claim.confidence:.2f}")
+        print(f"  Enforcement:{claim.enforcement}")
+        print(f"  Created by: {claim.created_by}")
+        print(f"  Created at: {claim.created_at}")
+        if claim.parent_id:
+            print(f"  Parent ID:  {claim.parent_id}")
+        if claim.tags:
+            print(f"  Tags:       {', '.join(claim.tags)}")
+        if claim.parent_axiom:
+            print(f"  Axioms:     {', '.join(claim.parent_axiom)}")
+
+        print(f"\n  Statement:\n    {claim.statement}")
+
+        if claim.evidence_links:
+            print(f"\n  Evidence ({len(claim.evidence_links)}):")
+            for ev in claim.evidence_links:
+                print(f"    [{ev.type}] {ev.url_or_ref}")
+                print(f"      {ev.description}")
+
+        if claim.counterarguments:
+            print(f"\n  Counterarguments ({len(claim.counterarguments)}):")
+            for ca in claim.counterarguments:
+                print(f"    - {ca}")
+
+        if claim.review_history:
+            print(f"\n  Review History ({len(claim.review_history)}):")
+            for rr in claim.review_history:
+                print(f"    [{rr.timestamp[:19]}] {rr.reviewer}: {rr.action}")
+                print(f"      {rr.comment}")
+
+        # Show lineage if this claim has a parent
+        lineage = await corpus.get_lineage(claim_id)
+        if len(lineage) > 1:
+            print(f"\n  Lineage ({len(lineage)} claims):")
+            for lc in lineage:
+                marker = " <-- current" if lc.id == claim_id else ""
+                print(f"    {lc.id} ({lc.status.value}){marker}")
+
     _run(_review())
 
 
@@ -1862,58 +1946,85 @@ def cmd_evolve_daemon(
 
 
 def cmd_stigmergy(file_path: str | None = None) -> None:
-    """Show stigmergy marks and hot paths."""
-    async def _stig():
-        swarm = await _get_swarm()
-        if swarm._stigmergy is None:
-            print("Stigmergy not initialized")
-            await swarm.shutdown()
-            return
+    """Show recent stigmergic marks, hot paths, and high salience marks."""
+    async def _stig() -> None:
+        from dharma_swarm.stigmergy import StigmergyStore
+
+        store = StigmergyStore(base_path=DHARMA_STATE / "stigmergy")
+        density = store.density()
+        print(f"=== Stigmergy ({density} marks) ===\n")
+
         if file_path:
-            marks = await swarm._stigmergy.read_marks(file_path=file_path, limit=10)
-            print(f"Marks for {file_path}:")
-            for m in marks:
-                ts = m.timestamp.isoformat()[:19]
-                print(f"  [{ts}] {m.agent}: {m.observation} (salience={m.salience:.1f})")
+            marks = await store.read_marks(file_path=file_path, limit=15)
+            if not marks:
+                print(f"No marks for {file_path}")
+            else:
+                print(f"Marks for {file_path}:")
+                for m in marks:
+                    ts = m.timestamp.isoformat()[:19]
+                    print(f"  [{ts}] {m.agent} ({m.action}): {m.observation} [sal={m.salience:.1f}]")
+                    if m.connections:
+                        print(f"    connections: {', '.join(m.connections)}")
         else:
-            hot = await swarm._stigmergy.hot_paths(window_hours=48, min_marks=2)
+            # Recent marks
+            recent = await store.read_marks(limit=10)
+            if recent:
+                print("Recent marks:")
+                for m in recent:
+                    ts = m.timestamp.isoformat()[:19]
+                    print(f"  [{ts}] {m.agent} -> {m.file_path}")
+                    print(f"    {m.action}: {m.observation} [sal={m.salience:.1f}]")
+
+            # Hot paths
+            hot = await store.hot_paths(window_hours=48, min_marks=2)
             if hot:
-                print("Hot paths (last 48h):")
+                print("\nHot paths (last 48h):")
                 for path, count in hot:
                     print(f"  {path}: {count} marks")
-            else:
-                print("No hot paths yet.")
-            high = await swarm._stigmergy.high_salience(threshold=0.7, limit=5)
+
+            # High salience
+            high = await store.high_salience(threshold=0.7, limit=5)
             if high:
-                print("\nHigh salience marks:")
+                print("\nHigh salience marks (>= 0.7):")
                 for m in high:
-                    print(f"  [{m.agent}] {m.observation} (salience={m.salience:.1f})")
-        await swarm.shutdown()
+                    ts = m.timestamp.isoformat()[:19]
+                    print(f"  [{ts}] {m.agent}: {m.observation} [sal={m.salience:.2f}]")
+
+            if not recent and not hot and not high:
+                print("No stigmergic marks yet. The lattice is empty.")
+
     _run(_stig())
 
 
 def cmd_hum() -> None:
-    """Show recent subconscious associations."""
-    async def _hum():
-        swarm = await _get_swarm()
-        if swarm._stigmergy is None:
-            print("Stigmergy not initialized (required for subconscious)")
-            await swarm.shutdown()
+    """Show recent subconscious associations and strongest resonances."""
+    async def _hum() -> None:
+        from dharma_swarm.stigmergy import StigmergyStore
+        from dharma_swarm.subconscious import SubconsciousStream
+
+        store = StigmergyStore(base_path=DHARMA_STATE / "stigmergy")
+        stream = SubconsciousStream(stigmergy=store)
+
+        dreams = await stream.get_recent_dreams(limit=10)
+        if not dreams:
+            print("No dreams yet. The HUM is silent.")
             return
-        try:
-            from dharma_swarm.subconscious import SubconsciousStream
-            stream = SubconsciousStream(stigmergy=swarm._stigmergy)
-            dreams = await stream.get_recent_dreams(limit=10)
-            if not dreams:
-                print("No dreams yet. The HUM is silent.")
-            else:
-                print("Recent subconscious associations:")
-                for d in dreams:
-                    print(f"  {d.source_a} <-> {d.source_b}")
-                    print(f"    {d.resonance_type}: {d.description[:80]} (strength={d.strength:.2f})")
-        except ImportError:
-            print("Subconscious module not available")
-        await swarm.shutdown()
+
+        print("=== Subconscious HUM ===\n")
+        print("Recent associations:")
+        for d in dreams:
+            ts = d.timestamp.isoformat()[:19]
+            print(f"  [{ts}] {d.source_a}")
+            print(f"       <-> {d.source_b}")
+            print(f"    {d.resonance_type} (strength={d.strength:.2f}): {d.description[:80]}")
+            print()
+
+        strong = await stream.strongest_resonances(threshold=0.3)
+        if strong:
+            print(f"Strongest resonances (>= 0.3): {len(strong)}")
+            for s in strong[:5]:
+                print(f"  {s.strength:.2f}  {s.resonance_type}: {s.description[:60]}")
+
     _run(_hum())
 
 
@@ -3573,26 +3684,109 @@ def cmd_xray(
     repo_path: str,
     output: str | None = None,
     as_json: bool = False,
+    exclude: list[str] | None = None,
+    packet: bool = False,
+    buyer: str = "CTO or founder under shipping pressure",
 ) -> None:
     """Run a Repo X-Ray analysis."""
     from pathlib import Path
-    from dharma_swarm.xray import run_xray, analyze_repo, render_markdown
+    from dharma_swarm.xray import (
+        analyze_repo,
+        render_markdown,
+        run_xray,
+        run_xray_packet,
+    )
 
     path = Path(repo_path).expanduser().resolve()
     if not path.is_dir():
         print(f"  Error: {path} is not a directory")
         raise SystemExit(1)
 
+    exclude_set = set(exclude) if exclude else None
     print(f"  Scanning {path}...")
-    report_path = run_xray(path, output_path=output, as_json=as_json)
+    if packet:
+        outputs = run_xray_packet(
+            path,
+            output_dir=output,
+            buyer=buyer,
+            exclude_patterns=exclude_set,
+        )
+        print(f"  Packet saved to: {outputs['output_dir']}")
+        print(f"  Service brief: {outputs['service_brief']}")
+        print(f"  Mission brief: {outputs['mission_brief']}")
+        print(f"  Report JSON: {outputs['report_json']}")
+        return
+
+    report_path = run_xray(path, output_path=output, as_json=as_json, exclude_patterns=exclude_set)
 
     if not as_json:
-        # Also print to stdout
-        report = analyze_repo(path)
+        report = analyze_repo(path, exclude_patterns=exclude_set)
         md = render_markdown(report)
         print(md)
 
     print(f"\n  Report saved to: {report_path}")
+
+
+def cmd_foreman(
+    foreman_cmd: str | None = None,
+    path: str = "",
+    name: str | None = None,
+    test_command: str | None = None,
+    exclude: list[str] | None = None,
+    level: str = "observe",
+    project: str | None = None,
+    skip_tests: bool = False,
+    schedule: str = "every 4h",
+) -> None:
+    """Foreman Quality Forge commands."""
+    from dharma_swarm.foreman import (
+        add_project,
+        format_status,
+        load_projects,
+        run_cycle,
+        create_foreman_cron_job,
+    )
+
+    match foreman_cmd:
+        case "add":
+            if not path:
+                print("  Error: path is required")
+                return
+            entry = add_project(
+                path=path,
+                name=name,
+                test_command=test_command,
+                exclude=exclude or [],
+            )
+            print(f"  Registered: {entry.name} ({entry.path})")
+        case "run":
+            if level not in ("observe", "advise", "build"):
+                print(f"  Error: level must be observe/advise/build, got {level}")
+                return
+            report = run_cycle(
+                level=level,
+                project_filter=project,
+                skip_tests=skip_tests,
+            )
+            print(f"  Forge cycle complete ({report.duration_seconds}s, {len(report.per_project)} projects)\n")
+            for p in report.per_project:
+                weakest = p["weakest_dimension"]
+                print(f"  {p['name']}: {p['grade']} (avg={p['avg_quality']:.2f})")
+                print(f"    weakest: {weakest}={p['dimensions'][weakest]:.2f}")
+                print(f"    → {p['task']['task']}")
+        case "status":
+            print(format_status())
+        case "cron":
+            job = create_foreman_cron_job(every=schedule, level=level)
+            print(f"  Foreman cron job: {job.get('id', '?')}")
+            print(f"  Schedule: {job.get('schedule_display', schedule)}")
+            print(f"  Level: {level}")
+        case _:
+            print("Usage: dgc foreman {add|run|status|cron}")
+            print("  add <path>          Register a project")
+            print("  run [--level L]     Run one forge cycle")
+            print("  status              Show quality dashboard")
+            print("  cron [--schedule S] Start recurring forge")
 
 
 def cmd_review(hours: float = 6.0, skip_tests: bool = False) -> None:
@@ -4437,6 +4631,34 @@ def _build_parser() -> argparse.ArgumentParser:
     p_xray.add_argument("repo_path", help="Path to repository to analyze")
     p_xray.add_argument("--output", "-o", default=None, help="Output file path")
     p_xray.add_argument("--json", action="store_true", dest="as_json", help="Output JSON instead of markdown")
+    p_xray.add_argument("--exclude", nargs="*", default=None, help="Path patterns to exclude")
+    p_xray.add_argument(
+        "--packet",
+        action="store_true",
+        help="Generate a productized Repo X-Ray packet directory instead of a single report file",
+    )
+    p_xray.add_argument(
+        "--buyer",
+        default="CTO or founder under shipping pressure",
+        help="Target buyer persona for the productized packet",
+    )
+
+    # -- foreman (Phase 15: Focused Quality Forge) --
+    p_foreman = sub.add_parser("foreman", help="The Foreman — focused quality forge")
+    foreman_sub = p_foreman.add_subparsers(dest="foreman_cmd")
+    p_fm_add = foreman_sub.add_parser("add", help="Register a project")
+    p_fm_add.add_argument("path", help="Path to the project root")
+    p_fm_add.add_argument("--name", default=None, help="Friendly project name")
+    p_fm_add.add_argument("--test-command", default=None, help="Test command (e.g. 'pytest')")
+    p_fm_add.add_argument("--exclude", nargs="*", default=None, help="Path patterns to exclude")
+    p_fm_run = foreman_sub.add_parser("run", help="Run one forge cycle")
+    p_fm_run.add_argument("--level", default="observe", choices=["observe", "advise", "build"], help="Execution level")
+    p_fm_run.add_argument("--project", default=None, help="Filter to one project")
+    p_fm_run.add_argument("--skip-tests", action="store_true", help="Skip running test suites")
+    foreman_sub.add_parser("status", help="Show quality dashboard")
+    p_fm_cron = foreman_sub.add_parser("cron", help="Start recurring forge cycle")
+    p_fm_cron.add_argument("--schedule", default="every 4h", help="Cron schedule")
+    p_fm_cron.add_argument("--level", default="advise", choices=["observe", "advise", "build"], help="Execution level")
 
     # -- review (Phase 13: Quality Ratchet) --
     p_review = sub.add_parser("review", help="Generate 6-hour review cycle report")
@@ -4953,6 +5175,21 @@ def main() -> None:
                 repo_path=args.repo_path,
                 output=args.output,
                 as_json=args.as_json,
+                exclude=getattr(args, "exclude", None),
+                packet=getattr(args, "packet", False),
+                buyer=getattr(args, "buyer", "CTO or founder under shipping pressure"),
+            )
+        case "foreman":
+            cmd_foreman(
+                foreman_cmd=args.foreman_cmd,
+                path=getattr(args, "path", ""),
+                name=getattr(args, "name", None),
+                test_command=getattr(args, "test_command", None),
+                exclude=getattr(args, "exclude", None),
+                level=getattr(args, "level", "observe"),
+                project=getattr(args, "project", None),
+                skip_tests=getattr(args, "skip_tests", False),
+                schedule=getattr(args, "schedule", "every 4h"),
             )
         case "review":
             cmd_review(

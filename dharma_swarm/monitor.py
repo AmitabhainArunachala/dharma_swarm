@@ -489,22 +489,91 @@ class SystemMonitor:
             results.append(result)
         return results
 
+    async def detect_fitness_regression(
+        self,
+        archive: Any,
+        n: int = 3,
+    ) -> list[Anomaly]:
+        """Check the evolution archive for monotonically decreasing fitness.
+
+        Fetches the last *n* entries from *archive* (an EvolutionArchive)
+        and emits a medium-severity ``fitness_regression`` anomaly if their
+        weighted fitness values are strictly monotonically decreasing.
+
+        Args:
+            archive: An EvolutionArchive instance.
+            n: Number of recent entries to inspect (default 3).
+
+        Returns:
+            A list containing zero or one Anomaly.
+        """
+        if archive is None:
+            return []
+
+        try:
+            latest = await archive.get_latest(n=n)
+        except Exception:
+            logger.warning("Failed to read evolution archive for fitness regression check")
+            return []
+
+        if len(latest) < n:
+            return []
+
+        # get_latest returns newest-first; reverse to chronological order
+        chrono = list(reversed(latest))
+        values = [e.fitness.weighted() for e in chrono]
+
+        # Check strict monotonic decrease
+        if all(values[i] > values[i + 1] for i in range(len(values) - 1)):
+            formatted = " -> ".join(f"{v:.3f}" for v in values)
+            return [
+                Anomaly(
+                    anomaly_type="fitness_regression",
+                    severity="medium",
+                    description=(
+                        f"Fitness monotonically decreasing over last {n} "
+                        f"archive entries: {formatted}"
+                    ),
+                )
+            ]
+
+        return []
+
     @staticmethod
     def bridge_summary(bridge: Any) -> dict:
         """Summarize a ResearchBridge state.
+
+        Extracts measurement count, correlation statistics, and per-group
+        summaries from a ResearchBridge instance.
 
         Args:
             bridge: A ResearchBridge instance (or None).
 
         Returns:
-            Dict with correlation and measurement count info.
+            Dict with status, measurement_count, correlation stats
+            (pearson_r, spearman_rho, n, contraction_recognition_overlap),
+            and group_summary.
         """
         if bridge is None:
             return {"status": "not_initialized"}
         try:
-            return {
+            result: dict[str, Any] = {
                 "status": "active",
                 "type": type(bridge).__name__,
+                "measurement_count": bridge.measurement_count,
             }
+
+            correlation = bridge.compute_correlation()
+            result["correlation"] = {
+                "n": correlation.n,
+                "pearson_r": correlation.pearson_r,
+                "spearman_rho": correlation.spearman_rho,
+                "contraction_recognition_overlap": correlation.contraction_recognition_overlap,
+                "summary": correlation.summary,
+            }
+
+            result["group_summary"] = bridge.group_summary()
+
+            return result
         except Exception:
             return {"status": "error"}

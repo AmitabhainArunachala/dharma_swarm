@@ -1,0 +1,647 @@
+{
+  "repo_name": "dharma_swarm",
+  "repo_path": "/Users/dhyana/dharma_swarm",
+  "generated_at": "2026-03-13T15:07:21.862051+00:00",
+  "total_files": 446,
+  "total_lines": 152785,
+  "total_non_blank_lines": 128909,
+  "language_breakdown": {
+    "docs": 603,
+    "config": 726,
+    "python": 441,
+    "javascript": 5
+  },
+  "language_lines": {
+    "python": 152079,
+    "javascript": 706
+  },
+  "top_modules": [
+    {
+      "name": "dharma_swarm",
+      "files": 205,
+      "lines": 88438,
+      "classes": 556,
+      "functions": 3045,
+      "description": "Contains 0 classes, 11 functions"
+    },
+    {
+      "name": "tests",
+      "files": 194,
+      "lines": 51425,
+      "classes": 378,
+      "functions": 3508,
+      "description": "Contains 2 classes, 20 functions"
+    },
+    {
+      "name": "scripts",
+      "files": 38,
+      "lines": 11670,
+      "classes": 8,
+      "functions": 277,
+      "description": "Contains 0 classes, 1 functions"
+    },
+    {
+      "name": ".claude",
+      "files": 5,
+      "lines": 706,
+      "classes": 0,
+      "functions": 0,
+      "description": ""
+    },
+    {
+      "name": "(root)",
+      "files": 1,
+      "lines": 351,
+      "classes": 0,
+      "functions": 4,
+      "description": "Contains 0 classes, 4 functions"
+    },
+    {
+      "name": "hooks",
+      "files": 1,
+      "lines": 183,
+      "classes": 0,
+      "functions": 2,
+      "description": "Contains 0 classes, 2 functions"
+    },
+    {
+      "name": "spinouts",
+      "files": 2,
+      "lines": 12,
+      "classes": 0,
+      "functions": 1,
+      "description": "Contains 0 classes, 0 functions"
+    }
+  ],
+  "module_connections": [
+    {
+      "from": "tests",
+      "to": "dharma_swarm"
+    },
+    {
+      "from": "scripts",
+      "to": "dharma_swarm"
+    }
+  ],
+  "test_file_count": 199,
+  "test_ratio": 0.806,
+  "avg_docstring_ratio": 0.418,
+  "avg_naming_score": 0.999,
+  "avg_complexity": 48.1,
+  "type_annotation_rate": 0.311,
+  "complexity_hotspots": [
+    {
+      "name": "execute_single_step",
+      "file": "scripts/strange_loop.py",
+      "line": 1007,
+      "complexity": 95,
+      "lines": 304
+    },
+    {
+      "name": "execute_single_step",
+      "file": "scripts/allout_autopilot.py",
+      "line": 698,
+      "complexity": 95,
+      "lines": 304
+    },
+    {
+      "name": "analyze_repo",
+      "file": "dharma_swarm/xray.py",
+      "line": 424,
+      "complexity": 87,
+      "lines": 312
+    },
+    {
+      "name": "_handle_command",
+      "file": "dharma_swarm/tui_legacy.py",
+      "line": 807,
+      "complexity": 78,
+      "lines": 278
+    },
+    {
+      "name": "_dispatch_async",
+      "file": "dharma_swarm/tui/app.py",
+      "line": 1953,
+      "complexity": 77,
+      "lines": 349
+    },
+    {
+      "name": "cmd_swarm",
+      "file": "dharma_swarm/dgc_cli.py",
+      "line": 1174,
+      "complexity": 72,
+      "lines": 275
+    },
+    {
+      "name": "build_darwin_status_text",
+      "file": "dharma_swarm/tui_helpers.py",
+      "line": 292,
+      "complexity": 68,
+      "lines": 243
+    },
+    {
+      "name": "check",
+      "file": "dharma_swarm/telos_gates.py",
+      "line": 148,
+      "complexity": 61,
+      "lines": 260
+    },
+    {
+      "name": "on_provider_runner_agent_event",
+      "file": "dharma_swarm/tui/app.py",
+      "line": 1117,
+      "complexity": 57,
+      "lines": 176
+    },
+    {
+      "name": "execute_pending_tasks",
+      "file": "dharma_swarm/thinkodynamic_director.py",
+      "line": 3614,
+      "complexity": 48,
+      "lines": 196
+    }
+  ],
+  "largest_files": [
+    {
+      "path": "dharma_swarm/dgc_cli.py",
+      "lines": 4591,
+      "complexity": 592
+    },
+    {
+      "path": "dharma_swarm/thinkodynamic_director.py",
+      "lines": 4175,
+      "complexity": 712
+    },
+    {
+      "path": "dharma_swarm/evolution.py",
+      "lines": 2392,
+      "complexity": 260
+    },
+    {
+      "path": "dharma_swarm/tui/app.py",
+      "lines": 2233,
+      "complexity": 509
+    },
+    {
+      "path": "tests/test_evolution.py",
+      "lines": 1732,
+      "complexity": 330
+    },
+    {
+      "path": "dharma_swarm/runtime_state.py",
+      "lines": 1636,
+      "complexity": 181
+    },
+    {
+      "path": "dharma_swarm/orchestrator.py",
+      "lines": 1620,
+      "complexity": 256
+    },
+    {
+      "path": "scripts/strange_loop.py",
+      "lines": 1601,
+      "complexity": 346
+    },
+    {
+      "path": "dharma_swarm/tui_legacy.py",
+      "lines": 1570,
+      "complexity": 352
+    },
+    {
+      "path": "tests/test_dgc_cli.py",
+      "lines": 1472,
+      "complexity": 321
+    }
+  ],
+  "external_deps": [
+    "adapters",
+    "aiofiles",
+    "aiosqlite",
+    "anthropic",
+    "app",
+    "artifacts",
+    "base",
+    "btw",
+    "child_process",
+    "chunker",
+    "claude",
+    "codex",
+    "commands",
+    "conversation_memory",
+    "croniter",
+    "crypto",
+    "data_flywheel",
+    "dharma_dark",
+    "ecosystem_map",
+    "engine",
+    "event_memory",
+    "event_types",
+    "events",
+    "fasttext",
+    "fs",
+    "governance",
+    "httpx",
+    "hybrid_retriever",
+    "hypothesis",
+    "jikoku_samaya",
+    "knowledge_store",
+    "main",
+    "mcp",
+    "model_routing",
+    "numpy",
+    "nvidia_rag",
+    "openai",
+    "openrouter",
+    "palette",
+    "path",
+    "prompt_input",
+    "provenance",
+    "provider_runner",
+    "pydantic",
+    "pytest",
+    "qdrant_client",
+    "reciprocity_commons",
+    "redis",
+    "retrieval_feedback",
+    "rich",
+    "runtime_state",
+    "scipy",
+    "screens",
+    "scripts",
+    "session_state",
+    "session_store",
+    "settings",
+    "splash",
+    "status_bar",
+    "strange_loop",
+    "stream_output",
+    "stream_parser",
+    "system_commands",
+    "telegram",
+    "textual",
+    "theme",
+    "thinking_panel",
+    "tool_call_card",
+    "torch",
+    "transformers",
+    "typer",
+    "unified_index",
+    "widgets",
+    "yaml"
+  ],
+  "internal_coupling": [
+    {
+      "file": "dharma_swarm/dgc_cli.py",
+      "internal_imports": 52,
+      "imports": [
+        "dharma_swarm.tui_helpers",
+        "dharma_swarm.context",
+        "dharma_swarm.swarm",
+        "dharma_swarm.semantic_digester",
+        "dharma_swarm.foreman",
+        "dharma_swarm.pulse",
+        "dharma_swarm.evolution_roster",
+        "dharma_swarm.evolution",
+        "dharma_swarm.doctor",
+        "dharma_swarm.provider_smoke",
+        "dharma_swarm.workspace_topology",
+        "dharma_swarm.semantic_synthesizer",
+        "dharma_swarm.mission_contract",
+        "dharma_swarm.models",
+        "dharma_swarm.review_cycle",
+        "dharma_swarm.subconscious",
+        "dharma_swarm.evaluation_registry",
+        "dharma_swarm.cron_scheduler",
+        "dharma_swarm.orchestrate_live",
+        "dharma_swarm.semantic_briefs",
+        "dharma_swarm.field_graph",
+        "dharma_swarm.tui",
+        "dharma_swarm.model_manager",
+        "dharma_swarm.memory",
+        "dharma_swarm.bootstrap",
+        "dharma_swarm.semantic_gravity",
+        "dharma_swarm.stigmergy",
+        "dharma_swarm.dharma_corpus",
+        "dharma_swarm.memory_lattice",
+        "dharma_swarm.tui_legacy",
+        "dharma_swarm.skills",
+        "dharma_swarm.context_search",
+        "dharma_swarm.routing_memory",
+        "dharma_swarm.integrations",
+        "dharma_swarm.ouroboros",
+        "dharma_swarm.adaptive_autonomy",
+        "dharma_swarm.master_prompt_engineer",
+        "dharma_swarm.semantic_researcher",
+        "dharma_swarm.gateway.runner",
+        "dharma_swarm.orchestrate",
+        "dharma_swarm.prompt_builder",
+        "dharma_swarm.runtime_state",
+        "dharma_swarm.iteration_depth",
+        "dharma_swarm.dharma_kernel",
+        "dharma_swarm.field_knowledge_base",
+        "dharma_swarm.telos_gates",
+        "dharma_swarm.flywheel_exporter",
+        "dharma_swarm.intent_router",
+        "dharma_swarm",
+        "dharma_swarm.full_power_probe",
+        "dharma_swarm.xray",
+        "dharma_swarm.semantic_hardener"
+      ]
+    },
+    {
+      "file": "dharma_swarm/swarm.py",
+      "internal_imports": 36,
+      "imports": [
+        "dharma_swarm.startup_crew",
+        "dharma_swarm.thinkodynamic_director",
+        "dharma_swarm.engine.event_memory",
+        "dharma_swarm.jikoku_instrumentation",
+        "dharma_swarm.evolution",
+        "dharma_swarm.providers",
+        "dharma_swarm.thread_manager",
+        "dharma_swarm.skill_composer",
+        "dharma_swarm.gaia_ledger",
+        "dharma_swarm.models",
+        "dharma_swarm.agent_runner",
+        "dharma_swarm.monitor",
+        "dharma_swarm.canary",
+        "dharma_swarm.yoga_node",
+        "dharma_swarm.memory",
+        "dharma_swarm.gaia_fitness",
+        "dharma_swarm.ecosystem_bridge",
+        "dharma_swarm.agent_memory",
+        "dharma_swarm.daemon_config",
+        "dharma_swarm.stigmergy",
+        "dharma_swarm.dharma_corpus",
+        "dharma_swarm.profiles",
+        "dharma_swarm.handoff",
+        "dharma_swarm.skills",
+        "dharma_swarm.task_board",
+        "dharma_swarm.context_search",
+        "dharma_swarm.engine.conversation_memory",
+        "dharma_swarm.adaptive_autonomy",
+        "dharma_swarm.dag_executor",
+        "dharma_swarm.policy_compiler",
+        "dharma_swarm.orchestrator",
+        "dharma_swarm.message_bus",
+        "dharma_swarm.dharma_kernel",
+        "dharma_swarm.telos_gates",
+        "dharma_swarm.intent_router",
+        "dharma_swarm.traces"
+      ]
+    },
+    {
+      "file": "dharma_swarm/evolution.py",
+      "internal_imports": 25,
+      "imports": [
+        "dharma_swarm.router_retrospective",
+        "dharma_swarm.execution_profile",
+        "dharma_swarm.evolution_roster",
+        "dharma_swarm.jikoku_instrumentation",
+        "dharma_swarm.gaia_ledger",
+        "dharma_swarm.models",
+        "dharma_swarm.elegance",
+        "dharma_swarm.dse_integration",
+        "dharma_swarm.archive",
+        "dharma_swarm.gaia_fitness",
+        "dharma_swarm.landscape",
+        "dharma_swarm.ucb_selector",
+        "dharma_swarm.convergence",
+        "dharma_swarm.experiment_log",
+        "dharma_swarm.fitness_predictor",
+        "dharma_swarm.sandbox",
+        "dharma_swarm.ouroboros",
+        "dharma_swarm.traces",
+        "dharma_swarm.jikoku_fitness",
+        "dharma_swarm.metrics",
+        "dharma_swarm.experiment_memory",
+        "dharma_swarm.meta_evolution",
+        "dharma_swarm.telos_gates",
+        "dharma_swarm.diff_applier",
+        "dharma_swarm.selector"
+      ]
+    },
+    {
+      "file": "tests/test_godel_claw_e2e.py",
+      "internal_imports": 14,
+      "imports": [
+        "dharma_swarm.models",
+        "dharma_swarm.dharma_corpus",
+        "dharma_swarm.policy_compiler",
+        "dharma_swarm.dogma_gate",
+        "dharma_swarm.stigmergy",
+        "dharma_swarm.subconscious",
+        "dharma_swarm.shakti",
+        "dharma_swarm.monitor",
+        "dharma_swarm.traces",
+        "dharma_swarm.canary",
+        "dharma_swarm.evolution",
+        "dharma_swarm.archive",
+        "dharma_swarm.telos_gates",
+        "dharma_swarm.dharma_kernel"
+      ]
+    },
+    {
+      "file": "tests/test_integration.py",
+      "internal_imports": 13,
+      "imports": [
+        "dharma_swarm.evolution",
+        "dharma_swarm.models",
+        "dharma_swarm.elegance",
+        "dharma_swarm.monitor",
+        "dharma_swarm.selector",
+        "dharma_swarm.archive",
+        "dharma_swarm.file_lock",
+        "dharma_swarm.bridge",
+        "dharma_swarm.fitness_predictor",
+        "dharma_swarm.metrics",
+        "dharma_swarm.telos_gates",
+        "dharma_swarm.traces",
+        "dharma_swarm.rv"
+      ]
+    },
+    {
+      "file": "dharma_swarm/pulse.py",
+      "internal_imports": 12,
+      "imports": [
+        "dharma_swarm.context",
+        "dharma_swarm.thread_manager",
+        "dharma_swarm.subconscious",
+        "dharma_swarm.models",
+        "dharma_swarm.shakti",
+        "dharma_swarm.memory",
+        "dharma_swarm.daemon_config",
+        "dharma_swarm.stigmergy",
+        "dharma_swarm.sleep_cycle",
+        "dharma_swarm.ouroboros",
+        "dharma_swarm.orchestrate",
+        "dharma_swarm.telos_gates"
+      ]
+    },
+    {
+      "file": "dharma_swarm/dse_integration.py",
+      "internal_imports": 12,
+      "imports": [
+        "dharma_swarm.evolution",
+        "dharma_swarm.evaluation_registry",
+        "dharma_swarm.archive",
+        "dharma_swarm.bridge",
+        "dharma_swarm.memory_lattice",
+        "dharma_swarm.integrations",
+        "dharma_swarm.ouroboros",
+        "dharma_swarm.runtime_state",
+        "dharma_swarm.sheaf",
+        "dharma_swarm.coalgebra",
+        "dharma_swarm.rv",
+        "dharma_swarm.monad"
+      ]
+    },
+    {
+      "file": "dharma_swarm/tui/app.py",
+      "internal_imports": 12,
+      "imports": [
+        "dharma_swarm.tui_helpers",
+        "dharma_swarm.context",
+        "dharma_swarm.swarm",
+        "dharma_swarm.pulse",
+        "dharma_swarm.subconscious",
+        "dharma_swarm.archive",
+        "dharma_swarm.ecosystem_bridge",
+        "dharma_swarm.dharma_corpus",
+        "dharma_swarm.stigmergy",
+        "dharma_swarm.prompt_builder",
+        "dharma_swarm.telos_gates",
+        "dharma_swarm.dharma_kernel"
+      ]
+    },
+    {
+      "file": "dharma_swarm/agent_runner.py",
+      "internal_imports": 10,
+      "imports": [
+        "dharma_swarm.daemon_config",
+        "dharma_swarm.models",
+        "dharma_swarm.context",
+        "dharma_swarm.provider_policy",
+        "dharma_swarm.shakti",
+        "dharma_swarm.stigmergy",
+        "dharma_swarm.agent_memory",
+        "dharma_swarm.engine.conversation_memory",
+        "dharma_swarm.telos_gates",
+        "dharma_swarm.engine.retrieval_feedback"
+      ]
+    },
+    {
+      "file": "dharma_swarm/tui_legacy.py",
+      "internal_imports": 10,
+      "imports": [
+        "dharma_swarm.context",
+        "dharma_swarm.swarm",
+        "dharma_swarm.pulse",
+        "dharma_swarm.dgc_cli",
+        "dharma_swarm.subconscious",
+        "dharma_swarm.ecosystem_bridge",
+        "dharma_swarm.dharma_corpus",
+        "dharma_swarm.prompt_builder",
+        "dharma_swarm.splash",
+        "dharma_swarm.telos_gates"
+      ]
+    }
+  ],
+  "risk_flags": [
+    {
+      "severity": "warning",
+      "category": "size",
+      "message": "Large file (596 lines). Consider splitting.",
+      "file": "tests/test_monitor.py"
+    },
+    {
+      "severity": "warning",
+      "category": "size",
+      "message": "Large file (523 lines). Consider splitting.",
+      "file": "tests/test_semantic_evolution.py"
+    },
+    {
+      "severity": "warning",
+      "category": "size",
+      "message": "Large file (1056 lines). Consider splitting.",
+      "file": "tests/test_thinkodynamic_director.py"
+    },
+    {
+      "severity": "warning",
+      "category": "size",
+      "message": "Large file (893 lines). Consider splitting.",
+      "file": "tests/test_gaia.py"
+    },
+    {
+      "severity": "warning",
+      "category": "size",
+      "message": "Large file (750 lines). Consider splitting.",
+      "file": "tests/test_orchestrator.py"
+    },
+    {
+      "severity": "warning",
+      "category": "size",
+      "message": "Large file (1472 lines). Consider splitting.",
+      "file": "tests/test_dgc_cli.py"
+    },
+    {
+      "severity": "warning",
+      "category": "size",
+      "message": "Large file (951 lines). Consider splitting.",
+      "file": "tests/test_ouroboros.py"
+    },
+    {
+      "severity": "warning",
+      "category": "size",
+      "message": "Large file (714 lines). Consider splitting.",
+      "file": "tests/test_integration.py"
+    },
+    {
+      "severity": "warning",
+      "category": "size",
+      "message": "Large file (1732 lines). Consider splitting.",
+      "file": "tests/test_evolution.py"
+    },
+    {
+      "severity": "warning",
+      "category": "size",
+      "message": "Large file (614 lines). Consider splitting.",
+      "file": "tests/test_bridge.py"
+    },
+    {
+      "severity": "warning",
+      "category": "size",
+      "message": "Large file (1268 lines). Consider splitting.",
+      "file": "tests/test_dse_integration.py"
+    },
+    {
+      "severity": "warning",
+      "category": "size",
+      "message": "Large file (507 lines). Consider splitting.",
+      "file": "tests/tui/test_app_plan_mode.py"
+    },
+    {
+      "severity": "warning",
+      "category": "size",
+      "message": "Large file (1601 lines). Consider splitting.",
+      "file": "scripts/strange_loop.py"
+    },
+    {
+      "severity": "warning",
+      "category": "size",
+      "message": "Large file (1267 lines). Consider splitting.",
+      "file": "scripts/allout_autopilot.py"
+    },
+    {
+      "severity": "warning",
+      "category": "size",
+      "message": "Large file (518 lines). Consider splitting.",
+      "file": "scripts/psmv_hyperfile_bootstrap.py"
+    }
+  ],
+  "recommendations": [
+    "Improve documentation. Add docstrings to public functions and classes.",
+    "Refactor `execute_single_step` in `scripts/strange_loop.py` (complexity=95). Extract helper functions.",
+    "Split large files: tests/test_monitor.py, tests/test_semantic_evolution.py, tests/test_thinkodynamic_director.py (596+ lines each)."
+  ]
+}

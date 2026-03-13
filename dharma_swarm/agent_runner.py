@@ -614,6 +614,7 @@ def _build_prompt(
         if isinstance(part, str) and part.strip()
     )
     if memory_query:
+        memory_mode = os.getenv("DGC_AGENT_PROMPT_MEMORY_MODE", "recent_only").strip().lower()
         try:
             from dharma_swarm.context import read_memory_context
             from dharma_swarm.context import read_latent_gold_context
@@ -623,11 +624,14 @@ def _build_prompt(
                 limit=3,
                 consumer="agent_runner.prompt",
                 task_id=task.id,
+                allow_semantic_search=memory_mode not in {"recent", "recent_only", "off"},
             )
             latent_gold = read_latent_gold_context(query=memory_query, limit=3)
         except Exception:
             memory_context = ""
             latent_gold = ""
+        if memory_mode == "off":
+            memory_context = ""
         if (
             memory_context
             and not memory_context.startswith("No memory")

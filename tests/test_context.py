@@ -187,6 +187,29 @@ def test_read_memory_context_with_data(tmp_path):
     assert "Test memory" in result
 
 
+def test_read_memory_context_can_skip_semantic_query(tmp_path):
+    from dharma_swarm.engine.unified_index import UnifiedIndex
+
+    db_dir = tmp_path / "db"
+    db_dir.mkdir()
+    index = UnifiedIndex(db_dir / "memory_plane.db")
+    index.index_document(
+        "note",
+        "notes/fast.md",
+        "# Fast\n\nRecent memory snapshot without semantic search.",
+        {"topic": "memory"},
+    )
+
+    result = read_memory_context(
+        state_dir=tmp_path,
+        query="latest memory snapshot",
+        allow_semantic_search=False,
+    )
+
+    assert "[index]" in result
+    assert "Recent memory snapshot" in result
+
+
 def test_read_recent_memories_with_data(tmp_path):
     """Recent memories should be ordered newest-first and newline-normalized."""
     db_dir = tmp_path / "db"

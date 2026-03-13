@@ -2,10 +2,11 @@
 
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
+from unittest.mock import AsyncMock
 
 import pytest
 
-from dharma_swarm.archive import FitnessScore
+from dharma_swarm.archive import ArchiveEntry, EvolutionArchive, FitnessScore
 from dharma_swarm.models import _utc_now
 from dharma_swarm.monitor import (
     AgentHealth,
@@ -637,3 +638,138 @@ def test_anomaly_json_roundtrip():
     a2 = Anomaly.model_validate_json(data)
     assert a2.anomaly_type == "fitness_drift"
     assert a2.related_traces == ["id1", "id2"]
+
+
+# ---------------------------------------------------------------------------
+# detect_fitness_regression -- evolution archive based
+# ---------------------------------------------------------------------------
+
+
+def _make_archive_entry(fitness_val: float, ts_offset_hours: float = 0.0) -> ArchiveEntry:
+    """Build an ArchiveEntry with uniform fitness at *fitness_val*."""
+    from dharma_swarm.models import _utc_now as _now
+
+    ts = _now() - timedelta(hours=ts_offset_hours)
+    return ArchiveEntry(
+        component="test",
+        change_type="test",
+        description="test entry",
+        fitness=FitnessScore(
+            correctness=fitness_val,
+            dharmic_alignment=fitness_val,
+            performance=fitness_val,
+            utilization=fitness_val,
+            economic_value=fitness_val,
+            elegance=fitness_val,
+            efficiency=fitness_val,
+            safety=fitness_val,
+        ),
+        timestamp=ts.isoformat(),
+    )
+
+
+@pytest.mark.asyncio
+async def test_fitness_regression_detected(monitor: SystemMonitor):
+    """Three monotonically decreasing fitness entries should trigger anomaly."""
+    # get_latest returns newest-first, so order: high ts first, low ts last
+    entries = [
+        _make_archive_entry(0.3, ts_offset_hours=0),   # newest (lowest fitness)
+        _make_archive_entry(0.6, ts_offset_hours=1),   # middle
+        _make_archive_entry(0.9, ts_offset_hours=2),   # oldest (highest fitness)
+    ]
+    archive = AsyncMock()
+    archive.get_latest = AsyncMock(return_value=entries)
+
+    anomalies = await monitor.detect_fitness_regression(archive, n=3)
+    assert len(anomalies) == 1
+    assert anomalies[0].anomaly_type == "fitness_regression"
+    assert anomalies[0].severity == "medium"
+    assert "0.900" in anomalies[0].description
+    assert "0.300" in anomalies[0].description
+
+
+@pytest.mark.asyncio
+async def test_fitness_regression_not_triggered_improving(monitor: SystemMonitor):
+    """Improving fitness should not trigger the anomaly."""
+    entries = [
+        _make_archive_entry(0.9, ts_offset_hours=0),
+        _make_archive_entry(0.6, ts_offset_hours=1),
+        _make_archive_entry(0.3, ts_offset_hours=2),
+    ]
+    archive = AsyncMock()
+    archive.get_latest = AsyncMock(return_value=entries)
+
+    anomalies = await monitor.detect_fitness_regression(archive, n=3)
+    assert len(anomalies) == 0
+
+
+@pytest.mark.asyncio
+async def test_fitness_regression_not_triggered_flat(monitor: SystemMonitor):
+    """Equal fitness values should not trigger the anomaly."""
+    entries = [
+        _make_archive_entry(0.5, ts_offset_hours=0),
+        _make_archive_entry(0.5, ts_offset_hours=1),
+        _make_archive_entry(0.5, ts_offset_hours=2),
+    ]
+    archive = AsyncMock()
+    archive.get_latest = AsyncMock(return_value=entries)
+
+    anomalies = await monitor.detect_fitness_regression(archive, n=3)
+    assert len(anomalies) == 0
+
+
+@pytest.mark.asyncio
+async def test_fitness_regression_insufficient_entries(monitor: SystemMonitor):
+    """Fewer than n entries should return no anomalies."""
+    entries = [_make_archive_entry(0.5)]
+    archive = AsyncMock()
+    archive.get_latest = AsyncMock(return_value=entries)
+
+    anomalies = await monitor.detect_fitness_regression(archive, n=3)
+    assert len(anomalies) == 0
+
+
+@pytest.mark.asyncio
+async def test_fitness_regression_none_archive(monitor: SystemMonitor):
+    """None archive should return empty list."""
+    anomalies = await monitor.detect_fitness_regression(None)
+    assert anomalies == []
+
+
+# ---------------------------------------------------------------------------
+# bridge_summary
+# ---------------------------------------------------------------------------
+
+
+def test_bridge_summary_none():
+    result = SystemMonitor.bridge_summary(None)
+    assert result == {"status": "not_initialized"}
+
+
+def test_bridge_summary_with_real_bridge():
+    """Verify bridge_summary extracts meaningful data from a ResearchBridge."""
+    from dharma_swarm.bridge import ResearchBridge
+
+    bridge = ResearchBridge(data_path=Path("/tmp/test_bridge_summary.jsonl"))
+    result = SystemMonitor.bridge_summary(bridge)
+
+    assert result["status"] == "active"
+    assert result["type"] == "ResearchBridge"
+    assert result["measurement_count"] == 0
+    assert "correlation" in result
+    assert result["correlation"]["n"] == 0
+    assert result["correlation"]["pearson_r"] is None
+    assert "group_summary" in result
+    assert result["group_summary"] == {}
+
+
+def test_bridge_summary_error_handling():
+    """An object that raises on attribute access should return error status."""
+
+    class BrokenBridge:
+        @property
+        def measurement_count(self):
+            raise RuntimeError("broken")
+
+    result = SystemMonitor.bridge_summary(BrokenBridge())
+    assert result["status"] == "error"

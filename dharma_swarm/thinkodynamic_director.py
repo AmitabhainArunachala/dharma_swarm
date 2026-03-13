@@ -32,7 +32,7 @@ from collections import defaultdict
 from dataclasses import asdict, dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Iterable, Sequence
+from typing import Any, Iterable, Mapping, Sequence
 
 from dharma_swarm.jikoku_samaya import JikokuTracer
 from dharma_swarm.mission_contract import (
@@ -574,6 +574,10 @@ DELEGATION_ITEM_RE = re.compile(
     r"^-\s*(?:\[(?P<role>[a-z0-9_\- ]+)\]\s*)?(?P<title>[^:]+?)(?:\s*::\s*(?P<description>.+))?$",
     re.IGNORECASE,
 )
+TRUSTED_DYNAMIC_DELEGATION_PROVIDERS = {
+    "codex-cli",
+    "claude-cli",
+}
 
 
 def _utc_now() -> datetime:
@@ -932,6 +936,29 @@ def _director_provider_timeout_seconds(timeout: int | float | None = None) -> fl
     if timeout is None:
         return 60.0
     return max(10.0, min(120.0, float(timeout) / 5.0))
+
+
+def _named_runner_timeout_seconds(timeout: int | float | None = None) -> float:
+    """Bound named-runner calls so one stuck mind cannot freeze the mission."""
+    override = os.getenv("DGC_THINKODYNAMIC_SWARM_RUNNER_TIMEOUT")
+    if override:
+        try:
+            return max(float(override), 0.1)
+        except ValueError:
+            logger.warning(
+                "Ignoring invalid DGC_THINKODYNAMIC_SWARM_RUNNER_TIMEOUT=%r",
+                override,
+            )
+    if timeout is None:
+        return 90.0
+    return max(20.0, min(180.0, float(timeout)))
+
+
+def _allows_dynamic_delegations(result: Mapping[str, Any]) -> bool:
+    provider = str(result.get("provider", "")).strip().lower()
+    if provider.startswith("swarm:"):
+        return True
+    return provider in TRUSTED_DYNAMIC_DELEGATION_PROVIDERS
 
 
 def _mission_directive_block(mission_brief: str) -> str:
@@ -2429,7 +2456,10 @@ class ThinkodynamicDirector:
                 },
             )
             try:
-                content = await runner.run_task(council_task)
+                content = await asyncio.wait_for(
+                    runner.run_task(council_task),
+                    timeout=_named_runner_timeout_seconds(90),
+                )
                 return CouncilTurn(
                     agent_name=member.name,
                     provider=member.provider,
@@ -2437,6 +2467,18 @@ class ThinkodynamicDirector:
                     backend=member.backend,
                     success=bool(content.strip()),
                     content=content.strip(),
+                )
+            except asyncio.TimeoutError:
+                return CouncilTurn(
+                    agent_name=member.name,
+                    provider=member.provider,
+                    model=member.model,
+                    backend=member.backend,
+                    success=False,
+                    error=(
+                        "named swarm runner timed out after "
+                        f"{_named_runner_timeout_seconds(90):.1f}s"
+                    ),
                 )
             except Exception as exc:
                 return CouncilTurn(
@@ -2709,6 +2751,7 @@ class ThinkodynamicDirector:
         task: Task,
         *,
         agent_name: str,
+        timeout: int,
     ) -> dict[str, Any]:
         metadata = dict(task.metadata or {})
         provider = getattr(getattr(runner, "_config", None), "provider", None)
@@ -2716,7 +2759,15 @@ class ThinkodynamicDirector:
             metadata["available_provider_types"] = [provider.value]
             metadata["allow_provider_routing"] = False
         pinned_task = task.model_copy(update={"metadata": metadata})
-        output = await runner.run_task(pinned_task)
+        try:
+            output = await asyncio.wait_for(
+                runner.run_task(pinned_task),
+                timeout=_named_runner_timeout_seconds(timeout),
+            )
+        except asyncio.TimeoutError as exc:
+            raise RuntimeError(
+                f"named swarm runner timed out after {_named_runner_timeout_seconds(timeout):.1f}s"
+            ) from exc
         return {
             "success": bool(output.strip()),
             "output": output,
@@ -3632,6 +3683,7 @@ class ThinkodynamicDirector:
                         runner,
                         task,
                         agent_name=agent_name,
+                        timeout=timeout,
                     )
                 except Exception as exc:
                     logger.info(
@@ -3657,7 +3709,8 @@ class ThinkodynamicDirector:
             artifact_path = artifact_dir / f"{slug}_{ts}.md"
 
             delegated_children: list[Task] = []
-            if success and not blocked and output_text:
+            delegation_trusted = _allows_dynamic_delegations(agent_result)
+            if success and not blocked and output_text and delegation_trusted:
                 delegated_children = await self._create_dynamic_delegations(task, workflow, output_text)
 
             artifact_content = [
@@ -3670,6 +3723,7 @@ class ThinkodynamicDirector:
                 f"**Provider**: {agent_result.get('provider', 'unknown')}",
                 f"**Agent**: {agent_result.get('agent_name', assigned_to)}",
                 f"**Output length**: {agent_result.get('output_length', 0)} chars",
+                f"**Delegation trusted**: {'yes' if delegation_trusted else 'no'}",
                 f"**Dynamic delegations**: {len(delegated_children)}",
                 "",
                 "## Council",
@@ -3713,6 +3767,7 @@ class ThinkodynamicDirector:
                 "output_length": len(output_text),
                 "provider": agent_result.get("provider", "unknown"),
                 "agent_name": agent_result.get("agent_name", assigned_to),
+                "delegation_trusted": delegation_trusted,
                 "delegated_child_task_ids": [child.id for child in delegated_children],
             }
             return result, [child.id for child in delegated_children]
