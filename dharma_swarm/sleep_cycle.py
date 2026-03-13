@@ -34,10 +34,11 @@ logger = logging.getLogger(__name__)
 class SleepPhase(str, Enum):
     """Phases of the sleep cycle, inspired by real sleep stages."""
 
-    LIGHT = "light"   # Quick cleanup: expire old stigmergy marks
-    DEEP = "deep"     # Heavy lifting: consolidate all agent memories
-    REM = "rem"       # Creative: subconscious dreaming + association
-    WAKE = "wake"     # Prepare for morning: generate sleep report
+    LIGHT = "light"      # Quick cleanup: expire old stigmergy marks
+    DEEP = "deep"        # Heavy lifting: consolidate all agent memories
+    REM = "rem"          # Creative: subconscious dreaming + association
+    SEMANTIC = "semantic" # Semantic evolution: digest→research→synthesize→harden→gravitize
+    WAKE = "wake"        # Prepare for morning: generate sleep report
 
 
 class SleepReport(BaseModel):
@@ -105,7 +106,7 @@ class SleepCycle:
         except Exception:
             pass
 
-        for phase in (SleepPhase.LIGHT, SleepPhase.DEEP, SleepPhase.REM):
+        for phase in (SleepPhase.LIGHT, SleepPhase.DEEP, SleepPhase.REM, SleepPhase.SEMANTIC):
             try:
                 result = await self.run_phase(phase)
                 report.phases_completed.append(phase.value)
@@ -143,6 +144,7 @@ class SleepCycle:
             SleepPhase.LIGHT: self._light_sleep,
             SleepPhase.DEEP: self._deep_sleep,
             SleepPhase.REM: self._rem_sleep,
+            SleepPhase.SEMANTIC: self._semantic_sleep,
         }
         handler = dispatch.get(phase)
         if handler is None:
@@ -231,14 +233,26 @@ class SleepCycle:
 
         return result
 
+    async def _semantic_sleep(self) -> dict[str, Any]:
+        """Phase 4: Semantic evolution cycle.
+
+        Runs DIGEST → RESEARCH → SYNTHESIZE → HARDEN → GRAVITIZE on the
+        codebase, indexing concepts into the memory plane.
+        """
+        from dharma_swarm.semantic_memory_bridge import run_semantic_sleep_phase
+
+        result = await run_semantic_sleep_phase()
+        return result
+
     async def _wake(self, report: SleepReport) -> dict[str, Any]:
-        """Phase 4: Generate morning summary.
+        """Phase 5: Generate morning summary + update bootstrap manifest.
 
         Writes the sleep report as JSON to
         ``~/.dharma/sleep_reports/YYYY-MM-DD.json``.
+        Also regenerates NOW.json so the next LLM instance has fresh state.
 
         Returns:
-            Dict with ``report_path`` string.
+            Dict with ``report_path`` and ``manifest_path`` strings.
         """
         self._reports_dir.mkdir(parents=True, exist_ok=True)
         date_str = datetime.now(timezone.utc).strftime("%Y-%m-%d")
@@ -247,7 +261,28 @@ class SleepCycle:
         report_data = report.model_dump(mode="json")
         report_path.write_text(json.dumps(report_data, indent=2, default=str))
 
-        return {"report_path": str(report_path)}
+        # Update bootstrap manifest so next instance is oriented
+        manifest_path = ""
+        try:
+            from dharma_swarm.bootstrap import NOW_PATH, generate_manifest
+            manifest = generate_manifest()
+            manifest_path = str(NOW_PATH)
+            logger.info("Bootstrap manifest updated: %s", manifest_path)
+            # Log whether the kernel crystal was loaded
+            crystal = manifest.get("kernel_crystal", "")
+            if crystal:
+                logger.info(
+                    "Kernel crystal loaded (%d chars) — orientation active",
+                    len(crystal),
+                )
+            else:
+                logger.warning(
+                    "Kernel crystal NOT found — check specs/KERNEL_CORE_SPEC.md"
+                )
+        except Exception as exc:
+            logger.warning("Failed to update bootstrap manifest: %s", exc)
+
+        return {"report_path": str(report_path), "manifest_path": manifest_path}
 
     # -- helpers -------------------------------------------------------------
 
@@ -268,6 +303,14 @@ class SleepCycle:
             report.high_salience_observations.extend(
                 result.get("high_salience", [])
             )
+        elif phase == SleepPhase.SEMANTIC:
+            # Semantic phase results are informational; log key stats
+            concepts = result.get("concepts_digested", 0)
+            clusters = result.get("clusters_generated", 0)
+            if concepts:
+                report.high_salience_observations.append(
+                    f"semantic: {concepts} concepts digested, {clusters} clusters"
+                )
 
     @staticmethod
     def is_quiet_hours(config: Any | None = None) -> bool:
