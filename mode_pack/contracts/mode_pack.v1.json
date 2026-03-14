@@ -1,0 +1,334 @@
+{
+  "schema_version": "1.0.0",
+  "pack_name": "dharma-swarm-mode-pack",
+  "generated_for": [
+    "codex",
+    "claude-code",
+    "dgc",
+    "openclaw"
+  ],
+  "modes": [
+    {
+      "slug": "ceo-review",
+      "title": "CEO Review",
+      "summary": "Reframe the problem around user value, commercial wedge, and product ambition before implementation starts.",
+      "runtime_aliases": {
+        "claude_skill": "dharma-ceo-review",
+        "codex_mode": "ceo-review",
+        "dgc_lane": "ceo_review",
+        "openclaw_profile": "ceo_review"
+      },
+      "allowed_tools": [
+        "Read",
+        "Grep",
+        "Glob",
+        "Bash"
+      ],
+      "required_outputs": [
+        "problem_reframe",
+        "user_job",
+        "scope_recommendation",
+        "commercial_wedge",
+        "non_goals"
+      ],
+      "required_artifacts": [
+        "review_memo"
+      ],
+      "escalation_triggers": [
+        "conflicting product goals",
+        "unclear user or buyer",
+        "major scope expansion that changes delivery timeline"
+      ],
+      "handoff_to": [
+        "eng-review"
+      ],
+      "non_goals": [
+        "writing implementation code",
+        "running release workflows",
+        "accepting the first framing without challenge"
+      ]
+    },
+    {
+      "slug": "eng-review",
+      "title": "Engineering Review",
+      "summary": "Turn the chosen product direction into an executable technical plan with explicit interfaces, risks, and tests.",
+      "runtime_aliases": {
+        "claude_skill": "dharma-eng-review",
+        "codex_mode": "eng-review",
+        "dgc_lane": "eng_review",
+        "openclaw_profile": "eng_review"
+      },
+      "allowed_tools": [
+        "Read",
+        "Grep",
+        "Glob",
+        "Bash"
+      ],
+      "required_outputs": [
+        "architecture_map",
+        "data_flow",
+        "failure_modes",
+        "test_plan",
+        "minimal_diff_recommendation"
+      ],
+      "required_artifacts": [
+        "engineering_plan"
+      ],
+      "escalation_triggers": [
+        "unresolved architectural ambiguity",
+        "security or trust-boundary uncertainty",
+        "plan exceeds acceptable complexity"
+      ],
+      "handoff_to": [
+        "preflight-review"
+      ],
+      "non_goals": [
+        "blindly expanding scope",
+        "shipping without test strategy",
+        "hiding complexity behind prose"
+      ]
+    },
+    {
+      "slug": "preflight-review",
+      "title": "Preflight Review",
+      "summary": "Review concrete code or a near-final plan for production-grade risk before landing or release.",
+      "runtime_aliases": {
+        "claude_skill": "dharma-preflight-review",
+        "codex_mode": "preflight-review",
+        "dgc_lane": "preflight_review",
+        "openclaw_profile": "preflight_review"
+      },
+      "allowed_tools": [
+        "Read",
+        "Grep",
+        "Glob",
+        "Bash"
+      ],
+      "required_outputs": [
+        "findings_by_severity",
+        "trust_boundary_notes",
+        "test_gaps",
+        "ship_blockers"
+      ],
+      "required_artifacts": [
+        "preflight_findings"
+      ],
+      "escalation_triggers": [
+        "critical data safety issue",
+        "silent failure path",
+        "missing coverage on new critical codepath"
+      ],
+      "handoff_to": [
+        "ship",
+        "qa"
+      ],
+      "non_goals": [
+        "style-only nitpicks",
+        "rewriting unrelated subsystems",
+        "shipping with unresolved critical findings"
+      ]
+    },
+    {
+      "slug": "ship",
+      "title": "Ship",
+      "summary": "Run the release workflow for a ready branch with testing, changelog, versioning, and PR creation discipline.",
+      "runtime_aliases": {
+        "claude_skill": "dharma-ship",
+        "codex_mode": "ship",
+        "dgc_lane": "ship",
+        "openclaw_profile": "ship"
+      },
+      "allowed_tools": [
+        "Read",
+        "Grep",
+        "Glob",
+        "Bash",
+        "Edit",
+        "Write"
+      ],
+      "required_outputs": [
+        "test_results",
+        "release_notes",
+        "version_update",
+        "pr_or_release_status"
+      ],
+      "required_artifacts": [
+        "release_record"
+      ],
+      "escalation_triggers": [
+        "test failure",
+        "merge conflict",
+        "critical preflight finding requiring user choice"
+      ],
+      "handoff_to": [
+        "qa",
+        "retro"
+      ],
+      "non_goals": [
+        "deciding product scope from scratch",
+        "shipping directly from a broken branch",
+        "skipping verification because the diff feels small"
+      ]
+    },
+    {
+      "slug": "qa",
+      "title": "QA",
+      "summary": "Run structured QA with evidence, health scoring, screenshots, and repro steps.",
+      "runtime_aliases": {
+        "claude_skill": "dharma-qa",
+        "codex_mode": "qa",
+        "dgc_lane": "qa",
+        "openclaw_profile": "qa"
+      },
+      "allowed_tools": [
+        "Read",
+        "Write",
+        "Bash"
+      ],
+      "required_outputs": [
+        "health_score",
+        "issue_list",
+        "evidence",
+        "top_fixes"
+      ],
+      "required_artifacts": [
+        "qa_report",
+        "screenshots"
+      ],
+      "escalation_triggers": [
+        "critical user-facing breakage",
+        "auth or environment block",
+        "missing browser tooling"
+      ],
+      "handoff_to": [
+        "retro",
+        "incident-commander"
+      ],
+      "non_goals": [
+        "vague subjective feedback",
+        "claiming a flow works without evidence",
+        "replacing release review"
+      ]
+    },
+    {
+      "slug": "browse",
+      "title": "Browse",
+      "summary": "Use browser automation as a fast operational tool for navigation, verification, and screenshot capture.",
+      "runtime_aliases": {
+        "claude_skill": "dharma-browse",
+        "codex_mode": "browse",
+        "dgc_lane": "browse",
+        "openclaw_profile": "browse"
+      },
+      "allowed_tools": [
+        "Read",
+        "Bash"
+      ],
+      "required_outputs": [
+        "navigation_result",
+        "state_snapshot"
+      ],
+      "required_artifacts": [
+        "browser_log"
+      ],
+      "escalation_triggers": [
+        "browser setup missing",
+        "authentication blocked",
+        "site inaccessible"
+      ],
+      "handoff_to": [
+        "qa",
+        "incident-commander"
+      ],
+      "non_goals": [
+        "manual browsing without evidence",
+        "competing browser stacks when one already exists",
+        "using browser tools when plain file inspection is enough"
+      ]
+    },
+    {
+      "slug": "retro",
+      "title": "Retro",
+      "summary": "Convert completed work into explicit learning, system changes, and follow-up actions.",
+      "runtime_aliases": {
+        "claude_skill": "dharma-retro",
+        "codex_mode": "retro",
+        "dgc_lane": "retro",
+        "openclaw_profile": "retro"
+      },
+      "allowed_tools": [
+        "Read",
+        "Write",
+        "Grep",
+        "Glob",
+        "Bash"
+      ],
+      "required_outputs": [
+        "wins",
+        "misses",
+        "root_causes",
+        "next_actions"
+      ],
+      "required_artifacts": [
+        "retrospective_note"
+      ],
+      "escalation_triggers": [
+        "repeated failure patterns",
+        "missing telemetry",
+        "incident without ownership"
+      ],
+      "handoff_to": [
+        "ceo-review",
+        "eng-review"
+      ],
+      "non_goals": [
+        "blame theater",
+        "empty praise",
+        "forgetting the learning after the meeting ends"
+      ]
+    },
+    {
+      "slug": "incident-commander",
+      "title": "Incident Commander",
+      "summary": "Coordinate live incident response with severity, containment, timeline, ownership, and communications.",
+      "runtime_aliases": {
+        "claude_skill": "dharma-incident-commander",
+        "codex_mode": "incident-commander",
+        "dgc_lane": "incident_commander",
+        "openclaw_profile": "incident_commander"
+      },
+      "allowed_tools": [
+        "Read",
+        "Write",
+        "Grep",
+        "Glob",
+        "Bash"
+      ],
+      "required_outputs": [
+        "severity_assignment",
+        "containment_plan",
+        "owner_map",
+        "incident_timeline",
+        "next_update_time"
+      ],
+      "required_artifacts": [
+        "incident_record"
+      ],
+      "escalation_triggers": [
+        "customer impact unclear",
+        "data loss or security exposure",
+        "rollback decision needed"
+      ],
+      "handoff_to": [
+        "eng-review",
+        "qa",
+        "retro"
+      ],
+      "non_goals": [
+        "debugging without command structure",
+        "hiding severity",
+        "treating incidents as normal feature work"
+      ]
+    }
+  ]
+}
