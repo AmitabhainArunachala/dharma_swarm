@@ -30,6 +30,7 @@ DGC_COMMANDS: tuple[DGCCommand, ...] = (
     DGCCommand("Run Pulse", "Run heartbeat", "/pulse", "system"),
     DGCCommand("Self Map", "System self-map (modules, tests, state)", "/self", "system"),
     DGCCommand("Context Layers", "Show agent context layers", "/context", "system"),
+    DGCCommand("Command Center Dashboard", "Open Command Center dashboard", "/dashboard", "system"),
     # Memory
     DGCCommand("Memory", "Strange loop memory", "/memory", "memory"),
     DGCCommand("Witness", "Record observation", "/witness", "memory"),

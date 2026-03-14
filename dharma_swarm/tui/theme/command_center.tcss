@@ -1,0 +1,246 @@
+/* Command Center — Hokusai theme extension
+ *
+ * Same mineral pigment palette as dharma_dark.tcss:
+ *   Sumi #181A20, Rokusho #8FA89B, Bengara #C19392,
+ *   Fuji #A89DB9, Torinoko #D8DCE6, Kitsurubami #C5B198,
+ *   Ash #A7AEBE, Indigo #94A3B8
+ */
+
+/* === Command Center Screen === */
+CommandCenterScreen {
+    background: #181A20;
+}
+
+/* === Tab container === */
+CommandCenterScreen TabbedContent {
+    height: 1fr;
+}
+
+CommandCenterScreen ContentSwitcher {
+    height: 1fr;
+}
+
+CommandCenterScreen TabPane {
+    padding: 1 1;
+}
+
+CommandCenterScreen Tabs {
+    background: #1D2128;
+    color: #A7AEBE;
+    dock: top;
+}
+
+CommandCenterScreen Tab {
+    color: #A7AEBE;
+    background: #1D2128;
+}
+
+CommandCenterScreen Tab.-active {
+    color: #D8DCE6;
+    background: #232730;
+    text-style: bold;
+}
+
+CommandCenterScreen Underline {
+    color: #8FA89B;
+}
+
+/* === Header bar === */
+#cc-header {
+    dock: top;
+    height: 1;
+    background: #1D2128;
+    color: #8FA89B;
+    text-style: bold;
+    padding: 0 1;
+}
+
+/* === Footer bar === */
+#cc-footer {
+    dock: bottom;
+    height: 1;
+    background: #1D2128;
+    color: #A7AEBE;
+    padding: 0 1;
+}
+
+/* === Overview Tab === */
+#overview-health {
+    width: 40%;
+    height: auto;
+    min-height: 8;
+    border: tall #373D49;
+    background: #1A1D23;
+    padding: 0 1;
+}
+
+#overview-stats {
+    width: 60%;
+    height: auto;
+    min-height: 8;
+    border: tall #373D49;
+    background: #1A1D23;
+    padding: 0 1;
+}
+
+#overview-top {
+    height: auto;
+    max-height: 14;
+}
+
+#overview-sparkline {
+    height: 3;
+    padding: 0 1;
+}
+
+#overview-anomalies {
+    height: auto;
+    max-height: 5;
+    color: #C19392;
+    padding: 0 1;
+}
+
+#overview-activity {
+    height: 1fr;
+    min-height: 6;
+}
+
+/* === Agent Tab === */
+#agent-table-container {
+    height: 60%;
+}
+
+#agent-detail-container {
+    height: 40%;
+    border-top: tall #373D49;
+    background: #1A1D23;
+    padding: 1 1;
+}
+
+/* === Evolution Tab === */
+#evo-sparkline-container {
+    height: 5;
+    padding: 0 1;
+}
+
+#evo-table-container {
+    height: 1fr;
+}
+
+/* === Ontology Tab === */
+#onto-tree-container {
+    width: 40%;
+    border-right: tall #373D49;
+}
+
+#onto-detail-container {
+    width: 60%;
+    padding: 1 1;
+}
+
+/* === Lineage Tab === */
+#lineage-search {
+    dock: top;
+    height: 3;
+    margin: 0 1;
+    background: #232730;
+    border: tall #373D49;
+}
+
+#lineage-search:focus {
+    border: tall #8FA89B;
+}
+
+#lineage-provenance {
+    width: 50%;
+    border-right: tall #373D49;
+}
+
+#lineage-impact {
+    width: 50%;
+}
+
+#lineage-trees {
+    height: 1fr;
+}
+
+#lineage-stats {
+    dock: bottom;
+    height: 1;
+    background: #1D2128;
+    color: #A7AEBE;
+    padding: 0 1;
+}
+
+/* === Shared widget styles === */
+CommandCenterScreen DataTable {
+    height: 1fr;
+    background: #1A1D23;
+    scrollbar-background: #232730;
+    scrollbar-color: #444B5A;
+    scrollbar-color-hover: #697387;
+    scrollbar-color-active: #8FA89B;
+    scrollbar-size-vertical: 1;
+}
+
+CommandCenterScreen DataTable > .datatable--header {
+    background: #1D2128;
+    color: #A7AEBE;
+    text-style: bold;
+}
+
+CommandCenterScreen DataTable > .datatable--cursor {
+    background: #2A3040;
+    color: #D8DCE6;
+}
+
+CommandCenterScreen Tree {
+    background: #1A1D23;
+    padding: 0 1;
+    scrollbar-background: #232730;
+    scrollbar-color: #444B5A;
+    scrollbar-color-hover: #697387;
+    scrollbar-size-vertical: 1;
+}
+
+CommandCenterScreen Tree > .tree--cursor {
+    background: #2A3040;
+    color: #D8DCE6;
+}
+
+CommandCenterScreen Tree > .tree--guides {
+    color: #373D49;
+}
+
+CommandCenterScreen Sparkline {
+    height: 3;
+    min-height: 3;
+}
+
+CommandCenterScreen LoadingIndicator {
+    color: #8FA89B;
+}
+
+/* Status colors */
+.status-healthy {
+    color: #8FA89B;
+}
+
+.status-degraded {
+    color: #C5B198;
+}
+
+.status-critical {
+    color: #C19392;
+}
+
+.status-unknown {
+    color: #A7AEBE;
+}
+
+/* Section headers */
+.section-header {
+    color: #94A3B8;
+    text-style: bold;
+    padding: 0 0 0 0;
+}

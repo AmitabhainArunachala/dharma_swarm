@@ -41,6 +41,7 @@ _SYNC_COMMANDS = frozenset(
         "openclaw",
         "moltbook",
         "evidence",
+        "dashboard",
     }
 )
 _ASYNC_COMMANDS = frozenset(
@@ -181,6 +182,8 @@ class SystemCommandHandler:
                 return f"[{BENGARA}]Usage: /chat [continue][/{BENGARA}]", None
         elif cmd == "btw":
             return "", "btw:open"
+        elif cmd == "dashboard":
+            return "", "dashboard:open"
         elif cmd in {"paste", "copy", "copylast"}:
             return "", cmd
         elif cmd == "net":

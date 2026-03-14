@@ -51,6 +51,7 @@ from .engine.provider_runner import ProviderRunner
 from .engine.session_store import SessionStore
 from .engine.session_state import SessionState
 from .screens.btw import BTWScreen
+from .screens.command_center import CommandCenterScreen
 from .screens.main import MainScreen
 from .screens.splash import SplashScreen
 from .widgets.prompt_input import PromptInput
@@ -133,6 +134,7 @@ class DGCApp(App):
     BINDINGS = [
         Binding("ctrl+c", "smart_cancel_or_copy", "Stop/Copy", show=True),
         Binding("ctrl+d", "quit", "Exit", show=True),
+        Binding("ctrl+g", "toggle_command_center", "Dashboard", show=False),
         Binding("ctrl+l", "clear_output", "Clear", show=True),
         Binding("ctrl+o", "cycle_mode", "Mode", show=True),
         Binding("ctrl+y", "copy_last", "Copy reply", show=False),
@@ -2390,6 +2392,10 @@ class DGCApp(App):
         main = self._get_main_screen()
         if main:
             main.stream_output.clear()
+
+    def action_toggle_command_center(self) -> None:
+        """Toggle the Command Center dashboard overlay."""
+        self.push_screen(CommandCenterScreen())
 
     def action_cycle_mode(self) -> None:
         """Cycle through N -> A -> P -> S operating modes."""
