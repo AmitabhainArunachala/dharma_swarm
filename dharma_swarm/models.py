@@ -251,3 +251,73 @@ class LLMResponse(BaseModel):
     usage: dict[str, int] = Field(default_factory=dict)
     tool_calls: list[dict[str, Any]] = Field(default_factory=list)
     stop_reason: Optional[str] = None
+
+
+# === Cascade / Strange Loop Models ===
+
+class LoopDomain(BaseModel):
+    """Configuration for a cascade domain.
+
+    Defines the phase functions (generate/test/score/gate/mutate/select/eigenform)
+    and convergence parameters for one domain of the strange loop engine.
+    """
+    name: str
+    generate_fn: str = "dharma_swarm.cascade_domains.common.default_generate"
+    test_fn: str = "dharma_swarm.cascade_domains.common.default_test"
+    score_fn: str = "dharma_swarm.cascade_domains.common.default_score"
+    gate_fn: str = "dharma_swarm.cascade_domains.common.telos_gate"
+    mutate_fn: str = "dharma_swarm.cascade_domains.common.default_mutate"
+    select_fn: str = "dharma_swarm.cascade_domains.common.default_select"
+    eigenform_fn: str = "dharma_swarm.cascade_domains.common.default_eigenform"
+    max_iterations: int = 10
+    fitness_threshold: float = 0.7
+    eigenform_epsilon: float = 0.01
+    convergence_window: int = 3
+    max_duration_seconds: float = 300.0
+    mutation_rate: float = 0.1
+
+
+class LoopResult(BaseModel):
+    """Result of running one cascade domain through the loop engine."""
+    domain: str
+    cycle_id: str = Field(default_factory=_new_id)
+    iterations_completed: int = 0
+    best_fitness: float = 0.0
+    eigenform_reached: bool = False
+    converged: bool = False
+    convergence_reason: str = ""
+    fitness_trajectory: list[float] = Field(default_factory=list)
+    eigenform_trajectory: list[float] = Field(default_factory=list)
+    duration_seconds: float = 0.0
+    interrupted: bool = False
+    interrupt_reason: str = ""
+
+
+class CatalyticEdge(BaseModel):
+    """Directed edge in the catalytic knowledge graph."""
+    source: str
+    target: str
+    edge_type: str
+    strength: float = 1.0
+    evidence: str = ""
+
+
+class ForgeScore(BaseModel):
+    """Composite quality score produced by QualityForge."""
+    stars: float = 0.0
+    yosemite: float = 5.0
+    dharmic: float = 0.0
+    efficiency: float = 0.0
+    elegance_sub: float = 0.0
+    behavioral_sub: float = 0.0
+    timestamp: datetime = Field(default_factory=_utc_now)
+
+
+class SystemVitals(BaseModel):
+    """Snapshot of system-level R_V measurement and regime."""
+    system_rv: float = 1.0
+    pr_current: float = 0.0
+    pr_previous: float = 0.0
+    regime: str = "unknown"
+    exploration_factor: float = 1.0
+    dimension_count: int = 0

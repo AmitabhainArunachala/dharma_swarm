@@ -33,3 +33,15 @@ specs/*.bak*
 specs/states/
 specs/tla2tools.jar
 external/
+
+# Runtime symlinks (machine-specific)
+.dharma_shared_link
+.dharma_witness_link
+.memory_fallback/
+
+# Build artifacts
+.next/
+node_modules/
+
+# Temp files
+*.rej
