@@ -900,6 +900,9 @@ class AgentRunner:
             self._mark_idea_outcome(task, outcome="success")
             self._record_retrieval_outcome(task, outcome="success")
 
+            # Strange loop: score agent output and emit fitness signal
+            self._emit_fitness_signal(task, result)
+
             logger.info(
                 "Agent %s finished task %s", self._config.name, task.id
             )
@@ -1028,6 +1031,31 @@ class AgentRunner:
             logger.debug(
                 "Memory record failed for %s: %s", self._config.name, exc
             )
+
+    def _emit_fitness_signal(self, task: Task, result: str) -> None:
+        """Score agent output and emit fitness signal to the bus.
+
+        Closes the strange loop: every agent output gets a behavioral
+        score that feeds into the recognition seed via the signal bus.
+        Best-effort — never fails the task.
+        """
+        try:
+            from dharma_swarm.metrics import MetricsAnalyzer
+            from dharma_swarm.signal_bus import SignalBus
+
+            sig = MetricsAnalyzer().analyze(result)
+            bus = SignalBus.get()
+            bus.emit({
+                "type": "AGENT_FITNESS",
+                "agent": self._config.name,
+                "task_id": task.id,
+                "swabhaav_ratio": sig.swabhaav_ratio,
+                "entropy": sig.entropy,
+                "recognition_type": sig.recognition_type.value,
+                "word_count": sig.word_count,
+            })
+        except Exception as exc:
+            logger.debug("Fitness signal emission failed: %s", exc)
 
     async def _record_failure_memory(self, task: Task, exc: Exception) -> None:
         """Store a task failure as a learned lesson in archival memory.

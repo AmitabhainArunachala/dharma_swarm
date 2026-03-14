@@ -964,6 +964,8 @@ def cmd_cascade(
     domain: str = "code",
     seed_path: str | None = None,
     seed_skill: str | None = None,
+    seed_project: str | None = None,
+    track: str | None = None,
     max_iter: int | None = None,
 ) -> None:
     """Run a strange loop cascade domain."""
@@ -987,8 +989,12 @@ def cmd_cascade(
         seed = None
         if seed_path:
             seed = {"path": seed_path}
+            if track:
+                seed["track"] = track
         elif seed_skill:
             seed = {"skill_name": seed_skill}
+        elif seed_project:
+            seed = {"project_path": seed_project}
 
         config = {"max_iterations": max_iter} if max_iter else None
         r = await run_domain(domain, seed=seed, resume=False, config=config)
@@ -1111,17 +1117,52 @@ def cmd_loops() -> None:
     else:
         print("\nDaemon: not running")
 
+    # Domain summary (latest scores per domain)
+    if history_path.exists():
+        all_lines = [l for l in history_path.read_text().strip().split("\n") if l.strip()]
+        latest_by_domain: dict[str, dict] = {}
+        for line in all_lines:
+            try:
+                d = json.loads(line)
+                domain_name = d.get("domain", "?")
+                latest_by_domain[domain_name] = d
+            except json.JSONDecodeError:
+                pass
+        if latest_by_domain:
+            print("\nDomain states:")
+            for name in sorted(latest_by_domain):
+                d = latest_by_domain[name]
+                status = "EIGENFORM" if d.get("eigenform_reached") else ("CONVERGED" if d.get("converged") else "INCOMPLETE")
+                note = f" ({d.get('note', '')})" if d.get("note") else ""
+                print(f"  {name:10s}: {status:10s} fitness={d.get('best_fitness', 0):.3f}{note}")
+
+    # Scoring reports
+    scoring_report = state_dir / "stigmergy" / "mycelium_scoring_report.json"
+    skill_health = state_dir / "stigmergy" / "mycelium_skill_health.json"
+    if scoring_report.exists():
+        try:
+            d = json.loads(scoring_report.read_text())
+            print(f"\nModule scoring: {d.get('scored_count', '?')} modules, mean {d.get('mean_stars', 0):.2f} stars")
+        except Exception:
+            pass
+    if skill_health.exists():
+        try:
+            d = json.loads(skill_health.read_text())
+            print(f"Skill health:   {d.get('healthy', '?')}/{d.get('total_skills', '?')} healthy, mean {d.get('mean_stars', 0):.1f} stars")
+        except Exception:
+            pass
+
     # Signal bus
     try:
         from dharma_swarm.signal_bus import SignalBus
         bus = SignalBus.get()
         cascade_signals = bus.drain(["CASCADE_COMPLETE"])
         if cascade_signals:
-            print(f"Signal bus: {len(cascade_signals)} cascade completion(s) pending")
+            print(f"\nSignal bus: {len(cascade_signals)} cascade completion(s) pending")
         else:
-            print("Signal bus: clear")
+            print("\nSignal bus: clear")
     except Exception:
-        print("Signal bus: not available")
+        print("\nSignal bus: not available")
 
 
 def cmd_health_check() -> None:
@@ -4028,6 +4069,48 @@ def cmd_initiatives(
             print("Usage: dgc initiatives {list|add|abandon|promote|summary}")
 
 
+def cmd_free_fleet(
+    tier: int | None = None,
+    as_json: bool = False,
+    set_env: bool = False,
+) -> None:
+    """Show free-fleet model configuration, optionally filtered by tier."""
+    import json as _json
+    from dharma_swarm.free_fleet import FREE_FLEET, TIER_MODELS, ALL_FREE_MODELS
+
+    if set_env:
+        print("export DGC_FREE_FLEET=1")
+        return
+
+    if tier is not None:
+        if tier not in (1, 2, 3):
+            print(f"Error: invalid tier {tier!r}. Must be 1, 2, or 3.")
+            raise SystemExit(1)
+        models = TIER_MODELS.get(tier, [])
+        if as_json:
+            print(_json.dumps({"tier": tier, "models": models}, indent=2))
+        else:
+            print(f"Tier {tier} models:")
+            for m in models:
+                print(f"  {m}")
+        return
+
+    if as_json:
+        data = {
+            "tiers": {str(k): v for k, v in TIER_MODELS.items()},
+            "all_models": ALL_FREE_MODELS,
+            "default_tier": FREE_FLEET.default_tier,
+        }
+        print(_json.dumps(data, indent=2))
+    else:
+        print("FREE_FLEET — zero-cost OpenRouter models")
+        print(f"  Default tier: {FREE_FLEET.default_tier}")
+        for tier_num, models in TIER_MODELS.items():
+            print(f"\n  Tier {tier_num}:")
+            for m in models:
+                print(f"    {m}")
+
+
 def cmd_gateway(config_path: str | None = None) -> None:
     """Start the messaging gateway."""
     from pathlib import Path
@@ -4456,6 +4539,8 @@ def _build_parser() -> argparse.ArgumentParser:
                            help="Domain: code, skill, product, research, meta, all")
     p_cascade.add_argument("--seed-path", default=None, help="Path to seed file")
     p_cascade.add_argument("--seed-skill", default=None, help="Skill name to seed")
+    p_cascade.add_argument("--seed-project", default=None, help="Project directory to seed (product domain)")
+    p_cascade.add_argument("--track", default=None, help="Research track: rv, phoenix, contemplative")
     p_cascade.add_argument("--max-iter", type=int, default=None, help="Override max iterations")
 
     # -- forge --
@@ -4878,6 +4963,11 @@ def _build_parser() -> argparse.ArgumentParser:
     p_gw = sub.add_parser("gateway", help="Start messaging gateway (v0.6.0)")
     p_gw.add_argument("--config", default=None, help="Path to gateway.yaml")
 
+    p_ff = sub.add_parser("free-fleet", help="Show free-tier OpenRouter model fleet")
+    p_ff.add_argument("--tier", type=int, default=None, help="Filter to tier 1, 2, or 3")
+    p_ff.add_argument("--json", dest="json", action="store_true", default=False, help="Output as JSON")
+    p_ff.add_argument("--set-env", dest="set_env", action="store_true", default=False, help="Print shell export command")
+
     return parser
 
 
@@ -5039,6 +5129,8 @@ def main() -> None:
                 domain=args.domain,
                 seed_path=args.seed_path,
                 seed_skill=args.seed_skill,
+                seed_project=args.seed_project,
+                track=args.track,
                 max_iter=args.max_iter,
             )
         case "forge":
@@ -5408,6 +5500,8 @@ def main() -> None:
             )
         case "gateway":
             cmd_gateway(config_path=args.config)
+        case "free-fleet":
+            cmd_free_fleet(tier=args.tier, as_json=args.json, set_env=args.set_env)
         case _:
             parser.print_help()
 

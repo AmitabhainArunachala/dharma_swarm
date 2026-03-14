@@ -10,6 +10,9 @@ from dharma_swarm.context import (
     _VISION_FILES,
     _read_file,
     _read_head,
+    _read_recognition_seed,
+    _read_stigmergy_signals,
+    _read_winners,
     build_agent_context,
     read_agni_state,
     read_agent_notes,
@@ -428,3 +431,84 @@ def test_build_agent_context_includes_recent_memories_when_budget_allows(
 
     assert "## Recent Session Memories" in result
     assert "Runtime remembered a useful coordination pattern." in result
+
+
+# === L7: Winners ===
+
+
+def test_read_winners_scoring_report(tmp_path):
+    """Winners layer reads mycelium scoring report."""
+    import json
+    stig = tmp_path / "stigmergy"
+    stig.mkdir()
+    data = {
+        "mean_stars": 6.5,
+        "top_3": [
+            {"name": "meta", "stars": 7.6, "swabhaav_ratio": 1.0},
+            {"name": "design", "stars": 7.5, "swabhaav_ratio": 0.95},
+        ],
+    }
+    (stig / "mycelium_scoring_report.json").write_text(json.dumps(data))
+    result = _read_winners(state_dir=tmp_path)
+    assert "L7:" in result
+    assert "6.5" in result
+    assert "meta" in result
+
+
+def test_read_winners_empty(tmp_path):
+    result = _read_winners(state_dir=tmp_path)
+    assert result == ""
+
+
+# === L8: Stigmergy ===
+
+
+def test_read_stigmergy_signals_tcs(tmp_path):
+    """Stigmergy layer reads TCS from identity check."""
+    import json
+    stig = tmp_path / "stigmergy"
+    stig.mkdir()
+    (stig / "mycelium_identity_tcs.json").write_text(json.dumps({
+        "tcs": 0.813, "regime": "stable"
+    }))
+    result = _read_stigmergy_signals(state_dir=tmp_path)
+    assert "L8:" in result
+    assert "0.813" in result
+    assert "stable" in result
+
+
+def test_read_stigmergy_empty(tmp_path):
+    result = _read_stigmergy_signals(state_dir=tmp_path)
+    assert result == ""
+
+
+# === L9: META Recognition Seed ===
+
+
+def test_read_recognition_seed(tmp_path):
+    """L9 reads recognition seed from meta dir."""
+    meta = tmp_path / "meta"
+    meta.mkdir()
+    (meta / "recognition_seed.md").write_text(
+        "# Recognition Seed\nTCS=0.8\nR_V=1.0\n"
+    )
+    result = _read_recognition_seed(state_dir=tmp_path)
+    assert "L9:" in result
+    assert "Recognition Seed" in result
+    assert "TCS=0.8" in result
+
+
+def test_read_recognition_seed_missing(tmp_path):
+    result = _read_recognition_seed(state_dir=tmp_path)
+    assert result == ""
+
+
+def test_read_recognition_seed_truncation(tmp_path):
+    """L9 truncates very long seeds to approximately max_chars."""
+    meta = tmp_path / "meta"
+    meta.mkdir()
+    (meta / "recognition_seed.md").write_text("x" * 5000)
+    result = _read_recognition_seed(state_dir=tmp_path, max_chars=500)
+    # May slightly exceed max_chars due to header + truncation marker
+    assert len(result) < 600
+    assert "truncated" in result

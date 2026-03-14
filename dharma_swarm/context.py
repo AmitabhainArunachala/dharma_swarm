@@ -653,17 +653,24 @@ def _read_winners(state_dir: Path | None = None, max_chars: int = 1500) -> str:
                         continue
                     try:
                         entry = json.loads(line)
-                        fitness = entry.get("fitness", 0)
+                        fitness_raw = entry.get("fitness", 0)
+                        # Handle both numeric fitness and dict-of-dimensions
+                        if isinstance(fitness_raw, dict):
+                            vals = [v for v in fitness_raw.values() if isinstance(v, (int, float))]
+                            fitness = sum(vals) / max(1, len(vals)) if vals else 0.0
+                        else:
+                            fitness = float(fitness_raw) if fitness_raw else 0.0
+                        entry["_weighted_fitness"] = fitness
                         if fitness >= 0.7:
                             winners.append(entry)
-                    except (json.JSONDecodeError, TypeError):
+                    except (json.JSONDecodeError, TypeError, ValueError):
                         continue
                 if winners:
-                    winners.sort(key=lambda w: w.get("fitness", 0), reverse=True)
+                    winners.sort(key=lambda w: w.get("_weighted_fitness", 0), reverse=True)
                     wlines = ["## Evolution Winners"]
                     for w in winners[:3]:
                         comp = w.get("component", "?")
-                        fit = w.get("fitness", 0)
+                        fit = w.get("_weighted_fitness", 0)
                         gen = w.get("generation", "?")
                         wlines.append(f"  {fit:.2f} fitness: {comp} (gen {gen})")
                     sections.append("\n".join(wlines))
