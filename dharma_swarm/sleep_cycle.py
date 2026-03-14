@@ -240,9 +240,17 @@ class SleepCycle:
         closes the strange loop: artifacts -> scores -> synthesis ->
         agent context -> artifacts.
         """
+        import sqlite3 as _sqlite3
+
         from dharma_swarm.semantic_memory_bridge import run_semantic_sleep_phase
 
-        result = await run_semantic_sleep_phase()
+        try:
+            result = await run_semantic_sleep_phase()
+        except _sqlite3.OperationalError as exc:
+            if "locked" in str(exc).lower():
+                logger.warning("Semantic sleep skipped: DB locked (%s)", exc)
+                return {"phase": "semantic", "skipped": True}
+            raise
 
         # Recognition synthesis — the strange loop closure
         try:
