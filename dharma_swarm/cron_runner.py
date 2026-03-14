@@ -1,0 +1,46 @@
+"""Execution dispatch for scheduled cron jobs."""
+
+from __future__ import annotations
+
+from typing import Any
+
+
+def _as_int(value: Any, default: int) -> int:
+    try:
+        parsed = int(value)
+    except (TypeError, ValueError):
+        return default
+    return parsed if parsed > 0 else default
+
+
+def _run_headless_prompt(job: dict[str, Any]) -> tuple[bool, str, str | None]:
+    from dharma_swarm.pulse import run_claude_headless
+
+    prompt = str(job.get("prompt", "")).strip()
+    if not prompt:
+        error = "Cron job prompt is empty"
+        return False, error, error
+
+    result = run_claude_headless(
+        prompt=prompt,
+        timeout=_as_int(job.get("timeout_sec"), 600),
+        model=str(job.get("model", "")).strip() or None,
+    )
+    success = not result.startswith(("ERROR:", "TIMEOUT:", "Error (rc="))
+    header = f"# Cron Job: {job.get('name', job.get('id', 'unnamed'))}\n\n"
+    return success, header + result, None if success else result[:500]
+
+
+def run_cron_job(job: dict[str, Any]) -> tuple[bool, str, str | None]:
+    """Dispatch a cron job to the configured runner."""
+
+    handler = str(job.get("handler", "headless_prompt")).strip() or "headless_prompt"
+    if handler == "headless_prompt":
+        return _run_headless_prompt(job)
+    if handler == "review_cycle":
+        from dharma_swarm.review_cycle import review_run_fn
+
+        return review_run_fn(job)
+
+    error = f"Unsupported cron handler: {handler}"
+    return False, error, error
