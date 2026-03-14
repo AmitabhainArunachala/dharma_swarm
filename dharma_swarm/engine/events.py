@@ -45,6 +45,14 @@ class EventType(str, Enum):
     HUMAN_REVIEW_REQUESTED = "human_review_requested"
     HUMAN_REVIEW_COMPLETED = "human_review_completed"
 
+    # Inter-loop signals (Strange Loop: shared downbeat)
+    FITNESS_IMPROVED = "fitness_improved"
+    FITNESS_DEGRADED = "fitness_degraded"
+    ANOMALY_DETECTED = "anomaly_detected"
+    CASCADE_EIGENFORM_DISTANCE = "cascade_eigenform_distance"
+    GATE_REJECTION_SPIKE = "gate_rejection_spike"
+    RECOGNITION_UPDATED = "recognition_updated"
+
 
 @dataclass(slots=True)
 class CanonicalEvent:

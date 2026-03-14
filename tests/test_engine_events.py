@@ -6,7 +6,8 @@ from dharma_swarm.engine.events import CanonicalEvent, EventType
 
 
 def test_event_type_count_is_17():
-    assert len(list(EventType)) == 17
+    # 17 original + 6 Strange Loop inter-loop signals = 23
+    assert len(list(EventType)) == 23
 
 
 def test_canonical_event_roundtrip_dict():

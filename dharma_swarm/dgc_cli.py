@@ -960,6 +960,170 @@ def cmd_health() -> None:
         sys.path.pop(0)
 
 
+def cmd_cascade(
+    domain: str = "code",
+    seed_path: str | None = None,
+    seed_skill: str | None = None,
+    max_iter: int | None = None,
+) -> None:
+    """Run a strange loop cascade domain."""
+    import asyncio
+
+    async def _run():
+        from dharma_swarm.cascade import get_registered_domains, run_domain
+
+        if domain == "all":
+            domains = get_registered_domains()
+            for name in sorted(domains):
+                try:
+                    config = {"max_iterations": max_iter} if max_iter else None
+                    r = await run_domain(name, resume=False, config=config)
+                    status = "EIGENFORM" if r.eigenform_reached else ("CONVERGED" if r.converged else "INCOMPLETE")
+                    print(f"  [{name}] {status} iter={r.iterations_completed} fitness={r.best_fitness:.3f} ({r.duration_seconds:.1f}s)")
+                except Exception as e:
+                    print(f"  [{name}] ERROR: {e}")
+            return
+
+        seed = None
+        if seed_path:
+            seed = {"path": seed_path}
+        elif seed_skill:
+            seed = {"skill_name": seed_skill}
+
+        config = {"max_iterations": max_iter} if max_iter else None
+        r = await run_domain(domain, seed=seed, resume=False, config=config)
+        status = "EIGENFORM" if r.eigenform_reached else ("CONVERGED" if r.converged else "INCOMPLETE")
+        print(f"Domain:     {r.domain}")
+        print(f"Status:     {status}")
+        print(f"Iterations: {r.iterations_completed}")
+        print(f"Best fit:   {r.best_fitness:.3f}")
+        if r.convergence_reason:
+            print(f"Reason:     {r.convergence_reason}")
+        print(f"Duration:   {r.duration_seconds:.1f}s")
+        if r.fitness_trajectory:
+            print(f"Trajectory: {' → '.join(f'{f:.3f}' for f in r.fitness_trajectory[-5:])}")
+
+    asyncio.run(_run())
+
+
+def cmd_forge(path: str | None = None, batch: str | None = None) -> None:
+    """Score artifact(s) through the quality forge."""
+    from pathlib import Path as P
+
+    def _score_file(filepath: str) -> None:
+        p = P(filepath).resolve()
+        if not p.exists():
+            print(f"  {filepath}: NOT FOUND")
+            return
+
+        content = p.read_text()
+        scores: dict[str, float] = {}
+
+        if p.suffix == ".py":
+            try:
+                from dharma_swarm.elegance import evaluate_elegance
+                e = evaluate_elegance(content)
+                scores["elegance"] = e.overall
+            except Exception:
+                scores["elegance"] = 0.0
+
+        try:
+            from dharma_swarm.metrics import MetricsAnalyzer
+            sig = MetricsAnalyzer().analyze(content)
+            scores["swabhaav"] = sig.swabhaav_ratio
+            scores["entropy"] = sig.entropy
+            scores["mimicry"] = 1.0 if sig.recognition_type.value == "MIMICRY" else 0.0
+        except Exception:
+            pass
+
+        # Composite
+        elegance = scores.get("elegance", 0.5)
+        swabhaav = scores.get("swabhaav", 0.5)
+        stars = elegance * 0.5 + swabhaav * 0.3 + (1.0 - scores.get("mimicry", 0.0)) * 0.2
+        print(f"  {p.name}: {stars*10:.1f}★  elegance={elegance:.2f} swabhaav={swabhaav:.2f}")
+
+    if batch:
+        bp = P(batch)
+        files = sorted(bp.glob("**/*.py")) + sorted(bp.glob("**/*.md"))
+        print(f"Scoring {len(files)} files in {batch}:")
+        for f in files[:20]:
+            _score_file(str(f))
+        if len(files) > 20:
+            print(f"  ... and {len(files) - 20} more")
+    elif path:
+        print("Forge Score:")
+        _score_file(path)
+    else:
+        print("Usage: dgc forge <path> | dgc forge --batch <dir>")
+
+
+def cmd_loops() -> None:
+    """Show strange loop status and cascade history."""
+    import json
+    from pathlib import Path as P
+
+    state_dir = P.home() / ".dharma"
+    meta_dir = state_dir / "meta"
+
+    # Recognition seed
+    seed_path = meta_dir / "recognition_seed.md"
+    if seed_path.exists():
+        lines = seed_path.read_text().split("\n")
+        print(f"Recognition seed: {len(seed_path.read_text())} chars ({lines[0].strip()})")
+    else:
+        print("Recognition seed: NOT YET GENERATED")
+
+    # TCS
+    tcs_path = state_dir / "stigmergy" / "mycelium_identity_tcs.json"
+    if tcs_path.exists():
+        try:
+            d = json.loads(tcs_path.read_text())
+            print(f"TCS: {d.get('tcs', '?')} ({d.get('regime', '?')})")
+        except Exception:
+            print("TCS: error reading")
+    else:
+        print("TCS: no data")
+
+    # Cascade history
+    history_path = meta_dir / "cascade_history.jsonl"
+    if history_path.exists():
+        lines = [l for l in history_path.read_text().strip().split("\n") if l.strip()]
+        print(f"\nCascade history: {len(lines)} runs")
+        for line in lines[-5:]:
+            try:
+                d = json.loads(line)
+                status = "EIGENFORM" if d.get("eigenform_reached") else ("CONVERGED" if d.get("converged") else "INCOMPLETE")
+                print(f"  {d.get('domain', '?')}: {status} fitness={d.get('best_fitness', 0):.3f} iter={d.get('iterations', 0)}")
+            except json.JSONDecodeError:
+                pass
+    else:
+        print("\nCascade history: no runs yet")
+
+    # Daemon status
+    pid_file = state_dir / "daemon.pid"
+    if pid_file.exists():
+        try:
+            pid = int(pid_file.read_text().strip())
+            os.kill(pid, 0)
+            print(f"\nDaemon: running (PID {pid})")
+        except (ValueError, OSError):
+            print("\nDaemon: dead (stale PID file)")
+    else:
+        print("\nDaemon: not running")
+
+    # Signal bus
+    try:
+        from dharma_swarm.signal_bus import SignalBus
+        bus = SignalBus.get()
+        cascade_signals = bus.drain(["CASCADE_COMPLETE"])
+        if cascade_signals:
+            print(f"Signal bus: {len(cascade_signals)} cascade completion(s) pending")
+        else:
+            print("Signal bus: clear")
+    except Exception:
+        print("Signal bus: not available")
+
+
 def cmd_health_check() -> None:
     """Monitor-based system health check (v0.2.0)."""
     async def _check():
@@ -4286,6 +4450,22 @@ def _build_parser() -> argparse.ArgumentParser:
     # -- hum --
     sub.add_parser("hum", help="Subconscious associations")
 
+    # -- cascade --
+    p_cascade = sub.add_parser("cascade", help="Run strange loop cascade domain")
+    p_cascade.add_argument("domain", nargs="?", default="code",
+                           help="Domain: code, skill, product, research, meta, all")
+    p_cascade.add_argument("--seed-path", default=None, help="Path to seed file")
+    p_cascade.add_argument("--seed-skill", default=None, help="Skill name to seed")
+    p_cascade.add_argument("--max-iter", type=int, default=None, help="Override max iterations")
+
+    # -- forge --
+    p_forge = sub.add_parser("forge", help="Score artifact through quality forge")
+    p_forge.add_argument("path", nargs="?", default=None, help="Path to score (or 'self')")
+    p_forge.add_argument("--batch", default=None, help="Score all files in directory")
+
+    # -- loops --
+    sub.add_parser("loops", help="Show strange loop status and cascade history")
+
     # -- run --
     p_run = sub.add_parser("run", help="Run orchestration loop")
     p_run.add_argument("--interval", type=float, default=2.0)
@@ -4854,6 +5034,17 @@ def main() -> None:
             cmd_gates(" ".join(args.action))
         case "health":
             cmd_health()
+        case "cascade":
+            cmd_cascade(
+                domain=args.domain,
+                seed_path=args.seed_path,
+                seed_skill=args.seed_skill,
+                max_iter=args.max_iter,
+            )
+        case "forge":
+            cmd_forge(path=args.path, batch=args.batch)
+        case "loops":
+            cmd_loops()
         case "health-check":
             cmd_health_check()
         case "doctor":

@@ -410,6 +410,17 @@ class EvolutionArchive:
         )
         return entries[:n]
 
+    async def get_best_approaches(self, n: int = 5, component: str | None = None) -> list[dict[str, str]]:
+        """Return condensed summaries of top applied entries (PULL interface)."""
+        best = await self.get_best(n=n, component=component)
+        return [{
+            "component": e.component,
+            "change_type": e.change_type,
+            "description": e.description[:200],
+            "fitness": f"{e.fitness.weighted():.3f}",
+            "gates_passed": ", ".join(e.gates_passed[:5]) if e.gates_passed else "none",
+        } for e in best]
+
     async def get_latest(self, n: int = 10) -> list[ArchiveEntry]:
         """Return the *n* most recent entries by timestamp."""
         entries = sorted(
@@ -456,6 +467,32 @@ class EvolutionArchive:
         entry.rollback_reason = reason
         await self._rewrite()
         return True
+
+    async def compact(self, min_age_entries: int = 50, fitness_percentile: float = 0.5) -> int:
+        """Mark low-value childless entries as composted (forgetting law)."""
+        entries = list(self._entries.values())
+        if len(entries) < min_age_entries:
+            return 0
+        applied = [e for e in entries if e.status == "applied"]
+        if not applied:
+            return 0
+        fitness_values = sorted(e.fitness.weighted() for e in applied)
+        median_idx = int(len(fitness_values) * fitness_percentile)
+        threshold = fitness_values[min(median_idx, len(fitness_values) - 1)]
+        has_children: set[str] = set()
+        for e in entries:
+            if e.parent_id:
+                has_children.add(e.parent_id)
+        entries_by_time = sorted(entries, key=lambda e: e.timestamp)
+        old_entries = entries_by_time[:-min_age_entries] if len(entries_by_time) > min_age_entries else []
+        composted = 0
+        for e in old_entries:
+            if (e.status in ("applied", "proposed") and e.fitness.weighted() < threshold and e.id not in has_children):
+                e.status = "composted"
+                composted += 1
+        if composted > 0:
+            await self._rewrite()
+        return composted
 
     def fitness_over_time(
         self,

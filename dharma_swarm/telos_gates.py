@@ -325,12 +325,37 @@ class TelosGatekeeper:
         results["ANEKANTA"] = (anekanta.gate_result, anekanta.reason)
 
         # --- DOGMA_DRIFT (Tier C) — confidence without evidence check ---
-        # Default check: no drift detected (used when no explicit check data available)
-        results["DOGMA_DRIFT"] = (GateResult.PASS, "No drift data in this check")
+        dogma_result = GateResult.PASS
+        dogma_reason = "No dogma drift detected"
+        if content:
+            from dharma_swarm.dogma_gate import DogmaDriftCheck, check_dogma_drift
+            confidence_markers = sum(1 for w in ["certainly", "definitely", "obviously", "clearly", "undoubtedly", "without question", "proven", "unquestionable", "absolute"] if w in content_lower)
+            evidence_markers = sum(1 for w in ["data shows", "experiment", "measured", "observed", "tested", "verified", "result:", "p-value", "p=", "evidence", "citation", "reference"] if w in content_lower)
+            if confidence_markers > 0:
+                drift_check = DogmaDriftCheck(confidence_before=0.5, confidence_after=min(1.0, 0.5 + confidence_markers * 0.15), evidence_count_before=0, evidence_count_after=evidence_markers)
+                drift_result = check_dogma_drift(drift_check)
+                dogma_result = drift_result.gate_result
+                dogma_reason = drift_result.reason
+        results["DOGMA_DRIFT"] = (dogma_result, dogma_reason)
 
         # --- STEELMAN (Tier C) — counterargument requirement ---
-        # Default check: passes when no proposal context available
-        results["STEELMAN"] = (GateResult.PASS, "No proposal context for steelman check")
+        steelman_result = GateResult.PASS
+        steelman_reason = "No proposal context for steelman check"
+        mutation_context = any(w in action_lower for w in ["mutate", "mutation", "propose", "proposal", "evolve", "change", "modify", "refactor"])
+        if mutation_context and content:
+            from dharma_swarm.steelman_gate import SteelmanCheck, check_steelman
+            counterargs = []
+            for marker in ["however", "but ", "alternatively", "risk:", "downside:", "concern:", "counterargument:", "on the other hand"]:
+                if marker in content_lower:
+                    idx = content_lower.index(marker)
+                    start = max(0, idx - 20)
+                    end = min(len(content), idx + 100)
+                    counterargs.append(content[start:end].strip())
+            sm_check = SteelmanCheck(counterarguments=counterargs)
+            sm_result = check_steelman(sm_check)
+            steelman_result = sm_result.gate_result
+            steelman_reason = sm_result.reason
+        results["STEELMAN"] = (steelman_result, steelman_reason)
 
         # --- Evaluate decision ---
         tier_a_fail = any(
@@ -416,14 +441,18 @@ class TelosGatekeeper:
         performative text can't pass the WITNESS gate.
         """
         tokens = re.findall(r"[a-zA-Z0-9_]+", reflection.lower())
-        if len(tokens) < 5:
+        if len(tokens) < 10:
+            return False
+        reflection_lower = reflection.lower()
+        substantive_markers = ["undo", "revert", "rollback", "restore", "backup", "uncertain", "unknown", "risk", "might fail", "assumption", "could break", "if this fails", "test", "verified", "data", "measured", "result", "evidence", "observed", "confirmed"]
+        if not any(marker in reflection_lower for marker in substantive_markers):
             return False
         try:
             from dharma_swarm.metrics import MetricsAnalyzer
             if MetricsAnalyzer().detect_mimicry(reflection):
                 return False
         except Exception:
-            pass  # Mimicry check is non-fatal
+            pass
         return True
 
     @staticmethod

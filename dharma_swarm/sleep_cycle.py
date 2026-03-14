@@ -234,14 +234,26 @@ class SleepCycle:
         return result
 
     async def _semantic_sleep(self) -> dict[str, Any]:
-        """Phase 4: Semantic evolution cycle.
+        """Phase 4: Semantic evolution + recognition synthesis.
 
-        Runs DIGEST → RESEARCH → SYNTHESIZE → HARDEN → GRAVITIZE on the
-        codebase, indexing concepts into the memory plane.
+        Runs semantic indexing, then generates a recognition seed that
+        closes the strange loop: artifacts -> scores -> synthesis ->
+        agent context -> artifacts.
         """
         from dharma_swarm.semantic_memory_bridge import run_semantic_sleep_phase
 
         result = await run_semantic_sleep_phase()
+
+        # Recognition synthesis — the strange loop closure
+        try:
+            from dharma_swarm.meta_daemon import RecognitionEngine
+            engine = RecognitionEngine(state_dir=self._memory_dir.parent)
+            seed = await engine.synthesize("deep")
+            result["recognition_seed_length"] = len(seed)
+            logger.info("Recognition seed generated (%d chars)", len(seed))
+        except Exception as exc:
+            logger.warning("Recognition synthesis failed: %s", exc)
+
         return result
 
     async def _wake(self, report: SleepReport) -> dict[str, Any]:

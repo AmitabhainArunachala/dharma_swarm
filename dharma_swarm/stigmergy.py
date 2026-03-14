@@ -38,6 +38,7 @@ class StigmergicMark(BaseModel):
     observation: str = Field(max_length=200)
     salience: float = 0.5
     connections: list[str] = Field(default_factory=list)
+    access_count: int = 0
 
 
 # ---------------------------------------------------------------------------
@@ -142,6 +143,18 @@ class StigmergyStore:
                 connections.update(m.connections)
         return sorted(connections)
 
+    async def query_relevant(self, task_keywords: list[str], limit: int = 10) -> list[StigmergicMark]:
+        """Filter marks by keyword overlap, sorted by salience (PULL protocol)."""
+        if not task_keywords:
+            return await self.high_salience(limit=limit)
+        marks = await self._load_marks()
+        keywords_lower = [kw.lower() for kw in task_keywords if kw.strip()]
+        if not keywords_lower:
+            return await self.high_salience(limit=limit)
+        relevant = [m for m in marks if any(kw in (m.observation + " " + m.file_path).lower() for kw in keywords_lower)]
+        relevant.sort(key=lambda m: m.salience, reverse=True)
+        return relevant[:limit]
+
     # -- maintenance ---------------------------------------------------------
 
     async def decay(self, max_age_hours: float = 168) -> int:
@@ -178,6 +191,23 @@ class StigmergyStore:
                 await f.write(m.model_dump_json() + "\n")
 
         return len(archive)
+
+    async def access_decay(self, decay_factor: float = 0.95) -> int:
+        """Decay marks based on access count -- unused marks fade faster."""
+        marks = await self._load_marks()
+        if not marks:
+            return 0
+        dead_count = 0
+        for m in marks:
+            exponent = max(1, 3 - m.access_count)
+            m.salience *= decay_factor ** exponent
+            if m.salience < 0.1:
+                dead_count += 1
+        self.base_path.mkdir(parents=True, exist_ok=True)
+        async with aiofiles.open(self._marks_file, "w") as f:
+            for m in marks:
+                await f.write(m.model_dump_json() + "\n")
+        return dead_count
 
     # -- sync helpers --------------------------------------------------------
 

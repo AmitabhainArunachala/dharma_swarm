@@ -53,6 +53,7 @@ _LARGE_DIFF_THRESHOLD: int = 200
 _SMALL_DIFF_BONUS: float = 0.05
 _LARGE_DIFF_PENALTY: float = 0.1
 _TEST_COVERAGE_BONUS: float = 0.05
+_REJECTION_PENALTY: float = 0.08
 
 
 class FitnessPredictor:
@@ -128,6 +129,10 @@ class FitnessPredictor:
         self._recompute_groups()
         return outcome
 
+    async def record_rejection(self, features: ProposalFeatures, reason: str = "") -> PredictionOutcome:
+        """Record a rejected proposal with zero fitness (substrate curdling)."""
+        return await self.record_outcome(features, actual_fitness=0.0)
+
     def predict(self, features: ProposalFeatures) -> float:
         """Estimate fitness of a proposal based on historical data.
 
@@ -157,6 +162,14 @@ class FitnessPredictor:
         # Test coverage bonus
         if features.test_coverage_exists:
             base += _TEST_COVERAGE_BONUS
+
+        # Rejection penalty
+        count = self._group_counts.get(key, 0)
+        if count > 0:
+            rejection_count = sum(1 for o in self._outcomes if (o.features.component, o.features.change_type) == key and o.actual_fitness == 0.0)
+            rejection_rate = rejection_count / count
+            if rejection_rate > 0.3:
+                base -= _REJECTION_PENALTY * (1 + rejection_rate)
 
         return max(0.0, min(1.0, base))
 

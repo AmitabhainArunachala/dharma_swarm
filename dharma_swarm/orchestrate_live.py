@@ -26,6 +26,7 @@ import signal
 import sys
 from datetime import datetime, timezone
 from pathlib import Path
+from typing import Any
 
 logger = logging.getLogger(__name__)
 
@@ -49,8 +50,14 @@ def _log(system: str, msg: str) -> None:
     logger.info("[%s] %s", system, msg)
 
 
-async def run_swarm_loop(shutdown_event: asyncio.Event) -> None:
-    """Primary loop: SwarmManager init + run with reasonable tick interval."""
+async def run_swarm_loop(
+    shutdown_event: asyncio.Event,
+    signal_bus: "Any | None" = None,
+) -> None:
+    """Primary loop: SwarmManager.tick() -- the ONE control path.
+
+    Strange Loop Phase 0: unified tick. No more split brain.
+    """
     from dharma_swarm.daemon_config import DaemonConfig
     from dharma_swarm.swarm import SwarmManager
 
@@ -69,23 +76,30 @@ async def run_swarm_loop(shutdown_event: asyncio.Event) -> None:
     try:
         while not shutdown_event.is_set():
             try:
-                # The swarm's run() loop blocks, so we tick manually
-                overrides = swarm._check_human_overrides()
-                if overrides.get("paused"):
+                # Drain signal bus before tick -- respond to inter-loop signals
+                if signal_bus is not None:
+                    anomaly_signals = signal_bus.drain(["ANOMALY_DETECTED"])
+                    if anomaly_signals:
+                        _log("swarm", f"Signal bus: {len(anomaly_signals)} anomaly signal(s)")
+
+                activity = await swarm.tick()
+
+                if activity.get("paused"):
                     _log("swarm", "Paused (.PAUSE file)")
                     await asyncio.sleep(30)
                     continue
-
-                if cfg.circuit_breaker.is_broken:
+                if activity.get("circuit_broken"):
                     _log("swarm", "Circuit breaker tripped, waiting...")
                     await asyncio.sleep(60)
                     continue
 
-                activity = await swarm._orchestrator.tick()
                 dispatched = activity.get("dispatched", 0)
                 settled = activity.get("settled", 0)
-                if dispatched or settled:
-                    _log("swarm", f"tick: dispatched={dispatched} settled={settled}")
+                rescued = activity.get("rescued", 0)
+                if dispatched or settled or rescued:
+                    _log("swarm", f"tick: dispatched={dispatched} settled={settled} rescued={rescued}")
+
+                cfg.circuit_breaker.record_success()
 
             except Exception as e:
                 _log("swarm", f"tick error: {e}")
@@ -287,6 +301,34 @@ def _stop_old_daemon() -> None:
     pid_file.unlink(missing_ok=True)
 
 
+RECOGNITION_INTERVAL = 7200  # 2 hours between recognition synthesis
+
+
+async def _run_recognition_loop(shutdown_event: asyncio.Event) -> None:
+    """Periodic recognition synthesis — the strange loop's self-model.
+
+    Every 2 hours, synthesizes signals from all subsystems into a recognition
+    seed that feeds back into agent context via L9 META layer.
+    """
+    while not shutdown_event.is_set():
+        try:
+            from dharma_swarm.meta_daemon import RecognitionEngine
+            engine = RecognitionEngine()
+            seed = await engine.synthesize("light")
+            _log("recognition", f"Seed updated ({len(seed)} chars)")
+        except Exception as e:
+            _log("recognition", f"Synthesis failed: {e}")
+
+        # Wait for next cycle or shutdown
+        try:
+            await asyncio.wait_for(
+                shutdown_event.wait(), timeout=RECOGNITION_INTERVAL
+            )
+            break
+        except asyncio.TimeoutError:
+            pass
+
+
 async def orchestrate(background: bool = False) -> None:
     """Main entry point — run all systems concurrently."""
     STATE_DIR.mkdir(parents=True, exist_ok=True)
@@ -295,8 +337,8 @@ async def orchestrate(background: bool = False) -> None:
     # Stop any existing daemon to avoid DB conflicts
     _stop_old_daemon()
 
-    # Write PID
-    pid_file = STATE_DIR / "orchestrator.pid"
+    # Write PID -- use daemon.pid for consistency with _stop_old_daemon()
+    pid_file = STATE_DIR / "daemon.pid"
     pid_file.write_text(str(os.getpid()))
 
     shutdown_event = asyncio.Event()
@@ -308,24 +350,28 @@ async def orchestrate(background: bool = False) -> None:
     signal.signal(signal.SIGINT, _signal_handler)
     signal.signal(signal.SIGTERM, _signal_handler)
 
+    # Phase 2: Create shared signal bus for inter-loop temporal coherence
+    from dharma_swarm.signal_bus import SignalBus
+    bus = SignalBus.get()
+
     _log("orchestrator", "=" * 60)
-    _log("orchestrator", "DGC Live Orchestrator starting")
+    _log("orchestrator", "DGC Live Orchestrator starting (Strange Loop v1)")
     _log("orchestrator", f"  PID: {os.getpid()}")
     _log("orchestrator", f"  State: {STATE_DIR}")
     _log("orchestrator", f"  Swarm tick: {SWARM_TICK}s")
     _log("orchestrator", f"  Pulse interval: {PULSE_INTERVAL}s")
-    _log("orchestrator", f"  Evolution interval: {EVOLUTION_INTERVAL}s")
-    _log("orchestrator", f"  Health interval: {HEALTH_INTERVAL}s")
-    _log("orchestrator", f"  Living layers interval: {LIVING_INTERVAL}s")
     _log("orchestrator", f"  Max daily: {MAX_DAILY}")
+    _log("orchestrator", f"  Signal bus: active")
     _log("orchestrator", "=" * 60)
 
+    # Strange Loop Phase 0: unified swarm tick handles evolution + living layers + health
+    # Only genuinely independent loops remain as separate tasks
     tasks = [
-        asyncio.create_task(run_swarm_loop(shutdown_event), name="swarm"),
+        asyncio.create_task(run_swarm_loop(shutdown_event, signal_bus=bus), name="swarm"),
         asyncio.create_task(run_pulse_loop(shutdown_event), name="pulse"),
-        asyncio.create_task(run_evolution_loop(shutdown_event), name="evolution"),
-        asyncio.create_task(run_health_loop(shutdown_event), name="health"),
-        asyncio.create_task(run_living_layers(shutdown_event), name="living"),
+        asyncio.create_task(
+            _run_recognition_loop(shutdown_event), name="recognition"
+        ),
     ]
 
     _log("orchestrator", f"All {len(tasks)} systems launched")

@@ -260,6 +260,8 @@ class DarwinEngine:
         self.last_landscape_probe: LandscapeProbe | None = None
         self.last_experiment_memory: ExperimentMemorySnapshot | None = None
         self.landscape_mapper = FitnessLandscapeMapper(self)
+        self._forge: Any | None = None
+        self._system_rv: Any | None = None
         self._dse_integrator: Any | None = None
         self._initialized: bool = False
         # Phase 4 velocity: content-hash skip for unchanged files

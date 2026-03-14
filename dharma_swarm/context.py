@@ -600,7 +600,7 @@ ROLE_PROFILES = {
 }
 
 # Budget: total chars for context injection
-CONTEXT_BUDGET = 30_000
+CONTEXT_BUDGET = 33_000  # Increased from 30K to fit L7+L8+L9 strange loop layers
 
 MEMORY_SURVIVAL_DIRECTIVE = (
     "\n\n## CRITICAL: MEMORY SURVIVAL\n"
@@ -613,6 +613,128 @@ MEMORY_SURVIVAL_DIRECTIVE = (
     "Read ~/.dharma/shared/ FIRST to see what other agents already found.\n"
     "Failure to externalize = permanent knowledge loss."
 )
+
+
+# ── L7/L8/L9: Winners + Stigmergy + META ────────────────────────────
+
+STIGMERGY_DIR = STATE_DIR / "stigmergy"
+META_DIR = STATE_DIR / "meta"
+
+
+def _read_winners(state_dir: Path | None = None, max_chars: int = 1500) -> str:
+    """L7: Read top forge scores and evolution winners for amplification."""
+    base = state_dir or STATE_DIR
+    sections = []
+    scoring_file = base / "stigmergy" / "mycelium_scoring_report.json"
+    if scoring_file.exists():
+        try:
+            data = json.loads(scoring_file.read_text())
+            top = data.get("top_3", [])
+            if top:
+                lines = ["## L7: Quality Winners (Forge Scores)"]
+                lines.append(f"Mean stars: {data.get('mean_stars', '?')}")
+                for entry in top[:3]:
+                    name = entry.get("name", "?")
+                    stars = entry.get("stars", 0)
+                    sw = entry.get("swabhaav_ratio", 0)
+                    lines.append(f"  {stars:.1f}* {name} (swabhaav={sw:.2f})")
+                sections.append("\n".join(lines))
+        except Exception:
+            pass
+    evo_dir = base / "evolution"
+    if evo_dir.exists():
+        try:
+            archive_file = evo_dir / "archive.jsonl"
+            if archive_file.exists():
+                lines_raw = archive_file.read_text().strip().split("\n")
+                winners = []
+                for line in lines_raw[-20:]:
+                    if not line.strip():
+                        continue
+                    try:
+                        entry = json.loads(line)
+                        fitness = entry.get("fitness", 0)
+                        if fitness >= 0.7:
+                            winners.append(entry)
+                    except (json.JSONDecodeError, TypeError):
+                        continue
+                if winners:
+                    winners.sort(key=lambda w: w.get("fitness", 0), reverse=True)
+                    wlines = ["## Evolution Winners"]
+                    for w in winners[:3]:
+                        comp = w.get("component", "?")
+                        fit = w.get("fitness", 0)
+                        gen = w.get("generation", "?")
+                        wlines.append(f"  {fit:.2f} fitness: {comp} (gen {gen})")
+                    sections.append("\n".join(wlines))
+        except Exception:
+            pass
+    result = "\n\n".join(sections)
+    return result[:max_chars] if result else ""
+
+
+def _read_stigmergy_signals(state_dir: Path | None = None, max_chars: int = 1500) -> str:
+    """L8: Read high-salience stigmergy marks for agent context."""
+    base = state_dir or STATE_DIR
+    stig_dir = base / "stigmergy"
+    if not stig_dir.exists():
+        return ""
+    sections = ["## L8: Stigmergy Signals"]
+    marks_file = stig_dir / "marks.jsonl"
+    if marks_file.exists():
+        try:
+            lines = marks_file.read_text().strip().split("\n")
+            hot_marks = []
+            for line in lines[-50:]:
+                if not line.strip():
+                    continue
+                try:
+                    mark = json.loads(line)
+                    sal = mark.get("salience", 0)
+                    if sal >= 0.7:
+                        hot_marks.append(mark)
+                except (json.JSONDecodeError, TypeError):
+                    continue
+            if hot_marks:
+                hot_marks.sort(key=lambda m: m.get("salience", 0), reverse=True)
+                for m in hot_marks[:5]:
+                    path = m.get("path", "?")
+                    sal = m.get("salience", 0)
+                    src = m.get("source", "?")
+                    desc = m.get("description", "")[:80]
+                    sections.append(f"  [{sal:.2f}] {path} ({src}): {desc}")
+        except Exception:
+            pass
+    tcs_file = stig_dir / "mycelium_identity_tcs.json"
+    if tcs_file.exists():
+        try:
+            tcs_data = json.loads(tcs_file.read_text())
+            tcs = tcs_data.get("tcs", 0)
+            regime = tcs_data.get("regime", "unknown")
+            sections.append(f"  System TCS: {tcs:.3f} ({regime})")
+        except Exception:
+            pass
+    result = "\n".join(sections)
+    return result[:max_chars] if len(sections) > 1 else ""
+
+
+def _read_recognition_seed(state_dir: Path | None = None, max_chars: int = 2000) -> str:
+    """L9: Read the recognition seed — the strange loop's self-model."""
+    base = state_dir or STATE_DIR
+    seed_path = base / "meta" / "recognition_seed.md"
+    if not seed_path.exists():
+        return ""
+    try:
+        content = seed_path.read_text()
+        content = scan_and_sanitize(content, "recognition_seed.md")
+        if not content.strip():
+            return ""
+        header = "## L9: META -- Recognition Seed\n"
+        if len(content) > max_chars - len(header):
+            content = content[:max_chars - len(header)] + "\n... [seed truncated]"
+        return header + content
+    except Exception:
+        return ""
 
 
 def build_agent_context(
@@ -688,6 +810,34 @@ def build_agent_context(
         if memories:
             sections.append(memories)
             used += len(memories)
+
+    # L7: Winners — amplification of highest-quality patterns
+    remaining = budget - used
+    if remaining > 500:
+        winners = _read_winners(state_dir=state_dir, max_chars=min(1500, remaining // 3))
+        if winners:
+            sections.append(winners)
+            used += len(winners)
+
+    # L8: Stigmergy — hot signals from daemons and other agents
+    remaining = budget - used
+    if remaining > 500:
+        stigmergy = _read_stigmergy_signals(
+            state_dir=state_dir, max_chars=min(1500, remaining // 3)
+        )
+        if stigmergy:
+            sections.append(stigmergy)
+            used += len(stigmergy)
+
+    # L9: META — recognition seed (strange loop closure)
+    remaining = budget - used
+    if remaining > 500:
+        seed = _read_recognition_seed(
+            state_dir=state_dir, max_chars=min(2000, remaining)
+        )
+        if seed:
+            sections.append(seed)
+            used += len(seed)
 
     # Memory survival instinct (Windsurf pattern)
     sections.append(MEMORY_SURVIVAL_DIRECTIVE)

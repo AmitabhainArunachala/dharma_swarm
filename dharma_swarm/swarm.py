@@ -116,6 +116,7 @@ class SwarmManager:
         self._director: Any = None               # ThinkodynamicDirector
         self._director_interval_ticks: int = 10  # Run director every N ticks
         self._tick_count: int = 0
+        self._living_interval_ticks: int = 3   # Run living layers every N ticks
 
         # v0.6.0: Hermes-inspired integration
         self._tool_registry: Any = None    # ToolRegistry
@@ -900,6 +901,17 @@ class SwarmManager:
             return activity > 0
         return bool(activity)
 
+    async def _tick_living_layers(self) -> dict[str, int]:
+        """Run stigmergy decay and other living-layer maintenance."""
+        summary: dict[str, int] = {}
+        if self._stigmergy:
+            try:
+                decayed = await self._stigmergy.decay()
+                summary["stigmergy_decayed"] = decayed
+            except Exception:
+                pass
+        return summary
+
     def _derive_failure_source(self, task: Task) -> str:
         meta = dict(task.metadata or {})
         source = str(meta.get("last_failure_source", "")).strip()
@@ -1070,6 +1082,81 @@ class SwarmManager:
             logger.debug("Director pulse error: %s", exc)
             return []
 
+    async def tick(self) -> dict[str, Any]:
+        """Execute one full swarm lifecycle tick.
+
+        This is the unified control path -- the ONLY way to advance
+        swarm state.  Both run() and orchestrate_live call this.
+        """
+        result: dict[str, Any] = {
+            "paused": False, "circuit_broken": False,
+            "dispatched": 0, "settled": 0, "rescued": 0,
+            "synthesized": 0, "director_proposals": 0,
+            "reopened": 0, "living_summary": {},
+        }
+        overrides = self._check_human_overrides()
+        if overrides["paused"]:
+            result["paused"] = True
+            return result
+        if overrides["focus"] and self._thread_mgr:
+            self._thread_mgr._current_thread = overrides["focus"]
+        if self._daemon.circuit_breaker.is_broken:
+            result["circuit_broken"] = True
+            return result
+
+        allow_autonomous_generation = True
+        if self._in_quiet_hours():
+            allow_autonomous_generation = False
+        if not self._contribution_allowed():
+            allow_autonomous_generation = False
+
+        rescued: list[Task] = []
+        now = datetime.now(timezone.utc)
+        if (self._last_auto_rescue_scan is None
+            or (now - self._last_auto_rescue_scan).total_seconds()
+            >= self._auto_rescue_scan_interval_seconds):
+            rescued = await self.rescue_recent_failures()
+            self._last_auto_rescue_scan = now
+        result["rescued"] = len(rescued)
+
+        reopened: list[Any] = []
+        if allow_autonomous_generation:
+            reopened = await self.spawn_latent_gold_tasks()
+        result["reopened"] = len(reopened)
+
+        activity = await self._orchestrator.tick()
+        result["dispatched"] = activity.get("dispatched", 0)
+        result["settled"] = activity.get("settled", 0)
+
+        coordination = await self.coordination_status(refresh=False)
+        synthesized = await self.spawn_coordination_tasks(coordination=coordination)
+        result["synthesized"] = len(synthesized)
+
+        director_proposals: list[Task] = []
+        self._tick_count += 1
+        if (allow_autonomous_generation and self._director is not None
+            and self._tick_count % self._director_interval_ticks == 0):
+            try:
+                director_proposals = await self._director_pulse()
+            except Exception:
+                pass
+        result["director_proposals"] = len(director_proposals)
+
+        living_summary: dict[str, int] = {}
+        if self._tick_count % self._living_interval_ticks == 0:
+            living_summary = await self._tick_living_layers()
+        result["living_summary"] = living_summary
+
+        did_work = (bool(reopened) or bool(rescued) or bool(synthesized)
+                    or bool(director_proposals) or self._tick_did_work(activity))
+        if did_work:
+            self._last_contribution = datetime.now()
+            self._daily_contributions += 1
+            self._daemon.circuit_breaker.record_success()
+            if self._thread_mgr:
+                self._thread_mgr.record_contribution()
+        return result
+
     async def run(self, interval: float | None = None) -> None:
         """Run the orchestration loop with Garden Daemon parameters.
 
@@ -1080,109 +1167,19 @@ class SwarmManager:
 
         while self._running:
             try:
-                # Check human overrides
-                overrides = self._check_human_overrides()
-                if overrides["paused"]:
-                    logger.info("Swarm paused by .PAUSE file")
-                    await asyncio.sleep(60)  # check again in a minute
+                activity = await self.tick()
+                if activity.get("paused"):
+                    await asyncio.sleep(60)
                     continue
-
-                # Apply focus override to thread manager
-                if overrides["focus"] and self._thread_mgr:
-                    self._thread_mgr._current_thread = overrides["focus"]
-
-                # Check circuit breaker
-                if self._daemon.circuit_breaker.is_broken:
-                    logger.warning("Circuit breaker tripped, paused")
+                if activity.get("circuit_broken"):
                     await asyncio.sleep(min(tick_interval, 300))
                     continue
-
-                allow_autonomous_generation = True
-                if self._in_quiet_hours():
-                    logger.debug("In quiet hours, autonomous task generation paused")
-                    allow_autonomous_generation = False
-                if not self._contribution_allowed():
-                    logger.debug("Rate limit: autonomous contribution not allowed yet")
-                    allow_autonomous_generation = False
-
-                rescued: list[Task] = []
-                now = datetime.now(timezone.utc)
-                if (
-                    self._last_auto_rescue_scan is None
-                    or (now - self._last_auto_rescue_scan).total_seconds()
-                    >= self._auto_rescue_scan_interval_seconds
-                ):
-                    rescued = await self.rescue_recent_failures()
-                    self._last_auto_rescue_scan = now
-                    if rescued:
-                        logger.info(
-                            "Rescued %d failed task(s) into pending",
-                            len(rescued),
-                        )
-
-                reopened: list[Any] = []
-                if allow_autonomous_generation:
-                    reopened = await self.spawn_latent_gold_tasks()
-                    if reopened:
-                        logger.info(
-                            "Reopened %d latent-gold follow-up task(s)",
-                            len(reopened),
-                        )
-
-                # Run orchestration tick
-                activity = await self._orchestrator.tick()
-                coordination = await self.coordination_status(refresh=False)
-                synthesized = await self.spawn_coordination_tasks(
-                    coordination=coordination
-                )
-                if synthesized:
-                    logger.info(
-                        "Spawned %d coordination synthesis task(s)",
-                        len(synthesized),
-                    )
-
-                # Thinkodynamic Director: periodic vision pulse
-                director_proposals: list[Task] = []
-                self._tick_count += 1
-                if (
-                    allow_autonomous_generation
-                    and self._director is not None
-                    and self._tick_count % self._director_interval_ticks == 0
-                ):
-                    try:
-                        director_proposals = await self._director_pulse()
-                    except Exception as exc:
-                        logger.debug("Director pulse failed (non-fatal): %s", exc)
-
-                did_work = (
-                    bool(reopened)
-                    or bool(rescued)
-                    or bool(synthesized)
-                    or bool(director_proposals)
-                    or self._tick_did_work(activity)
-                )
-
-                # Record contribution only when work actually occurred.
-                if did_work:
-                    self._last_contribution = datetime.now()
-                    self._daily_contributions += 1
-                    self._daemon.circuit_breaker.record_success()
-
-                    if self._thread_mgr:
-                        self._thread_mgr.record_contribution()
-
             except Exception as exc:
                 logger.exception("Tick failed: %s", exc)
                 tripped = self._daemon.circuit_breaker.record_failure()
                 if tripped:
-                    logger.error(
-                        "Circuit breaker tripped after %d consecutive failures",
-                        self._daemon.circuit_breaker.consecutive_failures,
-                    )
-                    # Switch thread on downtrend
                     if self._thread_mgr:
                         self._thread_mgr.rotate()
-
             await asyncio.sleep(tick_interval)
 
     def stop(self) -> None:

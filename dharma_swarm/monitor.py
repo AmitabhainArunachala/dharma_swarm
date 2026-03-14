@@ -82,10 +82,10 @@ class HealthReport(BaseModel):
 
 def _is_failure(entry: TraceEntry) -> bool:
     """Return True if *entry* represents a failed operation."""
-    if entry.state == "failed":
+    if entry.state in ("failed", "rejected", "blocked", "rolled_back"):
         return True
     action_lower = entry.action.lower()
-    return "fail" in action_lower or "error" in action_lower
+    return any(w in action_lower for w in ("fail", "error", "rejected", "blocked", "rolled_back"))
 
 
 def _entries_in_window(
