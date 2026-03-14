@@ -493,11 +493,23 @@ class OpenRouterFreeProvider(LLMProvider):
     # Free models on OpenRouter (verified March 2026)
     FREE_MODELS = [
         "meta-llama/llama-3.3-70b-instruct:free",
+        "deepseek/deepseek-r1:free",
+        "qwen/qwen-2.5-72b-instruct:free",
+        "google/gemini-2.0-flash-exp:free",
         "nousresearch/hermes-3-llama-3.1-405b:free",
         "google/gemma-3-27b-it:free",
         "mistralai/mistral-small-3.1-24b-instruct:free",
+        "microsoft/phi-4:free",
         "google/gemma-3-12b-it:free",
     ]
+
+    # Tiered fleet organisation (mirrors free_fleet.py TIER_MODELS)
+    FREE_FLEET_TIERS: dict[int, list[str]] = {
+        1: ["deepseek/deepseek-r1:free", "meta-llama/llama-3.3-70b-instruct:free"],
+        2: ["qwen/qwen-2.5-72b-instruct:free", "google/gemini-2.0-flash-exp:free", "nousresearch/hermes-3-llama-3.1-405b:free"],
+        3: ["microsoft/phi-4:free", "mistralai/mistral-small-3.1-24b-instruct:free"],
+    }
+    FREE_FLEET_ALL: list[str] = [m for tier in FREE_FLEET_TIERS.values() for m in tier]
 
     def __init__(self, api_key: str | None = None, model: str | None = None) -> None:
         self._api_key = api_key or os.environ.get("OPENROUTER_API_KEY")

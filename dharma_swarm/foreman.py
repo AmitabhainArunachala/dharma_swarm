@@ -33,6 +33,7 @@ DHARMA_DIR = Path(os.getenv("DHARMA_HOME", Path.home() / ".dharma"))
 FOREMAN_DIR = DHARMA_DIR / "foreman"
 PROJECTS_FILE = FOREMAN_DIR / "projects.json"
 CYCLES_FILE = FOREMAN_DIR / "cycles.jsonl"
+HISTORY_FILE = FOREMAN_DIR / "history.jsonl"
 
 QUALITY_DIMENSIONS = [
     "has_tests",
@@ -110,6 +111,23 @@ def save_projects(projects: list[ProjectEntry]) -> None:
         except OSError:
             pass
         raise
+
+
+def record_snapshot(projects: list[ProjectEntry]) -> None:
+    """Append a snapshot of project scores to HISTORY_FILE."""
+    _ensure_dirs()
+    ts = _utc_now().isoformat()
+    with open(HISTORY_FILE, "a", encoding="utf-8") as f:
+        for proj in projects:
+            f.write(
+                json.dumps({
+                    "ts": ts,
+                    "path": str(proj.path),
+                    "name": proj.name,
+                    "last_score": proj.last_score,
+                    "last_grade": proj.last_grade,
+                }) + "\n"
+            )
 
 
 def add_project(

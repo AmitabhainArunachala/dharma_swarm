@@ -225,6 +225,7 @@ def create_job(
     repeat: int | None = None,
     deliver: str = "local",
     urgent: bool = False,
+    **extras: Any,
 ) -> dict[str, Any]:
     """Create a new cron job.
 
@@ -261,6 +262,8 @@ def create_job(
         "last_error": None,
         "deliver": deliver,
     }
+    if extras:
+        job.update(extras)
 
     jobs = load_jobs()
     jobs.append(job)

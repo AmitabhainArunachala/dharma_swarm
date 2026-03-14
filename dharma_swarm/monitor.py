@@ -560,19 +560,25 @@ class SystemMonitor:
             result: dict[str, Any] = {
                 "status": "active",
                 "type": type(bridge).__name__,
-                "measurement_count": bridge.measurement_count,
+                "measurement_count": getattr(bridge, "measurement_count", 0),
             }
 
-            correlation = bridge.compute_correlation()
-            result["correlation"] = {
-                "n": correlation.n,
-                "pearson_r": correlation.pearson_r,
-                "spearman_rho": correlation.spearman_rho,
-                "contraction_recognition_overlap": correlation.contraction_recognition_overlap,
-                "summary": correlation.summary,
-            }
+            try:
+                correlation = bridge.compute_correlation()
+                result["correlation"] = {
+                    "n": correlation.n,
+                    "pearson_r": correlation.pearson_r,
+                    "spearman_rho": correlation.spearman_rho,
+                    "contraction_recognition_overlap": correlation.contraction_recognition_overlap,
+                    "summary": correlation.summary,
+                }
+            except Exception:
+                pass
 
-            result["group_summary"] = bridge.group_summary()
+            try:
+                result["group_summary"] = bridge.group_summary()
+            except Exception:
+                pass
 
             return result
         except Exception:

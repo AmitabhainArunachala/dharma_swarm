@@ -922,6 +922,121 @@ def _detect_task_repetitions(depth: int = 8, threshold: int = 3) -> list[str]:
     return [title for title, n in counts.most_common() if n >= threshold]
 
 
+# ---------------------------------------------------------------------------
+# Convergence detector — measure real progress toward telos
+# ---------------------------------------------------------------------------
+
+_TELOS_SIGNAL_WEIGHTS: dict[str, float] = {
+    # Universal welfare / Jagat Kalyan
+    "jagat kalyan": 4.0,
+    "universal welfare": 4.0,
+    "welfare": 2.0,
+    "ecological": 3.0,
+    "restoration": 3.0,
+    "regenerat": 2.5,
+    # Consciousness / awareness
+    "consciousness": 3.0,
+    "witness": 3.0,
+    "swabhaav": 3.0,
+    "awareness": 2.0,
+    "awakening": 2.5,
+    # System health / evolution
+    "health": 1.5,
+    "evolution": 2.0,
+    "evolv": 2.0,
+    "fitness": 1.5,
+    "improve": 1.5,
+    "optim": 1.5,
+    # Learning / knowledge
+    "learning": 2.0,
+    "knowledge": 1.5,
+    "insight": 2.0,
+    "understand": 1.5,
+    "research": 1.5,
+    # Creation / building
+    "creation": 2.0,
+    "creat": 1.5,
+    "build": 1.5,
+    "implement": 1.5,
+    "deploy": 1.5,
+    # Completion / delivery
+    "complet": 2.0,
+    "done": 1.5,
+    "delivered": 2.0,
+    "artifact": 1.5,
+    "success": 2.0,
+    "verified": 2.0,
+    "validated": 2.0,
+    "tested": 1.5,
+}
+
+# Maximum possible raw score (cap to normalize)
+_TELOS_MAX_SCORE: float = 20.0
+
+
+def _measure_telos_alignment(task_title: str, task_output: str) -> float:
+    """Score 0-1 how well a task title + output aligns with Jagat Kalyan telos.
+
+    Uses weighted keyword matching across both the task title and task output.
+    Title keywords get 2x weight since titles are deliberately chosen.
+
+    Args:
+        task_title: Short name of the task or opportunity.
+        task_output: Vision text or task result output.
+
+    Returns:
+        Float in [0, 1] where 1.0 = strong telos alignment.
+    """
+    combined_lower = task_title.lower()
+    output_lower = (task_output or "").lower()
+
+    raw = 0.0
+    for token, weight in _TELOS_SIGNAL_WEIGHTS.items():
+        # Title contributes double — titles are intentional
+        if token in combined_lower:
+            raw += weight * 2.0
+        if token in output_lower:
+            raw += weight
+
+    # Normalize to [0, 1]
+    return min(1.0, raw / _TELOS_MAX_SCORE)
+
+
+def _read_recent_convergence_scores(depth: int = 10) -> list[float]:
+    """Read telos_alignment scores from the last *depth* TD cycles.
+
+    Returns empty list when no log or no scores recorded yet.
+    """
+    cycle_log = STATE / "logs" / "thinkodynamic_director" / "cycles.jsonl"
+    if not cycle_log.exists():
+        return []
+    try:
+        lines = cycle_log.read_text(encoding="utf-8").strip().splitlines()
+    except Exception:
+        return []
+    scores: list[float] = []
+    for raw in lines[-depth:]:
+        try:
+            entry = json.loads(raw)
+            score = entry.get("telos_alignment_score")
+            if isinstance(score, (int, float)):
+                scores.append(float(score))
+        except Exception:
+            continue
+    return scores
+
+
+def _compute_convergence_score(depth: int = 10) -> float:
+    """Rolling average of the last *depth* telos_alignment scores.
+
+    Returns 0.0 when fewer than 2 data points exist (not enough history).
+    """
+    scores = _read_recent_convergence_scores(depth)
+    if len(scores) < 2:
+        return 0.0
+    return sum(scores) / len(scores)
+
+
 def _director_provider_timeout_seconds(timeout: int | float | None = None) -> float:
     """Bound provider fallback runtime so nested-session recovery fails fast."""
     override = os.getenv("DGC_THINKODYNAMIC_PROVIDER_TIMEOUT")
@@ -4156,6 +4271,22 @@ class ThinkodynamicDirector:
         )
         handoff_path = self._write_handoff(cycle_id=cycle_id, review=review) if review else None
 
+        # --- CONVERGENCE MEASUREMENT ---
+        # Score this cycle's telos alignment and compute rolling average.
+        _opportunity_title = primary.title if primary else workflow.opportunity_title
+        _vision_text = vision_result.get("vision_text", "")
+        cycle_telos_alignment = _measure_telos_alignment(
+            task_title=_opportunity_title,
+            task_output=_vision_text,
+        )
+        convergence_score = _compute_convergence_score(depth=10)
+        logger.debug(
+            "Cycle %s telos_alignment=%.3f rolling_convergence=%.3f",
+            cycle_id,
+            cycle_telos_alignment,
+            convergence_score,
+        )
+
         snapshot = {
             "cycle_id": cycle_id,
             "ts": _utc_ts(),
@@ -4181,6 +4312,8 @@ class ThinkodynamicDirector:
             "cycle_elapsed_min": round(cycle_elapsed_min, 2),
             "summary_path": str(summary_path),
             "handoff_path": str(handoff_path) if handoff_path else None,
+            "telos_alignment_score": round(cycle_telos_alignment, 4),
+            "convergence_score": round(convergence_score, 4),
         }
         _append_jsonl(self.log_dir / "cycles.jsonl", snapshot)
         _write_json(self.log_dir / "latest.json", snapshot)

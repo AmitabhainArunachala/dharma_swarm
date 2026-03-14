@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import difflib
 import random
+from dataclasses import dataclass, field
 from enum import Enum
 from pathlib import Path
 from statistics import mean, pvariance
@@ -251,3 +252,180 @@ class FitnessLandscapeMapper:
             BasinType.UNKNOWN: "explore",
         }
         return strategies.get(basin_type, "explore")
+
+
+# ---------------------------------------------------------------------------
+# FitnessLandscapeMap — time-series tracking per component type
+# ---------------------------------------------------------------------------
+
+
+class LandscapeEvent(str, Enum):
+    """Detected event in a component's fitness trajectory."""
+
+    NONE = "none"
+    PLATEAU = "plateau"        # fitness stuck for >= plateau_window cycles
+    REGRESSION = "regression"  # fitness dropped >= regression_pct from recent peak
+    BREAKTHROUGH = "breakthrough"  # fitness jumped >= breakthrough_pct
+
+
+@dataclass
+class ComponentLandscapeState:
+    """Per-component fitness history and current event."""
+
+    component_type: str
+    scores: list[float] = field(default_factory=list)
+    timestamps: list[str] = field(default_factory=list)
+    event: LandscapeEvent = field(default=LandscapeEvent.NONE)
+    event_detail: str = ""
+    peak_score: float = 0.0
+    trough_score: float = 1.0
+
+    def record(self, score: float, ts: str = "") -> None:
+        """Append a new fitness score and update peak/trough."""
+        self.scores.append(score)
+        self.timestamps.append(ts)
+        if score > self.peak_score:
+            self.peak_score = score
+        if score < self.trough_score:
+            self.trough_score = score
+
+    def recent_mean(self, window: int) -> float:
+        """Mean fitness over the last *window* scores."""
+        tail = self.scores[-window:]
+        return mean(tail) if tail else 0.0
+
+
+class FitnessLandscapeMap:
+    """Track fitness scores over time per component type.
+
+    Detects three landscape events:
+    - **plateau**: fitness variance is below threshold for >= plateau_window cycles.
+    - **regression**: current score dropped >= regression_pct from recent peak.
+    - **breakthrough**: current score jumped >= breakthrough_pct from recent mean.
+
+    Usage::
+
+        lmap = FitnessLandscapeMap()
+        lmap.record(component_type="swarm", score=0.72)
+        summary = lmap.landscape_summary()
+    """
+
+    def __init__(
+        self,
+        plateau_window: int = 5,
+        plateau_variance_threshold: float = 0.005,
+        regression_pct: float = 0.20,
+        breakthrough_pct: float = 0.30,
+    ) -> None:
+        self.plateau_window = max(2, int(plateau_window))
+        self.plateau_variance_threshold = float(plateau_variance_threshold)
+        self.regression_pct = float(regression_pct)
+        self.breakthrough_pct = float(breakthrough_pct)
+        self._states: dict[str, ComponentLandscapeState] = {}
+
+    def record(
+        self,
+        component_type: str,
+        score: float,
+        ts: str = "",
+    ) -> LandscapeEvent:
+        """Record a fitness score for a component and return the detected event.
+
+        Args:
+            component_type: Logical category of the component (e.g. "swarm", "agent").
+            score: Weighted fitness score in [0, 1].
+            ts: ISO timestamp string; defaults to empty string.
+
+        Returns:
+            The :class:`LandscapeEvent` detected after recording this score.
+        """
+        score = max(0.0, min(1.0, float(score)))
+        if component_type not in self._states:
+            self._states[component_type] = ComponentLandscapeState(
+                component_type=component_type
+            )
+        state = self._states[component_type]
+        prev_scores = list(state.scores)
+        state.record(score, ts)
+
+        event = self._detect_event(state, score, prev_scores)
+        state.event = event
+        state.event_detail = self._event_detail(event, state, score)
+        return event
+
+    def _detect_event(
+        self,
+        state: ComponentLandscapeState,
+        new_score: float,
+        prev_scores: list[float],
+    ) -> LandscapeEvent:
+        """Determine which event, if any, occurred at this score."""
+        if len(state.scores) < 2:
+            return LandscapeEvent.NONE
+
+        # Breakthrough: jumped >= breakthrough_pct above recent mean (before this score)
+        if prev_scores:
+            prev_mean = mean(prev_scores[-self.plateau_window:])
+            if prev_mean > 0.0 and (new_score - prev_mean) / prev_mean >= self.breakthrough_pct:
+                return LandscapeEvent.BREAKTHROUGH
+
+        # Regression: dropped >= regression_pct below recent peak
+        if state.peak_score > 0.0:
+            drop_frac = (state.peak_score - new_score) / state.peak_score
+            if drop_frac >= self.regression_pct:
+                return LandscapeEvent.REGRESSION
+
+        # Plateau: last plateau_window scores have near-zero variance
+        window = state.scores[-self.plateau_window:]
+        if len(window) >= self.plateau_window:
+            var = pvariance(window)
+            if var < self.plateau_variance_threshold:
+                return LandscapeEvent.PLATEAU
+
+        return LandscapeEvent.NONE
+
+    @staticmethod
+    def _event_detail(
+        event: LandscapeEvent,
+        state: ComponentLandscapeState,
+        score: float,
+    ) -> str:
+        """Human-readable detail string for an event."""
+        if event == LandscapeEvent.PLATEAU:
+            return (
+                f"Plateau detected over last {len(state.scores)} scores "
+                f"(mean={state.recent_mean(len(state.scores)):.3f})"
+            )
+        if event == LandscapeEvent.REGRESSION:
+            drop_pct = (state.peak_score - score) / max(state.peak_score, 1e-9) * 100
+            return f"Regression {drop_pct:.1f}% from peak {state.peak_score:.3f}"
+        if event == LandscapeEvent.BREAKTHROUGH:
+            return f"Breakthrough to {score:.3f} (new high {state.peak_score:.3f})"
+        return ""
+
+    def get_state(self, component_type: str) -> ComponentLandscapeState | None:
+        """Return current landscape state for a component type, or None."""
+        return self._states.get(component_type)
+
+    def landscape_summary(self) -> dict[str, dict[str, object]]:
+        """Return a summary dict of current landscape state per component type.
+
+        Keys are component type strings.  Each value is a dict with:
+        - ``event``: current :class:`LandscapeEvent` value string
+        - ``event_detail``: human-readable explanation
+        - ``peak_score``: highest recorded fitness
+        - ``trough_score``: lowest recorded fitness
+        - ``n_records``: total number of scores recorded
+        - ``recent_mean``: mean of last ``plateau_window`` scores
+        """
+        summary: dict[str, dict[str, object]] = {}
+        for comp_type, state in self._states.items():
+            summary[comp_type] = {
+                "event": state.event.value,
+                "event_detail": state.event_detail,
+                "peak_score": round(state.peak_score, 4),
+                "trough_score": round(state.trough_score, 4),
+                "n_records": len(state.scores),
+                "recent_mean": round(state.recent_mean(self.plateau_window), 4),
+            }
+        return summary

@@ -113,6 +113,17 @@ MODELS: dict[str, ModelInfo] = {
     ),
 }
 
+# Extra alias variants (normalized from user input)
+_ALIAS_VARIANTS: dict[str, str] = {
+    "opus-4.6": "opus",
+    "opus 4.6": "opus",
+    "claude-opus-4-6": "opus",
+    "sonnet-4.6": "sonnet",
+    "sonnet 4.6": "sonnet",
+    "claude-sonnet-4-6": "sonnet",
+    "claude": "sonnet",  # generic "claude" → sonnet (default)
+}
+
 
 def get_current_model() -> str:
     """Get the currently active model from environment/config."""
@@ -146,9 +157,14 @@ def list_models(provider: ProviderType | None = None) -> list[ModelInfo]:
 
 def get_model_info(alias_or_id: str) -> ModelInfo | None:
     """Get model info by alias (e.g., 'opus') or full ID."""
-    # Try alias first
+    # Try direct alias first
     if alias_or_id in MODELS:
         return MODELS[alias_or_id]
+
+    # Try variant aliases (e.g. 'opus-4.6', 'sonnet 4.6')
+    canonical = _ALIAS_VARIANTS.get(alias_or_id.lower())
+    if canonical and canonical in MODELS:
+        return MODELS[canonical]
 
     # Try full ID match
     for model in MODELS.values():
@@ -156,6 +172,39 @@ def get_model_info(alias_or_id: str) -> ModelInfo | None:
             return model
 
     return None
+
+
+def resolve_model_request(request: str) -> tuple[ModelInfo | None, str | None]:
+    """Resolve a model request, preferring existing user config when request is generic.
+
+    If *request* is ``"claude"`` (or another generic alias), first checks
+    ``~/.claude/config.json`` for an existing model preference and returns
+    that if it's a Claude model.  Otherwise returns the default Claude model.
+
+    Returns:
+        (ModelInfo, note) where *note* describes how the model was resolved.
+    """
+    key = request.strip().lower()
+    if key == "claude":
+        # Check existing config
+        config_path = Path.home() / ".claude" / "config.json"
+        existing_id: str | None = None
+        if config_path.exists():
+            try:
+                cfg = json.loads(config_path.read_text(encoding="utf-8"))
+                existing_id = cfg.get("model")
+            except Exception:
+                pass
+        if existing_id:
+            m = get_model_info(existing_id)
+            if m and m.provider == ProviderType.ANTHROPIC:
+                return m, f"Using existing config model {m.id}"
+        # Fall through to default
+        default = MODELS.get("sonnet")
+        return default, f"Defaulting to {default.id}" if default else None
+
+    m = get_model_info(request)
+    return m, f"Resolved {request} → {m.id}" if m else None
 
 
 def format_model_table(_models: list[ModelInfo] | None = None) -> str:

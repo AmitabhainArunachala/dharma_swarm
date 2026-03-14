@@ -6,8 +6,10 @@ thread rotation, quality gates, circuit breakers, and human overrides.
 
 from __future__ import annotations
 
+import json
+from collections import Counter
 from dataclasses import dataclass, field
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 
@@ -25,7 +27,6 @@ class CircuitBreaker:
         """Record a failure. Returns True if circuit should break."""
         self.consecutive_failures += 1
         if self.consecutive_failures >= self.max_failures:
-            from datetime import timedelta
             self.paused_until = datetime.now(timezone.utc) + timedelta(seconds=self.cooldown_seconds)
             return True
         return False
@@ -165,3 +166,137 @@ V7_BASE_RULES = """You operate under seven non-negotiable rules:
 7. LEAVE MARKS — After completing any task, write your key observations to ~/.dharma/shared/{your_name}_notes.md (append, never overwrite). Note what you found, what surprised you, what connects to what. These marks are how the colony remembers across sessions.
 
 Quality bar: Every contribution must connect to prior work, propose sources, state engineering implications, make testable predictions. Written from necessity, not obligation."""
+
+
+# ---------------------------------------------------------------------------
+# Adaptive quiet hours — learn from actual activity patterns
+# ---------------------------------------------------------------------------
+
+_ACTIVITY_WINDOW_DAYS = 14
+_QUIET_HOUR_ACTIVITY_THRESHOLD = 3  # >= 3 active events in an hour → not quiet
+
+
+class AdaptiveQuietHours:
+    """Learn which hours the user is actually active and avoid interrupting them.
+
+    Records pulse activity timestamps in a rolling 14-day window.  Derives
+    adaptive quiet hours by finding hours that are consistently active
+    (above threshold) and treating *those* as protected work time.
+
+    The logic is inverted from naive quiet-hours: instead of silencing the
+    daemon during low-activity hours, we silence it during hours that show
+    *high user activity*, because that's when interruption is most costly.
+
+    Default static quiet hours ([2, 3, 4, 5]) remain as a floor — they are
+    always included, regardless of observed patterns.
+
+    Args:
+        state_dir: Path to ``~/.dharma/`` or equivalent state directory.
+        window_days: Number of days to retain in the rolling activity window.
+        activity_threshold: Min event count in an hour to mark it as active.
+        static_floor: Hours always treated as quiet, regardless of activity.
+    """
+
+    def __init__(
+        self,
+        state_dir: Path | None = None,
+        window_days: int = _ACTIVITY_WINDOW_DAYS,
+        activity_threshold: int = _QUIET_HOUR_ACTIVITY_THRESHOLD,
+        static_floor: list[int] | None = None,
+    ) -> None:
+        self.state_dir = state_dir or Path.home() / ".dharma"
+        self.window_days = max(1, int(window_days))
+        self.activity_threshold = max(1, int(activity_threshold))
+        self.static_floor: frozenset[int] = frozenset(
+            static_floor if static_floor is not None else [2, 3, 4, 5]
+        )
+        self._log_path = self.state_dir / "activity_log.jsonl"
+
+    # ------------------------------------------------------------------
+    # Write path
+    # ------------------------------------------------------------------
+
+    def record_activity(self, ts: datetime | None = None) -> None:
+        """Append an activity timestamp to the rolling log.
+
+        Args:
+            ts: UTC timestamp of the activity.  Defaults to now.
+        """
+        now = (ts or datetime.now(timezone.utc)).isoformat()
+        entry = json.dumps({"ts": now}) + "\n"
+        try:
+            self.state_dir.mkdir(parents=True, exist_ok=True)
+            with self._log_path.open("a", encoding="utf-8") as fh:
+                fh.write(entry)
+        except Exception:
+            pass  # Best-effort; never block the main daemon loop.
+
+    # ------------------------------------------------------------------
+    # Read / prune path
+    # ------------------------------------------------------------------
+
+    def _load_recent_timestamps(self) -> list[datetime]:
+        """Read and prune activity log to the rolling window."""
+        if not self._log_path.exists():
+            return []
+        cutoff = datetime.now(timezone.utc) - timedelta(days=self.window_days)
+        recent: list[datetime] = []
+        try:
+            lines = self._log_path.read_text(encoding="utf-8").splitlines()
+        except Exception:
+            return []
+        kept: list[str] = []
+        for line in lines:
+            line = line.strip()
+            if not line:
+                continue
+            try:
+                data = json.loads(line)
+                ts_str = data.get("ts", "")
+                dt = datetime.fromisoformat(ts_str)
+                if dt.tzinfo is None:
+                    dt = dt.replace(tzinfo=timezone.utc)
+                if dt >= cutoff:
+                    kept.append(line)
+                    recent.append(dt)
+            except Exception:
+                continue
+        # Prune stale entries in-place when more than 20% were dropped
+        if len(kept) < len(lines) * 0.8:
+            try:
+                self._log_path.write_text(
+                    "\n".join(kept) + ("\n" if kept else ""), encoding="utf-8"
+                )
+            except Exception:
+                pass
+        return recent
+
+    def active_hours(self) -> set[int]:
+        """Return the set of UTC hours that exceed the activity threshold.
+
+        An hour is considered *active* when the rolling 14-day window contains
+        at least ``activity_threshold`` recorded events in that hour.
+        """
+        timestamps = self._load_recent_timestamps()
+        counts: Counter[int] = Counter(dt.hour for dt in timestamps)
+        return {hour for hour, count in counts.items() if count >= self.activity_threshold}
+
+    def compute_quiet_hours(self) -> list[int]:
+        """Derive the current adaptive quiet hours list.
+
+        Returns hours that are in either the static floor **or** the active
+        hours set.  The rationale: static floor = deep night (always quiet);
+        active hours = user is working (avoid interrupting).
+
+        Returns:
+            Sorted list of hour integers in [0, 23].
+        """
+        quiet = set(self.static_floor) | self.active_hours()
+        return sorted(quiet)
+
+    def update_config(self, config: "DaemonConfig") -> None:
+        """Mutate *config.quiet_hours* in-place with adaptive values.
+
+        Call this once per daemon tick, before the quiet-hours check.
+        """
+        config.quiet_hours = self.compute_quiet_hours()
