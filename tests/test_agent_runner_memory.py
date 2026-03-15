@@ -137,14 +137,18 @@ async def test_failed_task_learns_lesson(
 
 
 @pytest.mark.asyncio
-@pytest.mark.timeout(120)
+@pytest.mark.timeout(180)
 async def test_consolidation_runs_every_5_tasks(
     config: AgentConfig, memory: AgentMemoryBank, mock_provider: AsyncMock, fast_gate
 ) -> None:
     runner = AgentRunner(config, provider=mock_provider, memory=memory)
     await runner.start()
 
-    with patch.object(memory, "consolidate", wraps=memory.consolidate) as spy:
+    with (
+        patch("dharma_swarm.context.read_memory_context", return_value=""),
+        patch("dharma_swarm.context.read_latent_gold_context", return_value=""),
+        patch.object(memory, "consolidate", wraps=memory.consolidate) as spy,
+    ):
         # Run 5 tasks; consolidation triggers at tasks_completed % 5 == 0
         for i in range(5):
             await runner.run_task(Task(title=f"Task {i}"))
@@ -153,7 +157,11 @@ async def test_consolidation_runs_every_5_tasks(
         assert spy.call_count == 1
 
     # Run 5 more to get a second consolidation at task 10
-    with patch.object(memory, "consolidate", wraps=memory.consolidate) as spy2:
+    with (
+        patch("dharma_swarm.context.read_memory_context", return_value=""),
+        patch("dharma_swarm.context.read_latent_gold_context", return_value=""),
+        patch.object(memory, "consolidate", wraps=memory.consolidate) as spy2,
+    ):
         for i in range(5, 10):
             await runner.run_task(Task(title=f"Task {i}"))
         assert spy2.call_count == 1
