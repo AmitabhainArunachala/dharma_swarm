@@ -24,6 +24,7 @@ async def test_runner_start(config):
 
 
 @pytest.mark.asyncio
+@pytest.mark.timeout(60)
 async def test_runner_mock_task(config, fast_gate):
     runner = AgentRunner(config)
     await runner.start()
@@ -73,6 +74,7 @@ def test_build_prompt_handles_memory_context_import_failure(config, monkeypatch)
 
 
 @pytest.mark.asyncio
+@pytest.mark.timeout(60)
 async def test_runner_provider_error_string_marks_failure(config, fast_gate):
     from dharma_swarm.models import LLMResponse
 

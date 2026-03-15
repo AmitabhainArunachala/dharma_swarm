@@ -137,6 +137,7 @@ async def test_failed_task_learns_lesson(
 
 
 @pytest.mark.asyncio
+@pytest.mark.timeout(120)
 async def test_consolidation_runs_every_5_tasks(
     config: AgentConfig, memory: AgentMemoryBank, mock_provider: AsyncMock, fast_gate
 ) -> None:
@@ -234,6 +235,7 @@ async def test_memory_context_includes_agent_name(
 
 
 @pytest.mark.asyncio
+@pytest.mark.timeout(60)
 async def test_task_priority_maps_to_importance(
     config: AgentConfig, memory: AgentMemoryBank, mock_provider: AsyncMock, fast_gate
 ) -> None:
