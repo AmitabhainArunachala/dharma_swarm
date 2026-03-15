@@ -89,6 +89,7 @@ def _seed_agent_memory(mem_dir: Path, agent_name: str) -> None:
 # ---------------------------------------------------------------------------
 
 
+@pytest.mark.timeout(30)
 async def test_run_full_cycle_completes_all_phases(cycle: SleepCycle) -> None:
     report = await cycle.run_full_cycle()
     assert report.phases_completed == ["light", "deep", "rem", "semantic", "wake"]
@@ -142,6 +143,7 @@ async def test_rem_sleep_dreams_when_threshold(cycle: SleepCycle) -> None:
 # ---------------------------------------------------------------------------
 
 
+@pytest.mark.timeout(30)
 async def test_wake_writes_report(cycle: SleepCycle, tmp_path: Path) -> None:
     report = await cycle.run_full_cycle()
     reports_dir = tmp_path / "reports"
@@ -184,6 +186,7 @@ async def test_is_quiet_hours_false() -> None:
 # ---------------------------------------------------------------------------
 
 
+@pytest.mark.timeout(30)
 async def test_report_phase_list(cycle: SleepCycle) -> None:
     report = await cycle.run_full_cycle()
     assert "light" in report.phases_completed
@@ -197,6 +200,7 @@ async def test_report_phase_list(cycle: SleepCycle) -> None:
 # ---------------------------------------------------------------------------
 
 
+@pytest.mark.timeout(30)
 async def test_error_isolation(tmp_path: Path) -> None:
     bad_stigmergy = AsyncMock()
     bad_stigmergy.decay = AsyncMock(side_effect=RuntimeError("disk full"))
@@ -241,6 +245,7 @@ async def test_empty_memory_dir(tmp_path: Path) -> None:
 # ---------------------------------------------------------------------------
 
 
+@pytest.mark.timeout(30)
 async def test_graceful_degradation(tmp_path: Path) -> None:
     cycle = SleepCycle(
         agent_memory_dir=tmp_path / "agent_memory",

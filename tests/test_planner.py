@@ -84,6 +84,7 @@ def test_memory_survival_directive_injected():
 # === TEST 5: test_build_prompt_with_plan ===
 
 
+@pytest.mark.timeout(60)
 def test_build_prompt_with_plan():
     """Plan context is injected into the LLM request user message."""
     from dharma_swarm.agent_runner import _build_prompt
