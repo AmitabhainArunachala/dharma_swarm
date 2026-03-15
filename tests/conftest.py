@@ -56,3 +56,27 @@ def _isolate_dgc_env(monkeypatch):
     for key in list(os.environ):
         if any(key.startswith(prefix) for prefix in _DGC_LEAK_PREFIXES):
             monkeypatch.delenv(key)
+
+
+@pytest.fixture
+def fast_gate():
+    """Mock telos gate to return ALLOW instantly.
+
+    Use in tests that don't care about gate behavior to avoid
+    the ~10s overhead of the full reflective reroute cycle.
+    """
+    from unittest.mock import patch
+    from dharma_swarm.models import GateCheckResult, GateDecision
+    from dharma_swarm.telos_gates import ReflectiveGateOutcome
+
+    allow = ReflectiveGateOutcome(
+        result=GateCheckResult(
+            decision=GateDecision.ALLOW,
+            reason="All gates passed (test mock)",
+        ),
+    )
+    with patch(
+        "dharma_swarm.agent_runner.check_with_reflective_reroute",
+        return_value=allow,
+    ):
+        yield allow

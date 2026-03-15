@@ -333,7 +333,7 @@ async def test_leave_task_mark_best_effort(monkeypatch):
 
 
 @pytest.mark.asyncio
-async def test_run_task_provider_success_increments_counters():
+async def test_run_task_provider_success_increments_counters(fast_gate):
     cfg = AgentConfig(name="ok-agent", role=AgentRole.CODER)
     provider = AsyncMock()
     provider.complete = AsyncMock(return_value=LLMResponse(content="done", model="m"))
@@ -365,7 +365,7 @@ async def test_run_task_calls_leave_mark_on_success(monkeypatch):
 
 
 @pytest.mark.asyncio
-async def test_run_task_calls_leave_mark_on_failure(monkeypatch):
+async def test_run_task_calls_leave_mark_on_failure(monkeypatch, fast_gate):
     cfg = AgentConfig(name="mark-agent", role=AgentRole.CODER)
     provider = AsyncMock()
     provider.complete = AsyncMock(return_value=LLMResponse(content="", model="m"))
@@ -382,7 +382,7 @@ async def test_run_task_calls_leave_mark_on_failure(monkeypatch):
 
 
 @pytest.mark.asyncio
-async def test_run_task_provider_empty_content_is_failure():
+async def test_run_task_provider_empty_content_is_failure(fast_gate):
     cfg = AgentConfig(name="bad-agent", role=AgentRole.CODER)
     provider = AsyncMock()
     provider.complete = AsyncMock(return_value=LLMResponse(content="", model="m"))

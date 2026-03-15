@@ -58,7 +58,7 @@ class _RoutedProvider:
 
 
 @pytest.mark.asyncio
-async def test_run_task_uses_routed_provider_and_records_feedback() -> None:
+async def test_run_task_uses_routed_provider_and_records_feedback(fast_gate) -> None:
     provider = _RoutedProvider(content="Implemented fix in `module.py`.")
     runner = AgentRunner(
         AgentConfig(
@@ -92,7 +92,7 @@ async def test_run_task_uses_routed_provider_and_records_feedback() -> None:
 
 
 @pytest.mark.asyncio
-async def test_run_task_can_widen_provider_routing_from_task_metadata() -> None:
+async def test_run_task_can_widen_provider_routing_from_task_metadata(fast_gate) -> None:
     provider = _RoutedProvider(content="Compared two options and outlined tradeoffs.")
     runner = AgentRunner(
         AgentConfig(
@@ -125,7 +125,7 @@ async def test_run_task_can_widen_provider_routing_from_task_metadata() -> None:
 
 
 @pytest.mark.asyncio
-async def test_run_task_records_failure_feedback_for_routed_provider() -> None:
+async def test_run_task_records_failure_feedback_for_routed_provider(fast_gate) -> None:
     provider = _RoutedProvider(content="")
     runner = AgentRunner(
         AgentConfig(
