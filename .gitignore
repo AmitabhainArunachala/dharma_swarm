@@ -45,3 +45,6 @@ node_modules/
 
 # Temp files
 *.rej
+
+# Large generated graph files
+reports/psmv_hyperfiles_20260313/graphs/*.json
