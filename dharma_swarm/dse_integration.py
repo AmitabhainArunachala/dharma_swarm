@@ -279,7 +279,7 @@ class DSEIntegrator:
         self._observation_log = self._archive_path / "observations" / "coalgebra_stream.jsonl"
 
         # Monad with proxy R_V observer (real R_V requires torch)
-        self._monad: SelfObservationMonad[EvolutionObservation] = SelfObservationMonad(
+        self._monad: SelfObservationMonad = SelfObservationMonad(
             observer=self._proxy_rv_observer,
         )
         self._last_observed: Any = None  # ObservedState at varying nesting depths
@@ -334,7 +334,9 @@ class DSEIntegrator:
     def _proxy_rv_observer(obs: Any) -> RVReading:
         """Proxy R_V from cycle metadata when torch is unavailable."""
         if isinstance(obs, EvolutionObservation):
-            archived = obs.cycle_result.proposals_archived
+            # next_state is the CycleResult set by build_evolution_observation
+            next_s = obs.next_state
+            archived = int(getattr(next_s, "proposals_archived", 0))
         else:
             archived = 0
         contraction = 1.0 - min(archived, 5) * 0.1
@@ -387,27 +389,55 @@ class DSEIntegrator:
         double = self._monad.observe(observed)
         approaching_fp = is_idempotent(double, tolerance=0.05)
 
-        next_state = observation.next_state
-        component = (
-            next_state.component
-            if isinstance(next_state, (ArchiveEntry, Proposal))
-            else None
-        )
+        # Extract component from archive entries or proposals
+        component = None
+        for entry in archive_entries:
+            comp = getattr(entry, "component", None)
+            if comp:
+                component = comp
+                break
+        if component is None:
+            for p in proposals:
+                comp = getattr(p, "component", None)
+                if comp:
+                    component = comp
+                    break
+
+        # 4. Build an RVReading dict from the observation for downstream consumers
+        rv_reading_dict: dict[str, Any] | None = None
+        if observed.rv_measurement is not None:
+            rv_reading_dict = {
+                "rv": observed.rv_measurement,
+                "pr_early": observed.pr_early or 1.0,
+                "pr_late": observed.pr_late or observed.rv_measurement,
+                "model_name": observed.introspection.get("model", "evolution-proxy"),
+                "early_layer": 0,
+                "late_layer": 0,
+                "prompt_hash": observed.introspection.get("prompt_hash", "0" * 16),
+                "prompt_group": observed.introspection.get("prompt_group", "evolution_cycle"),
+            }
 
         # 4. Record to observation window + JSONL
-        record = observed.to_dict(state_serializer=lambda state: state.to_dict())
+        record: dict[str, Any] = {
+            "state_type": type(observed.state).__name__,
+            "rv_measurement": observed.rv_measurement,
+            "rv_reading": rv_reading_dict,
+            "observation_depth": observed.observation_depth,
+            "introspection": dict(observed.introspection),
+        }
         record.update(
             {
                 "cycle_id": result.cycle_id,
-                "rv": observed.rv_reading.rv if observed.rv_reading else None,
+                "rv": observed.rv_measurement,
                 "best_fitness": result.best_fitness,
                 "proposals_archived": result.proposals_archived,
                 "approaching_fixed_point": approaching_fp,
                 "discoveries_count": len(observation.discoveries),
                 "lessons": observation.discoveries[:5],
                 "component": component,
-                "archive_entry_id": observation.archive_entry_id,
-                "timestamp": observed.timestamp.isoformat(),
+                "timestamp": datetime.fromtimestamp(
+                    observed.timestamp, tz=timezone.utc
+                ).isoformat(),
             }
         )
         cycle_text = self._compose_cycle_text(result, observation)
@@ -533,7 +563,7 @@ class DSEIntegrator:
                 await self._research_bridge.load()
                 self._research_bridge_loaded = True
 
-            raw_rv = record.get("rv_reading")
+            raw_rv = record.get("rv_reading") or record.get("rv_measurement")
             rv_reading = (
                 RVReading.model_validate(raw_rv)
                 if isinstance(raw_rv, dict)
@@ -655,7 +685,8 @@ class DSEIntegrator:
     ) -> tuple[str, bool]:
         values: list[str] = []
         for proposal in proposals:
-            metadata = proposal.metadata if isinstance(proposal.metadata, dict) else {}
+            raw_meta = getattr(proposal, "metadata", None) or getattr(proposal, "test_results", None)
+            metadata = raw_meta if isinstance(raw_meta, dict) else {}
             for key in keys:
                 value = _coerce_text(metadata.get(key))
                 if value and value not in values:

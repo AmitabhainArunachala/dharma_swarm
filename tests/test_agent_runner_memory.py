@@ -165,7 +165,7 @@ async def test_consolidation_runs_every_5_tasks(
 
 @pytest.mark.asyncio
 async def test_memory_saves_after_successful_task(
-    config: AgentConfig, memory: AgentMemoryBank, mock_provider: AsyncMock
+    config: AgentConfig, memory: AgentMemoryBank, mock_provider: AsyncMock, fast_gate
 ) -> None:
     runner = AgentRunner(config, provider=mock_provider, memory=memory)
     await runner.start()
@@ -177,7 +177,7 @@ async def test_memory_saves_after_successful_task(
 
 @pytest.mark.asyncio
 async def test_memory_saves_after_failed_task(
-    config: AgentConfig, memory: AgentMemoryBank
+    config: AgentConfig, memory: AgentMemoryBank, fast_gate
 ) -> None:
     provider = AsyncMock()
     provider.complete = AsyncMock(

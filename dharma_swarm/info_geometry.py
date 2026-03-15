@@ -551,3 +551,115 @@ class MetaEvolutionStep:
             "is_dharmic": is_dharmic,
             "violations": self.attractor.constraint_violations(new_theta),
         }
+
+
+# ── MetaParameter <-> theta conversion ──────────────────────────────────
+
+# Canonical ordering of fitness dimensions for theta vector layout:
+#   [fitness_weight_0, ..., fitness_weight_N-1, mutation_rate, exploration_coeff,
+#    circuit_breaker_limit, map_elites_n_bins]
+
+def meta_parameters_to_theta(meta_params: Any) -> list[float]:
+    """Map MetaParameters to a flat theta vector on the statistical manifold.
+
+    Args:
+        meta_params: A MetaParameters instance (from meta_evolution.py).
+
+    Returns:
+        List of floats: fitness weights (sorted by key) + scalar hyperparams.
+    """
+    from dharma_swarm.archive import FITNESS_DIMENSIONS
+
+    theta: list[float] = []
+    weights = getattr(meta_params, "fitness_weights", {})
+    for dim in FITNESS_DIMENSIONS:
+        theta.append(float(weights.get(dim, 0.0)))
+    theta.append(float(getattr(meta_params, "mutation_rate", 0.1)))
+    theta.append(float(getattr(meta_params, "exploration_coeff", 1.0)))
+    theta.append(float(getattr(meta_params, "circuit_breaker_limit", 3)))
+    theta.append(float(getattr(meta_params, "map_elites_n_bins", 5)))
+    return theta
+
+
+def theta_to_meta_parameters(theta: Any) -> Any:
+    """Map a flat theta vector back to a MetaParameters instance.
+
+    Args:
+        theta: Sequence of floats from ``meta_parameters_to_theta``.
+
+    Returns:
+        A MetaParameters instance.
+    """
+    from dharma_swarm.archive import FITNESS_DIMENSIONS
+    from dharma_swarm.meta_evolution import MetaParameters
+
+    theta_list = list(theta)
+    n_dims = len(FITNESS_DIMENSIONS)
+    weights = {
+        dim: max(0.0, float(theta_list[i]))
+        for i, dim in enumerate(FITNESS_DIMENSIONS)
+    }
+    idx = n_dims
+    mutation_rate = float(theta_list[idx]) if idx < len(theta_list) else 0.1
+    exploration_coeff = float(theta_list[idx + 1]) if (idx + 1) < len(theta_list) else 1.0
+    circuit_breaker_limit = int(theta_list[idx + 2]) if (idx + 2) < len(theta_list) else 3
+    map_elites_n_bins = int(theta_list[idx + 3]) if (idx + 3) < len(theta_list) else 5
+
+    return MetaParameters(
+        fitness_weights=weights,
+        mutation_rate=mutation_rate,
+        exploration_coeff=exploration_coeff,
+        circuit_breaker_limit=max(1, circuit_breaker_limit),
+        map_elites_n_bins=max(1, map_elites_n_bins),
+    )
+
+
+def natural_meta_step(
+    meta_params_or_theta: Any,
+    loss_grad: Any,
+    step_size: float = 0.1,
+) -> Any:
+    """Take one natural gradient step on the meta-parameter manifold.
+
+    Uses the diagonal Fisher approximation for efficiency.
+
+    Args:
+        meta_params_or_theta: MetaParameters instance or flat theta vector.
+        loss_grad: Gradient of the loss w.r.t. theta (same length as theta).
+        step_size: Learning rate.
+
+    Returns:
+        Updated MetaParameters (if input was MetaParameters) or theta list.
+    """
+    from dharma_swarm.meta_evolution import MetaParameters
+
+    is_meta = isinstance(meta_params_or_theta, MetaParameters)
+    if is_meta:
+        theta = meta_parameters_to_theta(meta_params_or_theta)
+    else:
+        theta = list(meta_params_or_theta)
+
+    theta_arr = np.asarray(theta, dtype=float)
+    grad_arr = np.asarray(loss_grad, dtype=float)
+
+    # Pad or truncate gradient to match theta length
+    if len(grad_arr) < len(theta_arr):
+        grad_arr = np.pad(grad_arr, (0, len(theta_arr) - len(grad_arr)))
+    elif len(grad_arr) > len(theta_arr):
+        grad_arr = grad_arr[: len(theta_arr)]
+
+    # Diagonal Fisher approximation: G ≈ diag(theta^2 + eps)
+    eps = 1e-8
+    fisher_diag = theta_arr ** 2 + eps
+    natural_grad = grad_arr / fisher_diag
+
+    # Bound the step norm
+    grad_norm = float(np.linalg.norm(natural_grad))
+    if grad_norm > 1.0:
+        natural_grad = natural_grad / grad_norm
+
+    new_theta = theta_arr - step_size * natural_grad
+
+    if is_meta:
+        return theta_to_meta_parameters(new_theta.tolist())
+    return new_theta.tolist()

@@ -946,8 +946,7 @@ class TestObserveLedger:
         ledger = GaiaLedger(data_dir=tmp_path / "ledger")
         ledger.record_compute(_make_compute())
         result = observe_ledger(ledger)
-        assert result.rv_reading is not None
-        assert isinstance(result.rv_reading, RVReading)
+        assert result.rv_measurement is not None
 
     def test_observe_ledger_state_is_summary(self, tmp_path):
         ledger = GaiaLedger(data_dir=tmp_path / "ledger")

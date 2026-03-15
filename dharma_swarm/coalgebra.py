@@ -482,3 +482,55 @@ class DistributiveLaw:
             step_fn=lifted_step,
             name=f"{coalgebra.name}_lifted",
         )
+
+
+# ── Factory: CycleResult → EvolutionObservation ──────────────────────────
+
+def build_evolution_observation(
+    result: Any,
+    archive_entries: Any = (),
+    proposals: Any = (),
+) -> EvolutionObservation:
+    """Convert a CycleResult + archive entries + proposals into an observation.
+
+    Used by DSEIntegrator to bridge the evolution pipeline output into the
+    coalgebraic observation stream.
+
+    Args:
+        result: A CycleResult from DarwinEngine.run_cycle().
+        archive_entries: Sequence of ArchiveEntry from the cycle.
+        proposals: Sequence of Proposal from the cycle.
+
+    Returns:
+        EvolutionObservation capturing the cycle's observable outputs.
+    """
+    discoveries = list(getattr(result, "lessons_learned", []))
+    # Include archive entry descriptions as discoveries
+    for entry in archive_entries or ():
+        desc = getattr(entry, "description", None)
+        if desc and desc not in discoveries:
+            discoveries.append(desc)
+    # Include proposal descriptions as discoveries
+    for p in proposals or ():
+        desc = getattr(p, "description", None)
+        if desc and desc not in discoveries:
+            discoveries.append(desc)
+
+    best_fitness = float(getattr(result, "best_fitness", 0.0))
+    proposals_archived = int(getattr(result, "proposals_archived", 0))
+    # Proxy R_V from archived count: more archived → stronger contraction
+    rv_proxy = 1.0 - min(proposals_archived, 5) * 0.1
+
+    gate_decisions = []
+    for p in proposals or ():
+        gd = getattr(p, "gate_decision", None)
+        if gd:
+            gate_decisions.append(str(gd))
+
+    return EvolutionObservation(
+        next_state=result,
+        fitness=best_fitness,
+        rv=rv_proxy,
+        discoveries=discoveries,
+        gate_decision=gate_decisions[0] if gate_decisions else None,
+    )

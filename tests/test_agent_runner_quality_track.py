@@ -128,7 +128,7 @@ def test_build_prompt_appends_latent_gold(monkeypatch):
 
 
 @pytest.mark.asyncio
-async def test_run_task_records_retrieval_success_outcome(monkeypatch):
+async def test_run_task_records_retrieval_success_outcome(monkeypatch, fast_gate):
     cfg = AgentConfig(name="a", role=AgentRole.CODER)
     provider = AsyncMock()
     provider.complete = AsyncMock(return_value=LLMResponse(content="done", model="m"))
@@ -208,7 +208,7 @@ async def test_run_task_records_retrieval_success_outcome(monkeypatch):
 
 
 @pytest.mark.asyncio
-async def test_run_task_records_retrieval_failure_outcome(monkeypatch):
+async def test_run_task_records_retrieval_failure_outcome(monkeypatch, fast_gate):
     cfg = AgentConfig(name="a", role=AgentRole.CODER)
     provider = AsyncMock()
     provider.complete = AsyncMock(return_value=LLMResponse(content="", model="m"))
@@ -349,7 +349,7 @@ async def test_run_task_provider_success_increments_counters(fast_gate):
 
 
 @pytest.mark.asyncio
-async def test_run_task_calls_leave_mark_on_success(monkeypatch):
+async def test_run_task_calls_leave_mark_on_success(monkeypatch, fast_gate):
     cfg = AgentConfig(name="mark-agent", role=AgentRole.CODER)
     provider = AsyncMock()
     provider.complete = AsyncMock(return_value=LLMResponse(content="ok", model="m"))

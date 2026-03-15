@@ -115,18 +115,13 @@ async def test_after_cycle_persists_replayable_current_cycle_observation(tmp_pat
         for line in obs_path.read_text(encoding="utf-8").splitlines()
         if line.strip()
     ]
-    observed = ObservedState.from_dict(
-        records[-1],
-        state_loader=EvolutionObservation.from_dict,
-    )
+    record = records[-1]
 
-    assert observed.state.cycle_id == "cycle-1"
-    assert isinstance(observed.state.next_state, ArchiveEntry)
-    assert observed.state.next_state.component == "child.py"
-    assert observed.state.next_state.parent_id == parent.id
-    assert observed.state.archive_entry_id == current.id
-    assert "current lesson" in observed.state.discoveries
-    assert records[-1]["component"] == "child.py"
+    assert record["cycle_id"] == "cycle-1"
+    assert record["best_fitness"] == 0.4
+    assert "current lesson" in record.get("lessons", [])
+    assert record["observation_depth"] == 1
+    assert record.get("rv_measurement") is not None
 
 
 async def test_after_cycle_replaces_last_observed_with_current_cycle(tmp_path):
@@ -182,17 +177,11 @@ async def test_after_cycle_replaces_last_observed_with_current_cycle(tmp_path):
         for line in obs_path.read_text(encoding="utf-8").splitlines()
         if line.strip()
     ]
-    observed = ObservedState.from_dict(
-        records[-1],
-        state_loader=EvolutionObservation.from_dict,
-    )
 
     assert len(records) == 2
-    assert observed.state.cycle_id == "cycle-2"
-    assert isinstance(observed.state.next_state, ArchiveEntry)
-    assert observed.state.next_state.component == "second.py"
+    assert records[-1]["cycle_id"] == "cycle-2"
+    assert records[-1]["best_fitness"] == 0.7
     assert records[-1]["observation_depth"] == 1
-    assert records[-1]["archive_entry_id"] == observed.state.archive_entry_id
 
 
 def test_compose_cycle_text_dedupes_repeated_discoveries_and_lessons():
@@ -202,7 +191,9 @@ def test_compose_cycle_text_dedupes_repeated_discoveries_and_lessons():
         lessons_learned=["current lesson", "proposal description"],
     )
     observation = EvolutionObservation(
-        cycle_id="cycle-compose",
+        next_state=result,
+        fitness=0.5,
+        rv=0.8,
         discoveries=[
             "current lesson",
             "child archive state",

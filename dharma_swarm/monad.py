@@ -144,6 +144,55 @@ class SelfObservationMonad:
     # ── Tolerance for floating-point comparison in monad law checks ──
     EPSILON: float = 1e-6
 
+    def __init__(self, observer: Callable[..., RVReading] | None = None) -> None:
+        """Optionally attach a custom R_V observer callback.
+
+        Args:
+            observer: A callable that takes a state and returns an RVReading.
+                When provided, ``observe()`` uses this to produce R_V measurements
+                instead of returning proxy observations.
+        """
+        self._observer = observer
+
+    # ── observe: convenience wrapper ───────────────────────────────────
+
+    def observe(
+        self,
+        state: Any,
+        introspection: dict[str, Any] | None = None,
+    ) -> ObservedState:
+        """Apply one layer of self-observation to a state.
+
+        If the monad was constructed with an observer callback, it is called
+        to produce an RVReading.  Otherwise falls through to ``unit()``.
+
+        When the input is already an ObservedState, the result is a nested
+        observation (depth increases by 1).
+
+        Args:
+            state: The state to observe (can be bare or already observed).
+            introspection: Optional metadata dict to merge into the observation.
+
+        Returns:
+            An ObservedState wrapping the input with R_V metadata.
+        """
+        if self._observer is not None:
+            try:
+                reading = self._observer(state)
+                observed = ObservedState.from_rv_reading(state, reading)
+            except Exception:
+                observed = self.unit(state)
+        else:
+            observed = self.unit(state)
+
+        if isinstance(state, ObservedState):
+            observed.observation_depth = state.observation_depth + 1
+
+        if introspection:
+            observed.introspection.update(introspection)
+
+        return observed
+
     # ── eta: unit ──────────────────────────────────────────────────────
 
     @staticmethod
@@ -517,3 +566,10 @@ def _rv_close(a: Optional[float], b: Optional[float], eps: float) -> bool:
     if a is None or b is None:
         return False
     return abs(a - b) < eps
+
+
+# ── Module-level convenience wrappers ─────────────────────────────────────
+
+def is_idempotent(observed: ObservedState, tolerance: float = 0.05) -> bool:
+    """Module-level wrapper for ``SelfObservationMonad.is_idempotent``."""
+    return SelfObservationMonad.is_idempotent(observed, tolerance=tolerance)
