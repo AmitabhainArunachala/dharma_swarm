@@ -3836,6 +3836,9 @@ def cmd_cron(
     deliver: str = "local",
     urgent: bool = False,
     job_id: str = "",
+    interval_sec: float = 60.0,
+    max_loops: int | None = None,
+    run_immediately: bool = True,
 ) -> None:
     """Cron scheduler commands."""
     from dharma_swarm.cron_scheduler import (
@@ -3844,6 +3847,8 @@ def cmd_cron(
         remove_job,
         tick,
     )
+    from dharma_swarm.cron_daemon import run_cron_daemon
+    from dharma_swarm.cron_runner import run_cron_job
 
     match cron_cmd:
         case "add":
@@ -3878,11 +3883,18 @@ def cmd_cron(
             else:
                 print(f"  Job {job_id} not found")
         case "tick":
-            from dharma_swarm.review_cycle import review_run_fn
-            executed = tick(verbose=True, run_fn=review_run_fn)
+            executed = tick(verbose=True, run_fn=run_cron_job)
             print(f"  Tick complete: {executed} job(s) executed")
+        case "daemon":
+            executed = run_cron_daemon(
+                interval_sec=interval_sec,
+                max_loops=max_loops,
+                run_immediately=run_immediately,
+                tick_verbose=False,
+            )
+            print(f"  Cron daemon exited: {executed} job(s) executed")
         case _:
-            print("Usage: dgc cron {add|list|remove|tick}")
+            print("Usage: dgc cron {add|list|remove|tick|daemon}")
 
 
 def cmd_xray(
@@ -4238,6 +4250,11 @@ def _build_parser() -> argparse.ArgumentParser:
         epilog=__doc__,
     )
     sub = parser.add_subparsers(dest="command")
+
+    # -- living map --
+    p_map = sub.add_parser("map", help="Living map — all 8 layers, regenerated fresh from live sources")
+    p_map.add_argument("--json", action="store_true", help="JSON output")
+    p_map.add_argument("--layer", type=int, default=None, help="Single layer (0-7)")
 
     # -- status --
     sub.add_parser("status", help="System status overview")
@@ -4958,6 +4975,26 @@ def _build_parser() -> argparse.ArgumentParser:
     p_cron_rm = cron_sub.add_parser("remove", help="Remove a cron job")
     p_cron_rm.add_argument("job_id", help="Job ID to remove")
     cron_sub.add_parser("tick", help="Manually trigger a cron tick")
+    p_cron_daemon = cron_sub.add_parser("daemon", help="Run the cron scheduler as a local daemon")
+    p_cron_daemon.add_argument(
+        "--interval-sec",
+        type=float,
+        default=60.0,
+        help="Seconds between cron ticks",
+    )
+    p_cron_daemon.add_argument(
+        "--max-loops",
+        type=int,
+        default=None,
+        help="Stop after N tick loops (useful for testing)",
+    )
+    p_cron_daemon.add_argument(
+        "--no-run-immediately",
+        dest="run_immediately",
+        action="store_false",
+        help="Sleep for one interval before the first tick",
+    )
+    p_cron_daemon.set_defaults(run_immediately=True)
 
     # -- gateway (v0.6.0: Hermes-inspired messaging gateway) --
     p_gw = sub.add_parser("gateway", help="Start messaging gateway (v0.6.0)")
@@ -5497,7 +5534,17 @@ def main() -> None:
                 deliver=getattr(args, "deliver", "local"),
                 urgent=getattr(args, "urgent", False),
                 job_id=getattr(args, "job_id", ""),
+                interval_sec=getattr(args, "interval_sec", 60.0),
+                max_loops=getattr(args, "max_loops", None),
+                run_immediately=getattr(args, "run_immediately", True),
             )
+        case "map":
+            from dharma_swarm.living_map import generate, generate_json
+            if getattr(args, "json", False):
+                import json as _json
+                print(_json.dumps(generate_json(), indent=2, default=str))
+            else:
+                print(generate(layer=getattr(args, "layer", None)))
         case "gateway":
             cmd_gateway(config_path=args.config)
         case "free-fleet":

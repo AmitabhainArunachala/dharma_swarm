@@ -340,7 +340,7 @@ def get_due_jobs(quiet_hours: set[int] | None = None) -> list[dict[str, Any]]:
     """
     now = _utc_now()
     current_hour = datetime.now().hour  # local hour for quiet check
-    in_quiet = current_hour in (quiet_hours or DEFAULT_QUIET_HOURS)
+    in_quiet = current_hour in (DEFAULT_QUIET_HOURS if quiet_hours is None else quiet_hours)
 
     jobs = load_jobs()
     due: list[dict[str, Any]] = []
