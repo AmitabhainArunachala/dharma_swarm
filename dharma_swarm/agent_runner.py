@@ -30,7 +30,9 @@ from dharma_swarm.telos_gates import check_with_reflective_reroute
 
 logger = logging.getLogger(__name__)
 
-_HEARTBEAT_THRESHOLD = timedelta(seconds=60)
+from dharma_swarm.config import DEFAULT_CONFIG as _SWARM_CFG
+
+_HEARTBEAT_THRESHOLD = timedelta(seconds=_SWARM_CFG.agent.heartbeat_threshold_seconds)
 _ERROR_PREFIXES = (
     "error",
     "api error:",
@@ -660,12 +662,29 @@ def _looks_like_provider_failure(content: str) -> bool:
 
 
 def _task_file_path(task: Task) -> str:
-    """Infer file path context for a task mark."""
+    """Infer file path context for a task mark.
+
+    Priority:
+    1. Explicit metadata keys (file_path / target_file / path)
+    2. File path extracted from task title or description via regex
+    3. Fallback: task:<id>
+    """
+    import re
+
     meta = task.metadata or {}
     for key in ("file_path", "target_file", "path"):
         value = meta.get(key)
         if isinstance(value, str) and value.strip():
             return value.strip()
+
+    # Try to extract a file path from the task text
+    text = f"{task.title} {task.description}"
+    # Match paths like dharma_swarm/foo.py, ~/foo/bar.md, ./foo.json, /abs/path.txt
+    pattern = r'(?:[\w./~-]+/[\w./~-]*\.(?:py|md|json|yaml|yml|txt|ts|js|toml|cfg|ini|sh))'
+    match = re.search(pattern, text)
+    if match:
+        return match.group(0)
+
     return f"task:{task.id}"
 
 
@@ -903,6 +922,36 @@ class AgentRunner:
             # Strange loop: score agent output and emit fitness signal
             self._emit_fitness_signal(task, result)
 
+            # ── Telic Seam: record Outcome + ValueEvent + Contribution ──
+            try:
+                from dharma_swarm.telic_seam import get_seam
+                seam = get_seam()
+                outcome_id = seam.record_outcome(
+                    task,
+                    self._config.name,
+                    success=True,
+                    result_summary=result[:200] if result else "",
+                    duration_ms=completion_latency_ms,
+                )
+                if outcome_id:
+                    ve_id = seam.record_value_event(
+                        outcome_id, task, self._config.name,
+                        result_text=result[:200] if result else "",
+                        success=True,
+                        duration_ms=completion_latency_ms,
+                    )
+                    if ve_id:
+                        ve_obj = seam.registry.get_object(ve_id)
+                        cv = ve_obj.properties.get("composite_value", 0.0) if ve_obj else 0.0
+                        task_type = (task.metadata or {}).get("task_type", "general") if isinstance(task.metadata, dict) else "general"
+                        seam.record_contribution(
+                            ve_id, self._config.name,
+                            composite_value=cv,
+                            task_type=task_type,
+                        )
+            except Exception:
+                pass  # Seam recording is never fatal
+
             logger.info(
                 "Agent %s finished task %s", self._config.name, task.id
             )
@@ -937,6 +986,36 @@ class AgentRunner:
             self._record_follow_up_shard_outcome(task, outcome="failure", evidence_text=str(exc))
             self._mark_idea_outcome(task, outcome="failure")
             self._record_retrieval_outcome(task, outcome="failure")
+
+            # ── Telic Seam: record failure Outcome + ValueEvent + Contribution ──
+            try:
+                from dharma_swarm.telic_seam import get_seam
+                seam = get_seam()
+                outcome_id = seam.record_outcome(
+                    task,
+                    self._config.name,
+                    success=False,
+                    error=str(exc)[:200],
+                    duration_ms=completion_latency_ms,
+                )
+                if outcome_id:
+                    ve_id = seam.record_value_event(
+                        outcome_id, task, self._config.name,
+                        result_text=str(exc)[:200],
+                        success=False,
+                        duration_ms=completion_latency_ms,
+                    )
+                    if ve_id:
+                        ve_obj = seam.registry.get_object(ve_id)
+                        cv = ve_obj.properties.get("composite_value", 0.0) if ve_obj else 0.0
+                        task_type = (task.metadata or {}).get("task_type", "general") if isinstance(task.metadata, dict) else "general"
+                        seam.record_contribution(
+                            ve_id, self._config.name,
+                            composite_value=cv,
+                            task_type=task_type,
+                        )
+            except Exception:
+                pass  # Seam recording is never fatal
 
             async with self._lock:
                 self._state.status = AgentStatus.IDLE

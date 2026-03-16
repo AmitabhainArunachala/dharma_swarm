@@ -789,6 +789,8 @@ class OntologyRegistry:
             registry.register_type(obj_type)
         for link_def in _DOMAIN_LINKS:
             registry.register_link(link_def)
+        for link_def in _METABOLIC_LINKS:
+            registry.register_link(link_def)
         return registry
 
 
@@ -1099,9 +1101,258 @@ _DOMAIN_LINKS: list[LinkDef] = [
            inverse_name="informed_by"),
 ]
 
+_ACTION_PROPOSAL = ObjectType(
+    name="ActionProposal",
+    description="A proposed action before gate evaluation — the metabolic loop entry point",
+    properties={
+        "task_id": PropertyDef(name="task_id", property_type=PropertyType.STRING,
+                               required=True, immutable=True,
+                               description="Original task ID from orchestrator"),
+        "agent_id": PropertyDef(name="agent_id", property_type=PropertyType.STRING,
+                                required=True, description="Target agent for execution"),
+        "action_type": PropertyDef(name="action_type", property_type=PropertyType.ENUM,
+                                   enum_values=["dispatch", "fan_out", "pipeline",
+                                               "evolution", "manual"],
+                                   description="How this action entered the system"),
+        "title": PropertyDef(name="title", property_type=PropertyType.STRING,
+                             required=True, searchable=True),
+        "description": PropertyDef(name="description", property_type=PropertyType.TEXT),
+        "status": PropertyDef(name="status", property_type=PropertyType.ENUM,
+                              enum_values=["proposed", "gated", "approved", "rejected",
+                                          "executing", "completed", "failed"]),
+        "priority": PropertyDef(name="priority", property_type=PropertyType.ENUM,
+                                enum_values=["low", "normal", "high", "urgent"]),
+    },
+    actions=[
+        ActionDef(name="Propose", object_type="ActionProposal",
+                  description="Create a new action proposal",
+                  telos_gates=["AHIMSA", "SATYA"]),
+        ActionDef(name="Approve", object_type="ActionProposal",
+                  description="Approve after gate check",
+                  modifies=["status"]),
+        ActionDef(name="Reject", object_type="ActionProposal",
+                  description="Reject after gate check",
+                  modifies=["status"]),
+    ],
+    security=SecurityPolicy(audit_all=True),
+    telos_alignment=0.9,
+    shakti_energy=ShaktiEnergy.MAHAKALI,
+    icon="→",
+)
+
+_GATE_DECISION_TYPE = ObjectType(
+    name="GateDecisionRecord",
+    description="Result of telos gate evaluation on an ActionProposal",
+    properties={
+        "proposal_id": PropertyDef(name="proposal_id", property_type=PropertyType.STRING,
+                                    required=True, immutable=True,
+                                    description="ActionProposal this decision applies to"),
+        "decision": PropertyDef(name="decision", property_type=PropertyType.ENUM,
+                                enum_values=["allow", "block", "review"],
+                                required=True),
+        "reason": PropertyDef(name="reason", property_type=PropertyType.TEXT),
+        "gate_results": PropertyDef(name="gate_results", property_type=PropertyType.DICT,
+                                    description="Per-gate PASS/FAIL/WARN results"),
+        "witness_reroutes": PropertyDef(name="witness_reroutes",
+                                         property_type=PropertyType.INTEGER,
+                                         description="Number of reflective reroute attempts"),
+    },
+    actions=[
+        ActionDef(name="Record", object_type="GateDecisionRecord",
+                  description="Record a gate evaluation result"),
+    ],
+    security=SecurityPolicy(
+        write_roles=["orchestrator", "system"],
+        delete_roles=[],
+        audit_all=True,
+    ),
+    telos_alignment=1.0,
+    shakti_energy=ShaktiEnergy.MAHESHWARI,
+    icon="⊘",
+)
+
+_OUTCOME = ObjectType(
+    name="Outcome",
+    description="What happened after an ActionProposal was executed",
+    properties={
+        "proposal_id": PropertyDef(name="proposal_id", property_type=PropertyType.STRING,
+                                    required=True, immutable=True),
+        "task_id": PropertyDef(name="task_id", property_type=PropertyType.STRING,
+                               required=True, immutable=True),
+        "agent_id": PropertyDef(name="agent_id", property_type=PropertyType.STRING,
+                                required=True),
+        "success": PropertyDef(name="success", property_type=PropertyType.BOOLEAN,
+                               required=True),
+        "result_summary": PropertyDef(name="result_summary", property_type=PropertyType.TEXT,
+                                      searchable=True),
+        "error": PropertyDef(name="error", property_type=PropertyType.TEXT),
+        "duration_ms": PropertyDef(name="duration_ms", property_type=PropertyType.FLOAT),
+        "fitness_score": PropertyDef(name="fitness_score", property_type=PropertyType.FLOAT,
+                                     description="Behavioral fitness from MetricsAnalyzer"),
+    },
+    actions=[
+        ActionDef(name="Record", object_type="Outcome",
+                  description="Record execution outcome",
+                  creates=["KnowledgeArtifact"]),
+    ],
+    security=SecurityPolicy(audit_all=True),
+    telos_alignment=0.85,
+    shakti_energy=ShaktiEnergy.MAHASARASWATI,
+    icon="✓",
+)
+
+_VALUE_EVENT = ObjectType(
+    name="ValueEvent",
+    description="Measures the value an Outcome produced — the credit chain entry point",
+    properties={
+        "outcome_id": PropertyDef(name="outcome_id", property_type=PropertyType.STRING,
+                                   required=True, immutable=True,
+                                   description="Deduplicated: only one ValueEvent per Outcome"),
+        "agent_id": PropertyDef(name="agent_id", property_type=PropertyType.STRING,
+                                 required=True, description="Agent that produced the outcome"),
+        "cell_id": PropertyDef(name="cell_id", property_type=PropertyType.STRING,
+                                description="Scopes value to a VentureCell"),
+        "task_id": PropertyDef(name="task_id", property_type=PropertyType.STRING,
+                                required=True),
+        "task_type": PropertyDef(name="task_type", property_type=PropertyType.STRING,
+                                  description="Echoes task metadata for per-domain tracking"),
+        "behavioral_signal": PropertyDef(name="behavioral_signal", property_type=PropertyType.FLOAT,
+                                          description="From MetricsAnalyzer swabhaav_ratio"),
+        "success_value": PropertyDef(name="success_value", property_type=PropertyType.FLOAT,
+                                      description="1.0 success, 0.0 failure"),
+        "duration_efficiency": PropertyDef(name="duration_efficiency", property_type=PropertyType.FLOAT,
+                                            description="Normalized speed"),
+        "composite_value": PropertyDef(name="composite_value", property_type=PropertyType.FLOAT,
+                                        description="0.4*behavioral + 0.4*success + 0.2*duration"),
+        "scoring_method": PropertyDef(name="scoring_method", property_type=PropertyType.STRING,
+                                       description="Algorithm version used for scoring"),
+    },
+    actions=[
+        ActionDef(name="Record", object_type="ValueEvent",
+                  description="Record value measurement from an outcome"),
+    ],
+    security=SecurityPolicy(audit_all=True),
+    telos_alignment=0.85,
+    shakti_energy=ShaktiEnergy.MAHALAKSHMI,
+    icon="V",
+)
+
+_CONTRIBUTION = ObjectType(
+    name="Contribution",
+    description="Assigns credit from a ValueEvent to an agent — what routing reads",
+    properties={
+        "value_event_id": PropertyDef(name="value_event_id", property_type=PropertyType.STRING,
+                                       required=True, immutable=True,
+                                       description="Deduplicated: one per (value_event_id, agent_id)"),
+        "agent_id": PropertyDef(name="agent_id", property_type=PropertyType.STRING,
+                                 required=True, description="Agent receiving credit"),
+        "cell_id": PropertyDef(name="cell_id", property_type=PropertyType.STRING,
+                                description="Matches ValueEvent cell_id"),
+        "task_type": PropertyDef(name="task_type", property_type=PropertyType.STRING,
+                                  description="Echoes for per-domain fitness tracking"),
+        "credit_share": PropertyDef(name="credit_share", property_type=PropertyType.FLOAT,
+                                     required=True,
+                                     description="Fraction of value this agent gets (1.0 for single-agent)"),
+        "attributed_value": PropertyDef(name="attributed_value", property_type=PropertyType.FLOAT,
+                                         required=True,
+                                         description="composite_value * credit_share — what routing reads"),
+    },
+    actions=[
+        ActionDef(name="Record", object_type="Contribution",
+                  description="Record agent credit attribution"),
+    ],
+    security=SecurityPolicy(audit_all=True),
+    telos_alignment=0.85,
+    shakti_energy=ShaktiEnergy.MAHALAKSHMI,
+    icon="C",
+)
+
+_VENTURE_CELL = ObjectType(
+    name="VentureCell",
+    description="Fractal project container — first-class ontology object with its own agents, budgets, KPIs",
+    properties={
+        "name": PropertyDef(name="name", property_type=PropertyType.STRING,
+                            required=True, searchable=True),
+        "description": PropertyDef(name="description", property_type=PropertyType.TEXT),
+        "domain": PropertyDef(name="domain", property_type=PropertyType.ENUM,
+                              enum_values=["research", "engineering", "product",
+                                          "infrastructure", "governance", "community"]),
+        "autonomy_stage": PropertyDef(name="autonomy_stage", property_type=PropertyType.INTEGER,
+                                      description="1=research-only → 5=mostly autonomous"),
+        "status": PropertyDef(name="status", property_type=PropertyType.ENUM,
+                              enum_values=["incubating", "active", "mature",
+                                          "divesting", "archived"]),
+        "budget_tokens": PropertyDef(name="budget_tokens", property_type=PropertyType.INTEGER,
+                                     description="Token budget allocation"),
+        "kpis": PropertyDef(name="kpis", property_type=PropertyType.DICT,
+                            description="Key performance indicators"),
+    },
+    actions=[
+        ActionDef(name="Create", object_type="VentureCell",
+                  description="Create a new venture cell",
+                  telos_gates=["AHIMSA", "SATYA", "REVERSIBILITY"]),
+        ActionDef(name="Advance", object_type="VentureCell",
+                  description="Advance autonomy stage",
+                  modifies=["autonomy_stage"],
+                  telos_gates=["SVABHAAVA"]),
+    ],
+    security=SecurityPolicy(
+        create_roles=["orchestrator", "system"],
+        telos_required=True,
+        audit_all=True,
+    ),
+    telos_alignment=0.95,
+    shakti_energy=ShaktiEnergy.MAHALAKSHMI,
+    icon="◈",
+)
+
+
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+# METABOLIC LOOP LINKS — Connecting proposals, gates, outcomes
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+_METABOLIC_LINKS: list[LinkDef] = [
+    LinkDef(name="has_gate_decision", source_type="ActionProposal",
+            target_type="GateDecisionRecord", cardinality=LinkCardinality.ONE_TO_ONE,
+            inverse_name="decides_proposal",
+            description="Gate evaluation result for this proposal"),
+    LinkDef(name="has_outcome", source_type="ActionProposal",
+            target_type="Outcome", cardinality=LinkCardinality.ONE_TO_ONE,
+            inverse_name="outcome_of_proposal",
+            description="Execution outcome for this proposal"),
+    LinkDef(name="executed_by_agent", source_type="ActionProposal",
+            target_type="AgentIdentity", cardinality=LinkCardinality.MANY_TO_ONE,
+            inverse_name="executed_proposals",
+            description="Agent that executed this proposal"),
+    LinkDef(name="belongs_to_cell", source_type="ActionProposal",
+            target_type="VentureCell", cardinality=LinkCardinality.MANY_TO_ONE,
+            inverse_name="cell_proposals",
+            description="VentureCell this proposal belongs to"),
+    LinkDef(name="cell_has_agent", source_type="VentureCell",
+            target_type="AgentIdentity", cardinality=LinkCardinality.ONE_TO_MANY,
+            inverse_name="agent_in_cell",
+            description="Agents assigned to this cell"),
+    LinkDef(name="cell_has_thread", source_type="VentureCell",
+            target_type="ResearchThread", cardinality=LinkCardinality.ONE_TO_MANY,
+            inverse_name="thread_in_cell",
+            description="Research threads within this cell"),
+    # Phase A.2: ValueEvent + Contribution links
+    LinkDef(name="has_value_event", source_type="Outcome",
+            target_type="ValueEvent", cardinality=LinkCardinality.ONE_TO_ONE,
+            inverse_name="value_of_outcome",
+            description="Value measurement for this outcome"),
+    LinkDef(name="has_contribution", source_type="ValueEvent",
+            target_type="Contribution", cardinality=LinkCardinality.ONE_TO_MANY,
+            inverse_name="contributes_to_value",
+            description="Credit attributions from this value event"),
+]
+
+
 _DOMAIN_TYPES: list[ObjectType] = [
     _RESEARCH_THREAD, _EXPERIMENT, _PAPER, _AGENT_IDENTITY,
     _KNOWLEDGE_ARTIFACT, _TYPED_TASK, _EVOLUTION_ENTRY, _WITNESS_LOG,
+    _ACTION_PROPOSAL, _GATE_DECISION_TYPE, _OUTCOME, _VALUE_EVENT,
+    _CONTRIBUTION, _VENTURE_CELL,
 ]
 
 
