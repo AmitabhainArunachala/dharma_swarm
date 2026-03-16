@@ -591,6 +591,271 @@ class TestVentureCell:
 
 
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+# TelicSeam — Query Agent Fitness (Phase B.1)
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+
+class TestQueryAgentFitness:
+    def test_no_data_returns_neutral(self, seam):
+        score, n = seam.query_agent_fitness("nonexistent_agent")
+        assert score == pytest.approx(0.5)
+        assert n == 0
+
+    def test_single_contribution(self, seam, sample_task):
+        seam.record_dispatch(sample_task, "agent_alpha")
+        outcome_id = seam.record_outcome(
+            sample_task, "agent_alpha", success=True,
+            result_summary="done", duration_ms=5000.0,
+        )
+        ve_id = seam.record_value_event(
+            outcome_id, sample_task, "agent_alpha",
+            result_text="done", success=True, duration_ms=5000.0,
+        )
+        ve_obj = seam.registry.get_object(ve_id)
+        cv = ve_obj.properties["composite_value"]
+        seam.record_contribution(
+            ve_id, "agent_alpha", composite_value=cv,
+        )
+
+        score, n = seam.query_agent_fitness("agent_alpha")
+        assert n == 1
+        # Bayesian smoothed: (5*0.5 + cv) / (5 + 1)
+        expected = (5 * 0.5 + cv) / 6
+        assert score == pytest.approx(expected, abs=1e-6)
+
+    def test_multiple_contributions_smoothed(self, seam):
+        # Create 3 contributions manually with known attributed_values
+        for i in range(3):
+            t = Task(title=f"Task {i}", priority=TaskPriority.HIGH)
+            seam.record_dispatch(t, "agent_alpha")
+            oid = seam.record_outcome(t, "agent_alpha", success=True,
+                                       result_summary="ok", duration_ms=1000.0)
+            ve_id = seam.record_value_event(
+                oid, t, "agent_alpha",
+                result_text="ok", success=True, duration_ms=1000.0,
+            )
+            ve_obj = seam.registry.get_object(ve_id)
+            cv = ve_obj.properties["composite_value"]
+            seam.record_contribution(
+                ve_id, "agent_alpha", composite_value=cv,
+            )
+
+        score, n = seam.query_agent_fitness("agent_alpha")
+        assert n == 3
+        # Score should not be raw mean — it should be Bayesian smoothed toward 0.5
+        assert 0.0 < score < 1.0
+
+    def test_cell_id_filter(self, seam, sample_task):
+        seam.record_dispatch(sample_task, "agent_alpha")
+        oid = seam.record_outcome(sample_task, "agent_alpha", success=True,
+                                   result_summary="done", duration_ms=5000.0)
+        ve_id = seam.record_value_event(
+            oid, sample_task, "agent_alpha",
+            result_text="done", success=True, duration_ms=5000.0,
+            cell_id="rv_cell",
+        )
+        ve_obj = seam.registry.get_object(ve_id)
+        cv = ve_obj.properties["composite_value"]
+        seam.record_contribution(
+            ve_id, "agent_alpha", composite_value=cv,
+            cell_id="rv_cell",
+        )
+
+        # Matching cell_id → finds data
+        score_match, n_match = seam.query_agent_fitness(
+            "agent_alpha", cell_id="rv_cell",
+        )
+        assert n_match == 1
+
+        # Non-matching cell_id → no data, returns prior
+        score_miss, n_miss = seam.query_agent_fitness(
+            "agent_alpha", cell_id="other_cell",
+        )
+        assert n_miss == 0
+        assert score_miss == pytest.approx(0.5)
+
+    def test_task_type_filter(self, seam, sample_task):
+        seam.record_dispatch(sample_task, "agent_alpha")
+        oid = seam.record_outcome(sample_task, "agent_alpha", success=True,
+                                   result_summary="done", duration_ms=5000.0)
+        ve_id = seam.record_value_event(
+            oid, sample_task, "agent_alpha",
+            result_text="done", success=True, duration_ms=5000.0,
+        )
+        ve_obj = seam.registry.get_object(ve_id)
+        cv = ve_obj.properties["composite_value"]
+        seam.record_contribution(
+            ve_id, "agent_alpha", composite_value=cv,
+            task_type="experiment",
+        )
+
+        # Matching task_type → finds data
+        score_match, n_match = seam.query_agent_fitness(
+            "agent_alpha", task_type="experiment",
+        )
+        assert n_match == 1
+
+        # Non-matching → prior
+        score_miss, n_miss = seam.query_agent_fitness(
+            "agent_alpha", task_type="build",
+        )
+        assert n_miss == 0
+
+    def test_low_sample_count_stays_near_prior(self, seam, sample_task):
+        """With only 1-2 samples, score should stay close to 0.5 (prior)."""
+        seam.record_dispatch(sample_task, "agent_alpha")
+        oid = seam.record_outcome(sample_task, "agent_alpha", success=True,
+                                   result_summary="perfect", duration_ms=100.0)
+        ve_id = seam.record_value_event(
+            oid, sample_task, "agent_alpha",
+            result_text="perfect", success=True, duration_ms=100.0,
+        )
+        ve_obj = seam.registry.get_object(ve_id)
+        cv = ve_obj.properties["composite_value"]
+        seam.record_contribution(
+            ve_id, "agent_alpha", composite_value=cv,
+        )
+
+        score, n = seam.query_agent_fitness("agent_alpha")
+        assert n == 1
+        # With prior weight 5, one sample can't move far from 0.5
+        assert abs(score - 0.5) < 0.2
+
+
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+# Fitness-biased Routing (Phase B.1)
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+
+class TestFitnessRouting:
+    def test_feature_flag_off_returns_none(self, seam, sample_task):
+        """With ENABLE_FITNESS_ROUTING unset, _fitness_biased_pick returns None."""
+        import os
+        from dharma_swarm.orchestrator import Orchestrator
+
+        os.environ.pop("ENABLE_FITNESS_ROUTING", None)
+        orch = Orchestrator.__new__(Orchestrator)
+
+        from dharma_swarm.models import AgentRole, AgentState
+        agents = [
+            AgentState(id="a1", name="a1", role=AgentRole.CODER),
+            AgentState(id="a2", name="a2", role=AgentRole.CODER),
+        ]
+        result = orch._fitness_biased_pick(agents, sample_task)
+        assert result is None
+
+    def test_fitness_biased_pick_prefers_higher_attributed_value(self, seam, sample_task):
+        """With flag on, higher-attributed_value agent wins."""
+        import os
+        import dharma_swarm.telic_seam as _ts_mod
+        os.environ["ENABLE_FITNESS_ROUTING"] = "true"
+
+        # Point module singleton to test seam so _fitness_biased_pick reads our data
+        old_seam = _ts_mod._SEAM
+        _ts_mod._SEAM = seam
+
+        try:
+            from dharma_swarm.orchestrator import Orchestrator
+            from dharma_swarm.models import AgentRole, AgentState
+
+            # Create contributions: agent_a has high value, agent_b has low
+            for agent_name, success in [("agent_a", True), ("agent_b", False)]:
+                t = Task(title=f"Task for {agent_name}", priority=TaskPriority.HIGH)
+                seam.record_dispatch(t, agent_name)
+                oid = seam.record_outcome(t, agent_name, success=success,
+                                           result_summary="ok", duration_ms=5000.0)
+                ve_id = seam.record_value_event(
+                    oid, t, agent_name,
+                    result_text="ok", success=success, duration_ms=5000.0,
+                )
+                ve_obj = seam.registry.get_object(ve_id)
+                cv = ve_obj.properties["composite_value"]
+                seam.record_contribution(
+                    ve_id, agent_name, composite_value=cv,
+                )
+
+            orch = Orchestrator.__new__(Orchestrator)
+            agents = [
+                AgentState(id="agent_b", name="agent_b", role=AgentRole.CODER),
+                AgentState(id="agent_a", name="agent_a", role=AgentRole.CODER),
+            ]
+
+            # Seed random to avoid exploration
+            import random
+            random.seed(42)  # 42 gives random() > 0.1 first call
+
+            result = orch._fitness_biased_pick(agents, sample_task)
+            # agent_a (success=True) should have higher score than agent_b (success=False)
+            assert result is not None
+            assert result.id == "agent_a"
+        finally:
+            os.environ.pop("ENABLE_FITNESS_ROUTING", None)
+            _ts_mod._SEAM = old_seam
+
+    def test_fitness_within_role_matched_subset(self, seam, sample_task):
+        """Role match narrows candidates, fitness picks within."""
+        import os
+        os.environ["ENABLE_FITNESS_ROUTING"] = "true"
+
+        try:
+            from dharma_swarm.orchestrator import Orchestrator
+            from dharma_swarm.models import AgentRole, AgentState
+
+            orch = Orchestrator.__new__(Orchestrator)
+
+            # Two coders + one researcher
+            agents = [
+                AgentState(id="a1", name="a1", role=AgentRole.CODER),
+                AgentState(id="a2", name="a2", role=AgentRole.CODER),
+                AgentState(id="a3", name="a3", role=AgentRole.RESEARCHER),
+            ]
+
+            # Task with preferred_roles=["coder"]
+            t = Task(
+                title="Code task",
+                priority=TaskPriority.HIGH,
+                metadata={"coordination_preferred_roles": ["coder"]},
+            )
+
+            result = orch._select_idle_agent(t, agents)
+            # Should pick from coders, not researcher
+            assert result is not None
+            assert result.id in ("a1", "a2")
+        finally:
+            os.environ.pop("ENABLE_FITNESS_ROUTING", None)
+
+    def test_exploration_sometimes_random(self, seam, sample_task):
+        """With exploration, some picks should be random."""
+        import os
+        import random
+        os.environ["ENABLE_FITNESS_ROUTING"] = "true"
+
+        try:
+            from dharma_swarm.orchestrator import Orchestrator
+            from dharma_swarm.models import AgentRole, AgentState
+
+            orch = Orchestrator.__new__(Orchestrator)
+
+            picks = {"a1": 0, "a2": 0}
+            for i in range(100):
+                random.seed(i)
+                agents = [
+                    AgentState(id="a1", name="a1", role=AgentRole.CODER),
+                    AgentState(id="a2", name="a2", role=AgentRole.CODER),
+                ]
+                result = orch._fitness_biased_pick(agents, sample_task)
+                if result:
+                    picks[result.id] += 1
+
+            # With 10% exploration, both agents should get some picks
+            # (even with identical fitness, exploration picks randomly)
+            assert picks["a1"] > 0
+            assert picks["a2"] > 0
+        finally:
+            os.environ.pop("ENABLE_FITNESS_ROUTING", None)
+
+
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 # Singleton
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 

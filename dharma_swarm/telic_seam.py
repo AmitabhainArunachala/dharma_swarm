@@ -369,6 +369,40 @@ class TelicSeam:
             logger.debug("TelicSeam.record_contribution failed: %s", exc)
             return None
 
+    _PRIOR_WEIGHT = 5  # Bayesian smoothing prior weight
+
+    def query_agent_fitness(
+        self,
+        agent_id: str,
+        cell_id: str = "",
+        task_type: str = "",
+    ) -> tuple[float, int]:
+        """Query smoothed fitness score for an agent.
+
+        Returns (smoothed_score, n_samples). Bayesian smoothing with prior
+        weight of 5 at 0.5 — you need ~5 outcomes before score meaningfully
+        departs from neutral.
+        """
+        try:
+            contributions = self._registry.get_objects_by_type("Contribution")
+            values: list[float] = []
+            for c in contributions:
+                if c.properties.get("agent_id") != agent_id:
+                    continue
+                if cell_id and c.properties.get("cell_id") != cell_id:
+                    continue
+                if task_type and c.properties.get("task_type") != task_type:
+                    continue
+                av = c.properties.get("attributed_value", 0.0)
+                if isinstance(av, (int, float)):
+                    values.append(float(av))
+
+            n = len(values)
+            score = (self._PRIOR_WEIGHT * 0.5 + sum(values)) / (self._PRIOR_WEIGHT + n)
+            return (score, n)
+        except Exception:
+            return (0.5, 0)
+
     def get_proposal_for_task(self, task_id: str) -> str | None:
         """Look up the ActionProposal ID for a task."""
         return self._proposal_map.get(task_id)
