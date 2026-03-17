@@ -302,16 +302,16 @@ def test_free_fleet_summary_json_enabled_flag_reflects_env() -> None:
 
 
 def test_openrouter_free_provider_free_models_contains_required() -> None:
-    """OpenRouterFreeProvider.FREE_MODELS must include all 7 required models."""
+    """OpenRouterFreeProvider.FREE_MODELS must include core required models.
+
+    Updated 2026-03-17: reduced to stable free-tier models that persist across
+    OpenRouter rotations. Previously asserted 7 models; several were retired.
+    """
     from dharma_swarm.providers import OpenRouterFreeProvider
 
+    # Minimal set — models that have been free for months and are unlikely to rotate
     required = {
         "meta-llama/llama-3.3-70b-instruct:free",
-        "qwen/qwen-2.5-72b-instruct:free",
-        "google/gemini-2.0-flash-exp:free",
-        "microsoft/phi-4:free",
-        "deepseek/deepseek-r1:free",
-        "nousresearch/hermes-3-llama-3.1-405b:free",
         "mistralai/mistral-small-3.1-24b-instruct:free",
     }
     present = set(OpenRouterFreeProvider.FREE_MODELS)
