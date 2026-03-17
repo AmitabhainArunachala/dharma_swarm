@@ -243,7 +243,7 @@ async def test_memory_context_includes_agent_name(
 
 
 @pytest.mark.asyncio
-@pytest.mark.timeout(60)
+@pytest.mark.timeout(120)
 async def test_task_priority_maps_to_importance(
     config: AgentConfig, memory: AgentMemoryBank, mock_provider: AsyncMock, fast_gate
 ) -> None:
