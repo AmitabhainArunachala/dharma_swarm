@@ -26,6 +26,7 @@ from dharma_swarm.models import (
     TaskPriority,
 )
 from dharma_swarm.agent_memory import AgentMemoryBank
+from dharma_swarm.jikoku_samaya import get_global_tracer as _jikoku_tracer
 from dharma_swarm.telos_gates import check_with_reflective_reroute
 
 logger = logging.getLogger(__name__)
@@ -805,6 +806,13 @@ class AgentRunner:
         response: LLMResponse | None = None
         completion_latency_ms = 0.0
 
+        _task_tracer = _jikoku_tracer()
+        _task_span = _task_tracer.start(
+            "execute.tool_use",
+            f"run_task({self._config.name}, {task.title[:60]})",
+            agent_id=self._config.name,
+            task_id=task.id,
+        )
         try:
             meta = task.metadata if isinstance(task.metadata, dict) else {}
             telic_agent_id = self.agent_id
@@ -872,26 +880,45 @@ class AgentRunner:
                     request.system = request.system + "\n\n" + memory_ctx
 
             if self._provider is not None:
+                _tracer = _jikoku_tracer()
+                _jspan = _tracer.start(
+                    "execute.llm_call",
+                    f"Agent {self._config.name}: {task.title[:80]}",
+                    agent_id=self._config.name,
+                    task_id=task.id,
+                )
                 completion_started = time.monotonic()
-                if _is_routed_provider(self._provider):
-                    available_provider_types = _available_provider_types(task, self._config)
-                    route_request = _build_route_request(
-                        task,
-                        self._config,
-                        request,
-                        available_provider_types=available_provider_types,
-                    )
-                    route_decision, response = await self._provider.complete_for_task(
-                        route_request,
-                        request,
-                        available_provider_types=available_provider_types,
-                    )
-                else:
-                    response = await self._provider.complete(request)
-                completion_latency_ms = (time.monotonic() - completion_started) * 1000.0
-                result = response.content
-                if _looks_like_provider_failure(result):
-                    raise RuntimeError(result or "Provider returned empty response")
+                try:
+                    if _is_routed_provider(self._provider):
+                        available_provider_types = _available_provider_types(task, self._config)
+                        route_request = _build_route_request(
+                            task,
+                            self._config,
+                            request,
+                            available_provider_types=available_provider_types,
+                        )
+                        route_decision, response = await self._provider.complete_for_task(
+                            route_request,
+                            request,
+                            available_provider_types=available_provider_types,
+                        )
+                    else:
+                        response = await self._provider.complete(request)
+                    completion_latency_ms = (time.monotonic() - completion_started) * 1000.0
+                    result = response.content
+                    if _looks_like_provider_failure(result):
+                        raise RuntimeError(result or "Provider returned empty response")
+                finally:
+                    try:
+                        _tracer.end(
+                            _jspan,
+                            latency_ms=completion_latency_ms,
+                            model=getattr(response, "model", "") if response else "",
+                            provider=getattr(response, "provider", "") if response else "",
+                            success=response is not None and not _looks_like_provider_failure(response.content) if response else False,
+                        )
+                    except Exception:
+                        pass  # Tracing must never break the caller
             else:
                 result = (
                     f"[mock] Agent {self._config.name} completed: {task.title}"
@@ -985,6 +1012,11 @@ class AgentRunner:
             logger.info(
                 "Agent %s finished task %s", self._config.name, task.id
             )
+            # Close outer task span (success)
+            try:
+                _task_tracer.end(_task_span, success=True, latency_ms=completion_latency_ms)
+            except Exception:
+                pass
             return result
 
         except Exception as exc:
@@ -1052,6 +1084,11 @@ class AgentRunner:
                 self._state.status = AgentStatus.IDLE
                 self._state.current_task = None
                 self._state.error = str(exc)
+            # Close outer task span (failure)
+            try:
+                _task_tracer.end(_task_span, success=False, error=str(exc)[:200])
+            except Exception:
+                pass
             logger.exception(
                 "Agent %s failed task %s", self._config.name, task.id
             )

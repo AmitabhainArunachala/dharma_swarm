@@ -448,6 +448,119 @@ def api_waitlist_count():
 
 
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+# KAIZEN OPS — Live efficiency audit surface
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+JIKOKU_DIR = Path.home() / ".dharma" / "jikoku"
+# Remote JSONL dirs pulled via rsync (see scripts/sync_jikoku.sh)
+JIKOKU_REMOTE_DIRS = {
+    "local": JIKOKU_DIR,
+    "agni": JIKOKU_DIR / "agni",
+    "rushabdev": JIKOKU_DIR / "rushabdev",
+}
+
+
+def _load_all_jikoku_spans(limit: int = 2000) -> list[dict]:
+    """Load spans from all locations (local + VPS mirrors)."""
+    all_spans: list[dict] = []
+    for source, d in JIKOKU_REMOTE_DIRS.items():
+        log_file = d / "JIKOKU_LOG.jsonl"
+        if not log_file.exists():
+            continue
+        try:
+            lines = log_file.read_text().strip().split("\n")
+            for line in lines[-limit:]:
+                if not line.strip():
+                    continue
+                span = json.loads(line)
+                span["_source"] = source
+                all_spans.append(span)
+        except Exception:
+            continue
+
+    # Sort by start time descending
+    all_spans.sort(key=lambda s: s.get("ts_start", ""), reverse=True)
+    return all_spans[:limit]
+
+
+@app.get("/api/kaizen")
+def api_kaizen():
+    """KaizenOps live efficiency data — aggregated from all locations."""
+    spans = _load_all_jikoku_spans(limit=5000)
+    if not spans:
+        return {
+            "status": "no_data",
+            "message": "No JIKOKU spans recorded yet. Waiting for agent tasks.",
+            "sources": {k: str(v / "JIKOKU_LOG.jsonl") for k, v in JIKOKU_REMOTE_DIRS.items()},
+        }
+
+    # Aggregate by source
+    source_stats: dict[str, dict] = {}
+    for span in spans:
+        src = span.get("_source", "unknown")
+        if src not in source_stats:
+            source_stats[src] = {"span_count": 0, "total_sec": 0.0, "categories": {}}
+        source_stats[src]["span_count"] += 1
+        dur = span.get("duration_sec") or 0
+        source_stats[src]["total_sec"] += dur
+        cat = span.get("category", "unknown")
+        if cat not in source_stats[src]["categories"]:
+            source_stats[src]["categories"][cat] = {"count": 0, "total_sec": 0.0}
+        source_stats[src]["categories"][cat]["count"] += 1
+        source_stats[src]["categories"][cat]["total_sec"] += dur
+
+    # Aggregate by agent
+    agent_stats: dict[str, dict] = {}
+    for span in spans:
+        agent = span.get("agent_id") or "unknown"
+        if agent not in agent_stats:
+            agent_stats[agent] = {"span_count": 0, "total_sec": 0.0, "success": 0, "fail": 0}
+        agent_stats[agent]["span_count"] += 1
+        agent_stats[agent]["total_sec"] += span.get("duration_sec") or 0
+        meta = span.get("metadata") or {}
+        if meta.get("success") is True:
+            agent_stats[agent]["success"] += 1
+        elif meta.get("success") is False:
+            agent_stats[agent]["fail"] += 1
+
+    # Category breakdown (global)
+    categories: dict[str, dict] = {}
+    for span in spans:
+        cat = span.get("category", "unknown")
+        if cat not in categories:
+            categories[cat] = {"count": 0, "total_sec": 0.0, "avg_sec": 0.0}
+        categories[cat]["count"] += 1
+        categories[cat]["total_sec"] += span.get("duration_sec") or 0
+    for cat, stats in categories.items():
+        stats["avg_sec"] = stats["total_sec"] / stats["count"] if stats["count"] else 0
+
+    # Recent spans (last 20)
+    recent = []
+    for span in spans[:20]:
+        recent.append({
+            "agent": span.get("agent_id", "?"),
+            "category": span.get("category", "?"),
+            "intent": span.get("intent", "")[:80],
+            "duration_sec": round(span.get("duration_sec") or 0, 2),
+            "source": span.get("_source", "?"),
+            "ts": span.get("ts_start", "")[:19],
+            "success": (span.get("metadata") or {}).get("success"),
+        })
+
+    total_compute = sum(s.get("duration_sec") or 0 for s in spans)
+
+    return {
+        "status": "active",
+        "total_spans": len(spans),
+        "total_compute_sec": round(total_compute, 1),
+        "sources": source_stats,
+        "agents": agent_stats,
+        "categories": categories,
+        "recent": recent,
+    }
+
+
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 # DASHBOARD HTML
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
@@ -1271,3 +1384,161 @@ async function joinWL(){
 refresh();
 setInterval(refresh,5000);
 </script></body></html>"""
+
+
+# ---------------------------------------------------------------------------
+# KaizenOps dashboard HTML
+# ---------------------------------------------------------------------------
+
+_KAIZEN_HTML = r"""<!DOCTYPE html>
+<html lang="en"><head>
+<meta charset="UTF-8"><meta name="viewport" content="width=device-width,initial-scale=1.0">
+<title>KaizenOps — Factory Floor</title>
+<style>
+:root{--bg:#08090d;--card:#0e1017;--border:#1a1d2e;--g:#00ff88;--r:#ff4466;--y:#ffaa00;--b:#3399ff;--dim:#555;--txt:#c8ccd4}
+*{margin:0;padding:0;box-sizing:border-box}
+body{background:var(--bg);color:var(--txt);font-family:'JetBrains Mono','SF Mono',monospace;font-size:13px}
+.topbar{display:flex;align-items:center;justify-content:space-between;padding:12px 24px;border-bottom:1px solid var(--border);background:#0a0b10}
+.topbar h1{color:var(--g);font-size:1.3em;letter-spacing:2px}
+.topbar .right{color:var(--dim);font-size:0.8em}
+.live{width:8px;height:8px;background:var(--g);border-radius:50%;display:inline-block;animation:pulse 2s infinite}
+@keyframes pulse{0%,100%{opacity:1}50%{opacity:0.3}}
+.grid{display:grid;grid-template-columns:1fr 1fr 1fr;gap:1px;background:var(--border);margin-top:1px}
+.grid2{display:grid;grid-template-columns:1fr 1fr;gap:1px;background:var(--border)}
+.panel{background:var(--card);padding:16px 20px;min-height:100px}
+.panel h2{color:var(--g);font-size:0.85em;text-transform:uppercase;letter-spacing:1.5px;margin-bottom:12px}
+.stats{display:flex;gap:20px;flex-wrap:wrap}
+.stat{flex:1;min-width:80px}
+.stat .val{font-size:1.8em;font-weight:700;line-height:1.1}
+.stat .label{color:var(--dim);font-size:0.7em;text-transform:uppercase;letter-spacing:1px;margin-top:2px}
+.stat.green .val{color:var(--g)}.stat.red .val{color:var(--r)}.stat.yellow .val{color:var(--y)}.stat.blue .val{color:var(--b)}
+.tbl{width:100%;border-collapse:collapse;font-size:0.85em}
+.tbl th{text-align:left;color:var(--dim);font-weight:400;padding:4px 0;border-bottom:1px solid var(--border);font-size:0.8em;text-transform:uppercase;letter-spacing:0.5px}
+.tbl td{padding:5px 0;border-bottom:1px solid #111318}
+.bar-bg{height:8px;background:#1a1d2e;border-radius:4px;overflow:hidden;flex:1}
+.bar-fill{height:100%;border-radius:4px}
+.src-row{display:flex;align-items:center;gap:8px;padding:4px 0;border-bottom:1px solid #111318}
+.src-row .name{min-width:80px;font-weight:700}
+.footer{padding:12px 24px;color:#2a2a2a;font-size:0.7em;text-align:center;border-top:1px solid #111}
+.no-data{color:var(--dim);font-size:0.9em;padding:40px;text-align:center}
+@media(max-width:900px){.grid{grid-template-columns:1fr 1fr}}
+@media(max-width:600px){.grid{grid-template-columns:1fr}}
+</style></head><body>
+
+<div class="topbar">
+  <div style="display:flex;align-items:center;gap:12px">
+    <h1>KAIZEN OPS</h1>
+    <span style="color:var(--dim);font-size:0.75em">Factory Floor Board</span>
+  </div>
+  <div class="right"><span class="live"></span> <span id="clock"></span></div>
+</div>
+
+<div class="grid">
+  <div class="panel">
+    <h2>Compute</h2>
+    <div class="stats">
+      <div class="stat green"><div class="val" id="total-spans">0</div><div class="label">Total Spans</div></div>
+      <div class="stat blue"><div class="val" id="total-compute">0s</div><div class="label">Compute Time</div></div>
+    </div>
+  </div>
+  <div class="panel">
+    <h2>Sources</h2>
+    <div id="sources"></div>
+  </div>
+  <div class="panel">
+    <h2>Categories</h2>
+    <div id="categories"></div>
+  </div>
+</div>
+
+<div class="grid2">
+  <div class="panel">
+    <h2>Agent Activity</h2>
+    <div id="agents"></div>
+  </div>
+  <div class="panel">
+    <h2>Recent Spans</h2>
+    <div id="recent" style="max-height:400px;overflow-y:auto;scrollbar-width:thin"></div>
+  </div>
+</div>
+
+<div class="footer">KaizenOps — JIKOKU SAMAYA efficiency protocol — dharma_swarm</div>
+
+<script>
+const $=id=>document.getElementById(id);
+function updateClock(){$('clock').textContent=new Date().toISOString().slice(0,19).replace('T',' ')+' UTC'}
+setInterval(updateClock,1000);updateClock();
+
+function fmtDur(s){
+  if(s<60)return s.toFixed(1)+'s';
+  if(s<3600)return (s/60).toFixed(1)+'m';
+  return (s/3600).toFixed(1)+'h';
+}
+
+async function refresh(){
+  try{
+    const d=await fetch('/api/kaizen').then(r=>r.json());
+    if(d.status==='no_data'){
+      $('total-spans').textContent='0';
+      $('total-compute').textContent='—';
+      $('sources').innerHTML='<div class="no-data">No spans yet. Waiting for agent tasks...</div>';
+      return;
+    }
+    $('total-spans').textContent=d.total_spans.toLocaleString();
+    $('total-compute').textContent=fmtDur(d.total_compute_sec);
+
+    // Sources
+    const srcs=Object.entries(d.sources||{});
+    $('sources').innerHTML=srcs.map(([name,s])=>{
+      const color=name==='local'?'var(--g)':name==='agni'?'var(--b)':'var(--y)';
+      return '<div class="src-row"><span class="name" style="color:'+color+'">'+name+'</span>'+
+        '<span>'+s.span_count+' spans</span>'+
+        '<span style="margin-left:auto">'+fmtDur(s.total_sec)+'</span></div>';
+    }).join('')||'<div style="color:var(--dim)">No sources</div>';
+
+    // Categories
+    const cats=Object.entries(d.categories||{}).sort((a,b)=>b[1].total_sec-a[1].total_sec);
+    const maxCat=cats.length?cats[0][1].total_sec:1;
+    $('categories').innerHTML=cats.map(([name,s])=>{
+      const pct=maxCat>0?(s.total_sec/maxCat*100):0;
+      return '<div style="display:flex;align-items:center;gap:8px;padding:3px 0;font-size:0.85em">'+
+        '<span style="min-width:120px;color:var(--txt)">'+name+'</span>'+
+        '<div class="bar-bg"><div class="bar-fill" style="width:'+pct+'%;background:var(--g)"></div></div>'+
+        '<span style="min-width:50px;text-align:right">'+s.count+'</span>'+
+        '<span style="min-width:50px;text-align:right;color:var(--dim)">'+fmtDur(s.total_sec)+'</span></div>';
+    }).join('')||'<div style="color:var(--dim)">No categories</div>';
+
+    // Agents
+    const agents=Object.entries(d.agents||{}).sort((a,b)=>b[1].span_count-a[1].span_count);
+    $('agents').innerHTML='<table class="tbl"><tr><th>Agent</th><th>Spans</th><th>Compute</th><th>OK</th><th>Fail</th></tr>'+
+      agents.map(([name,s])=>'<tr><td style="font-weight:700">'+name+'</td><td>'+s.span_count+'</td>'+
+        '<td>'+fmtDur(s.total_sec)+'</td>'+
+        '<td style="color:var(--g)">'+s.success+'</td>'+
+        '<td style="color:var(--r)">'+(s.fail||0)+'</td></tr>').join('')+
+      '</table>';
+
+    // Recent
+    const recent=d.recent||[];
+    $('recent').innerHTML=recent.map(r=>{
+      const sc=r.success===true?'color:var(--g)':r.success===false?'color:var(--r)':'color:var(--dim)';
+      const icon=r.success===true?'&#10003;':r.success===false?'&#10007;':'&#8987;';
+      return '<div style="display:flex;gap:8px;padding:4px 0;border-bottom:1px solid #111318;font-size:0.8em;align-items:center">'+
+        '<span style="'+sc+';min-width:16px">'+icon+'</span>'+
+        '<span style="min-width:60px;color:var(--b)">'+r.agent+'</span>'+
+        '<span style="min-width:100px;color:var(--dim)">'+r.category+'</span>'+
+        '<span style="flex:1">'+r.intent+'</span>'+
+        '<span style="min-width:50px;text-align:right">'+r.duration_sec+'s</span>'+
+        '<span style="min-width:50px;text-align:right;color:var(--dim)">'+r.source+'</span></div>';
+    }).join('')||'<div class="no-data">No recent spans</div>';
+
+  }catch(e){console.error('Refresh error:',e)}
+}
+refresh();
+setInterval(refresh,5000);
+</script></body></html>"""
+
+
+@app.get("/kaizen", response_class=HTMLResponse)
+def kaizen_dashboard():
+    """KaizenOps factory-floor board."""
+    return _KAIZEN_HTML
