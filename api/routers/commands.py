@@ -34,12 +34,14 @@ async def create_task(req: CreateTaskRequest) -> ApiResponse:
         except ValueError:
             priority = TaskPriority.NORMAL
 
+        meta = dict(req.metadata or {})
+        if req.assigned_to:
+            meta["assigned_to"] = req.assigned_to
         task = await swarm.create_task(
             title=req.title,
             description=req.description,
             priority=priority,
-            assigned_to=req.assigned_to,
-            metadata=req.metadata,
+            metadata=meta,
         )
         return ApiResponse(data={
             "id": task.id,

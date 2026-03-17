@@ -14,13 +14,14 @@ import json
 import os
 import random
 import time
-from abc import ABC, abstractmethod
+from abc import abstractmethod
 from collections.abc import AsyncIterator
 from pathlib import Path
 from typing import Any
 
 import httpx
 
+from dharma_swarm.base_provider import BaseProvider, ProviderCapabilities
 from dharma_swarm.models import LLMRequest, LLMResponse, ProviderType
 from dharma_swarm.jikoku_instrumentation import jikoku_traced_provider  # type: ignore
 from dharma_swarm.ollama_config import (
@@ -54,8 +55,13 @@ from dharma_swarm.router_v1 import (
 from dharma_swarm.routing_memory import RoutingMemoryStore, build_task_signature
 
 
-class LLMProvider(ABC):
-    """Abstract base for all LLM providers."""
+class LLMProvider(BaseProvider):
+    """Abstract base for all LLM providers.
+
+    Inherits shared plumbing from BaseProvider (normalize_tool_calls,
+    normalize_messages_openai, strip_system_messages, build_response,
+    _ensure_client).  Concrete providers override complete() and stream().
+    """
 
     @abstractmethod
     async def complete(self, request: LLMRequest) -> LLMResponse:
@@ -69,6 +75,12 @@ class LLMProvider(ABC):
 
 class AnthropicProvider(LLMProvider):
     """Provider backed by the Anthropic Messages API."""
+
+    capabilities = ProviderCapabilities(
+        supports_streaming=True, supports_tools=True,
+        supports_thinking=True, supports_system_prompt=True,
+        max_context_tokens=200_000, provider_family="anthropic",
+    )
 
     def __init__(self, api_key: str | None = None) -> None:
         self._api_key = api_key or os.environ.get("ANTHROPIC_API_KEY")
@@ -131,6 +143,11 @@ class AnthropicProvider(LLMProvider):
 
 class OpenAIProvider(LLMProvider):
     """Provider backed by the OpenAI Chat Completions API."""
+
+    capabilities = ProviderCapabilities(
+        supports_streaming=True, supports_tools=True,
+        max_context_tokens=128_000, provider_family="openai",
+    )
 
     def __init__(self, api_key: str | None = None) -> None:
         self._api_key = api_key or os.environ.get("OPENAI_API_KEY")
@@ -198,6 +215,11 @@ class OpenAIProvider(LLMProvider):
 class OpenRouterProvider(LLMProvider):
     """Provider backed by OpenRouter (OpenAI-compatible API with custom base_url)."""
 
+    capabilities = ProviderCapabilities(
+        supports_streaming=True, supports_tools=False,
+        max_context_tokens=128_000, provider_family="openrouter",
+    )
+
     def __init__(self, api_key: str | None = None) -> None:
         self._api_key = api_key or os.environ.get("OPENROUTER_API_KEY")
         self._client: Any = None
@@ -257,6 +279,12 @@ class OpenRouterProvider(LLMProvider):
 
 class NVIDIANIMProvider(LLMProvider):
     """Provider backed by NVIDIA NIM's OpenAI-compatible endpoint."""
+
+    capabilities = ProviderCapabilities(
+        supports_streaming=False, supports_tools=True,
+        max_context_tokens=128_000, provider_family="nvidia",
+        can_close=True,
+    )
 
     def __init__(
         self,
@@ -382,6 +410,12 @@ class _SubprocessProvider(LLMProvider):
     override ``_build_cli_args``.
     """
 
+    capabilities = ProviderCapabilities(
+        supports_streaming=False, supports_tools=False,
+        supports_system_prompt=True, max_context_tokens=200_000,
+        provider_family="subprocess", requires_api_key=False,
+    )
+
     _cli_command: str = "claude"
     _cli_label: str = "claude-code"
 
@@ -490,24 +524,27 @@ class OpenRouterFreeProvider(LLMProvider):
     Falls back through the list if a model is unavailable.
     """
 
-    # Free models on OpenRouter (verified March 2026)
+    capabilities = ProviderCapabilities(
+        supports_streaming=True, supports_tools=False,
+        max_context_tokens=32_000, provider_family="openrouter_free",
+    )
+
+    # Free models on OpenRouter (updated 2026-03-16 — verify availability before use)
     FREE_MODELS = [
         "meta-llama/llama-3.3-70b-instruct:free",
         "deepseek/deepseek-r1:free",
-        "qwen/qwen-2.5-72b-instruct:free",
-        "google/gemini-2.0-flash-exp:free",
-        "nousresearch/hermes-3-llama-3.1-405b:free",
+        "qwen/qwen3-235b-a22b:free",
+        "google/gemini-2.5-flash-preview:free",
         "google/gemma-3-27b-it:free",
         "mistralai/mistral-small-3.1-24b-instruct:free",
-        "microsoft/phi-4:free",
-        "google/gemma-3-12b-it:free",
+        "microsoft/phi-4-reasoning:free",
     ]
 
-    # Tiered fleet organisation (mirrors free_fleet.py TIER_MODELS)
+    # Tiered fleet organisation
     FREE_FLEET_TIERS: dict[int, list[str]] = {
-        1: ["deepseek/deepseek-r1:free", "meta-llama/llama-3.3-70b-instruct:free"],
-        2: ["qwen/qwen-2.5-72b-instruct:free", "google/gemini-2.0-flash-exp:free", "nousresearch/hermes-3-llama-3.1-405b:free"],
-        3: ["microsoft/phi-4:free", "mistralai/mistral-small-3.1-24b-instruct:free"],
+        1: ["deepseek/deepseek-r1:free", "meta-llama/llama-3.3-70b-instruct:free", "qwen/qwen3-235b-a22b:free"],
+        2: ["google/gemini-2.5-flash-preview:free", "google/gemma-3-27b-it:free"],
+        3: ["mistralai/mistral-small-3.1-24b-instruct:free", "microsoft/phi-4-reasoning:free"],
     }
     FREE_FLEET_ALL: list[str] = [m for tier in FREE_FLEET_TIERS.values() for m in tier]
 
@@ -597,6 +634,12 @@ class OpenRouterFreeProvider(LLMProvider):
 
 class OllamaProvider(LLMProvider):
     """Provider for Ollama local or cloud inference via the native REST API."""
+
+    capabilities = ProviderCapabilities(
+        supports_streaming=True, supports_tools=False,
+        max_context_tokens=32_000, provider_family="ollama",
+        requires_api_key=False, can_close=True,
+    )
 
     DEFAULT_BASE_URL = OLLAMA_LOCAL_BASE_URL
     DEFAULT_MODEL = OLLAMA_DEFAULT_LOCAL_MODEL

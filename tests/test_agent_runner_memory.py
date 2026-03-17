@@ -69,7 +69,7 @@ async def test_runner_memory_defaults_to_none(config: AgentConfig) -> None:
 
 @pytest.mark.asyncio
 async def test_memory_context_injected_into_system_prompt(
-    config: AgentConfig, memory: AgentMemoryBank, mock_provider: AsyncMock
+    config: AgentConfig, memory: AgentMemoryBank, mock_provider: AsyncMock, fast_gate
 ) -> None:
     await memory.remember("key1", "value1", category="working", importance=0.8)
     runner = AgentRunner(config, provider=mock_provider, memory=memory)
@@ -92,7 +92,7 @@ async def test_memory_context_injected_into_system_prompt(
 
 @pytest.mark.asyncio
 async def test_successful_task_stores_result_in_working_memory(
-    config: AgentConfig, memory: AgentMemoryBank, mock_provider: AsyncMock
+    config: AgentConfig, memory: AgentMemoryBank, mock_provider: AsyncMock, fast_gate
 ) -> None:
     runner = AgentRunner(config, provider=mock_provider, memory=memory)
     await runner.start()
@@ -113,7 +113,7 @@ async def test_successful_task_stores_result_in_working_memory(
 
 @pytest.mark.asyncio
 async def test_failed_task_learns_lesson(
-    config: AgentConfig, memory: AgentMemoryBank
+    config: AgentConfig, memory: AgentMemoryBank, fast_gate
 ) -> None:
     provider = AsyncMock()
     provider.complete = AsyncMock(
@@ -137,13 +137,18 @@ async def test_failed_task_learns_lesson(
 
 
 @pytest.mark.asyncio
+@pytest.mark.timeout(180)
 async def test_consolidation_runs_every_5_tasks(
-    config: AgentConfig, memory: AgentMemoryBank, mock_provider: AsyncMock
+    config: AgentConfig, memory: AgentMemoryBank, mock_provider: AsyncMock, fast_gate
 ) -> None:
     runner = AgentRunner(config, provider=mock_provider, memory=memory)
     await runner.start()
 
-    with patch.object(memory, "consolidate", wraps=memory.consolidate) as spy:
+    with (
+        patch("dharma_swarm.context.read_memory_context", return_value=""),
+        patch("dharma_swarm.context.read_latent_gold_context", return_value=""),
+        patch.object(memory, "consolidate", wraps=memory.consolidate) as spy,
+    ):
         # Run 5 tasks; consolidation triggers at tasks_completed % 5 == 0
         for i in range(5):
             await runner.run_task(Task(title=f"Task {i}"))
@@ -152,7 +157,11 @@ async def test_consolidation_runs_every_5_tasks(
         assert spy.call_count == 1
 
     # Run 5 more to get a second consolidation at task 10
-    with patch.object(memory, "consolidate", wraps=memory.consolidate) as spy2:
+    with (
+        patch("dharma_swarm.context.read_memory_context", return_value=""),
+        patch("dharma_swarm.context.read_latent_gold_context", return_value=""),
+        patch.object(memory, "consolidate", wraps=memory.consolidate) as spy2,
+    ):
         for i in range(5, 10):
             await runner.run_task(Task(title=f"Task {i}"))
         assert spy2.call_count == 1
@@ -165,7 +174,7 @@ async def test_consolidation_runs_every_5_tasks(
 
 @pytest.mark.asyncio
 async def test_memory_saves_after_successful_task(
-    config: AgentConfig, memory: AgentMemoryBank, mock_provider: AsyncMock
+    config: AgentConfig, memory: AgentMemoryBank, mock_provider: AsyncMock, fast_gate
 ) -> None:
     runner = AgentRunner(config, provider=mock_provider, memory=memory)
     await runner.start()
@@ -177,7 +186,7 @@ async def test_memory_saves_after_successful_task(
 
 @pytest.mark.asyncio
 async def test_memory_saves_after_failed_task(
-    config: AgentConfig, memory: AgentMemoryBank
+    config: AgentConfig, memory: AgentMemoryBank, fast_gate
 ) -> None:
     provider = AsyncMock()
     provider.complete = AsyncMock(
@@ -198,7 +207,7 @@ async def test_memory_saves_after_failed_task(
 
 
 @pytest.mark.asyncio
-async def test_runner_works_without_memory(config: AgentConfig) -> None:
+async def test_runner_works_without_memory(config: AgentConfig, fast_gate) -> None:
     runner = AgentRunner(config)
     await runner.start()
     result = await runner.run_task(Task(title="No memory task"))
@@ -213,7 +222,7 @@ async def test_runner_works_without_memory(config: AgentConfig) -> None:
 
 @pytest.mark.asyncio
 async def test_memory_context_includes_agent_name(
-    tmp_path: Path, mock_provider: AsyncMock
+    tmp_path: Path, mock_provider: AsyncMock, fast_gate
 ) -> None:
     agent_name = "cartographer-7"
     config = AgentConfig(name=agent_name, role=AgentRole.CARTOGRAPHER)
@@ -234,8 +243,9 @@ async def test_memory_context_includes_agent_name(
 
 
 @pytest.mark.asyncio
+@pytest.mark.timeout(60)
 async def test_task_priority_maps_to_importance(
-    config: AgentConfig, memory: AgentMemoryBank, mock_provider: AsyncMock
+    config: AgentConfig, memory: AgentMemoryBank, mock_provider: AsyncMock, fast_gate
 ) -> None:
     runner = AgentRunner(config, provider=mock_provider, memory=memory)
     await runner.start()

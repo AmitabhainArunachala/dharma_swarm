@@ -6,13 +6,22 @@ from unittest.mock import patch
 from dharma_swarm.context import (
     CONTEXT_BUDGET,
     ROLE_PROFILES,
+    ContextBlock,
     _THREAD_CLAUDE_FILES,
     _VISION_FILES,
+    _compress,
+    _compress_full,
+    _compress_medium,
+    _compress_minimal,
+    _compress_tail,
+    _fit_to_budget,
+    _is_fresh,
     _read_file,
     _read_head,
     _read_recognition_seed,
     _read_stigmergy_signals,
     _read_winners,
+    _resolve_transmission,
     build_agent_context,
     read_agni_state,
     read_agent_notes,
@@ -512,3 +521,286 @@ def test_read_recognition_seed_truncation(tmp_path):
     # May slightly exceed max_chars due to header + truncation marker
     assert len(result) < 600
     assert "truncated" in result
+
+
+# === Compression Engine ===
+
+
+def test_compress_full_preserves_head_and_tail():
+    """Full compression keeps first 70% + last 30%."""
+    content = "HEAD" * 50 + "MIDDLE" * 50 + "TAIL" * 50
+    result = _compress_full(content, 200)
+    assert len(result) <= 200
+    assert result.startswith("HEAD")
+    assert "TAIL" in result  # tail content preserved
+    assert "truncated" in result
+
+
+def test_compress_full_passthrough_small():
+    """Content under max_chars passes through unchanged."""
+    content = "small text"
+    assert _compress_full(content, 1000) == content
+
+
+def test_compress_medium_keeps_boundaries():
+    """Medium compression preserves head and tail, omits middle."""
+    content = "A" * 200 + "B" * 200 + "C" * 200
+    result = _compress_medium(content, 200)
+    assert len(result) <= 200
+    assert result.startswith("A")
+    assert result.endswith("C")
+    assert "middle omitted" in result
+
+
+def test_compress_minimal_multiline():
+    """Minimal compression keeps first heading + first/last paragraphs."""
+    lines = ["# Title", "First paragraph.", "", "Middle stuff.", "", "Last paragraph."]
+    content = "\n".join(lines)
+    result = _compress_minimal(content, 60)
+    assert len(result) <= 60
+    assert "Title" in result
+
+
+def test_compress_minimal_falls_back_for_few_lines():
+    """Minimal compression falls back to full for <=3 lines."""
+    content = "A" * 100 + "\n" + "B" * 100
+    result = _compress_minimal(content, 80)
+    # Falls back to _compress_full behavior — should have truncated marker
+    assert len(result) <= 80
+    assert "truncated" in result
+
+
+def test_compress_tail_keeps_end():
+    """Tail compression keeps the last N chars."""
+    content = "OLD" * 100 + "RECENT" * 20
+    result = _compress_tail(content, 120)
+    assert len(result) == 120
+    assert result.endswith("RECENT")
+
+
+def test_compress_dispatcher_with_file(tmp_path):
+    """_compress reads file, scans injection, compresses."""
+    f = tmp_path / "doc.txt"
+    f.write_text("Important " * 100)
+    result = _compress(f, "full", 200)
+    assert result is not None
+    assert len(result) <= 200
+    assert result.startswith("Important")
+
+
+def test_compress_dispatcher_missing_file(tmp_path):
+    """_compress returns None for missing files."""
+    result = _compress(tmp_path / "nope.txt", "full", 200)
+    assert result is None
+
+
+def test_compress_dispatcher_tiers(tmp_path):
+    """All 5 tiers produce different (or equal for small files) output."""
+    f = tmp_path / "test.txt"
+    f.write_text("x" * 500)
+    results = {}
+    for tier in ("full", "medium", "minimal", "header", "tail"):
+        results[tier] = _compress(f, tier, 200)
+        assert results[tier] is not None
+        assert len(results[tier]) <= 200
+
+
+# === Transmission Resolution ===
+
+
+def test_resolve_transmission_prefers_transmission(tmp_path):
+    """When a .transmission.md file exists, it's preferred."""
+    with patch("dharma_swarm.context.TRANSMISSION_DIR", tmp_path):
+        original = tmp_path / "SOUL.md"
+        transmission = tmp_path / "SOUL.transmission.md"
+        original.write_text("original")
+        transmission.write_text("transmission version")
+        assert _resolve_transmission(original) == transmission
+
+
+def test_resolve_transmission_falls_back(tmp_path):
+    """Without a transmission, original path is returned."""
+    with patch("dharma_swarm.context.TRANSMISSION_DIR", tmp_path):
+        original = tmp_path / "SOUL.md"
+        assert _resolve_transmission(original) == original
+
+
+def test_read_file_uses_transmission(tmp_path):
+    """_read_file (via _compress) should pick up transmission files."""
+    with patch("dharma_swarm.context.TRANSMISSION_DIR", tmp_path):
+        original = tmp_path / "test.md"
+        original.write_text("verbose " * 100)
+        transmission = tmp_path / "test.transmission.md"
+        transmission.write_text("compressed transmission content")
+        result = _read_file(original, max_chars=5000)
+        assert result is not None
+        assert "compressed transmission content" in result
+
+
+# === Freshness Check ===
+
+
+def test_is_fresh_recent_file(tmp_path):
+    """A just-created file should be fresh."""
+    f = tmp_path / "recent.txt"
+    f.write_text("hello")
+    assert _is_fresh(f, hours=1) is True
+
+
+def test_is_fresh_missing_file(tmp_path):
+    """A missing file is not fresh."""
+    assert _is_fresh(tmp_path / "nope.txt") is False
+
+
+# === Budget Fitting ===
+
+
+def test_fit_to_budget_no_trim_needed():
+    """Blocks under budget are returned unchanged."""
+    blocks = [
+        ContextBlock("a", 1, "x" * 100, 100),
+        ContextBlock("b", 5, "y" * 100, 100),
+    ]
+    result = _fit_to_budget(blocks, 300)
+    assert len(result) == 2
+
+
+def test_fit_to_budget_trims_middle():
+    """Over-budget assembly trims middle positions (4-8) first."""
+    blocks = [
+        ContextBlock("seed", 1, "x" * 100, 100),       # protected
+        ContextBlock("directive", 2, "x" * 100, 100),   # protected
+        ContextBlock("primary", 3, "x" * 100, 100),     # protected
+        ContextBlock("foundations", 4, "x" * 200, 200),  # trimmable
+        ContextBlock("research", 5, "x" * 200, 200),    # trimmable
+        ContextBlock("swarm", 9, "x" * 100, 100),       # protected (bottom)
+        ContextBlock("vision", 11, "x" * 100, 100),     # protected (bottom)
+    ]
+    # Total = 900, budget = 600 → need to shed 300 from middle
+    result = _fit_to_budget(blocks, 600)
+    names = {b.name for b in result}
+    # Seed, directive, primary, swarm, vision should survive
+    assert "seed" in names
+    assert "directive" in names
+    assert "primary" in names
+    assert "swarm" in names
+    assert "vision" in names
+    # Middle blocks should be trimmed (highest pos first: research=5, then foundations=4)
+    assert sum(b.char_count for b in result) <= 600
+
+
+def test_fit_to_budget_preserves_bottom():
+    """Bottom positions (9-11) are never trimmed."""
+    blocks = [
+        ContextBlock("seed", 1, "x" * 500, 500),
+        ContextBlock("middle", 6, "x" * 500, 500),
+        ContextBlock("hot", 10, "x" * 500, 500),
+        ContextBlock("vision", 11, "x" * 500, 500),
+    ]
+    result = _fit_to_budget(blocks, 1600)
+    names = {b.name for b in result}
+    assert "hot" in names
+    assert "vision" in names
+    # Middle block should be trimmed
+    assert "middle" not in names
+
+
+# === U-Shaped Positional Layout ===
+
+
+def test_recognition_seed_at_top():
+    """Recognition seed should appear at the very beginning of context."""
+    ctx = build_agent_context(role="surgeon", thread="mechanistic")
+    # If recognition seed exists, it should be first
+    if "L9:" in ctx or "Recognition Seed" in ctx:
+        seed_pos = ctx.find("Recognition Seed") if "Recognition Seed" in ctx else ctx.find("L9:")
+        directive_pos = ctx.find("MEMORY SURVIVAL")
+        assert seed_pos < directive_pos, "Recognition seed should come before survival directive"
+
+
+def test_vision_at_bottom():
+    """Vision layer should appear near the end of context (strong bottom attention)."""
+    ctx = build_agent_context(role="architect", thread="mechanistic")
+    if "Vision Layer" in ctx and "MEMORY SURVIVAL" in ctx:
+        vision_pos = ctx.find("Vision Layer")
+        directive_pos = ctx.find("MEMORY SURVIVAL")
+        assert vision_pos > directive_pos, "Vision should come after survival directive"
+
+
+def test_primary_layer_promotion():
+    """Each role's primary layer should appear early in the context (position 3)."""
+    # Surgeon's primary is engineering
+    ctx = build_agent_context(role="surgeon", thread="mechanistic")
+    if "Engineering Layer" in ctx and "MEMORY SURVIVAL" in ctx:
+        eng_pos = ctx.find("Engineering Layer")
+        directive_pos = ctx.find("MEMORY SURVIVAL")
+        # Engineering should be right after directive (position 3)
+        assert eng_pos < len(ctx) // 2, "Surgeon's primary (engineering) should be in the top half"
+
+
+# === Role Profile Validation ===
+
+
+def test_all_profiles_have_primary_layer():
+    """Every role profile should define a primary_layer."""
+    for role, profile in ROLE_PROFILES.items():
+        assert "primary_layer" in profile, f"Role {role} missing primary_layer"
+
+
+def test_all_profiles_have_tier_keys():
+    """Every role profile should define compression tiers."""
+    tier_keys = {"vision_tier", "research_tier", "engineering_tier"}
+    for role, profile in ROLE_PROFILES.items():
+        for key in tier_keys:
+            assert key in profile, f"Role {role} missing {key}"
+
+
+# === Distilled Agent Notes ===
+
+
+def test_read_agent_notes_prefers_distilled(tmp_path):
+    """Agent notes should use distilled version when fresh."""
+    import time
+
+    shared = tmp_path / "shared"
+    shared.mkdir()
+    (shared / "surgeon_notes.md").write_text("Raw verbose notes " * 100)
+
+    distilled_dir = tmp_path / "context" / "distilled"
+    distilled_dir.mkdir(parents=True)
+    distilled_file = distilled_dir / "surgeon_distilled.md"
+    distilled_file.write_text("Key finding: bug in line 42")
+
+    with (
+        patch("dharma_swarm.context.SHARED_DIR", shared),
+        patch("dharma_swarm.context.STATE_DIR", tmp_path),
+    ):
+        result = read_agent_notes()
+        assert "distilled" in result
+        assert "Key finding" in result
+
+
+def test_read_agent_notes_falls_back_when_stale(tmp_path):
+    """Agent notes should fall back to raw when distilled is stale."""
+    import os
+
+    shared = tmp_path / "shared"
+    shared.mkdir()
+    (shared / "surgeon_notes.md").write_text("Raw note content here")
+
+    distilled_dir = tmp_path / "context" / "distilled"
+    distilled_dir.mkdir(parents=True)
+    distilled_file = distilled_dir / "surgeon_distilled.md"
+    distilled_file.write_text("Stale distilled content")
+    # Make it 7 hours old (beyond 6-hour freshness window)
+    import time
+    old_time = time.time() - 7 * 3600
+    os.utime(distilled_file, (old_time, old_time))
+
+    with (
+        patch("dharma_swarm.context.SHARED_DIR", shared),
+        patch("dharma_swarm.context.STATE_DIR", tmp_path),
+    ):
+        result = read_agent_notes()
+        assert "distilled" not in result
+        assert "Raw note content" in result

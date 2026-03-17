@@ -53,6 +53,19 @@ def test_run_cron_job_dispatches_review_cycle():
     mock.assert_called_once()
 
 
+def test_run_cron_job_dispatches_doctor_assurance():
+    with patch(
+        "dharma_swarm.doctor.doctor_run_fn",
+        return_value=(True, "# Doctor", None),
+    ) as mock:
+        success, output, error = run_cron_job({"handler": "doctor_assurance"})
+
+    assert success is True
+    assert output == "# Doctor"
+    assert error is None
+    mock.assert_called_once()
+
+
 def test_run_cron_job_rejects_unknown_handler():
     success, output, error = run_cron_job({"handler": "mystery"})
 

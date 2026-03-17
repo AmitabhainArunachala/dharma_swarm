@@ -240,31 +240,4 @@ def test_legacy_handle_result_flushes_buffer() -> None:
     assert flush_idx is not None, "handle_result must call _flush_buffer"
 
 
-# ---------------------------------------------------------------------------
-# Bug 3: subprocess_manager stderr should not use PIPE
-# ---------------------------------------------------------------------------
-
-
-def test_subprocess_manager_stderr_not_piped() -> None:
-    """SubprocessManager must NOT use stderr=PIPE to avoid deadlock.
-
-    When stderr is captured via PIPE but never consumed, the pipe buffer
-    (64KB on macOS) can fill and deadlock the subprocess.
-    """
-    from dharma_swarm.tui.engine.subprocess_manager import SubprocessManager
-
-    import inspect
-
-    source = inspect.getsource(SubprocessManager.run_claude)
-
-    # Verify stderr=subprocess.PIPE is NOT in the Popen call
-    assert "stderr=subprocess.PIPE" not in source, (
-        "SubprocessManager must not use stderr=subprocess.PIPE -- "
-        "stderr is never consumed, which can deadlock the subprocess"
-    )
-
-    # Verify stderr is handled (DEVNULL or no capture)
-    assert "stderr=" in source, (
-        "SubprocessManager should explicitly set stderr "
-        "(e.g., subprocess.DEVNULL)"
-    )
+# Bug 3 test removed: subprocess_manager.py was deleted as orphaned code

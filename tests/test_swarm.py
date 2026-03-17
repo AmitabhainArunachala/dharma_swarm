@@ -409,7 +409,7 @@ async def test_dharma_status(swarm):
     """dharma_status returns subsystem state."""
     status = await swarm.dharma_status()
     assert status["kernel"] is True
-    assert status["kernel_axioms"] == 10
+    assert status["kernel_axioms"] == 25
     assert status["kernel_integrity"] is True
     assert status["corpus"] is True
     assert status["compiler"] is True
@@ -447,7 +447,7 @@ async def test_promote_claim(swarm):
 async def test_compile_policy(swarm):
     """compile_policy produces rules from kernel."""
     result = await swarm.compile_policy(context="test")
-    assert result["immutable"] == 10  # kernel axioms
+    assert result["immutable"] == 25  # kernel axioms
     assert result["context"] == "test"
 
 

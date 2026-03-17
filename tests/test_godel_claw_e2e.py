@@ -42,7 +42,7 @@ async def test_kernel_create_save_load_verify_tamper_detect(tmp_dharma):
 
     # Create and verify defaults
     kernel = DharmaKernel.create_default()
-    assert len(kernel.principles) == 10
+    assert len(kernel.principles) == 25
     assert kernel.verify_integrity()
 
     # Save to disk
@@ -54,7 +54,7 @@ async def test_kernel_create_save_load_verify_tamper_detect(tmp_dharma):
     guard2 = KernelGuard(kernel_path=tmp_dharma["kernel"])
     loaded = await guard2.load()
     assert loaded.verify_integrity()
-    assert len(loaded.principles) == 10
+    assert len(loaded.principles) == 25
 
     # Tamper with the JSON on disk and confirm detection
     raw = tmp_dharma["kernel"].read_text()
@@ -130,7 +130,7 @@ async def test_policy_compile_includes_kernel_and_corpus(tmp_dharma):
         context="test",
     )
 
-    assert len(policy.get_immutable_rules()) == 10  # from kernel
+    assert len(policy.get_immutable_rules()) == 25  # from kernel
     assert len(policy.get_mutable_rules()) >= 1  # from corpus
 
 

@@ -16,12 +16,15 @@ import {
   BrainCircuit,
   ChevronDown,
   ChevronUp,
+  ClipboardCheck,
   Dna,
   GitBranch,
   Globe,
   Grid3X3,
+  HeartPulse,
   LayoutDashboard,
   ListTodo,
+  MessageSquare,
   Microscope,
   Network,
   Shield,
@@ -49,6 +52,9 @@ const iconMap: Record<string, ComponentType<{ className?: string; size?: number 
   Workflow,
   Grid3X3,
   Sparkles,
+  MessageSquare,
+  ClipboardCheck,
+  HeartPulse,
 };
 
 // ---------------------------------------------------------------------------
@@ -74,7 +80,9 @@ const sections: NavSection[] = [
     level: 1,
     items: [
       { label: "Overview", href: "/dashboard", icon: "LayoutDashboard", level: 1 },
-      { label: "Claude", href: "/dashboard/claude", icon: "BrainCircuit", level: 1 },
+      { label: "Conv. Log", href: "/dashboard/log", icon: "MessageSquare", level: 1 },
+      { label: "Truth Map", href: "/dashboard/modules", icon: "Activity", level: 1 },
+      { label: "Control Plane", href: "/dashboard/claude", icon: "BrainCircuit", level: 1 },
       { label: "Agents", href: "/dashboard/agents", icon: "Bot", level: 1 },
       { label: "Tasks", href: "/dashboard/tasks", icon: "ListTodo", level: 1 },
     ],
@@ -83,6 +91,8 @@ const sections: NavSection[] = [
     label: "INTELLIGENCE",
     level: 3,
     items: [
+      { label: "Eval Harness", href: "/dashboard/eval", icon: "ClipboardCheck", level: 3 },
+      { label: "System Audit", href: "/dashboard/audit", icon: "HeartPulse", level: 3 },
       { label: "Evolution", href: "/dashboard/evolution", icon: "Dna", level: 3 },
       { label: "Gates", href: "/dashboard/gates", icon: "Shield", level: 3 },
     ],

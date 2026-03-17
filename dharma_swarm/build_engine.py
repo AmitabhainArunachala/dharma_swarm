@@ -80,8 +80,17 @@ def _hermes_available() -> bool:
     return True
 
 
-def _spawn_agent(prompt: str, system_prompt: str, project_path: str) -> str:
-    """Spawn a Hermes AIAgent and run the task. Returns agent output."""
+def _spawn_agent(
+    prompt: str,
+    system_prompt: str,
+    project_path: str,
+    model: str | None = None,
+) -> str:
+    """Spawn a Hermes AIAgent and run the task. Returns agent output.
+
+    Args:
+        model: Override the default model (e.g. for free-tier custodian agents).
+    """
     original_path = list(sys.path)
     hermes_str = str(HERMES_DIR)
     try:
@@ -90,7 +99,7 @@ def _spawn_agent(prompt: str, system_prompt: str, project_path: str) -> str:
         from run_agent import AIAgent
 
         agent = AIAgent(
-            model=DEFAULT_MODEL,
+            model=model or DEFAULT_MODEL,
             max_iterations=MAX_AGENT_ITERATIONS,
             enabled_toolsets=["terminal", "file"],
             quiet_mode=True,

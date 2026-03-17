@@ -2,12 +2,16 @@
 
 import builtins
 import re
+from pathlib import Path
 
 import pytest
 from unittest.mock import AsyncMock
 
 from dharma_swarm.models import AgentConfig, AgentRole, AgentStatus, Task
 from dharma_swarm.agent_runner import AgentPool, AgentRunner, _build_prompt
+from dharma_swarm.lineage import LineageGraph
+from dharma_swarm.ontology import OntologyRegistry
+from dharma_swarm.telic_seam import TelicSeam
 
 
 @pytest.fixture
@@ -24,7 +28,8 @@ async def test_runner_start(config):
 
 
 @pytest.mark.asyncio
-async def test_runner_mock_task(config):
+@pytest.mark.timeout(60)
+async def test_runner_mock_task(config, fast_gate):
     runner = AgentRunner(config)
     await runner.start()
     task = Task(title="Write tests")
@@ -33,6 +38,63 @@ async def test_runner_mock_task(config):
     assert "Write tests" in result
     assert runner.state.status == AgentStatus.IDLE
     assert runner.state.tasks_completed == 1
+
+
+@pytest.mark.asyncio
+async def test_runner_records_telic_chain_with_stable_agent_id_and_cell_scope(
+    config,
+    fast_gate,
+    tmp_path: Path,
+):
+    from dharma_swarm.models import LLMResponse
+    import dharma_swarm.telic_seam as telic_module
+
+    provider = AsyncMock()
+    provider.complete = AsyncMock(return_value=LLMResponse(content="done", model="test"))
+
+    seam = TelicSeam(
+        registry=OntologyRegistry.create_dharma_registry(),
+        lineage=LineageGraph(db_path=tmp_path / "telic-lineage.db"),
+    )
+    old_seam = telic_module._SEAM
+    telic_module._SEAM = seam
+
+    try:
+        named_config = config.model_copy(
+            update={"name": "display-name", "id": "agent-stable-id"}
+        )
+        runner = AgentRunner(named_config, provider=provider)
+        await runner.start()
+        task = Task(
+            title="Write scoped telic record",
+            metadata={"task_type": "research", "cell_id": "rv-cell"},
+        )
+
+        await runner.run_task(task)
+
+        outcome = seam.registry.get_objects_by_type("Outcome")[0]
+        value_event = seam.registry.get_objects_by_type("ValueEvent")[0]
+        contribution = seam.registry.get_objects_by_type("Contribution")[0]
+
+        assert outcome.properties["agent_id"] == named_config.id
+        assert value_event.properties["agent_id"] == named_config.id
+        assert value_event.properties["cell_id"] == "rv-cell"
+        assert contribution.properties["agent_id"] == named_config.id
+        assert contribution.properties["cell_id"] == "rv-cell"
+        assert contribution.properties["task_type"] == "research"
+
+        score, n = seam.query_agent_fitness(
+            named_config.id,
+            cell_id="rv-cell",
+            task_type="research",
+        )
+        assert n == 1
+        assert score > 0.5
+
+        report = seam.lifecycle_integrity_report()
+        assert report["is_clean"] is True
+    finally:
+        telic_module._SEAM = old_seam
 
 
 def test_build_prompt_uses_recent_only_memory_recall_by_default(config, monkeypatch):
@@ -73,7 +135,8 @@ def test_build_prompt_handles_memory_context_import_failure(config, monkeypatch)
 
 
 @pytest.mark.asyncio
-async def test_runner_provider_error_string_marks_failure(config):
+@pytest.mark.timeout(60)
+async def test_runner_provider_error_string_marks_failure(config, fast_gate):
     from dharma_swarm.models import LLMResponse
 
     for text in ("ERROR: upstream unavailable", "API Error: Unable to connect to API (ENOTFOUND)"):

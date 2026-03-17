@@ -15,6 +15,25 @@ from api.models import (
 
 router = APIRouter(prefix="/api", tags=["ontology"])
 
+_TYPE_CATEGORIES: dict[str, tuple[str, str]] = {
+    "ResearchThread": ("concept", "strategy lattice"),
+    "Experiment": ("concept", "research ops"),
+    "Paper": ("artifact", "publication"),
+    "AgentIdentity": ("agent", "operator mesh"),
+    "KnowledgeArtifact": ("artifact", "knowledge vault"),
+    "TypedTask": ("task", "execution rail"),
+    "EvolutionEntry": ("artifact", "evolution archive"),
+    "WitnessLog": ("gate", "witness field"),
+}
+
+_CATEGORY_LAYOUT: dict[str, tuple[int, int]] = {
+    "concept": (80, 80),
+    "task": (420, 160),
+    "agent": (760, 60),
+    "artifact": (1080, 120),
+    "gate": (1420, 200),
+}
+
 
 def _get_registry():
     from dharma_swarm.ontology import OntologyRegistry
@@ -93,21 +112,33 @@ async def ontology_graph() -> ApiResponse:
     reg = _get_registry()
     nodes = []
     edges = []
+    category_counts: dict[str, int] = {}
 
     types = reg.get_types()
-    for i, t in enumerate(types):
+    for t in types:
+        category, zone = _TYPE_CATEGORIES.get(t.name, ("concept", "semantic mesh"))
+        count_in_category = category_counts.get(category, 0)
+        category_counts[category] = count_in_category + 1
+        base_x, base_y = _CATEGORY_LAYOUT.get(category, (0, 0))
         nodes.append({
             "id": t.name,
-            "type": "ontologyType",
+            "type": category,
             "data": {
                 "label": t.name,
                 "description": t.description,
                 "propertyCount": len(t.properties),
+                "actionCount": len(t.actions),
+                "linkCount": len(reg.get_all_links_involving(t.name)),
+                "runtimeCount": len(reg.get_objects_by_type(t.name)),
                 "shakti": t.shakti_energy.value if hasattr(t.shakti_energy, 'value') else str(t.shakti_energy),
                 "telos": t.telos_alignment,
                 "icon": t.icon,
+                "zone": zone,
             },
-            "position": {"x": 0, "y": 0},
+            "position": {
+                "x": base_x + (count_in_category % 2) * 120,
+                "y": base_y + (count_in_category // 2) * 180,
+            },
         })
 
     # Collect all unique links

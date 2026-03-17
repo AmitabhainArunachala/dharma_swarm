@@ -10,9 +10,11 @@ from datetime import datetime, timezone
 import contextlib
 import importlib.util
 import io
+import json
 import os
 from pathlib import Path
 import shutil
+import sqlite3
 import socket
 import subprocess
 import sys
@@ -21,6 +23,9 @@ from urllib.parse import urlparse
 
 
 HOME = Path.home()
+REPO_ROOT = HOME / "dharma_swarm"
+DOCTOR_DIR = HOME / ".dharma" / "doctor"
+DOCTOR_HISTORY_DIR = DOCTOR_DIR / "history"
 
 
 @dataclass
@@ -45,6 +50,21 @@ def _mask_secret(raw: str) -> str:
 
 def _add(checks: list[DoctorCheck], **kwargs: Any) -> None:
     checks.append(DoctorCheck(**kwargs))
+
+
+def _parse_iso_datetime(raw: Any) -> datetime | None:
+    if not raw or not isinstance(raw, str):
+        return None
+    text = raw.strip()
+    if not text:
+        return None
+    try:
+        parsed = datetime.fromisoformat(text.replace("Z", "+00:00"))
+    except ValueError:
+        return None
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=timezone.utc)
+    return parsed.astimezone(timezone.utc)
 
 
 def _venv_python() -> Path | None:
@@ -80,6 +100,345 @@ def _run_venv_probe(code: str, *, timeout_seconds: float) -> tuple[bool, str]:
     if proc.returncode == 0:
         return (True, out)
     return (False, out or f"rc={proc.returncode}")
+
+
+def _pid_alive(pid: int) -> bool:
+    try:
+        if pid <= 1:
+            return False
+        os.kill(pid, 0)
+        return True
+    except OSError:
+        return False
+
+
+def _read_pid_file(path: Path) -> tuple[int | None, str]:
+    if not path.exists():
+        return None, "missing"
+    try:
+        pid = int(path.read_text(encoding="utf-8").strip())
+    except Exception:
+        return None, "invalid"
+    if _pid_alive(pid):
+        return pid, "alive"
+    return pid, "stale"
+
+
+def _list_daemon_like_processes(timeout_seconds: float) -> list[tuple[int, str]]:
+    try:
+        proc = subprocess.run(
+            ["ps", "-axo", "pid=,command="],
+            capture_output=True,
+            text=True,
+            timeout=max(0.5, timeout_seconds),
+        )
+    except Exception:
+        return []
+
+    if proc.returncode != 0:
+        return []
+
+    current_pid = os.getpid()
+    matches: list[tuple[int, str]] = []
+    needles = ("dharma_swarm.orchestrate_live", "orchestrate_live.py", "run_daemon.sh")
+    skip_markers = ("dgc doctor", "ps -axo", "rg ", "pytest")
+
+    for raw in proc.stdout.splitlines():
+        line = raw.strip()
+        if not line:
+            continue
+        parts = line.split(maxsplit=1)
+        if len(parts) != 2:
+            continue
+        try:
+            pid = int(parts[0])
+        except ValueError:
+            continue
+        command = parts[1]
+        if pid == current_pid:
+            continue
+        if not any(needle in command for needle in needles):
+            continue
+        if any(marker in command for marker in skip_markers):
+            continue
+        matches.append((pid, command))
+
+    return matches
+
+
+def _check_daemon_integrity(checks: list[DoctorCheck], timeout_seconds: float) -> None:
+    state_dir = HOME / ".dharma"
+    pid_files = {
+        "daemon": state_dir / "daemon.pid",
+        "orchestrator": state_dir / "orchestrator.pid",
+        "cron_daemon": state_dir / "cron" / "daemon.pid",
+    }
+    pid_statuses = {
+        label: _read_pid_file(path)
+        for label, path in pid_files.items()
+    }
+    stale = [
+        f"{label}={pid if pid is not None else '?'}"
+        for label, (pid, status) in pid_statuses.items()
+        if status == "stale"
+    ]
+    invalid = [
+        label
+        for label, (_, status) in pid_statuses.items()
+        if status == "invalid"
+    ]
+    live_processes = _list_daemon_like_processes(timeout_seconds)
+
+    if len(live_processes) > 1:
+        detail = " | ".join(f"{pid}:{command}" for pid, command in live_processes[:4])
+        _add(
+            checks,
+            name="daemon_integrity",
+            status="FAIL",
+            summary=f"multiple daemon-like processes detected ({len(live_processes)})",
+            detail=detail,
+            fix="Stop duplicate daemons, clear stale pid files, then start a single runtime.",
+        )
+        return
+
+    if stale or invalid:
+        detail_parts: list[str] = []
+        if stale:
+            detail_parts.append("stale pid files: " + ", ".join(stale))
+        if invalid:
+            detail_parts.append("invalid pid files: " + ", ".join(invalid))
+        if live_processes:
+            pid, command = live_processes[0]
+            detail_parts.append(f"live process: {pid}:{command}")
+        _add(
+            checks,
+            name="daemon_integrity",
+            status="WARN",
+            summary="pid file state is inconsistent with runtime",
+            detail=" | ".join(detail_parts),
+            fix="Remove stale/invalid pid files and ensure only one daemon launcher owns the runtime.",
+        )
+        return
+
+    if live_processes:
+        pid, command = live_processes[0]
+        _add(
+            checks,
+            name="daemon_integrity",
+            status="PASS",
+            summary=f"single daemon-like process detected (PID {pid})",
+            detail=command,
+        )
+        return
+
+    _add(
+        checks,
+        name="daemon_integrity",
+        status="PASS",
+        summary="no duplicate daemon signals detected",
+    )
+
+
+def _check_message_bus_integrity(checks: list[DoctorCheck], timeout_seconds: float) -> None:
+    canonical = HOME / ".dharma" / "db" / "messages.db"
+    shadow_paths = [
+        HOME / ".dharma" / "message_bus.db",
+        HOME / ".dharma" / "db" / "message_bus.db",
+    ]
+    live_processes = _list_daemon_like_processes(timeout_seconds)
+
+    if not canonical.exists():
+        _add(
+            checks,
+            name="message_bus_integrity",
+            status="FAIL" if live_processes else "WARN",
+            summary="canonical message bus database is missing",
+            detail=str(canonical),
+            fix="Keep the shared bus at ~/.dharma/db/messages.db and initialize it before relying on cross-process signals.",
+        )
+        return
+
+    try:
+        with sqlite3.connect(canonical) as conn:
+            cur = conn.cursor()
+            journal_mode = str(cur.execute("PRAGMA journal_mode").fetchone()[0]).lower()
+            counts = {
+                "messages": int(cur.execute("SELECT COUNT(*) FROM messages").fetchone()[0]),
+                "heartbeats": int(cur.execute("SELECT COUNT(*) FROM heartbeats").fetchone()[0]),
+                "subscriptions": int(cur.execute("SELECT COUNT(*) FROM subscriptions").fetchone()[0]),
+                "artifacts": int(cur.execute("SELECT COUNT(*) FROM artifacts").fetchone()[0]),
+                "events_total": int(cur.execute("SELECT COUNT(*) FROM events").fetchone()[0]),
+                "events_unconsumed": int(
+                    cur.execute("SELECT COUNT(*) FROM events WHERE consumed_at IS NULL").fetchone()[0]
+                ),
+                "stale_heartbeats": int(
+                    cur.execute(
+                        "SELECT COUNT(*) FROM heartbeats "
+                        "WHERE datetime(last_seen) < datetime('now', '-5 minutes')"
+                    ).fetchone()[0]
+                ),
+            }
+    except Exception as exc:
+        _add(
+            checks,
+            name="message_bus_integrity",
+            status="FAIL" if live_processes else "WARN",
+            summary="message bus database could not be inspected",
+            detail=f"{canonical}: {exc}",
+            fix="Repair ~/.dharma/db/messages.db or reinitialize the shared bus schema.",
+        )
+        return
+
+    shadow_present = [path for path in shadow_paths if path.exists()]
+    detail_parts = [
+        f"db={canonical}",
+        f"journal={journal_mode}",
+        f"messages={counts['messages']}",
+        f"heartbeats={counts['heartbeats']}",
+        f"subscriptions={counts['subscriptions']}",
+        f"events={counts['events_total']}",
+        f"queued_events={counts['events_unconsumed']}",
+        f"artifacts={counts['artifacts']}",
+    ]
+    if shadow_present:
+        detail_parts.append(
+            "shadow_paths=" + ", ".join(str(path) for path in shadow_present)
+        )
+
+    issues: list[str] = []
+    if journal_mode != "wal":
+        issues.append(f"journal mode is {journal_mode}, not wal")
+    if shadow_present:
+        issues.append("alternate message bus database path(s) still exist")
+    if (
+        counts["messages"] > 0
+        and counts["heartbeats"] == 0
+        and counts["subscriptions"] == 0
+        and counts["events_total"] <= 1
+    ):
+        issues.append("bus traffic is mailbox-only; liveness/pubsub/event lanes are effectively idle")
+    if live_processes and counts["heartbeats"] == 0:
+        issues.append("no agent heartbeats recorded on the shared bus")
+    if live_processes and counts["subscriptions"] == 0:
+        issues.append("no topic subscriptions recorded on the shared bus")
+    if live_processes and counts["events_total"] <= 1:
+        issues.append("event rail is barely used")
+    if counts["stale_heartbeats"] > 0:
+        issues.append(f"{counts['stale_heartbeats']} stale heartbeat(s)")
+    if counts["events_unconsumed"] > 50:
+        issues.append(f"{counts['events_unconsumed']} unconsumed event(s)")
+
+    if issues:
+        _add(
+            checks,
+            name="message_bus_integrity",
+            status="WARN",
+            summary="shared message bus exists, but usage still looks thin or split",
+            detail=" | ".join(detail_parts + issues),
+            fix="Keep one canonical bus path, and make heartbeats, subscriptions, and cross-process events observable on it.",
+        )
+        return
+
+    _add(
+        checks,
+        name="message_bus_integrity",
+        status="PASS",
+        summary="shared message bus is present and looks coherent",
+        detail=" | ".join(detail_parts),
+    )
+
+
+def _check_doctor_schedule(checks: list[DoctorCheck]) -> None:
+    jobs_path = HOME / ".dharma" / "cron" / "jobs.json"
+    if not jobs_path.exists():
+        _add(
+            checks,
+            name="doctor_schedule",
+            status="WARN",
+            summary="doctor cron schedule file is missing",
+            detail=str(jobs_path),
+            fix="Create a recurring doctor_assurance cron job before relying on unattended sweeps.",
+        )
+        return
+
+    try:
+        payload = json.loads(jobs_path.read_text(encoding="utf-8"))
+    except Exception as exc:
+        _add(
+            checks,
+            name="doctor_schedule",
+            status="WARN",
+            summary="doctor cron schedule file is unreadable",
+            detail=f"{jobs_path}: {exc}",
+            fix="Repair ~/.dharma/cron/jobs.json so Doctor sweeps can be scheduled safely.",
+        )
+        return
+
+    if not isinstance(payload, dict) or not isinstance(payload.get("jobs"), list):
+        _add(
+            checks,
+            name="doctor_schedule",
+            status="WARN",
+            summary="doctor cron schedule file has unexpected shape",
+            detail=str(jobs_path),
+            fix="Normalize ~/.dharma/cron/jobs.json to the scheduler's {'jobs': [...]} format.",
+        )
+        return
+
+    jobs = [
+        job
+        for job in payload["jobs"]
+        if isinstance(job, dict)
+        and job.get("enabled", True)
+        and str(job.get("handler", "")).strip() == "doctor_assurance"
+    ]
+    if not jobs:
+        _add(
+            checks,
+            name="doctor_schedule",
+            status="WARN",
+            summary="no enabled doctor_assurance cron job is configured",
+            detail=str(jobs_path),
+            fix="Schedule a recurring Doctor sweep so assurance keeps running overnight.",
+        )
+        return
+
+    now = datetime.now(timezone.utc)
+    overdue: list[str] = []
+    upcoming: list[str] = []
+    for job in jobs:
+        label = str(job.get("name") or job.get("id") or "doctor_assurance")
+        next_run = _parse_iso_datetime(job.get("next_run_at"))
+        last_run = _parse_iso_datetime(job.get("last_run_at"))
+        if next_run is None:
+            overdue.append(f"{label}: next_run_at missing")
+            continue
+        if next_run < now:
+            overdue.append(f"{label}: next run overdue since {next_run.isoformat()}")
+            continue
+        summary = f"{label} next={next_run.isoformat()}"
+        if last_run is not None:
+            summary += f" last={last_run.isoformat()}"
+        upcoming.append(summary)
+
+    if overdue:
+        _add(
+            checks,
+            name="doctor_schedule",
+            status="WARN",
+            summary="doctor cron is configured but at least one sweep is overdue",
+            detail=" | ".join(overdue + upcoming),
+            fix="Kick the cron daemon or repair overdue doctor jobs so unattended sweeps keep running.",
+        )
+        return
+
+    _add(
+        checks,
+        name="doctor_schedule",
+        status="PASS",
+        summary=f"{len(jobs)} doctor cron job(s) armed for unattended sweeps",
+        detail=" | ".join(upcoming),
+    )
 
 
 def _check_env_autoload(checks: list[DoctorCheck]) -> None:
@@ -523,9 +882,126 @@ def _check_router_paths(checks: list[DoctorCheck]) -> None:
     )
 
 
-def run_doctor(*, timeout_seconds: float = 1.5, quick: bool = False) -> dict[str, Any]:
+def _doctor_status(summary: dict[str, int]) -> str:
+    status = "PASS"
+    if int(summary.get("fail", 0)) > 0:
+        status = "FAIL"
+    elif int(summary.get("warn", 0)) > 0:
+        status = "WARN"
+    return status
+
+
+def _assurance_report(*, repo_root: Path, quick: bool) -> dict[str, Any]:
+    from dharma_swarm.assurance.runner import assurance_checks, run_assurance
+    changed_files: list[str] | None = None
+    if quick:
+        try:
+            from dharma_swarm.assurance.scanner_test_gaps import _git_changed_files
+            changed_files = _git_changed_files(repo_root)
+        except Exception:
+            changed_files = None
+    assurance = run_assurance(repo_root=repo_root, changed_files=changed_files)
+    assurance["checks"] = assurance_checks(assurance)
+    return assurance
+
+
+def write_doctor_artifacts(
+    report: dict[str, Any],
+    *,
+    output_dir: Path | None = None,
+    write_history: bool = True,
+) -> dict[str, str]:
+    target_dir = output_dir or DOCTOR_DIR
+    history_dir = target_dir / "history"
+    target_dir.mkdir(parents=True, exist_ok=True)
+    history_dir.mkdir(parents=True, exist_ok=True)
+
+    rendered = render_doctor_report(report)
+    latest_json = target_dir / "latest_report.json"
+    latest_markdown = target_dir / "latest_report.md"
+    latest_json.write_text(json.dumps(report, indent=2), encoding="utf-8")
+    latest_markdown.write_text(rendered + "\n", encoding="utf-8")
+
+    history_json = ""
+    history_markdown = ""
+    if write_history:
+        stamp = datetime.now(timezone.utc).strftime("%Y%m%d_%H%M%S")
+        history_json_path = history_dir / f"doctor_{stamp}.json"
+        history_markdown_path = history_dir / f"doctor_{stamp}.md"
+        history_json_path.write_text(json.dumps(report, indent=2), encoding="utf-8")
+        history_markdown_path.write_text(rendered + "\n", encoding="utf-8")
+        history_json = str(history_json_path)
+        history_markdown = str(history_markdown_path)
+
+    return {
+        "json": str(latest_json),
+        "markdown": str(latest_markdown),
+        "history_json": history_json,
+        "history_markdown": history_markdown,
+    }
+
+
+def load_latest_doctor_report(*, output_dir: Path | None = None) -> dict[str, Any] | None:
+    target_dir = output_dir or DOCTOR_DIR
+    latest_json = target_dir / "latest_report.json"
+    if not latest_json.exists():
+        return None
+    try:
+        return json.loads(latest_json.read_text(encoding="utf-8"))
+    except Exception:
+        return None
+
+
+def create_doctor_job(
+    *,
+    schedule: str = "every 6h",
+    quick: bool = True,
+    strict: bool = False,
+    timeout_seconds: float = 1.5,
+) -> dict[str, Any]:
+    from dharma_swarm.cron_scheduler import create_job
+
+    return create_job(
+        prompt="Run the DGC Doctor assurance sweep and persist the latest report.",
+        schedule=schedule,
+        name="doctor_assurance",
+        handler="doctor_assurance",
+        urgent=True,
+        doctor_quick=quick,
+        doctor_strict=strict,
+        timeout_sec=timeout_seconds,
+    )
+
+
+def doctor_run_fn(job: dict[str, Any]) -> tuple[bool, str, str | None]:
+    quick = bool(job.get("doctor_quick", True))
+    strict = bool(job.get("doctor_strict", False))
+    timeout_seconds = float(job.get("timeout_sec", 1.5) or 1.5)
+    report = run_doctor(timeout_seconds=timeout_seconds, quick=quick)
+    artifacts = write_doctor_artifacts(report)
+    output = render_doctor_report(report)
+    output += (
+        "\n\nArtifacts:\n"
+        f"- latest json: {artifacts['json']}\n"
+        f"- latest markdown: {artifacts['markdown']}"
+    )
+    status = str(report.get("status", "PASS"))
+    success = status == "PASS" or (status == "WARN" and not strict)
+    error = None if success else f"Doctor report status={status}"
+    return success, output, error
+
+
+def run_doctor(
+    *,
+    timeout_seconds: float = 1.5,
+    quick: bool = False,
+    repo_root: Path | None = None,
+) -> dict[str, Any]:
     checks: list[DoctorCheck] = []
     _check_env_autoload(checks)
+    _check_daemon_integrity(checks, timeout_seconds=timeout_seconds)
+    _check_message_bus_integrity(checks, timeout_seconds=timeout_seconds)
+    _check_doctor_schedule(checks)
     _check_router_env(checks)
     _check_worker_bins(checks, timeout_seconds=timeout_seconds)
     _check_provider_env(checks)
@@ -534,28 +1010,54 @@ def run_doctor(*, timeout_seconds: float = 1.5, quick: bool = False) -> dict[str
     _check_router_paths(checks)
     _check_router_wiring(checks)
 
+    root = repo_root or REPO_ROOT
+    assurance: dict[str, Any] = {}
+    try:
+        assurance = _assurance_report(repo_root=root, quick=quick)
+        for check in assurance.get("checks", []):
+            _add(
+                checks,
+                name=str(check.get("name", "assurance_unknown")),
+                status=str(check.get("status", "WARN")),
+                summary=str(check.get("summary", "")).strip(),
+                detail=str(check.get("detail", "")).strip(),
+            )
+    except Exception as exc:
+        _add(
+            checks,
+            name="assurance_runner",
+            status="WARN",
+            summary="assurance mesh failed to run",
+            detail=str(exc),
+            fix="Fix scanner/runtime errors under dharma_swarm/assurance before trusting doctor output.",
+        )
+
     pass_count = sum(1 for c in checks if c.status == "PASS")
     warn_count = sum(1 for c in checks if c.status == "WARN")
     fail_count = sum(1 for c in checks if c.status == "FAIL")
 
-    status = "PASS"
-    if fail_count:
-        status = "FAIL"
-    elif warn_count:
-        status = "WARN"
-
     fixes = [c.fix for c in checks if c.fix]
+    for fix in assurance.get("recommended_fixes", []):
+        if fix and fix not in fixes:
+            fixes.append(str(fix))
+
+    summary = {
+        "total": len(checks),
+        "pass": pass_count,
+        "warn": warn_count,
+        "fail": fail_count,
+    }
     return {
         "timestamp_utc": datetime.now(timezone.utc).isoformat(),
-        "status": status,
-        "summary": {
-            "total": len(checks),
-            "pass": pass_count,
-            "warn": warn_count,
-            "fail": fail_count,
-        },
+        "status": _doctor_status(summary),
+        "summary": summary,
         "checks": [c.to_dict() for c in checks],
         "recommended_fixes": fixes,
+        "assurance": assurance,
+        "artifacts": {
+            "latest_json": str(DOCTOR_DIR / "latest_report.json"),
+            "latest_markdown": str(DOCTOR_DIR / "latest_report.md"),
+        },
     }
 
 
@@ -589,11 +1091,32 @@ def render_doctor_report(report: dict[str, Any]) -> str:
         if detail:
             lines.append(f"  detail: {detail}")
 
+    assurance = report.get("assurance", {})
+    if assurance:
+        try:
+            from dharma_swarm.assurance.runner import render_assurance_report
+
+            lines.append("")
+            lines.append(render_assurance_report(assurance))
+        except Exception:
+            pass
+
     fixes = [str(item).strip() for item in report.get("recommended_fixes", []) if str(item).strip()]
     if fixes:
         lines.append("")
         lines.append("Recommended fixes:")
         for idx, item in enumerate(fixes, start=1):
             lines.append(f"{idx}. {item}")
+
+    artifacts = report.get("artifacts", {})
+    latest_json = str(artifacts.get("latest_json", "")).strip()
+    latest_markdown = str(artifacts.get("latest_markdown", "")).strip()
+    if latest_json or latest_markdown:
+        lines.append("")
+        lines.append("Artifact targets:")
+        if latest_json:
+            lines.append(f"- json: {latest_json}")
+        if latest_markdown:
+            lines.append(f"- markdown: {latest_markdown}")
 
     return "\n".join(lines)

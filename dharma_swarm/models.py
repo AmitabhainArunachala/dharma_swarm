@@ -53,6 +53,7 @@ class AgentRole(str, Enum):
     SURGEON = "surgeon"
     ARCHITECT = "architect"
     VALIDATOR = "validator"
+    CONDUCTOR = "conductor"
 
 
 class MessagePriority(str, Enum):

@@ -248,6 +248,39 @@ async def spawn_default_crew(swarm) -> list:
     return list(agents)
 
 
+async def spawn_conductor_crew(swarm) -> list:
+    """Register conductor agents in the swarm agent pool.
+
+    This makes conductors visible in ``dgc status`` and allows the swarm
+    to route tasks to them. The conductors' actual lifecycle is managed
+    by PersistentAgent.run_loop(), not by the swarm.
+    """
+    from dharma_swarm.conductors import CONDUCTOR_CONFIGS
+
+    existing = await swarm.list_agents()
+    existing_names = {a.name for a in existing}
+
+    spawned = []
+    for cfg in CONDUCTOR_CONFIGS:
+        if cfg["name"] in existing_names:
+            continue
+        try:
+            agent = await swarm.spawn_agent(
+                name=cfg["name"],
+                role=cfg["role"],
+                thread="mechanistic",
+                provider_type=cfg["provider_type"],
+                model=cfg["model"],
+                system_prompt=cfg["system_prompt"][:500],
+            )
+            spawned.append(agent)
+            logger.info("Registered conductor: %s (%s)", cfg["name"], cfg["model"])
+        except Exception as e:
+            logger.warning("Failed to register conductor %s: %s", cfg["name"], e)
+
+    return spawned
+
+
 async def create_seed_tasks(swarm) -> list:
     """Create seed tasks for the first daemon cycle.
 

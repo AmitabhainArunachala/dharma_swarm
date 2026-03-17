@@ -82,6 +82,9 @@ class Orchestrator:
         event_memory: Any = None,
         yoga: YogaScheduler | None = None,
     ) -> None:
+        from dharma_swarm.config import DEFAULT_CONFIG
+        _cfg = DEFAULT_CONFIG.orchestrator
+
         self._board = task_board
         self._pool = agent_pool
         self._bus = message_bus
@@ -95,17 +98,17 @@ class Orchestrator:
         self._active_dispatches: dict[str, TaskDispatch] = {}
         # Track running asyncio tasks for actual LLM execution
         self._running_tasks: dict[str, asyncio.Task] = {}
-        self._default_timeout_seconds = 300.0
-        self._default_claim_timeout_seconds = 420.0
-        self._default_max_retries = 0
-        self._default_retry_backoff_seconds = 0.0
-        self._transient_failure_retry_limit = 2
-        self._transient_failure_backoff_seconds = 30.0
-        self._long_timeout_retry_limit = 1
-        self._long_timeout_backoff_seconds = 15.0
-        self._long_timeout_retry_threshold_seconds = 120.0
-        self._timeout_retry_growth_factor = 1.5
-        self._max_timeout_retry_seconds = 900.0
+        self._default_timeout_seconds = _cfg.task_timeout_seconds
+        self._default_claim_timeout_seconds = _cfg.claim_timeout_seconds
+        self._default_max_retries = _cfg.max_retries
+        self._default_retry_backoff_seconds = _cfg.retry_backoff_seconds
+        self._transient_failure_retry_limit = _cfg.transient_failure_retry_limit
+        self._transient_failure_backoff_seconds = _cfg.transient_failure_backoff_seconds
+        self._long_timeout_retry_limit = _cfg.long_timeout_retry_limit
+        self._long_timeout_backoff_seconds = _cfg.long_timeout_backoff_seconds
+        self._long_timeout_retry_threshold_seconds = _cfg.long_timeout_threshold_seconds
+        self._timeout_retry_growth_factor = _cfg.timeout_retry_growth_factor
+        self._max_timeout_retry_seconds = _cfg.max_timeout_retry_seconds
         self._last_coordination_result: CoordinationResult | None = None
         self._last_coordination_summary: dict[str, Any] = self._empty_coordination_summary()
         self._last_coordination_signature = ""
@@ -299,6 +302,62 @@ class Orchestrator:
     def stop(self) -> None:
         """Signal the run loop to exit after the current tick."""
         self._running = False
+
+    async def graceful_stop(self, timeout: float = 30.0) -> dict[str, int]:
+        """Cancel all in-flight tasks, gather with timeout, then stop.
+
+        Varela's autopoiesis: clean death is part of the lifecycle.
+
+        Returns a summary of what was cancelled vs completed.
+        """
+        self._running = False
+        cancelled = 0
+        completed = 0
+
+        if not self._running_tasks:
+            return {"cancelled": 0, "completed": 0}
+
+        # First, cancel all running asyncio tasks
+        for task_id, atask in self._running_tasks.items():
+            if not atask.done():
+                atask.cancel()
+                cancelled += 1
+            else:
+                completed += 1
+
+        # Wait for cancellation to propagate (with timeout)
+        if self._running_tasks:
+            pending = [t for t in self._running_tasks.values() if not t.done()]
+            if pending:
+                done, timed_out = await asyncio.wait(
+                    pending, timeout=timeout,
+                    return_when=asyncio.ALL_COMPLETED,
+                )
+                # Suppress CancelledError from gathered tasks
+                for task in done:
+                    try:
+                        task.result()
+                    except (asyncio.CancelledError, Exception):
+                        pass
+                for task in timed_out:
+                    task.cancel()
+
+        self._running_tasks.clear()
+        self._active_dispatches.clear()
+
+        logger.info(
+            "Orchestrator graceful stop: %d cancelled, %d already completed",
+            cancelled, completed,
+        )
+        return {"cancelled": cancelled, "completed": completed}
+
+    async def __aenter__(self) -> "Orchestrator":
+        """Async context manager support."""
+        return self
+
+    async def __aexit__(self, exc_type: Any, exc_val: Any, exc_tb: Any) -> None:
+        """Graceful stop on context exit."""
+        await self.graceful_stop()
 
     @property
     def ledger_paths(self) -> dict[str, str]:
@@ -635,6 +694,8 @@ class Orchestrator:
             return ["reviewer", "researcher", "general"]
         return []
 
+    _EXPLORATION_RATE = 0.1  # 10% random exploration
+
     def _select_idle_agent(
         self,
         task: Task | None,
@@ -642,13 +703,71 @@ class Orchestrator:
     ) -> AgentState | None:
         if not idle_agents:
             return None
+
         preferred_roles = self._task_preferred_roles(task)
-        for preferred in preferred_roles:
-            for index, agent in enumerate(idle_agents):
-                role_value = str(getattr(agent.role, "value", agent.role)).lower()
-                if role_value == preferred:
-                    return idle_agents.pop(index)
+
+        # Collect ALL role-matched candidates (not just first match)
+        role_matched: list[AgentState] = []
+        for agent in idle_agents:
+            role_value = str(getattr(agent.role, "value", agent.role)).lower()
+            if any(role_value == p for p in preferred_roles):
+                role_matched.append(agent)
+
+        # Pick from role-matched subset if any, else all candidates
+        candidates = role_matched if role_matched else list(idle_agents)
+
+        # Fitness-biased selection (feature-flagged, best-effort)
+        best = self._fitness_biased_pick(candidates, task)
+        if best is not None:
+            idle_agents.remove(best)
+            return best
+
+        # FIFO fallback (original behavior)
+        if role_matched:
+            pick = role_matched[0]
+            idle_agents.remove(pick)
+            return pick
         return idle_agents.pop(0)
+
+    def _fitness_biased_pick(
+        self,
+        candidates: list[AgentState],
+        task: Task | None,
+    ) -> AgentState | None:
+        """Fitness-biased agent selection with Bayesian smoothing and exploration."""
+        if len(candidates) <= 1:
+            return candidates[0] if candidates else None
+
+        # Feature flag: ENABLE_FITNESS_ROUTING (default off until enough data)
+        import os
+        if os.getenv("ENABLE_FITNESS_ROUTING", "").lower() not in ("1", "true", "yes"):
+            return None  # Falls through to FIFO
+
+        try:
+            import random
+            from dharma_swarm.telic_seam import get_seam
+            seam = get_seam()
+
+            # Exploration: 10% of the time, pick randomly
+            if random.random() < self._EXPLORATION_RATE:
+                return random.choice(candidates)
+
+            task_meta = task.metadata if task and isinstance(task.metadata, dict) else {}
+            task_type = task_meta.get("task_type", "")
+            cell_id = task_meta.get("cell_id", "")
+
+            scored: list[tuple[float, int, AgentState]] = []
+            for agent in candidates:
+                score, n = seam.query_agent_fitness(
+                    agent.id, cell_id=cell_id, task_type=task_type,
+                )
+                scored.append((score, n, agent))
+
+            # Sort by score descending, then sample count descending
+            scored.sort(key=lambda x: (x[0], x[1]), reverse=True)
+            return scored[0][2]
+        except Exception:
+            return None  # Falls through to FIFO
 
     @staticmethod
     def _empty_coordination_summary() -> dict[str, Any]:
@@ -1326,6 +1445,19 @@ class Orchestrator:
         td.metadata["dispatch_started_monotonic"] = time.monotonic()
         task_for_gate = await self._safe_get_task(td.task_id)
 
+        # ── Telic Seam: record ActionProposal in ontology ──
+        proposal_id: str | None = None
+        if task_for_gate is not None:
+            try:
+                from dharma_swarm.telic_seam import get_seam
+                proposal_id = get_seam().record_dispatch(
+                    task_for_gate, td.agent_id,
+                    topology=td.topology.value if td.topology else "dispatch",
+                )
+                td.metadata["telic_proposal_id"] = proposal_id or ""
+            except Exception:
+                pass  # Seam recording is never fatal
+
         action_ref = (
             f"dispatch task {task_for_gate.title} -> {td.agent_id}"
             if task_for_gate
@@ -1344,6 +1476,18 @@ class Orchestrator:
             max_reroutes=1,
             requirement_refs=[f"task:{td.task_id}", f"agent:{td.agent_id}"],
         )
+
+        # ── Telic Seam: record GateDecision in ontology ──
+        if proposal_id is not None:
+            try:
+                from dharma_swarm.telic_seam import get_seam
+                get_seam().record_gate_decision(
+                    proposal_id, gate.result,
+                    witness_reroutes=gate.attempts,
+                )
+            except Exception:
+                pass  # Seam recording is never fatal
+
         if gate.result.decision.value == "block":
             await self._safe_update_task(
                 td.task_id,

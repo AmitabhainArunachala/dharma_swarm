@@ -18,9 +18,9 @@ from dharma_swarm.dharma_kernel import (
 
 
 def test_create_default():
-    """Default kernel has 10 principles and a non-empty signature."""
+    """Default kernel has 25 principles and a non-empty signature."""
     kernel = DharmaKernel.create_default()
-    assert len(kernel.principles) == 10
+    assert len(kernel.principles) == 25
     assert kernel.signature != ""
     assert len(kernel.signature) == 64  # SHA-256 hex digest
 
@@ -76,7 +76,7 @@ def test_json_roundtrip():
     restored = DharmaKernel.model_validate(data)
     assert restored.verify_integrity() is True
     assert restored.signature == kernel.signature
-    assert len(restored.principles) == 10
+    assert len(restored.principles) == 25
 
 
 # ---------------------------------------------------------------------------
@@ -96,7 +96,7 @@ async def test_kernel_guard_save_load(tmp_path):
     loaded = await guard2.load()
     assert loaded.verify_integrity() is True
     assert loaded.signature == kernel.signature
-    assert len(loaded.principles) == 10
+    assert len(loaded.principles) == 25
 
 
 @pytest.mark.asyncio

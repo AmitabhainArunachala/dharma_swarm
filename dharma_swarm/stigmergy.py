@@ -34,7 +34,7 @@ class StigmergicMark(BaseModel):
     timestamp: datetime = Field(default_factory=_utc_now)
     agent: str
     file_path: str
-    action: Action
+    action: str = ""  # Was required Action; defaulted for back-compat with old marks
     observation: str = Field(max_length=200)
     salience: float = 0.5
     connections: list[str] = Field(default_factory=list)
@@ -76,15 +76,30 @@ class StigmergyStore:
     # -- read ----------------------------------------------------------------
 
     async def _load_marks(self) -> list[StigmergicMark]:
-        """Read all marks from the JSONL file."""
+        """Read all marks from the JSONL file.
+
+        Tolerant: bad marks are counted and skipped, never crash the caller.
+        """
         if not self._marks_file.exists():
             return []
         marks: list[StigmergicMark] = []
+        self._corrupt_count = 0
         async with aiofiles.open(self._marks_file, "r") as f:
             async for line in f:
                 stripped = line.strip()
-                if stripped:
+                if not stripped:
+                    continue
+                try:
                     marks.append(StigmergicMark.model_validate_json(stripped))
+                except Exception:
+                    self._corrupt_count += 1
+        if self._corrupt_count:
+            import logging
+            logging.getLogger(__name__).warning(
+                "Stigmergy: skipped %d corrupt marks out of %d total lines",
+                self._corrupt_count,
+                len(marks) + self._corrupt_count,
+            )
         return marks
 
     async def read_marks(

@@ -22,12 +22,16 @@ import {
   Wrench,
 } from "lucide-react";
 import { useChat, type ChatMessage, type ToolEvent } from "@/hooks/useChat";
+import { getChatProfiles, resolveChatProfile, shortProfileLabel } from "@/lib/chatProfiles";
 import { colors } from "@/lib/theme";
 
 interface ChatInterfaceProps {
   className?: string;
   showHeader?: boolean;
   compact?: boolean;
+  profileId?: string;
+  onProfileChange?: (profileId: string) => void;
+  allowProfileSwitch?: boolean;
 }
 
 const TOOL_ICONS: Record<string, typeof Terminal> = {
@@ -53,10 +57,22 @@ function formatTokenCount(value: number | undefined): string {
   return String(value);
 }
 
+function profileAccentColor(accent: string): string {
+  if (accent === "kinpaku") return colors.kinpaku;
+  if (accent === "botan") return colors.botan;
+  if (accent === "rokusho") return colors.rokusho;
+  if (accent === "fuji") return colors.fuji;
+  if (accent === "bengara") return colors.bengara;
+  return colors.aozora;
+}
+
 export function ChatInterface({
   className = "",
   showHeader = true,
   compact = false,
+  profileId,
+  onProfileChange,
+  allowProfileSwitch = true,
 }: ChatInterfaceProps) {
   const {
     messages,
@@ -67,10 +83,16 @@ export function ChatInterface({
     sendMessage,
     clearMessages,
     stopStreaming,
-  } = useChat();
+  } = useChat(profileId);
   const [input, setInput] = useState("");
   const messagesEndRef = useRef<HTMLDivElement>(null);
   const inputRef = useRef<HTMLTextAreaElement>(null);
+  const profiles = getChatProfiles(status);
+  const activeProfile = resolveChatProfile(
+    status,
+    profileId ?? status?.default_profile_id ?? profiles[0]?.id ?? "claude_opus",
+  );
+  const accentColor = profileAccentColor(activeProfile.accent);
 
   useEffect(() => {
     messagesEndRef.current?.scrollIntoView({ behavior: "smooth" });
@@ -104,8 +126,11 @@ export function ChatInterface({
           <div className="flex items-center gap-2.5">
             <Sparkles size={16} className="text-aozora" />
             <div className="flex flex-wrap items-center gap-2">
-              <span className="font-heading text-sm font-bold tracking-wide text-aozora">
-                Claude Opus 4.6
+              <span
+                className="font-heading text-sm font-bold tracking-wide"
+                style={{ color: accentColor }}
+              >
+                {activeProfile.label}
               </span>
               <span className="rounded-full bg-rokusho/15 px-2 py-0.5 font-mono text-[10px] text-rokusho">
                 {status?.tools ?? 11} tools
@@ -116,22 +141,55 @@ export function ChatInterface({
               <span className="rounded-full bg-kinpaku/15 px-2 py-0.5 font-mono text-[10px] text-kinpaku">
                 {formatTokenCount(status?.max_tokens)} out
               </span>
+              <span className="rounded-full bg-sumi-800 px-2 py-0.5 font-mono text-[10px] text-sumi-600">
+                {activeProfile.model}
+              </span>
             </div>
           </div>
-          <button
-            onClick={clearMessages}
-            className="rounded p-1.5 text-sumi-600 transition-colors hover:bg-sumi-800 hover:text-torinoko"
-            title="Clear conversation"
-          >
-            <Trash2 size={14} />
-          </button>
+          <div className="flex items-center gap-1.5">
+            {allowProfileSwitch && profiles.length > 1 && onProfileChange && (
+              <div className="flex items-center gap-1 rounded-lg border border-sumi-700/40 bg-sumi-850/70 p-1">
+                {profiles.map((profile) => {
+                  const isActive = profile.id === activeProfile.id;
+                  const profileAccent = profileAccentColor(profile.accent);
+                  return (
+                    <button
+                      key={profile.id}
+                      onClick={() => onProfileChange(profile.id)}
+                      className="rounded-md px-2 py-1 font-mono text-[10px] transition-colors"
+                      style={{
+                        color: isActive ? profileAccent : colors.sumi[600],
+                        background: isActive
+                          ? `color-mix(in srgb, ${profileAccent} 14%, transparent)`
+                          : "transparent",
+                      }}
+                      title={profile.summary}
+                    >
+                      {shortProfileLabel(profile)}
+                    </button>
+                  );
+                })}
+              </div>
+            )}
+            <button
+              onClick={clearMessages}
+              className="rounded p-1.5 text-sumi-600 transition-colors hover:bg-sumi-800 hover:text-torinoko"
+              title="Clear conversation"
+            >
+              <Trash2 size={14} />
+            </button>
+          </div>
         </div>
       )}
 
       {/* Messages + tool activity */}
       <div className="flex-1 overflow-y-auto">
         {messages.length === 0 ? (
-          <EmptyState compact={compact} onSuggestion={(s) => sendMessage(s)} />
+          <EmptyState
+            compact={compact}
+            profileLabel={activeProfile.label}
+            onSuggestion={(s) => sendMessage(s)}
+          />
         ) : (
           <div className="space-y-1 px-4 py-3">
             <AnimatePresence initial={false}>
@@ -178,7 +236,7 @@ export function ChatInterface({
             value={input}
             onChange={(e) => setInput(e.target.value)}
             onKeyDown={handleKeyDown}
-            placeholder="Ask Claude — it has full system access..."
+            placeholder={`Ask ${shortProfileLabel(activeProfile)} — it can inspect, edit, and steer the swarm...`}
             rows={1}
             className={`flex-1 resize-none rounded-lg border border-sumi-700/40 bg-sumi-850 ${
               compact ? "px-3 py-2" : "px-4 py-3"
@@ -332,9 +390,11 @@ function MessageBubble({ message, compact }: { message: ChatMessage; compact: bo
 
 function EmptyState({
   compact,
+  profileLabel,
   onSuggestion,
 }: {
   compact: boolean;
+  profileLabel: string;
   onSuggestion: (text: string) => void;
 }) {
   const suggestions = [
@@ -353,7 +413,7 @@ function EmptyState({
         DHARMA COMMAND Console
       </h3>
       <p className="mt-1 text-center text-xs text-sumi-600">
-        Claude Opus 4.6 with full system access — files, shell, swarm, evolution
+        {profileLabel} with full system access — files, shell, swarm, evolution
       </p>
       {!compact && (
         <div className="mt-6 grid w-full max-w-md grid-cols-2 gap-2">

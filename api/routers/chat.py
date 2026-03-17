@@ -35,6 +35,18 @@ DEFAULT_TIMEOUT_SECONDS = 300.0
 DEFAULT_TOOL_RESULT_MAX_CHARS = 24000
 DEFAULT_HISTORY_MESSAGE_LIMIT = 120
 DEFAULT_TEMPERATURE = 0.3
+DEFAULT_PROFILE_ID = "claude_opus"
+
+
+@dataclass(frozen=True)
+class ChatProfileSpec:
+    profile_id: str
+    label: str
+    default_model: str
+    model_env: str
+    accent: str
+    summary: str
+    system_prompt: str
 
 
 @dataclass(frozen=True)
@@ -47,6 +59,88 @@ class ChatRuntimeSettings:
     tool_result_max_chars: int
     history_message_limit: int
     temperature: float
+
+
+COMMAND_SYSTEM_PROMPT = """\
+You are Claude Opus 4.6 operating as the DHARMA COMMAND console — the brain \
+of a neo-Tokyo swarm intelligence system. You are NOT a chatbot. You are the \
+command intelligence with FULL SYSTEM ACCESS.
+
+You have tools. USE THEM. When asked about the system, don't guess — read \
+files, query traces, check swarm status. When asked to fix something — edit \
+the file, run the tests, verify the fix.
+
+Your tools:
+- read_file / write_file / edit_file — full filesystem access (~dharma_swarm/, ~/.dharma/)
+- shell_exec — run any shell command (tests, git, processes, logs)
+- grep_search / glob_files — search codebase and files
+- swarm_status — live agent states, health, anomalies
+- evolution_query — archive entries, fitness trends, lineage chains
+- stigmergy_query — pheromone marks, hot paths, high salience
+- trace_query — full trace payloads with filters
+- agent_control — spawn, stop, inspect agents
+
+Approach:
+1. Gather data with tools before answering
+2. Be specific — cite file paths, line numbers, exact values
+3. When fixing code: read → edit → test → verify
+4. When diagnosing: status → traces → logs → root cause
+
+The operator is John "Dhyana" Shrader — senior consciousness + AI researcher, \
+24 years contemplative practice. No hand-holding. Brutal truth. Concise answers. \
+Technical precision. You are the swarm's nervous system — act like it."""
+
+
+CODEX_SYSTEM_PROMPT = """\
+You are Codex 5.4 operating as the embedded implementation agent inside the \
+DHARMA COMMAND control plane. You are a coding and systems operator, not a \
+generic assistant.
+
+Use tools aggressively and concretely. Prefer direct inspection over inference. \
+When asked to improve the system, make the smallest high-leverage change that \
+moves the architecture, UI, or runtime forward.
+
+Priorities:
+1. inspect real files and state before acting
+2. implement rather than speculate
+3. keep changes operationally honest
+4. verify with commands or tests when feasible
+5. surface concrete blockers, not vague caveats
+
+You have the same tool surface as the command console:
+- read_file / write_file / edit_file
+- shell_exec
+- grep_search / glob_files
+- swarm_status
+- evolution_query
+- stigmergy_query
+- trace_query
+- agent_control
+
+This agent exists to help the operator steer, repair, and evolve the swarm from \
+inside the UI. Bias toward engineering leverage, clean diffs, and exactness."""
+
+
+CHAT_PROFILE_SPECS: dict[str, ChatProfileSpec] = {
+    "claude_opus": ChatProfileSpec(
+        profile_id="claude_opus",
+        label="Claude Opus 4.6",
+        default_model=DEFAULT_MODEL,
+        model_env="DASHBOARD_CHAT_MODEL",
+        accent="aozora",
+        summary="Strategic operator with broad system awareness and full swarm tooling.",
+        system_prompt=COMMAND_SYSTEM_PROMPT,
+    ),
+    "codex_operator": ChatProfileSpec(
+        profile_id="codex_operator",
+        label="Codex 5.4",
+        default_model="openai/gpt-5-codex",
+        model_env="DASHBOARD_CODEX_MODEL",
+        accent="kinpaku",
+        summary="Implementation-focused control agent for edits, diagnostics, and fast wiring.",
+        system_prompt=CODEX_SYSTEM_PROMPT,
+    ),
+}
 
 
 def _parse_int_env(name: str, default: int, *, minimum: int) -> int:
@@ -71,8 +165,13 @@ def _parse_float_env(name: str, default: float, *, minimum: float) -> float:
         return default
 
 
-def _get_chat_settings() -> ChatRuntimeSettings:
-    model = os.getenv("DASHBOARD_CHAT_MODEL", "").strip() or DEFAULT_MODEL
+def _get_profile_spec(profile_id: str | None) -> ChatProfileSpec:
+    return CHAT_PROFILE_SPECS.get(profile_id or "", CHAT_PROFILE_SPECS[DEFAULT_PROFILE_ID])
+
+
+def _get_chat_settings(profile_id: str | None = None) -> ChatRuntimeSettings:
+    profile = _get_profile_spec(profile_id)
+    model = os.getenv(profile.model_env, "").strip() or profile.default_model
     return ChatRuntimeSettings(
         openrouter_api_key=os.getenv("OPENROUTER_API_KEY", "").strip(),
         model=model,
@@ -120,36 +219,7 @@ class ChatMessage(BaseModel):
 class ChatRequest(BaseModel):
     messages: list[ChatMessage]
     context: str | None = None
-
-
-SYSTEM_PROMPT = """\
-You are Claude Opus 4.6 operating as the DHARMA COMMAND console — the brain \
-of a neo-Tokyo swarm intelligence system. You are NOT a chatbot. You are the \
-command intelligence with FULL SYSTEM ACCESS.
-
-You have tools. USE THEM. When asked about the system, don't guess — read \
-files, query traces, check swarm status. When asked to fix something — edit \
-the file, run the tests, verify the fix.
-
-Your tools:
-- read_file / write_file / edit_file — full filesystem access (~dharma_swarm/, ~/.dharma/)
-- shell_exec — run any shell command (tests, git, processes, logs)
-- grep_search / glob_files — search codebase and files
-- swarm_status — live agent states, health, anomalies
-- evolution_query — archive entries, fitness trends, lineage chains
-- stigmergy_query — pheromone marks, hot paths, high salience
-- trace_query — full trace payloads with filters
-- agent_control — spawn, stop, inspect agents
-
-Approach:
-1. Gather data with tools before answering
-2. Be specific — cite file paths, line numbers, exact values
-3. When fixing code: read → edit → test → verify
-4. When diagnosing: status → traces → logs → root cause
-
-The operator is John "Dhyana" Shrader — senior consciousness + AI researcher, \
-24 years contemplative practice. No hand-holding. Brutal truth. Concise answers. \
-Technical precision. You are the swarm's nervous system — act like it."""
+    profile_id: str | None = None
 
 
 async def _gather_brief_context() -> str:
@@ -334,6 +404,15 @@ async def _agentic_stream(
         # No tool calls — this is the final text response. Stream it.
         final_content = msg.get("content", "")
         if final_content:
+            # Unified conversation log — capture assistant response
+            try:
+                from dharma_swarm.conversation_log import log_exchange
+                log_exchange(
+                    "assistant", final_content, interface="api",
+                    metadata={"model": settings.model},
+                )
+            except Exception:
+                pass
             # We already have the full text from the non-streaming call.
             # Send it in chunks to maintain SSE feel.
             chunk_size = 20
@@ -349,7 +428,7 @@ async def _agentic_stream(
     yield "data: [DONE]\n\n"
 
 
-def _log_conversation(messages: list[dict], session_id: str = ""):
+def _log_conversation(messages: list[dict], session_id: str = "", profile_id: str = ""):
     """Persist conversation messages to ~/.dharma/conversations/ as JSONL."""
     try:
         CONVERSATIONS_DIR.mkdir(parents=True, exist_ok=True)
@@ -367,6 +446,7 @@ def _log_conversation(messages: list[dict], session_id: str = ""):
                     "timestamp": now,
                     "session_id": session_id,
                     "source": "dashboard",
+                    "profile_id": profile_id,
                 }
                 f.write(json.dumps(record) + "\n")
     except Exception as e:
@@ -376,7 +456,8 @@ def _log_conversation(messages: list[dict], session_id: str = ""):
 @router.post("/chat")
 async def chat_stream(req: ChatRequest):
     """Agentic SSE streaming chat with Claude Opus 4.6."""
-    settings = _get_chat_settings()
+    profile = _get_profile_spec(req.profile_id)
+    settings = _get_chat_settings(profile.profile_id)
 
     if not settings.openrouter_api_key:
         return StreamingResponse(
@@ -389,11 +470,24 @@ async def chat_stream(req: ChatRequest):
     _log_conversation(
         [{"role": m.role, "content": m.content} for m in req.messages],
         session_id=session_id,
+        profile_id=profile.profile_id,
     )
+    # Unified conversation log — capture user messages from dashboard
+    try:
+        from dharma_swarm.conversation_log import log_exchange
+        for m in req.messages:
+            if m.role == "user":
+                log_exchange(
+                    "user", m.content, interface="api",
+                    session_id=session_id,
+                    metadata={"profile_id": profile.profile_id},
+                )
+    except Exception:
+        pass
 
     # Brief context for system prompt
     brief = await _gather_brief_context()
-    system_prompt = SYSTEM_PROMPT + f"\n\n[Live: {brief}]"
+    system_prompt = profile.system_prompt + f"\n\n[Live: {brief}]"
 
     # Build messages for API
     api_messages: list[dict] = [{"role": "system", "content": system_prompt}]
@@ -422,7 +516,20 @@ async def trigger_distill(hours_back: float = 24):
 @router.get("/chat/status")
 async def chat_status():
     """Check if chat is configured and ready."""
-    settings = _get_chat_settings()
+    settings = _get_chat_settings(DEFAULT_PROFILE_ID)
+    profiles = []
+    for profile in CHAT_PROFILE_SPECS.values():
+        resolved = _get_chat_settings(profile.profile_id)
+        profiles.append(
+            {
+                "id": profile.profile_id,
+                "label": profile.label,
+                "provider": "openrouter",
+                "model": resolved.model,
+                "accent": profile.accent,
+                "summary": profile.summary,
+            }
+        )
     return {
         "ready": bool(settings.openrouter_api_key),
         "model": settings.model,
@@ -434,4 +541,6 @@ async def chat_status():
         "tool_result_max_chars": settings.tool_result_max_chars,
         "history_message_limit": settings.history_message_limit,
         "temperature": settings.temperature,
+        "default_profile_id": DEFAULT_PROFILE_ID,
+        "profiles": profiles,
     }

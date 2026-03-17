@@ -85,10 +85,7 @@ app = FastAPI(
 # CORS for Next.js dev server
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=[
-        "http://localhost:3000",
-        "http://127.0.0.1:3000",
-    ],
+    allow_origins=["*"],
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
@@ -104,6 +101,8 @@ from api.routers.lineage import router as lineage_router
 from api.routers.stigmergy import router as stigmergy_router
 from api.routers.commands import router as commands_router
 from api.routers.chat import router as chat_router
+from api.routers.modules import router as modules_router
+from api.routers.dashboard_new import router as dashboard_new_router
 
 app.include_router(health_router)
 app.include_router(agents_router)
@@ -113,6 +112,8 @@ app.include_router(lineage_router)
 app.include_router(stigmergy_router)
 app.include_router(commands_router)
 app.include_router(chat_router)
+app.include_router(modules_router)
+app.include_router(dashboard_new_router)
 
 
 # ── Root ──────────────────────────────────────────────────────────

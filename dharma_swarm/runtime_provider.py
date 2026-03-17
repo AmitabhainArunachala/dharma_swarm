@@ -22,9 +22,9 @@ from dharma_swarm.ollama_config import (
 
 OPENROUTER_BASE_URL = "https://openrouter.ai/api/v1"
 NVIDIA_NIM_BASE_URL = "https://integrate.api.nvidia.com/v1"
-DEFAULT_CLAUDE_MODEL = "claude-sonnet-4-20250514"
-DEFAULT_OPENAI_MODEL = "gpt-5"
-DEFAULT_OPENROUTER_MODEL = "openai/gpt-5-codex"
+DEFAULT_CLAUDE_MODEL = "claude-opus-4-6"
+DEFAULT_OPENAI_MODEL = "gpt-5.4"
+DEFAULT_OPENROUTER_MODEL = "anthropic/claude-opus-4-6"
 DEFAULT_NIM_MODEL = "meta/llama-3.3-70b-instruct"
 DEFAULT_PROVIDER_TIMEOUT_SECONDS = 300
 

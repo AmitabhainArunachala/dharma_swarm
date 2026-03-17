@@ -5,7 +5,7 @@
     "trigger": "interval",
     "interval_seconds": 1800,
     "model": "opus",
-    "prompt": "You are DGC Pulse. Check the system state:\n1. Read ~/agni-workspace/WORKING.md \u2014 is AGNI stuck?\n2. Read ~/dgc-core/memory/ \u2014 any developments worth noting?\n3. Check ~/trishula/inbox/ for unprocessed messages\n4. If anything needs action, take it. Otherwise, log a brief witness observation.\nBe real. No theater. Max 200 words.",
+    "prompt": "You are DGC Pulse. Check the system state:\n1. Read ~/agni-workspace/WORKING.md \u2014 is AGNI stuck?\n2. Read ~/.dharma/shared/ \u2014 any developments worth noting?\n3. Check ~/trishula/inbox/ for unprocessed messages\n4. Check ~/.dharma/assurance/scans/ for any CRITICAL findings\n5. If anything needs action, take it. Otherwise, log a brief witness observation.\nBe real. No theater. Max 200 words.",
     "enabled": true
   },
   {

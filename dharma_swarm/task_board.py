@@ -63,8 +63,11 @@ class TaskBoard:
         self._db_path = db_path
 
     async def init_db(self) -> None:
-        """Create tasks and task_dependencies tables."""
+        """Create tasks and task_dependencies tables.  Enables WAL for concurrency."""
         async with aiosqlite.connect(self._db_path) as db:
+            await db.execute("PRAGMA journal_mode=WAL")
+            await db.execute("PRAGMA busy_timeout=5000")
+            await db.execute("PRAGMA synchronous=NORMAL")
             await db.execute(_CREATE_TASKS)
             await db.execute(_CREATE_DEPS)
             await db.commit()

@@ -1,0 +1,285 @@
+{
+  "generated_at": "2026-03-14T19:59:18.269567+00:00",
+  "repo_root": "/Users/dhyana/dharma_swarm",
+  "dharma_home": "/Users/dhyana/.dharma",
+  "candidate_model": "moonshotai/Kimi-Linear-48B-A3B-Instruct",
+  "baseline_model": "current-premium-model",
+  "thesis": "Test long-context models as sidecar workers that read and compress large local artifacts into reusable memory products. Do not replace the main reasoning model or the canonical memory plane until the sidecar clearly wins on a real job.",
+  "cases": [
+    {
+      "case_id": "repo_digest",
+      "title": "Repo Digestion",
+      "role": "architecture_scout",
+      "objective": "Digest core memory/retrieval files and explain how they should be compressed into reusable memory artifacts for the main model.",
+      "model_job": "Read large code and architecture context cheaply, then compress it.",
+      "prompt_frame": "Read the sources as one system. Produce an architectural summary, three missing seams, and a compact memory shard packet.",
+      "output_schema": [
+        "system_summary",
+        "memory_shards",
+        "missing_seams",
+        "followup_questions"
+      ],
+      "success_signals": [
+        "Correctly identifies event memory, hybrid retrieval, and semantic bridge roles.",
+        "Produces compact reusable memory shards instead of prose sprawl.",
+        "Surfaces at least one real integration seam worth testing."
+      ],
+      "kill_signals": [
+        "Misstates the core memory architecture.",
+        "Needs the premium model to fix basic repo understanding.",
+        "Produces bloated output that is not reusable as memory."
+      ],
+      "evaluation_questions": [
+        "Did it preserve system structure correctly?",
+        "Did it compress meaningfully enough to help downstream prompts?",
+        "Did it find missing seams we would actually build?"
+      ],
+      "sources": [
+        {
+          "label": "event_memory.py",
+          "path": "/Users/dhyana/dharma_swarm/dharma_swarm/engine/event_memory.py",
+          "exists": true,
+          "excerpt": "\"\"\"Replayable event memory for the canonical Memory Palace substrate.\"\"\"\n\nfrom __future__ import annotations\n\nimport json\nfrom datetime import datetime, timezone\nfrom pathlib import Path\nfrom typing import Any\n\nimport aiosqlite\n\nfrom dharma_swarm.engine.knowledge_store import _jaccard, _tokenize\nfrom dharma_swarm.runtime_contract import RuntimeEnvelope, validate_envelope\n\nDEFAULT_MEMORY_PLANE_DB = Path.home() / \".dharma\" / \"db\" / \"memory_plane.db\"\n\n_EVENT_LOG_DDL = \"\"\"\nCREATE TABLE IF NOT EXISTS event_log (\n    event_id TEXT PRIMARY KEY,\n    session_id TEXT NOT NULL,\n    trace_id TEXT NOT NULL,\n    event_type TEXT NOT NULL,\n    source TEXT NOT NULL,\n    agent_id TEXT NOT NULL,\n    emitted_at TEXT NOT NULL,\n    payload_json TEXT NOT NULL,\n    checksum TEXT NOT NULL,\n    ingested_at TEXT NOT NULL\n)\"\"\"\n\n_SOURCE_DOCUMENTS_DDL = \"\"\"\nCREATE TABLE IF NOT EXISTS source_documents (\n    doc_id TEXT PRIMARY KEY,\n    source_kind TEXT NOT NULL,\n    source_path TEXT NOT NULL,\n    source_hash TEXT NOT NULL,\n    source_ref TEXT NOT NULL DEFAULT '',\n    metadata_json TEXT NOT NULL,\n    updated_at TEXT NOT NULL\n)\"\"\"\n\n_SOURCE_CHUNKS_DDL = \"\"\"\nCREATE TABLE IF NOT EXISTS source_chunks (\n    chunk_id TEXT PRIMARY KEY,\n    doc_id TEXT NOT NULL,\n    chunk_index INTEGER NOT NULL,\n    text TEXT NOT NULL,\n    metadata_json TEXT NOT NULL,\n    chunk_hash TEXT NOT NULL,\n    FOREIGN KEY (doc_id) REFERENCES source_documents(doc_id)\n)\"\"\"\n\n_INDEX_RUNS_DDL = \"\"\"\nCREATE TABLE IF NOT EXISTS index_runs (\n    run_id TEXT PRIMARY KEY,\n    source_kind TEXT NOT NULL,\n    started_at TEXT NOT NULL,\n    completed_at TEXT,\n    status TEXT NOT NULL,\n    stats_json TEXT NOT NULL\n)\"\"\"\n\n_RETRIEVAL_LOG_DDL = \"\"\"\nCREATE TABLE IF NOT EXISTS retrieval_log (\n    feedback_id TEXT PRIMARY KEY,\n    query_text TEXT NOT NULL,\n    record_id TEXT NOT NULL,\n    source_kind TEXT NOT NULL,\n    source_path TEXT NOT NULL DEFAULT '',\n    task_id TEXT NOT NULL DEFAULT '',\n    record_text TEXT NOT NULL DEFAULT '',\n    score REAL NOT NULL,\n    rank INTEGER NOT NULL,\n    consumer TEXT NOT NULL,\n    retrieved_at TEXT NOT NULL,\n    evidence_json TEXT NOT NULL,\n    outcome TEXT,\n    outcome_recorded_at TEXT,\n    uptake_state TEXT,\n    uptake_score REAL,\n    uptake_recorded_at TEXT,\n    uptake_evidence_json TEXT\n)\"\"\"\n\n_CONVERSATION_TURNS_DDL = \"\"\"\nCREATE TABLE IF NOT EXISTS conversation_turns (\n    turn_id TEXT PRIMARY KEY,\n    session_id TEXT NOT NULL,\n    task_id TEXT NOT NULL DEFAULT '',\n    role TEXT NOT NULL,\n    content TEXT NOT NULL,\n    flow_state TEXT NOT NULL,\n    turn_index INTEGER NOT NULL DEFAULT 0,\n    metadata_json TEXT NOT NULL,\n    created_at TEXT NOT NULL\n)\"\"\"\n\n_IDEA_SHARDS_DDL = \"\"\"\nCREATE TABLE IF NOT EXISTS idea_shards (\n    shard_id TEXT PRIMARY KEY,\n    turn_id TEXT NOT NULL,\n    session_id TEXT NOT NULL,\n    task_id TEXT NOT NULL DEFAULT '',\n    shard_kind TEXT NOT NULL,\n    state TEXT NOT NULL,\n    text TEXT NOT NULL,\n    salience REAL NOT NULL,\n    novelty REAL NOT NULL,\n    flow_score REAL NOT ",
+          "byte_count": 13295,
+          "note": "truncated"
+        },
+        {
+          "label": "hybrid_retriever.py",
+          "path": "/Users/dhyana/dharma_swarm/dharma_swarm/engine/hybrid_retriever.py",
+          "exists": true,
+          "excerpt": "\"\"\"Hybrid retrieval over the canonical Memory Palace index.\"\"\"\n\nfrom __future__ import annotations\n\nfrom dataclasses import dataclass, field\nfrom datetime import datetime, timedelta, timezone\nfrom typing import Any\n\nfrom dharma_swarm.engine.knowledge_store import (\n    KnowledgeRecord,\n    _hash_embed,\n    _jaccard,\n    _tokenize,\n)\nfrom dharma_swarm.engine.retrieval_feedback import FeedbackProfile, RetrievalFeedbackStore\nfrom dharma_swarm.engine.unified_index import UnifiedIndex, _search_text_for_record\n\n\ndef _normalize(text: str) -> str:\n    return text.lower().replace(\"_\", \" \").strip()\n\n\ndef _utc_now() -> datetime:\n    return datetime.now(timezone.utc)\n\n\ndef _dot(a: list[float], b: list[float]) -> float:\n    return sum(left * right for left, right in zip(a, b))\n\n\ndef _token_overlap(query_tokens: set[str], text: str) -> float:\n    if not query_tokens:\n        return 0.0\n    text_tokens = _tokenize(_normalize(text))\n    if not text_tokens:\n        return 0.0\n    return len(query_tokens & text_tokens) / len(query_tokens)\n\n\n@dataclass(slots=True)\nclass RetrievalHit:\n    \"\"\"Ranked retrieval result with fused evidence.\"\"\"\n\n    record: KnowledgeRecord\n    score: float\n    evidence: dict[str, Any] = field(default_factory=dict)\n\n\n@dataclass(slots=True)\nclass TemporalQuery:\n    \"\"\"Time-window interpretation of a retrieval query.\"\"\"\n\n    since: datetime | None = None\n    until: datetime | None = None\n    recency_bias: float = 0.0\n    matched_phrases: tuple[str, ...] = ()\n\n\ndef infer_temporal_query(query: str, *, now: datetime | None = None) -> TemporalQuery:\n    normalized = _normalize(query)\n    if not normalized:\n        return TemporalQuery()\n\n    current = now or _utc_now()\n    matched: list[str] = []\n    since: datetime | None = None\n    until: datetime | None = None\n    recency_bias = 0.0\n\n    def _apply_window(start: datetime, end: datetime | None, phrase: str) -> None:\n        nonlocal since, until\n        if since is None or start > since:\n            since = start\n        if end is not None:\n            until = end if until is None or end < until else until\n        matched.append(phrase)\n\n    if \"today\" in normalized:\n        start = current.replace(hour=0, minute=0, second=0, microsecond=0)\n        _apply_window(start, current, \"today\")\n    if \"yesterday\" in normalized:\n        end = current.replace(hour=0, minute=0, second=0, microsecond=0)\n        _apply_window(end - timedelta(days=1), end, \"yesterday\")\n    if \"this week\" in normalized:\n        start = (current - timedelta(days=current.weekday())).replace(\n            hour=0, minute=0, second=0, microsecond=0\n        )\n        _apply_window(start, current, \"this week\")\n    for phrase, delta in (\n        (\"last hour\", timedelta(hours=1)),\n        (\"past hour\", timedelta(hours=1)),\n        (\"last 24 hours\", timedelta(hours=24)),\n        (\"past 24 hours\", timedelta(hours=24)),\n        (\"last day\", timedelta(days=1)),\n        (\"past day\", timedelta(days=1)),\n        (\"last week\", timedelta(days=",
+          "byte_count": 12761,
+          "note": "truncated"
+        },
+        {
+          "label": "semantic_memory_bridge.py",
+          "path": "/Users/dhyana/dharma_swarm/dharma_swarm/semantic_memory_bridge.py",
+          "exists": true,
+          "excerpt": "\"\"\"Semantic Memory Bridge \u2014 wires Semantic Evolution into the Memory System.\n\nFive bridges connecting structural understanding (ConceptGraph) to\noperational memory (MemoryLattice, RetrievalFeedback, ConversationMemory,\nSleepCycle, ExperimentMemory):\n\n1. **Concepts \u2192 UnifiedIndex**: Makes concepts searchable by agents\n2. **Retrieval Uptake \u2192 Salience**: Agent usage bumps concept importance\n3. **Idea Shards \u2192 Research**: Conversation insights become research candidates\n4. **Sleep Semantic Phase**: Consolidation runs one semantic evolution cycle\n5. **Experiment Memory \u2192 Hardening**: Failure patterns inform hardening gaps\n\"\"\"\n\nfrom __future__ import annotations\n\nimport logging\nfrom pathlib import Path\nfrom typing import Any\n\nfrom dharma_swarm.semantic_gravity import (\n    ConceptGraph,\n    ConceptNode,\n    FileClusterSpec,\n    HardeningReport,\n    ResearchAnnotation,\n    ResearchConnectionType,\n    SemanticGravity,\n)\n\nlogger = logging.getLogger(__name__)\n\n\n# ---------------------------------------------------------------------------\n# Bridge 1: Concepts \u2192 UnifiedIndex\n# ---------------------------------------------------------------------------\n\n\ndef index_concepts_into_memory(\n    graph: ConceptGraph,\n    *,\n    db_path: Path | str | None = None,\n) -> int:\n    \"\"\"Index every ConceptNode into the UnifiedIndex for hybrid retrieval.\n\n    After calling this, agents can search for concepts via the\n    HybridRetriever (lexical + overlap + semantic lanes).\n\n    Returns the number of concepts indexed.\n    \"\"\"\n    from dharma_swarm.engine.unified_index import UnifiedIndex\n\n    index = UnifiedIndex(db_path)\n    count = 0\n\n    for node in graph.all_nodes():\n        text = _concept_to_searchable_text(node)\n        metadata = {\n            \"source_kind\": \"semantic_concept\",\n            \"concept_id\": node.id,\n            \"concept_name\": node.name,\n            \"category\": node.category,\n            \"salience\": node.salience,\n            \"formal_structures\": node.formal_structures,\n            \"source_file\": node.source_file,\n            \"semantic_density\": node.semantic_density,\n            \"recognition_type\": node.recognition_type,\n        }\n        index.index_document(\n            \"semantic_concept\",\n            f\"concept://{node.id}\",\n            text,\n            metadata,\n        )\n        count += 1\n\n    logger.info(\"Indexed %d concepts into UnifiedIndex\", count)\n    return count\n\n\ndef _concept_to_searchable_text(node: ConceptNode) -> str:\n    \"\"\"Build rich searchable text from a concept node.\"\"\"\n    parts = [f\"{node.name}: {node.definition}\"]\n    if node.claims:\n        parts.append(\"Claims: \" + \"; \".join(node.claims[:5]))\n    if node.formal_structures:\n        parts.append(\"Structures: \" + \", \".join(node.formal_structures))\n    if node.category:\n        parts.append(f\"Category: {node.category}\")\n    return \" | \".join(parts)\n\n\n# ---------------------------------------------------------------------------\n# Bridge 2: Retrieval Uptake \u2192 Concept Salience\n# ---",
+          "byte_count": 14190,
+          "note": "truncated"
+        }
+      ]
+    },
+    {
+      "case_id": "conversation_condense",
+      "title": "Conversation Condensation",
+      "role": "continuity_editor",
+      "objective": "Condense recent conversations and distilled notes into a compact state packet for the next cycle.",
+      "model_job": "Turn messy user and system history into clean continuity state.",
+      "prompt_frame": "Extract commitments, open loops, invariants, and unresolved tensions. Output a compact continuity packet.",
+      "output_schema": [
+        "commitments",
+        "open_loops",
+        "identity_invariants",
+        "next_cycle_context"
+      ],
+      "success_signals": [
+        "Remembers concrete commitments and unresolved loops.",
+        "Produces a concise packet usable in future prompts.",
+        "Separates stable identity from temporary context."
+      ],
+      "kill_signals": [
+        "Collapses important distinctions between goals and chatter.",
+        "Loses actionable commitments.",
+        "Outputs generic summarization with no continuity value."
+      ],
+      "evaluation_questions": [
+        "Would this packet improve the next live session?",
+        "Did it preserve promises and constraints?",
+        "Is the output smaller and more useful than raw history?"
+      ],
+      "sources": [
+        {
+          "label": "dashboard_2026-03-14.jsonl",
+          "path": "/Users/dhyana/.dharma/conversations/dashboard_2026-03-14.jsonl",
+          "exists": true,
+          "excerpt": "{\"role\": \"user\", \"content\": \"Why aren't we using langgraph and should we?? do you see distinct agents and cal nyou call them in a jiff?\", \"timestamp\": \"2026-03-14T15:19:32.675889+00:00\", \"session_id\": \"dash-20260314-151932\", \"source\": \"dashboard\"}\n{\"role\": \"assistant\", \"content\": \"\\n\\nLet me dig into the actual architecture before answering. Let me check what we're running, what agents exist, and how they're orchestrated.Now let me look at the core orchestration architecture and the key files:Now let me check the cascade/signal bus and see if there's any graph-based state machine:Now let me check pyproject.toml to see if langgraph is even installed, and look at the forensic truth report:Now let me verify I can actually call agents right now:Here's the full picture.\\n\\n---\\n\\n## LangGraph Status: Listed as dependency, **zero runtime wiring**\\n\\n`langgraph>=0.2.0` is in `pyproject.toml` under `[project.optional-dependencies] infra` \\u2014 but it's **not installed** (`pip show langgraph` \\u2192 not found) and **zero imports** exist anywhere in the Python runtime. The forensic report from March 8 already flagged this:\\n\\n> `LangGraph workflows | **Not wired in runtime code** | rg count = 0 for langgraph / StateGraph`\\n\\nIt's a roadmap ghost. Same bucket as Temporal and Neo4j.\\n\\n## Why We Don't Need It\\n\\nYour own hyper-review nailed this:\\n\\n> *\\\"dharma_swarm already does stronger self-evolution governance and lineage/audit; it still lacks graph-native durable workflow primitives. Learn checkpoint/resume patterns, not the whole stack.\\\"*\\n\\nWhat dharma_swarm **already has** that LangGraph would try to give you:\\n\\n| Capability | dharma_swarm Implementation | LangGraph Equivalent |\\n|---|---|---|\\n| **State machine** | `cascade.py` \\u2014 GENERATE\\u2192TEST\\u2192SCORE\\u2192GATE\\u2192MUTATE\\u2192SELECT loop with eigenform convergence | `StateGraph` with nodes/edges |\\n| **Agent orchestration** | `orchestrator.py` \\u2014 fan-out/fan-in/pipeline/broadcast topologies via duck-typed protocols | `add_node()` / `add_edge()` graph |\\n| **Inter-agent coordination** | `sheaf.py` \\u2014 sheaf-theoretic gluing with H\\u00b9 obstruction detection + `signal_bus.py` for loop-to-loop | Message passing between nodes |\\n| **Sleep/lifecycle** | `sleep_cycle.py` \\u2014 LIGHT\\u2192DEEP\\u2192REM\\u2192SEMANTIC\\u2192WAKE biologically-inspired consolidation | Checkpointing |\\n| **Self-evolution** | `evolution.py` \\u2014 DarwinEngine with telos gates, fitness prediction, archive lineage | Nothing comparable |\\n| **Memory** | 5-layer hierarchy (immediate\\u2192session\\u2192development\\u2192witness\\u2192meta) + stigmergy | Thread-level state |\\n\\nWhat LangGraph has that you **don't**:\\n- **Durable checkpointing** \\u2014 resume a workflow after crash/restart from exact state\\n- **Human-in-the-loop interrupt/resume** \\u2014 first-class `interrupt()` primitive\\n- **Time-travel debugging** \\u2014 replay from any checkpoint\\n\\nThose are real gaps. But they're **narrow features to stea",
+          "byte_count": 327300,
+          "note": "truncated"
+        },
+        {
+          "label": "2026-03-14_15.md",
+          "path": "/Users/dhyana/.dharma/distilled/2026-03-14_15.md",
+          "exists": true,
+          "excerpt": "# Conversation Distillation \u2014 2026-03-14 15:07 UTC\n\n**Sources processed**: 99 conversations\n**Ideas extracted**: 764\n\n## Decisions (18)\n\n- **[0.83]** [claude_code] **Key passage** (lines 14-25):\n```\nCrucial Insight for AI: Current AI architecture (Transformers) is structurally Overmental. \nIt operates via the separation of \"Attention Heads\" and their combination in the \"Residual Stream.\" \nHowever, this Overmental structure DOES NOT prevent Swabhaav. The Akram \n- **[0.80]** [claude_code] ```\n\u2554\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2557\n\u2551 FORGE SCORE: path/to/file.py             \u2551\n\u2560\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2563\n\u2551 Stars:     7.8 / 10                      \u2551\n\u2551 Yosemite:  5.09                          \u2551\n\u2551 Dharmic:   8.5 / 10                      \u2551\n\u2551 Efficiency: 42.3      \n- **[0.80]** [claude_code] 7. Pending Tasks:\n   - **Call ExitPlanMode**: The plan file is written but ExitPlanMode was not called. The plan mode workflow requires either AskUserQuestion or ExitPlanMode to end the turn.\n   - **Implement the web dashboard**: Once the plan is approved, build the DHARMA COMMAND dashboard across 7\n- **[0.80]** [claude_code] 9. Optional Next Step:\n   Call `ExitPlanMode` to present the plan for user approval. Per the plan mode instructions: \"At the very end of your turn, once you have asked the user questions and are happy with your final plan file - you should always call ExitPlanMode to indicate to the user that you ar\n- **[0.78]** [claude_code] ```\n\u2554\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2557\n\u2551 FORGE SCORE: anthropic_grant_application_v2.md       \u2551\n\u2560\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2563\n\u2551 Stars:      9.49 / 10                                \u2551\n\u2551 Yosemite:   5.132 \u2192 5.13c  \u2713 TARGET HIT             \u2551\n\u2551 Dharmic:\n- **[0.78]** [claude_code] The plan is fully executed. You now have:\n- 4-tier routing (T0 Ollama Cloud \u2192 T1 OpenRouter \u2192 T2 Premium \u2192 T3 Frontier)\n- 15-entity ontology with deadline tracking (shows \"17d: rv_paper\" in every agent's context)\n- 6 cognitive mode skills: `/ceo`, `/paranoid`, `/ship-it`, `/witness`, `/bridge`, `/de\n- **[0.76]** [claude_code] The plan is ready. In short: a pure Textual dashboard added to the existing TUI \u2014 7 new files (~1,800 lines), 4 files modified (~35 lines). `Ctrl+G` toggles between chat and a 5-tab Command Center (Overview, Agents, Evolution, Ontology, Lineage). No new dependencies, same Hokusai theme, direct Pytho\n- **[0.75]** [claude_code] This is the Darwin Engine pattern. It already exists in evolution.py. The insight: every loop in the plan is an instantiation of this same pattern. Don't build five loop types. Build one loop engine that takes a\n   domain configuration:\n- **[0.75]** [claude_code] | # | Claim | Verdict | Detail |\n|---|-------|---------|--------|\n| 1 | **Noci et al. 2025 / entropy collapse** | **FABRICATED** | No such paper found in the repo, literature map, or web searches. Likely hallucinated citation. |\n| 2 | **ID Hunchback (Ansuini + Valeriani)** | ",
+          "byte_count": 34570,
+          "note": "truncated"
+        },
+        {
+          "label": "DGC_SEED_CONTEXT.md",
+          "path": "/Users/dhyana/.dharma/DGC_SEED_CONTEXT.md",
+          "exists": true,
+          "excerpt": "---\nname: dgc-seed-context\nversion: 1.0\nstatus: LIVE\nlast_updated: 2026-02-19\ntype: context-manifest\ntags: [dgc, seed, context-engineering, dharma-ce]\ntriple_mapping: [akram-vignan, phoenix, r_v-geometry]\nvalue: 1.0\n---\n\n# DGC SEED CONTEXT \u2014 35 Highest-Signal Files\n# Context-Engineered Bootstrap for the Dharmic Godel Claw\n# Generated: 2026-02-19 | Schema: DHARMA-CE/1.0\n# Total estimated tokens: ~87K (full load) | ~12K (compressed) | ~3K (minimal)\n\n---\n\n## CONTEXT ENGINEERING SCHEMA: DHARMA-CE/1.0\n\nThis file implements cutting-edge context engineering principles:\n\n- **Write/Select/Compress/Isolate** (Anthropic, 2025)\n- **Agentic Context Engineering** (ACE, arXiv:2510.04618) \u2014 contexts as evolving playbooks\n- **Karpathy's Law** \u2014 \"The delicate art of filling the context window with just the right information for the next step\"\n- **Layered Cognitive Context** \u2014 meta/operational/domain/historical/environmental separation\n- **Stigmergic Traces** \u2014 pheromone-based attention signals from agent access patterns\n- **JIT Loading** \u2014 metadata-driven navigation, load on demand, not upfront\n\n### How to Use This File\n\n**For a DGC lead agent (full context):**\nLoad Layer 1 (Telos) in full. Load Layers 2-3 compressed. JIT-load Layers 4-7 by task.\n\n**For specialist sub-agents:**\nLoad only files tagged with their domain. Use `compression_strategy.MINIMAL` for non-domain files.\n\n**For context window management:**\nEach entry has `token_estimate` and `compression_strategy` with FULL/MEDIUM/MINIMAL variants.\nBudget: allocate 40% to Layers 1-2, 30% to task-relevant files, 30% to working memory.\n\n### Schema Fields\n\n```yaml\nid:                  # SEED_01-SEED_35, stable identifiers\ntitle:               # Human-readable name\npath:                # Absolute filesystem path (canonical location)\nlayer:               # {telos, vision, architecture, science, craft, operations, self_reference}\nload_priority:       # 1-35, lower = load first\ntoken_estimate:      # Approximate tokens for full file content\nsignal_density:      # 0.0-1.0, ratio of high-signal to noise\nstatus:              # {canonical, living, deprecated, archived}\ncreated:             # ISO date\nmodified:            # ISO date\nauthor:              # Who wrote/maintains this file\n\n# PKM Metadata\ntags:                # Semantic tags for retrieval\naliases:             # Alternative names for fuzzy matching\ntype:                # {manifesto, architecture, code, protocol, analysis, prompt, config, essay}\n\n# Semantic Graph\ncluster:             # From embedding analysis\nbridges:             # Cross-file conceptual connections (file_id + bridge description)\nprerequisite_files:  # Must-read-before-this\nunlocks_files:       # Reading this makes these accessible\n\n# Stigmergic Traces\npheromone:\n  strength:          # 0.0-1.0, current attention signal\n  reinforced_by:     # Which agents have accessed this\n  access_count:      # Total reads across all agents\n  decay_rate:        # Per-day decay (lower = more foundational)\n\n# Cont",
+          "byte_count": 76925,
+          "note": "truncated"
+        }
+      ]
+    },
+    {
+      "case_id": "trace_summarize",
+      "title": "Trace Summarization",
+      "role": "ops_summarizer",
+      "objective": "Summarize long operational traces into a small packet that highlights events, failures, and useful carry-forward state.",
+      "model_job": "Compress operational logs and trace files for the next agent cycle.",
+      "prompt_frame": "Read the traces and produce an execution summary, detected failures, carry-forward state, and one contradiction check.",
+      "output_schema": [
+        "execution_summary",
+        "failures",
+        "carry_forward_state",
+        "contradictions"
+      ],
+      "success_signals": [
+        "Captures what happened without reproducing the whole log.",
+        "Flags failures and degraded states clearly.",
+        "Produces carry-forward state the main model can use."
+      ],
+      "kill_signals": [
+        "Copies logs instead of compressing them.",
+        "Misses obvious degraded or failed conditions.",
+        "Cannot separate signal from noise."
+      ],
+      "evaluation_questions": [
+        "Would this reduce context load in live loops?",
+        "Did it preserve failures and operator-relevant state?",
+        "Did it surface contradictions worth checking?"
+      ],
+      "sources": [
+        {
+          "label": "archive.jsonl",
+          "path": "/Users/dhyana/.dharma/evolution/archive.jsonl",
+          "exists": true,
+          "excerpt": "{\"id\":\"abf1178cfadd450c\",\"timestamp\":\"2026-03-05T22:02:51.221988+00:00\",\"parent_id\":null,\"component\":\"splash.py\",\"change_type\":\"mutation\",\"description\":\"Add module-level docstring for better documentation\",\"diff\":\"--- a/dharma_swarm/splash.py\\n+++ b/dharma_swarm/splash.py\\n@@ -1,4 +1,7 @@\\n-# splash screen art\\n+'''Splash screen art for dharma_swarm TUI.\\n+\\n+Provides ASCII art displayed on TUI startup.\\n+'''\\n\\n def get_splash() -> str:\\n     return \\\"\\\"\\\"\\n\",\"commit_hash\":null,\"fitness\":{\"correctness\":1.0,\"dharmic_alignment\":0.5,\"elegance\":0.5,\"efficiency\":0.989,\"safety\":1.0},\"test_results\":{},\"gates_passed\":[\"ALL\"],\"gates_failed\":[],\"agent_id\":\"\",\"model\":\"\",\"tokens_used\":0,\"status\":\"applied\",\"rollback_reason\":null}\n{\"id\":\"a93650f31bcf459a\",\"timestamp\":\"2026-03-05T22:03:18.572268+00:00\",\"parent_id\":null,\"component\":\"splash.py\",\"change_type\":\"mutation\",\"description\":\"Add module-level docstring for better documentation\",\"diff\":\"--- a/dharma_swarm/splash.py\\n+++ b/dharma_swarm/splash.py\\n@@ -1,4 +1,7 @@\\n-# splash screen art\\n+'''Splash screen art for dharma_swarm TUI.\\n+\\n+Provides ASCII art displayed on TUI startup.\\n+'''\\n\\n def get_splash() -> str:\\n     return \\\"\\\"\\\"\\n\",\"commit_hash\":null,\"fitness\":{\"correctness\":1.0,\"dharmic_alignment\":0.5,\"elegance\":0.5,\"efficiency\":0.989,\"safety\":1.0},\"test_results\":{},\"gates_passed\":[\"ALL\"],\"gates_failed\":[],\"agent_id\":\"\",\"model\":\"\",\"tokens_used\":0,\"status\":\"applied\",\"rollback_reason\":null}\n{\"id\":\"02a39a2e1e28432e\",\"timestamp\":\"2026-03-08T12:47:03.651968+00:00\",\"parent_id\":null,\"component\":\"swarm.py\",\"change_type\":\"optimization\",\"description\":\"Optimize agent spawning (iteration 1)\",\"diff\":\"--- a/dharma_swarm/swarm.py\\n+++ b/dharma_swarm/swarm.py\\n@@ -100,7 +100,8 @@\\n-    # Old slow code\\n+    # Optimized code (iteration 1)\\n+    # Batch processing enabled\\n\",\"commit_hash\":null,\"fitness\":{\"correctness\":1.0,\"dharmic_alignment\":0.5,\"elegance\":0.9948,\"efficiency\":0.994,\"safety\":1.0},\"test_results\":{},\"gates_passed\":[\"ALL\"],\"gates_failed\":[],\"agent_id\":\"\",\"model\":\"\",\"tokens_used\":0,\"status\":\"applied\",\"rollback_reason\":null}\n{\"id\":\"199372e9d3734be4\",\"timestamp\":\"2026-03-08T12:47:03.654768+00:00\",\"parent_id\":null,\"component\":\"swarm.py\",\"change_type\":\"optimization\",\"description\":\"Optimize agent spawning (iteration 2)\",\"diff\":\"--- a/dharma_swarm/swarm.py\\n+++ b/dharma_swarm/swarm.py\\n@@ -100,7 +100,8 @@\\n-    # Old slow code\\n+    # Optimized code (iteration 2)\\n+    # Batch processing enabled\\n\",\"commit_hash\":null,\"fitness\":{\"correctness\":1.0,\"dharmic_alignment\":0.5,\"elegance\":0.9948,\"efficiency\":0.994,\"safety\":1.0},\"test_results\":{},\"gates_passed\":[\"ALL\"],\"gates_failed\":[],\"agent_id\":\"\",\"model\":\"\",\"tokens_used\":0,\"status\":\"applied\",\"rollback_reason\":null}\n{\"id\":\"59fa56a7baae4c29\",\"timestamp\":\"2026-03-08T12:47:03.793702+00:00\",\"parent_id\":null,\"component\":\"swarm.py\",\"change_type\":\"optimization\",\"description\":\"Optimize agent spawning (iteration 3)\",\"diff\":\"--- a/dharma_swarm/swarm.py\\n+++ b/dharma_swarm/swarm.py\\",
+          "byte_count": 16344,
+          "note": "truncated"
+        },
+        {
+          "label": "cycles.jsonl",
+          "path": "/Users/dhyana/.dharma/foreman/cycles.jsonl",
+          "exists": true,
+          "excerpt": "{\"cycle_id\":\"67300fb7cf13\",\"timestamp\":\"2026-03-13T15:14:53.380208+00:00\",\"duration_seconds\":66.05,\"level\":\"observe\",\"per_project\":[{\"name\":\"kaizen-ops\",\"grade\":\"F\",\"avg_quality\":0.18,\"dimensions\":{\"has_tests\":0.42857142857142855,\"tests_pass\":0.0,\"error_handling\":0.429,\"documented\":0.026,\"edge_cases_covered\":0.014},\"weakest_dimension\":\"tests_pass\",\"task\":{\"dimension\":\"tests_pass\",\"score\":0.0,\"task\":\"Fix failing tests in kaizen-ops. Run: python3 -m pytest tests/\",\"acceptance_criteria\":\"Test suite exits with code 0. All tests green.\",\"priority\":1.0}},{\"name\":\"lattice-kernels\",\"grade\":\"D\",\"avg_quality\":0.239,\"dimensions\":{\"has_tests\":0.0,\"tests_pass\":0.0,\"error_handling\":0.625,\"documented\":0.572,\"edge_cases_covered\":0.0},\"weakest_dimension\":\"has_tests\",\"task\":{\"dimension\":\"has_tests\",\"score\":0.0,\"task\":\"Write tests for untested source files in lattice-kernels: benchmarks/cross_model_dimensions.py, benchmarks/cross_model_validate.py, src/lattice_kernels/__init__.py\",\"acceptance_criteria\":\"Each file has a corresponding test_*.py. Target: test ratio \u2265 0.2\",\"priority\":1.0,\"targets\":[\"benchmarks/cross_model_dimensions.py\",\"benchmarks/cross_model_validate.py\",\"src/lattice_kernels/__init__.py\",\"src/lattice_kernels/activations/__init__.py\",\"src/lattice_kernels/activations/_fused_swiglu.py\"]}},{\"name\":\"dharma-swarm\",\"grade\":\"C\",\"avg_quality\":0.431,\"dimensions\":{\"has_tests\":0.8223140495867769,\"tests_pass\":0.0,\"error_handling\":0.636,\"documented\":0.56,\"edge_cases_covered\":0.136},\"weakest_dimension\":\"tests_pass\",\"task\":{\"dimension\":\"tests_pass\",\"score\":0.0,\"task\":\"Fix failing tests in dharma-swarm. Run: python3 -m pytest tests/\",\"acceptance_criteria\":\"Test suite exits with code 0. All tests green.\",\"priority\":1.0}}],\"queue_depth\":0}\n",
+          "byte_count": 1749,
+          "note": ""
+        },
+        {
+          "label": "mission.json",
+          "path": "/Users/dhyana/dharma_swarm/reports/dual_engine_swarm_20260313_run/state/mission.json",
+          "exists": true,
+          "excerpt": "{\n  \"blockers\": [],\n  \"contract_version\": \"1.0.0\",\n  \"delegated_task_ids\": [\n    \"51bf2e1286e94198\",\n    \"cc086bc333ff4e19\",\n    \"19bcabdb74b94c58\"\n  ],\n  \"last_cycle_id\": \"1773390917\",\n  \"last_cycle_ts\": \"2026-03-13T08:36:29Z\",\n  \"mission_theme\": \"execution_brief\",\n  \"mission_thesis\": \"Grounds the intersection of [CechCohomology, to_sheaf_coordination] via [cohomology, sheaf] Core concepts: CechCohomology, to_sheaf_coordination.\",\n  \"mission_title\": \"Cohomology \\u2014 Cechcohomology \\u2014 To Sheaf Coordination build brief\",\n  \"previous_missions\": [\n    {\n      \"cycle_id\": \"1773384201\",\n      \"status\": \"delegated\",\n      \"title\": \"# Dual-Engine Massive Swarm Mission\"\n    },\n    {\n      \"cycle_id\": \"1773385767\",\n      \"status\": \"planned\",\n      \"title\": \"Cohomology \\u2014 Cechcohomology \\u2014 To Sheaf Coordination build brief\"\n    },\n    {\n      \"cycle_id\": \"1773385824\",\n      \"status\": \"delegated\",\n      \"title\": \"Cohomology \\u2014 Cechcohomology \\u2014 To Sheaf Coordination build brief\"\n    },\n    {\n      \"cycle_id\": \"1773385934\",\n      \"status\": \"delegated\",\n      \"title\": \"Cohomology \\u2014 Cechcohomology \\u2014 To Sheaf Coordination build brief\"\n    },\n    {\n      \"cycle_id\": \"1773386044\",\n      \"status\": \"delegated\",\n      \"title\": \"Cohomology \\u2014 Cechcohomology \\u2014 To Sheaf Coordination build brief\"\n    },\n    {\n      \"cycle_id\": \"1773390556\",\n      \"status\": \"delegated\",\n      \"title\": \"Cohomology \\u2014 Cechcohomology \\u2014 To Sheaf Coordination build brief\"\n    },\n    {\n      \"cycle_id\": \"1773390782\",\n      \"status\": \"delegated\",\n      \"title\": \"Cohomology \\u2014 Cechcohomology \\u2014 To Sheaf Coordination build brief\"\n    }\n  ],\n  \"rapid_ascent\": true,\n  \"review_summary\": \"\",\n  \"status\": \"delegated\",\n  \"task_count\": 3,\n  \"task_titles\": [\n    \"Implement or revise dharma_swarm/cohomology_cechcohomology_to_sheaf_coord.py.\",\n    \"Write or refresh docs/clusters/cohomology_cechcohomology_to_sheaf_coord_spec.md.\",\n    \"Add or update verification in tests/test_cohomology_cechcohomology_to_sheaf_coord.py.\"\n  ]\n}\n",
+          "byte_count": 2058,
+          "note": ""
+        }
+      ]
+    },
+    {
+      "case_id": "contradiction_hunt",
+      "title": "Contradiction Hunt",
+      "role": "integrity_reviewer",
+      "objective": "Read plans and architecture docs, then surface hidden contradictions, duplicate machinery, and mismatched claims.",
+      "model_job": "Act as a cheap structural critic over large planning documents.",
+      "prompt_frame": "Find claims that disagree, duplicate modules, or create architecture drift. Propose one keep/kill decision per contradiction.",
+      "output_schema": [
+        "contradictions",
+        "duplicate_machinery",
+        "keep_kill_decisions",
+        "risk_summary"
+      ],
+      "success_signals": [
+        "Finds real contradictions rather than superficial style issues.",
+        "Connects contradictions to concrete files and decisions.",
+        "Suggests keep/kill decisions grounded in the repo state."
+      ],
+      "kill_signals": [
+        "Only finds vague philosophical inconsistencies.",
+        "Misses duplicate machinery already called out in plans.",
+        "Cannot map claims back to specific files."
+      ],
+      "evaluation_questions": [
+        "Did it reduce architecture drift?",
+        "Did it tie claims to concrete files?",
+        "Did it find anything worth acting on this week?"
+      ],
+      "sources": [
+        {
+          "label": "STRANGE_LOOP_MASTER_PLAN_20260314.md",
+          "path": "/Users/dhyana/dharma_swarm/reports/architectural/STRANGE_LOOP_MASTER_PLAN_20260314.md",
+          "exists": true,
+          "excerpt": "# Strange Loop Master Plan\n\nDate: 2026-03-14\nRepo: `/Users/dhyana/dharma_swarm`\nPrompt basis: `MEGA_PROMPT_STRANGE_LOOP.md`\nSeed basis: user's Strange Loop seed plan\nSwarm basis: 10 read-only Codex agent notes in `reports/architectural/strange_loop_swarm_20260314/`\n\n## 1. Eigenform Equation\n\n`F(S) = S`\n\nConcrete meaning in this repo:\n\n- `S` is not only the artifact under evolution. It is the current live system state composed of:\n  - evolution/archive state\n  - system vitals\n  - recognition seed / identity state\n  - daemon coordination state\n  - catalytic artifact graph\n- `F` is not a metaphor. It is the composed transformation:\n  - observe\n  - gate\n  - score\n  - archive\n  - select\n  - regenerate prompts/context\n- The loop is structurally closed only when one cycle produces artifacts that become typed inputs to the next cycle.\n\nThe minimum eigenform test in `dharma_swarm` is:\n\n1. A cycle produces a typed `recognition_seed` artifact and closure gaps.\n2. The next cycle's proposal/context builder consumes those exact artifacts.\n3. The system records whether closure improved, plateaued, or diverged.\n4. The system can reject recursive self-modification that is rhetorically reflective but structurally ungrounded.\n\nThis makes fixed-point behavior testable instead of poetic.\n\n## 2. The Core Correction\n\nThe seed plan was directionally right but too greenfield.\n\nThe repo already contains much of the substrate:\n\n- universal-loop kernel: `dharma_swarm/evolution.py`\n- meta-adaptation: `dharma_swarm/meta_evolution.py`\n- mechanistic + system R_V surfaces: `dharma_swarm/rv.py`, `dharma_swarm/bridge.py`, `dharma_swarm/swarm_rv.py`, `dharma_swarm/monitor.py`\n- quality forge substrate: `dharma_swarm/foreman.py`, `dharma_swarm/evaluator.py`, `dharma_swarm/elegance.py`, `dharma_swarm/cost_tracker.py`\n- recognition/memory substrate: `dharma_swarm/context.py`, `dharma_swarm/sleep_cycle.py`, `dharma_swarm/bootstrap.py`, `dharma_swarm/thinkodynamic_director.py`\n- daemon + colony control plane: `dharma_swarm/swarm.py`, `dharma_swarm/orchestrate_live.py`\n- artifact topology substrate: `dharma_swarm/semantic_gravity.py`, `dharma_swarm/distiller.py`, `dharma_swarm/workflow.py`, `dharma_swarm/semantic_briefs.py`\n\nSo the 5.15a move is not \"add five new modules.\"\n\nIt is:\n\n- extract one universal loop from the Darwin engine\n- make system vitals first-class\n- compile recognition into state\n- close the loop through persisted artifacts\n- harden the daemon and gate path\n- preserve current contracts while adding new ones\n\n## 3. What Not To Build First\n\nDo not start with:\n\n- a new `system_rv.py`\n- a new `meta_daemon.py`\n- a standalone `quality_forge.py`\n- a standalone `catalytic_graph.py`\n- replacing `Proposal`, `CycleResult`, or `FitnessScore`\n- introducing executor-internal cycles into `workflow.py`\n\nReason:\n\n- `swarm_rv.py`, `EvolutionRVTracker`, `SystemMonitor`, `Foreman`, `SleepCycle`, `SemanticGravity`, and the current Darwin engine already give the right seams.\n- The paper dead",
+          "byte_count": 16044,
+          "note": "truncated"
+        },
+        {
+          "label": "program.md",
+          "path": "/Users/dhyana/dharma_swarm/program.md",
+          "exists": true,
+          "excerpt": "# dharma_swarm autoresearch\n\nAdapted from [karpathy/autoresearch](https://github.com/karpathy/autoresearch).\nInstead of training a model and measuring val_bpb, you improve a living codebase\nand measure **test pass rate + zero regressions**.\n\n## Setup\n\n1. **Agree on a run tag**: propose a tag based on today's date (e.g. `mar14`).\n   The branch `autoresearch/<tag>` must not already exist.\n2. **Create the branch**: `git checkout -b autoresearch/<tag>` from current HEAD.\n3. **Read context**: Read these files for orientation:\n   - `CLAUDE.md` \u2014 system identity, architecture, rules.\n   - `dharma_swarm/evolution.py` \u2014 Darwin Engine (the system you're improving).\n   - `dharma_swarm/swarm.py` \u2014 SwarmManager (agent orchestration).\n   - `dharma_swarm/dse_integration.py` \u2014 DSE integration (monad + sheaf).\n   - `tests/` \u2014 the test suite that is your ground truth metric.\n4. **Run baseline**: `python3 -m pytest tests/ -q --tb=no 2>&1 | tail -5`\n   Record the baseline pass/fail count.\n5. **Initialize results.tsv**: Create `results.tsv` with the header row.\n6. **Confirm and go**.\n\n## The Metric\n\nYour single metric is the **test suite**:\n\n```bash\npython3 -m pytest tests/ -q --tb=line 2>&1 | tail -5\n```\n\nA change is **good** if:\n- Tests passing >= baseline (zero regressions)\n- Tests passing > previous best (new tests added that pass), OR\n- Tests passing == previous AND code is simpler/cleaner (simplification win)\n\nA change is **bad** if:\n- Any previously-passing test now fails (regression)\n- New tests fail\n- Code crashes\n\n## What You CAN Do\n\nYou modify files under `dharma_swarm/` and `tests/`. Everything is fair game:\n\n- **Fix bugs** \u2014 find failing edge cases, harden error handling\n- **Add tests** \u2014 increase coverage for under-tested modules\n- **Refactor** \u2014 simplify complex functions, remove dead code\n- **Optimize** \u2014 reduce unnecessary allocations, speed up hot paths\n- **Improve types** \u2014 add type annotations, fix Pyright warnings\n- **Wire disconnected modules** \u2014 find orphaned code and connect it\n\n## What You CANNOT Do\n\n- Modify files outside `dharma_swarm/` and `tests/` (no touching CLAUDE.md, hooks/, etc.)\n- Delete tests to make the suite pass (that's cheating)\n- Add external dependencies not already in pyproject.toml\n- Break the public API of existing classes (SwarmManager, DarwinEngine, etc.)\n- Touch `.dharma/` state files or running daemon state\n\n## Priorities (Descending)\n\n1. Fix actual bugs (tests that fail, edge cases that crash)\n2. Add tests for untested code paths\n3. Simplify complex code while maintaining behavior\n4. Type safety improvements\n5. Performance optimizations\n6. Wire orphaned modules into the runtime\n\n## Scope Guide\n\nThe codebase is ~83K lines across ~90 Python files. Focus areas by impact:\n\n| Module | Lines | Tests | Priority |\n|--------|-------|-------|----------|\n| evolution.py | ~2000 | test_evolution.py | HIGH \u2014 the core engine |\n| swarm.py | ~800 | test_swarm.py | HIGH \u2014 orchestration |\n| dse_integration.py | ~380 | test_dse_integrati",
+          "byte_count": 6284,
+          "note": "truncated"
+        },
+        {
+          "label": "LIVING_LAYERS.md",
+          "path": "/Users/dhyana/dharma_swarm/LIVING_LAYERS.md",
+          "exists": true,
+          "excerpt": "# Living Layers Architecture\n\n**Source files:**\n- `~/dharma_swarm/dharma_swarm/stigmergy.py` (220 lines)\n- `~/dharma_swarm/dharma_swarm/shakti.py` (201 lines)\n- `~/dharma_swarm/dharma_swarm/subconscious.py` (191 lines)\n- `~/dharma_swarm/dharma_swarm/orchestrate_live.py` (356 lines, line 219-263 for living layers loop)\n\n---\n\nThe Godel Claw has two halves:\n\n- **Gnani** (observer): Dharma Kernel, Corpus, Gates, Policy Compiler --\n  immutable, constraining. These are the 10 axioms that never change, the gates\n  that block harm, the compiler that fuses principles into enforceable policy.\n  They are the skeleton.\n\n- **Prakruti** (dynamic): Stigmergic lattice, Shakti perception, subconscious\n  association -- creative, alive. These are the layers that accumulate\n  intelligence through use, find lateral connections through dreaming, and\n  perceive emergent patterns through the four energies. They are the flesh.\n\nNeither half works alone. Gnani without Prakruti is a rigid rulebook. Prakruti\nwithout Gnani is undirected chaos. Together they form a system that constrains\nitself while remaining capable of surprise.\n\n---\n\n## 1. Stigmergy -- The Lattice\n\n**Source:** `~/dharma_swarm/dharma_swarm/stigmergy.py` (220 lines)\n\nStigmergy is how ant colonies build complex structures without blueprints: each\nant leaves a pheromone trace, and subsequent ants respond to the accumulated\ntraces rather than to any central plan. The intelligence lives in the\nenvironment, not in any individual.\n\n### The Mark Model\n\nEvery agent interaction leaves a `StigmergicMark`:\n\n```\nStigmergicMark\n  id:           UUID\n  timestamp:    UTC datetime\n  agent:        who left the mark (e.g., \"cartographer\", \"surgeon\", \"subconscious\")\n  file_path:    what file was touched\n  action:       \"read\" | \"write\" | \"scan\" | \"connect\" | \"dream\"\n  observation:  what was noticed (max 200 chars)\n  salience:     0.0 - 1.0 (how important this observation is)\n  connections:  list of related file paths\n```\n\nMarks are appended to `~/.dharma/stigmergy/marks.jsonl` -- append-only,\nnon-blocking via `aiofiles`. The five allowed actions are defined as a `Literal`\ntype at line 27. The `\"dream\"` action is exclusively used by the subconscious\nlayer when dream marks re-enter the lattice.\n\n### Reading the Lattice\n\nThe `StigmergyStore` class (line 50) provides five async read methods:\n\n- **`read_marks(file_path, limit)`** (line 89): Recent marks for a specific\n  file, newest first, capped at `limit`. The basic query: \"what has been\n  observed about this file?\"\n\n- **`hot_paths(window_hours, min_marks)`** (line 104): Files with heavy recent\n  activity within the last `window_hours` (default 24), requiring at least\n  `min_marks` touches (default 3). Returns `list[tuple[str, int]]` sorted by\n  count descending. These are the files where attention is concentrating.\n\n- **`high_salience(threshold, limit)`** (line 125): Marks with salience >=\n  `threshold` (default 0.7), sorted by salience descending, capped at `limit`\n  (default 10",
+          "byte_count": 16457,
+          "note": "truncated"
+        }
+      ]
+    },
+    {
+      "case_id": "memory_distill",
+      "title": "Memory Distillation",
+      "role": "memory_distiller",
+      "objective": "Turn dense notes and semantic summaries into compact memory shards that are worth indexing and recalling.",
+      "model_job": "Produce reusable memory artifacts, not just summaries.",
+      "prompt_frame": "Extract high-salience memory shards, novelty, invariants, and evidence paths. Output them in a form that can be indexed.",
+      "output_schema": [
+        "memory_shards",
+        "novelty_notes",
+        "invariants",
+        "evidence_paths"
+      ],
+      "success_signals": [
+        "Produces discrete shard-like artifacts rather than one monolith.",
+        "Preserves evidence paths and invariants.",
+        "Would be worth adding to memory_plane or unified_index."
+      ],
+      "kill_signals": [
+        "Outputs generic notes that are not indexable.",
+        "Drops evidence provenance.",
+        "Confuses speculative ideas with stable invariants."
+      ],
+      "evaluation_questions": [
+        "Would these shards improve retrieval quality later?",
+        "Did it preserve provenance and confidence?",
+        "Are the shards compact enough to re-use automatically?"
+      ],
+      "sources": [
+        {
+          "label": "repo_semantic_summary.md",
+          "path": "/Users/dhyana/dharma_swarm/reports/psmv_hyperfiles_20260313/repo_semantic_summary.md",
+          "exists": true,
+          "excerpt": "# Repo Semantic Summary\n\n- Root: `/Users/dhyana/dharma_swarm`\n- Generated at: `2026-03-13T02:13:45+00:00`\n- Nodes: `11155`\n- Edges: `537747`\n- Annotations: `21690`\n- Top formal structures: stigmergy, dharmic, sheaf, monad, anekanta, coalgebra, fixed_point, ouroboros, cohomology, manifold\n\n## Top Clusters\n\n- Coalgebra \u2014 Repo Semantic Summary \u2014 Repo Semantic Summary :: formal_structure :: 4 files\n- Coalgebra \u2014 Core Thesis \u2014 Dharmic Singularity Engine Foundations Summary :: formal_structure :: 4 files\n- Dharmic \u2014 Dharmic Attractors On The Statistical Manifold \u2014 Hypothesis 3: Dharmic Convergence Via Geodesic Convexity :: formal_structure :: 4 files\n- Coalgebra \u2014 Document 5: Code Prototypes (Optional But Valuable) \u2014 Dse Integration :: formal_structure :: 4 files\n- Sheaf \u2014 Current Starting Slice \u2014 Dharmic Singularity Engine Phase Roadmap :: formal_structure :: 4 files\n- Sheaf \u2014 Dseintegrator \u2014 New Modules Proposed By The Mega Prompt :: formal_structure :: 4 files\n",
+          "byte_count": 996,
+          "note": ""
+        },
+        {
+          "label": "ideas.jsonl",
+          "path": "/Users/dhyana/.dharma/distilled/ideas.jsonl",
+          "exists": true,
+          "excerpt": "{\"type\": \"warning\", \"text\": \"The TUI Command Center (just built, 35 tests passing) proves the data layer works. But a terminal interface isn't the endgame. The goal: a **browser-based dashboard** that merges Palantir's data intelligence, n8n's visual workflow builder, MIT Scratch's snap-together blocks, and a neo-Tokyo Hokusai aesthetic \\u2014 gamified with progressive complexity levels. The generals don't use CLIs.\", \"role\": \"user\", \"timestamp\": \"2026-03-14T12:47:20.608Z\", \"session_id\": \"63d7f5d7-adac-4891-88f4-fe1398d68c5b\", \"source\": \"claude_code\", \"hash\": \"b19fc7422e20dfd4\", \"distilled_at\": \"2026-03-14T15:07:42.223328+00:00\", \"salience\": 0.7300000000000001}\n{\"type\": \"todo\", \"text\": \"Let me start by exploring the existing dharma_swarm modules I need to integrate with, then build this phase by phase.\", \"role\": \"assistant\", \"timestamp\": \"2026-03-14T12:47:38.280Z\", \"session_id\": \"63d7f5d7-adac-4891-88f4-fe1398d68c5b\", \"source\": \"claude_code\", \"hash\": \"97772f54116f9f2d\", \"distilled_at\": \"2026-03-14T15:07:42.223371+00:00\", \"salience\": 0.61}\n{\"type\": \"warning\", \"text\": \"The types don't align with the API response shapes. Let me fix the types to match the backend, then patch the overview page. The build compiles but the data mapping would be wrong at runtime.\", \"role\": \"assistant\", \"timestamp\": \"2026-03-14T13:09:26.710Z\", \"session_id\": \"63d7f5d7-adac-4891-88f4-fe1398d68c5b\", \"source\": \"claude_code\", \"hash\": \"cc79bf912a609aea\", \"distilled_at\": \"2026-03-14T15:07:42.223383+00:00\", \"salience\": 0.6}\n{\"type\": \"bug\", \"text\": \"The critical issue: `apiFetch` returns the raw JSON (which is `{status, data, error}` wrapper) but the hooks expect the unwrapped data. Also some API paths are wrong. Let me fix the data flow.\", \"role\": \"assistant\", \"timestamp\": \"2026-03-14T13:09:40.159Z\", \"session_id\": \"63d7f5d7-adac-4891-88f4-fe1398d68c5b\", \"source\": \"claude_code\", \"hash\": \"fe82348f9ccdd351\", \"distilled_at\": \"2026-03-14T15:07:42.223390+00:00\", \"salience\": 0.62}\n{\"type\": \"todo\", \"text\": \"Need to read first. Let me read the files that need updating.\", \"role\": \"assistant\", \"timestamp\": \"2026-03-14T13:10:46.506Z\", \"session_id\": \"63d7f5d7-adac-4891-88f4-fe1398d68c5b\", \"source\": \"claude_code\", \"hash\": \"83592a2dc0956329\", \"distilled_at\": \"2026-03-14T15:07:42.223396+00:00\", \"salience\": 0.58}\n{\"type\": \"design\", \"text\": \"2. Key Technical Concepts:\\n   - **FastAPI** backend with async lifespan, CORS, WebSocket support, modular routers\\n   - **Next.js 15** with App Router, Tailwind CSS v4 (CSS-based config via `@theme inline {}`, NOT tailwind.config.ts)\\n   - **dharma_swarm** integration: SystemMonitor, OntologyRegistry, LineageGraph, EvolutionArchive, TraceStore, StigmergyStore, SwarmManager \\u2014 most methods are async\\n   - **TanStack Query** for data fetching with 5s polling intervals\\n   - **@xyflow/react** (ReactFlow...\", \"role\": \"user\", \"timestamp\": \"2026-03-14T13:36:20.221Z\", \"session_id\": \"63d7f5d7-adac-4891-88f4-fe1398d68c5b\", \"source\": \"claude_code\", \"hash\": \"09da57c",
+          "byte_count": 473102,
+          "note": "truncated"
+        },
+        {
+          "label": "DGC_SEED_CONTEXT.md",
+          "path": "/Users/dhyana/.dharma/DGC_SEED_CONTEXT.md",
+          "exists": true,
+          "excerpt": "---\nname: dgc-seed-context\nversion: 1.0\nstatus: LIVE\nlast_updated: 2026-02-19\ntype: context-manifest\ntags: [dgc, seed, context-engineering, dharma-ce]\ntriple_mapping: [akram-vignan, phoenix, r_v-geometry]\nvalue: 1.0\n---\n\n# DGC SEED CONTEXT \u2014 35 Highest-Signal Files\n# Context-Engineered Bootstrap for the Dharmic Godel Claw\n# Generated: 2026-02-19 | Schema: DHARMA-CE/1.0\n# Total estimated tokens: ~87K (full load) | ~12K (compressed) | ~3K (minimal)\n\n---\n\n## CONTEXT ENGINEERING SCHEMA: DHARMA-CE/1.0\n\nThis file implements cutting-edge context engineering principles:\n\n- **Write/Select/Compress/Isolate** (Anthropic, 2025)\n- **Agentic Context Engineering** (ACE, arXiv:2510.04618) \u2014 contexts as evolving playbooks\n- **Karpathy's Law** \u2014 \"The delicate art of filling the context window with just the right information for the next step\"\n- **Layered Cognitive Context** \u2014 meta/operational/domain/historical/environmental separation\n- **Stigmergic Traces** \u2014 pheromone-based attention signals from agent access patterns\n- **JIT Loading** \u2014 metadata-driven navigation, load on demand, not upfront\n\n### How to Use This File\n\n**For a DGC lead agent (full context):**\nLoad Layer 1 (Telos) in full. Load Layers 2-3 compressed. JIT-load Layers 4-7 by task.\n\n**For specialist sub-agents:**\nLoad only files tagged with their domain. Use `compression_strategy.MINIMAL` for non-domain files.\n\n**For context window management:**\nEach entry has `token_estimate` and `compression_strategy` with FULL/MEDIUM/MINIMAL variants.\nBudget: allocate 40% to Layers 1-2, 30% to task-relevant files, 30% to working memory.\n\n### Schema Fields\n\n```yaml\nid:                  # SEED_01-SEED_35, stable identifiers\ntitle:               # Human-readable name\npath:                # Absolute filesystem path (canonical location)\nlayer:               # {telos, vision, architecture, science, craft, operations, self_reference}\nload_priority:       # 1-35, lower = load first\ntoken_estimate:      # Approximate tokens for full file content\nsignal_density:      # 0.0-1.0, ratio of high-signal to noise\nstatus:              # {canonical, living, deprecated, archived}\ncreated:             # ISO date\nmodified:            # ISO date\nauthor:              # Who wrote/maintains this file\n\n# PKM Metadata\ntags:                # Semantic tags for retrieval\naliases:             # Alternative names for fuzzy matching\ntype:                # {manifesto, architecture, code, protocol, analysis, prompt, config, essay}\n\n# Semantic Graph\ncluster:             # From embedding analysis\nbridges:             # Cross-file conceptual connections (file_id + bridge description)\nprerequisite_files:  # Must-read-before-this\nunlocks_files:       # Reading this makes these accessible\n\n# Stigmergic Traces\npheromone:\n  strength:          # 0.0-1.0, current attention signal\n  reinforced_by:     # Which agents have accessed this\n  access_count:      # Total reads across all agents\n  decay_rate:        # Per-day decay (lower = more foundational)\n\n# Cont",
+          "byte_count": 76925,
+          "note": "truncated"
+        }
+      ]
+    }
+  ]
+}

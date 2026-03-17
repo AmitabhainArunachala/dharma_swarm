@@ -21,6 +21,9 @@ dependencies = [
     "aiofiles>=23.0",
     "scipy>=1.11",
     "textual>=0.40",
+    "fastapi>=0.104",
+    "uvicorn>=0.24",
+    "numpy>=1.24",
 ]
 
 [project.optional-dependencies]
@@ -32,6 +35,11 @@ infra = [
     "temporalio>=1.8.0",
     "qdrant-client>=1.11.0",
     "neo4j>=5.25.0",
+]
+ginko = [
+    "hmmlearn>=0.3",
+    "arch>=6.0",
+    "yfinance>=0.2",
 ]
 
 [project.scripts]

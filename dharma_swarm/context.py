@@ -17,8 +17,10 @@ from __future__ import annotations
 import json
 import sqlite3
 import time
+from dataclasses import dataclass
 from datetime import timezone
 from pathlib import Path
+from typing import Literal
 
 from dharma_swarm.injection_scanner import scan_and_sanitize
 
@@ -28,22 +30,174 @@ TRISHULA_INBOX = HOME / "trishula" / "inbox"
 STATE_DIR = HOME / ".dharma"
 SHARED_DIR = STATE_DIR / "shared"
 PSMV = HOME / "Persistent-Semantic-Memory-Vault"
+FOUNDATIONS_DIR = HOME / "dharma_swarm" / "foundations"
+ARCHITECTURE_DIR = HOME / "dharma_swarm" / "architecture"
+TRANSMISSION_DIR = FOUNDATIONS_DIR / "transmissions"
+
+# ── Types ────────────────────────────────────────────────────────────
+
+CompressionTier = Literal["full", "medium", "minimal", "header", "tail"]
+
+
+@dataclass
+class ContextBlock:
+    """A positioned chunk of context for U-shaped assembly."""
+    name: str
+    position: int       # Lower = closer to top of context (high-attention zone)
+    content: str
+    char_count: int
+
+
+# ── Compression engine ───────────────────────────────────────────────
+
+
+def _resolve_transmission(path: Path) -> Path:
+    """Check for a transmission-grade (manually compressed) version of a file."""
+    t_path = TRANSMISSION_DIR / (path.stem + ".transmission.md")
+    return t_path if t_path.exists() else path
+
+
+def _compress_full(content: str, max_chars: int) -> str:
+    """Keep first 70% + last 30% — preserves both structure and conclusions."""
+    if len(content) <= max_chars:
+        return content
+    marker = "\n... [truncated]\n"
+    available = max_chars - len(marker)
+    if available < 20:
+        return content[:max_chars]
+    head_budget = int(available * 0.7)
+    tail_budget = available - head_budget
+    return content[:head_budget] + marker + content[-tail_budget:]
+
+
+def _compress_medium(content: str, max_chars: int) -> str:
+    """First 40% + last 20%, skip middle — U-shape within document."""
+    if len(content) <= max_chars:
+        return content
+    marker = "\n... [middle omitted]\n"
+    available = max_chars - len(marker)
+    if available < 20:
+        return content[:max_chars]
+    head_budget = int(available * 0.67)   # ~40% of 60% total
+    tail_budget = available - head_budget  # ~20% of 60% total
+    return content[:head_budget] + marker + content[-tail_budget:]
+
+
+def _compress_minimal(content: str, max_chars: int) -> str:
+    """First heading + first paragraph + last paragraph — orientation only."""
+    if len(content) <= max_chars:
+        return content
+    lines = content.split("\n")
+    if len(lines) <= 3:
+        # Too few lines for paragraph extraction; fall back to head/tail
+        return _compress_full(content, max_chars)
+    # Gather opening lines (heading + first paragraph)
+    head_lines: list[str] = []
+    head_len = 0
+    head_limit = max_chars // 2
+    for line in lines:
+        # Always include at least the first line
+        if head_lines and head_len + len(line) + 1 > head_limit:
+            break
+        head_lines.append(line)
+        head_len += len(line) + 1
+    # Gather closing lines (last paragraph)
+    tail_lines: list[str] = []
+    tail_len = 0
+    tail_limit = max_chars // 3
+    for line in reversed(lines):
+        if tail_lines and tail_len + len(line) + 1 > tail_limit:
+            break
+        tail_lines.insert(0, line)
+        tail_len += len(line) + 1
+    marker = "\n...\n"
+    result = "\n".join(head_lines) + marker + "\n".join(tail_lines)
+    return result[:max_chars]
+
+
+def _compress_header(content: str, max_chars: int) -> str:
+    """First N chars — same as legacy head truncation."""
+    return content[:max_chars] if len(content) > max_chars else content
+
+
+def _compress_tail(content: str, max_chars: int) -> str:
+    """Last N chars — for append-only logs (agent notes, stigmergy)."""
+    return content[-max_chars:] if len(content) > max_chars else content
+
+
+_COMPRESSORS = {
+    "full": _compress_full,
+    "medium": _compress_medium,
+    "minimal": _compress_minimal,
+    "header": _compress_header,
+    "tail": _compress_tail,
+}
+
+
+def _compress(
+    path: Path,
+    tier: CompressionTier = "full",
+    max_chars: int = 2000,
+) -> str | None:
+    """Dispatcher: resolve transmission, scan injection, compress.
+
+    Returns None if file is missing or unreadable.
+    """
+    resolved = _resolve_transmission(path)
+    if not resolved.exists():
+        return None
+    try:
+        content = resolved.read_text()
+        content = scan_and_sanitize(content, resolved.name)
+        return _COMPRESSORS[tier](content, max_chars)
+    except Exception:
+        return None
+
+
+def _is_fresh(path: Path, hours: int = 6) -> bool:
+    """Check if a file was modified within the last N hours."""
+    try:
+        age_h = (time.time() - path.stat().st_mtime) / 3600
+        return age_h < hours
+    except OSError:
+        return False
+
+
+def _fit_to_budget(blocks: list[ContextBlock], budget: int) -> list[ContextBlock]:
+    """Trim middle-position blocks first when over budget.
+
+    Protects positions 1-3 (top: seed, directive, primary) and 9-11
+    (bottom: swarm, hot signals, vision). Drops from positions 4-8
+    starting with position 8 downward.
+    """
+    total = sum(b.char_count for b in blocks)
+    if total <= budget:
+        return blocks
+
+    result = list(blocks)
+    trimmable = sorted(
+        [b for b in result if 4 <= b.position <= 8],
+        key=lambda b: b.position,
+        reverse=True,
+    )
+    for block in trimmable:
+        if total <= budget:
+            break
+        result.remove(block)
+        total -= block.char_count
+
+    return result
+
 
 # ── File reading helper ──────────────────────────────────────────────
 
 def _read_file(path: Path, max_chars: int = 2000) -> str | None:
-    """Read a file, truncate if needed, scan for injection. Returns None if missing."""
-    if not path.exists():
-        return None
-    try:
-        content = path.read_text()
-        # Scan external files for prompt injection before inclusion
-        content = scan_and_sanitize(content, path.name)
-        if len(content) > max_chars:
-            return content[:max_chars] + "\n... [truncated]"
-        return content
-    except Exception:
-        return None
+    """Read a file with head+tail compression, scan for injection.
+
+    Backward-compatible wrapper around _compress(). Uses 70/30 head/tail
+    split instead of head-only truncation so conclusions are preserved.
+    """
+    return _compress(path, "full", max_chars)
 
 
 def _read_head(path: Path, lines: int = 30) -> str | None:
@@ -126,6 +280,21 @@ _VISION_FILES = {
         AGNI_WORKSPACE / "NORTH_STAR" / "90_DAY_COUNTER_ATTRACTOR.md",
         AGNI_WORKSPACE / "NORTH_STAR" / "SAB_500_YEAR_VISION.md",
     ],
+    "seed_crystal": [
+        PSMV / "00-CORE" / "SEED_CRYSTAL.md",
+    ],
+    "the_catch": [
+        PSMV / "CORE" / "THE_CATCH.md",
+    ],
+    "overmind_error": [
+        PSMV / "06-Multi-System-Coherence" / "TELOS_SWARM_RESIDUAL_STREAM" / "THE_OVERMIND_ERROR.md",
+    ],
+    "mech_interp_bridge": [
+        PSMV / "CORE" / "MECH_INTERP_BRIDGE.md",
+    ],
+    "psmv_crown_jewels": [
+        FOUNDATIONS_DIR / "PSMV_CROWN_JEWELS.md",
+    ],
 }
 
 
@@ -141,6 +310,105 @@ def read_vision(keys: list[str] | None = None, max_per_file: int = 1500) -> str:
                 sections.append(f"\n## {key} ({p.name})\n{content}")
                 break
     return "\n".join(sections) if len(sections) > 1 else ""
+
+
+# ── L1b: FOUNDATIONS — Intellectual pillars and engineering principles ──
+
+
+# Map task domains to the most relevant pillar files
+_DOMAIN_PILLARS: dict[str, list[str]] = {
+    "consciousness": [
+        "PILLAR_09_DADA_BHAGWAN.md",
+        "PILLAR_08_AUROBINDO.md",
+        "PILLAR_07_HOFSTADTER.md",
+        "PSMV_CROWN_JEWELS.md",
+        "SACRED_GEOMETRY.md",
+    ],
+    "mechanistic": [
+        "PILLAR_06_FRISTON.md",
+        "PILLAR_05_DEACON.md",
+        "PILLAR_07_HOFSTADTER.md",
+        "THINKODYNAMIC_BRIDGE.md",
+        "EMPIRICAL_CLAIMS_REGISTRY.md",
+    ],
+    "evolution": [
+        "PILLAR_02_KAUFFMAN.md",
+        "PILLAR_03_JANTSCH.md",
+        "PILLAR_01_LEVIN.md",
+        "RESIDUAL_STREAM_DIGEST.md",
+    ],
+    "governance": [
+        "PILLAR_11_BEER.md",
+        "PILLAR_10_VARELA.md",
+        "PILLAR_05_DEACON.md",
+        "SAMAYA_PROTOCOL.md",
+    ],
+    "architecture": [
+        "PILLAR_11_BEER.md",
+        "PILLAR_10_VARELA.md",
+        "PILLAR_01_LEVIN.md",
+        "../architecture/BLUEPRINTS.md",
+    ],
+    "identity": [
+        "PILLAR_09_DADA_BHAGWAN.md",
+        "PILLAR_07_HOFSTADTER.md",
+        "PILLAR_10_VARELA.md",
+    ],
+    "economics": [
+        "ECONOMIC_VISION.md",
+    ],
+}
+
+
+def read_foundations(
+    domain: str | None = None,
+    max_per_file: int = 1500,
+    max_total: int = 4000,
+) -> str:
+    """Read foundations context: principles + domain-relevant pillar summaries.
+
+    Always includes PRINCIPLES.md (engineering constraints).
+    Adds relevant pillar excerpts based on task domain.
+    """
+    if not FOUNDATIONS_DIR.exists():
+        return ""
+
+    sections: list[str] = ["# Foundations Layer"]
+    used = 0
+
+    # Always include engineering principles if available
+    principles_path = ARCHITECTURE_DIR / "PRINCIPLES.md"
+    if principles_path.exists():
+        content = _read_file(principles_path, max_chars=min(2000, max_total // 2))
+        if content:
+            sections.append(f"## Engineering Principles\n{content}")
+            used += len(content)
+
+    # Add META_SYNTHESIS summary if available
+    meta_path = FOUNDATIONS_DIR / "META_SYNTHESIS.md"
+    if meta_path.exists() and used < max_total - 500:
+        content = _read_head(meta_path, lines=40)
+        if content:
+            sections.append(f"## Foundations Overview\n{content}")
+            used += len(content)
+
+    # Add domain-relevant pillar excerpts
+    pillar_names = _DOMAIN_PILLARS.get(domain or "", [])
+    if not pillar_names:
+        # Default: meta-synthesis covers it
+        pillar_names = []
+
+    for pname in pillar_names:
+        if used >= max_total - 300:
+            break
+        ppath = FOUNDATIONS_DIR / pname
+        if ppath.exists():
+            content = _read_head(ppath, lines=25)
+            if content:
+                sections.append(f"## {pname.replace('.md', '').replace('_', ' ')}\n{content}")
+                used += len(content)
+
+    return "\n\n".join(sections) if len(sections) > 1 else ""
 
 
 # ── L2: RESEARCH — Thread-specific knowledge ────────────────────────
@@ -536,7 +804,11 @@ def read_recent_memories(
 
 
 def read_agent_notes(exclude_role: str | None = None, max_per_agent: int = 500) -> str:
-    """Read recent notes from other agents in the swarm."""
+    """Read recent notes from other agents in the swarm.
+
+    Prefers distilled versions (from context_agent) when they exist and
+    are fresh (< 6 hours old). Falls back to tail of raw notes.
+    """
     if not SHARED_DIR.exists():
         return ""
     sections = ["# Other Agents' Recent Findings"]
@@ -546,11 +818,24 @@ def read_agent_notes(exclude_role: str | None = None, max_per_agent: int = 500) 
         role = nf.stem.replace("_notes", "")
         if exclude_role and role.lower() == exclude_role.lower():
             continue
+        # Check for distilled version first
+        distilled_path = STATE_DIR / "context" / "distilled" / f"{role}_distilled.md"
+        if distilled_path.exists() and _is_fresh(distilled_path):
+            try:
+                content = distilled_path.read_text()
+                if content:
+                    sections.append(
+                        f"\n## {role} (distilled)\n"
+                        f"{content[:max_per_agent]}"
+                    )
+                    continue
+            except Exception:
+                pass
+        # Fall back to tail of raw notes
         try:
             content = nf.read_text()
         except Exception:
             continue
-        # Last N chars — most recent findings
         tail = content[-max_per_agent:] if len(content) > max_per_agent else content
         sections.append(f"\n## {role}\n{tail}")
 
@@ -568,13 +853,23 @@ ROLE_PROFILES = {
         "engineering_weight": 0.4,
         "ops_weight": 0.3,
         "notes_weight": 0.2,
+        "foundations_domain": "architecture",
+        "primary_layer": "ops",
+        "vision_tier": "medium",
+        "research_tier": "header",
+        "engineering_tier": "full",
     },
     "archeologist": {
-        "vision": ["genome_spec", "samaya_protocol", "ten_words"],
+        "vision": ["genome_spec", "samaya_protocol", "ten_words", "seed_crystal", "the_catch"],
         "research_weight": 0.5,
         "engineering_weight": 0.1,
         "ops_weight": 0.1,
         "notes_weight": 0.3,
+        "foundations_domain": "consciousness",
+        "primary_layer": "research",
+        "vision_tier": "full",
+        "research_tier": "full",
+        "engineering_tier": "minimal",
     },
     "surgeon": {
         "vision": [],  # surgeon doesn't need vision, needs code
@@ -582,13 +877,23 @@ ROLE_PROFILES = {
         "engineering_weight": 0.6,
         "ops_weight": 0.2,
         "notes_weight": 0.3,
+        "foundations_domain": None,  # surgeon works on code, not foundations
+        "primary_layer": "engineering",
+        "vision_tier": "minimal",
+        "research_tier": "tail",
+        "engineering_tier": "full",
     },
     "architect": {
-        "vision": ["genome_spec", "lenia_godel", "garden_daemon"],
+        "vision": ["genome_spec", "lenia_godel", "garden_daemon", "overmind_error"],
         "research_weight": 0.3,
         "engineering_weight": 0.4,
         "ops_weight": 0.1,
         "notes_weight": 0.2,
+        "foundations_domain": "architecture",
+        "primary_layer": "foundations",
+        "vision_tier": "full",
+        "research_tier": "medium",
+        "engineering_tier": "full",
     },
     "validator": {
         "vision": ["constitution"],
@@ -596,6 +901,11 @@ ROLE_PROFILES = {
         "engineering_weight": 0.4,
         "ops_weight": 0.3,
         "notes_weight": 0.3,
+        "foundations_domain": "governance",
+        "primary_layer": "stigmergy",
+        "vision_tier": "medium",
+        "research_tier": "header",
+        "engineering_tier": "medium",
     },
 }
 
@@ -744,6 +1054,33 @@ def _read_recognition_seed(state_dir: Path | None = None, max_chars: int = 2000)
         return ""
 
 
+# Map primary_layer profile values to block names
+_PRIMARY_LAYER_BLOCK = {
+    "engineering": "engineering",
+    "research": "research",
+    "ops": "ops",
+    "foundations": "foundations",
+    "stigmergy": "hot_signals",
+}
+
+# Default positions for U-shaped layout:
+#   TOP (strong attention): 1=seed, 2=directive, 3=primary
+#   MIDDLE (weaker attention): 4=foundations, 5=research, 6=engineering, 7=ops, 8=memories
+#   BOTTOM (strong attention): 9=swarm, 10=hot_signals, 11=vision
+_DEFAULT_POSITIONS = {
+    "recognition_seed": 1,
+    "survival_directive": 2,
+    "foundations": 4,
+    "research": 5,
+    "engineering": 6,
+    "ops": 7,
+    "recent_memories": 8,
+    "swarm_notes": 9,
+    "hot_signals": 10,
+    "vision": 11,
+}
+
+
 def build_agent_context(
     role: str | None = None,
     thread: str | None = None,
@@ -751,8 +1088,12 @@ def build_agent_context(
 ) -> str:
     """Assemble multi-layer context for an agent's system prompt.
 
-    Selects content based on role (what the agent does) and thread
-    (what research direction is active). Respects a total char budget.
+    Uses U-shaped positional layout: high-signal content at context
+    boundaries (top/bottom), reference material in the middle. Each
+    role's primary layer is promoted to position 3 (high attention).
+
+    Budget fitting trims middle-position blocks first (4-8), never
+    the top (seed, directive, primary) or bottom (swarm, signals, vision).
 
     Args:
         role: Agent role (cartographer, archeologist, surgeon, architect, validator).
@@ -765,92 +1106,106 @@ def build_agent_context(
     """
     profile = ROLE_PROFILES.get(role or "", {})
     budget = CONTEXT_BUDGET
-    sections = []
-    used = 0
+    blocks: list[ContextBlock] = []
+    primary_layer = profile.get("primary_layer")
+    promoted_block = _PRIMARY_LAYER_BLOCK.get(primary_layer or "")
 
-    # L1: Vision — role-specific crown jewels
-    vision_keys = profile.get("vision", ["ten_words", "soul"])
-    if vision_keys:
-        vision = read_vision(keys=vision_keys, max_per_file=1500)
-        if vision:
-            sections.append(vision)
-            used += len(vision)
+    def _pos(block_name: str) -> int:
+        """Position for a block: 3 if promoted, else default."""
+        if block_name == promoted_block:
+            return 3
+        return _DEFAULT_POSITIONS.get(block_name, 6)
+
+    def _add(name: str, content: str) -> None:
+        if content:
+            blocks.append(ContextBlock(name, _pos(name), content, len(content)))
+
+    # L9: Recognition seed (lands at top for instant orientation)
+    seed = _read_recognition_seed(state_dir=state_dir, max_chars=2000)
+    if seed:
+        blocks.append(ContextBlock("recognition_seed", 1, seed, len(seed)))
+
+    # Memory survival directive (always position 2)
+    blocks.append(ContextBlock(
+        "survival_directive", 2,
+        MEMORY_SURVIVAL_DIRECTIVE, len(MEMORY_SURVIVAL_DIRECTIVE),
+    ))
+
+    # L1b: Foundations — intellectual pillars + engineering principles
+    foundations_domain = profile.get("foundations_domain")
+    if foundations_domain is None:
+        _thread_domain_map = {
+            "mechanistic": "mechanistic",
+            "phenomenological": "consciousness",
+            "architectural": "architecture",
+            "alignment": "governance",
+            "scaling": "evolution",
+        }
+        foundations_domain = _thread_domain_map.get(thread or "", None)
+    foundations_budget = int(budget * 0.12)
+    if foundations_budget > 300:
+        foundations = read_foundations(
+            domain=foundations_domain,
+            max_total=foundations_budget,
+        )
+        _add("foundations", foundations)
 
     # L2: Research — thread-weighted
     research_budget = int(budget * profile.get("research_weight", 0.3))
     if research_budget > 500:
         research = read_research(thread=thread, max_per_file=research_budget // 3)
-        if research:
-            sections.append(research)
-            used += len(research)
+        _add("research", research)
 
     # L3: Engineering — code reality
     eng_budget = int(budget * profile.get("engineering_weight", 0.3))
     if eng_budget > 500:
         eng = read_engineering()
-        if eng:
-            sections.append(eng)
-            used += len(eng)
+        _add("engineering", eng)
 
-    # L4: Ops — operational state (always include, compact)
+    # L4: Ops — operational state
     ops_budget = int(budget * profile.get("ops_weight", 0.2))
     if ops_budget > 300:
         ops = read_ops(state_dir)
         if ops and len(ops) > ops_budget:
             ops = ops[:ops_budget] + "\n... [ops truncated]"
-        if ops:
-            sections.append(ops)
-            used += len(ops)
+        _add("ops", ops)
 
-    # L5: Swarm — other agents' notes + recent session memories
+    # L5b: Recent memories from StrangeLoopMemory
+    memories = read_recent_memories(state_dir=state_dir, max_entries=5)
+    if memories:
+        blocks.append(ContextBlock("recent_memories", 8, memories, len(memories)))
+
+    # L5: Swarm — other agents' notes
     notes_budget = int(budget * profile.get("notes_weight", 0.2))
     if notes_budget > 200:
         notes = read_agent_notes(exclude_role=role, max_per_agent=notes_budget // 5)
         if notes:
-            sections.append(notes)
-            used += len(notes)
+            blocks.append(ContextBlock("swarm_notes", 9, notes, len(notes)))
 
-    # L5b: Recent memories from StrangeLoopMemory
-    remaining = budget - used
-    if remaining > 500:
-        memories = read_recent_memories(state_dir=state_dir, max_entries=5)
-        if memories:
-            sections.append(memories)
-            used += len(memories)
+    # L7+L8: Winners + Stigmergy — hot signals
+    winners = _read_winners(state_dir=state_dir, max_chars=1500)
+    stigmergy = _read_stigmergy_signals(state_dir=state_dir, max_chars=1500)
+    hot_parts = [s for s in [winners, stigmergy] if s]
+    if hot_parts:
+        hot_signals = "\n\n".join(hot_parts)
+        blocks.append(ContextBlock(
+            "hot_signals", _pos("hot_signals"),
+            hot_signals, len(hot_signals),
+        ))
 
-    # L7: Winners — amplification of highest-quality patterns
-    remaining = budget - used
-    if remaining > 500:
-        winners = _read_winners(state_dir=state_dir, max_chars=min(1500, remaining // 3))
-        if winners:
-            sections.append(winners)
-            used += len(winners)
+    # L1: Vision — crown jewels land last (bottom of context = strong attention)
+    vision_keys = profile.get("vision", ["ten_words", "soul"])
+    if vision_keys:
+        vision = read_vision(keys=vision_keys, max_per_file=1500)
+        if vision:
+            blocks.append(ContextBlock("vision", 11, vision, len(vision)))
 
-    # L8: Stigmergy — hot signals from daemons and other agents
-    remaining = budget - used
-    if remaining > 500:
-        stigmergy = _read_stigmergy_signals(
-            state_dir=state_dir, max_chars=min(1500, remaining // 3)
-        )
-        if stigmergy:
-            sections.append(stigmergy)
-            used += len(stigmergy)
+    # Fit to budget (trim middle positions 4-8 first)
+    blocks = _fit_to_budget(blocks, budget)
 
-    # L9: META — recognition seed (strange loop closure)
-    remaining = budget - used
-    if remaining > 500:
-        seed = _read_recognition_seed(
-            state_dir=state_dir, max_chars=min(2000, remaining)
-        )
-        if seed:
-            sections.append(seed)
-            used += len(seed)
-
-    # Memory survival instinct (Windsurf pattern)
-    sections.append(MEMORY_SURVIVAL_DIRECTIVE)
-    used += len(MEMORY_SURVIVAL_DIRECTIVE)
-
-    result = "\n\n".join(sections)
+    # Sort by position → assemble
+    blocks.sort(key=lambda b: b.position)
+    result = "\n\n".join(b.content for b in blocks)
 
     # Hard cap
     if len(result) > CONTEXT_BUDGET:

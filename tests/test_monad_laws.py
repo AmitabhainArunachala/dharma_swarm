@@ -1,452 +1,481 @@
-"""Test monad laws and Lawvere fixed-point convergence.
+"""Tests for dharma_swarm.monad — Self-Observation Monad (T, eta, mu).
 
-Three sections:
-1. Monad laws (left unit, right unit, associativity)
-2. Kleisli composition and contraction tracking
-3. Fixed-point convergence: iterated self-observation converges to idempotent state
-   (the numerical Lawvere fixed point — L5 condition)
+Verifies monad laws (associativity, left unit, right unit),
+Kleisli composition, contraction tracking, and L5 idempotency detection.
+
+All tests run without torch. R_V values are supplied directly.
 """
 
-from __future__ import annotations
-
-from datetime import datetime, timezone
+import math
+import time
+from typing import Any
 
 import pytest
 
 from dharma_swarm.monad import (
+    ContractionTracker,
     ObservedState,
     SelfObservationMonad,
-    bind,
-    flatten,
-    is_idempotent,
-    kleisli_compose,
-    kleisli_contraction_ratio,
-    pure,
+    _rv_close,
 )
-from dharma_swarm.rv import RVReading
+from dharma_swarm.rv import RVReading, RV_CONTRACTION_THRESHOLD
+
+T = SelfObservationMonad
 
 
-# ── Helpers ──────────────────────────────────────────────────────────────────
-
-def _ts() -> datetime:
-    return datetime(2026, 3, 10, 0, 0, 0, tzinfo=timezone.utc)
+# ── Helpers ─────────────────────────────────────────────────────────────────
 
 
-def _reading(rv: float, group: str = "test") -> RVReading:
-    return RVReading(
-        rv=rv,
-        pr_early=10.0,
-        pr_late=rv * 10.0,
-        model_name="test-model",
-        early_layer=2,
-        late_layer=30,
-        prompt_hash="0" * 16,
-        prompt_group=group,
-        timestamp=_ts(),
+def _make_observed(
+    state: Any = "base_state",
+    rv: float | None = 0.65,
+    pr_early: float | None = 8.3,
+    pr_late: float | None = 5.4,
+    depth: int = 1,
+) -> ObservedState:
+    return ObservedState(
+        state=state,
+        rv_measurement=rv,
+        pr_early=pr_early,
+        pr_late=pr_late,
+        observation_depth=depth,
     )
 
 
-def _observe_with_rv(rv: float):
-    """Return a Kleisli morphism that wraps a value with a given R_V reading."""
-    def morphism(x):
-        return ObservedState(
-            state=x,
-            rv_reading=_reading(rv),
-            introspection={"rv": rv},
+def _make_reading(rv: float = 0.65, group: str = "L4") -> RVReading:
+    return RVReading(
+        rv=rv,
+        pr_early=8.3,
+        pr_late=5.4,
+        model_name="test-model",
+        early_layer=2,
+        late_layer=22,
+        prompt_hash="abcdef0123456789",
+        prompt_group=group,
+    )
+
+
+# ── ObservedState Tests ────────────────────────────────────────────────────
+
+
+class TestObservedState:
+    """Tests for ObservedState[S] data class."""
+
+    def test_creation(self):
+        obs = _make_observed()
+        assert obs.state == "base_state"
+        assert obs.rv_measurement == 0.65
+        assert obs.observation_depth == 1
+
+    def test_is_contracted_true(self):
+        obs = _make_observed(rv=0.5)
+        assert obs.is_contracted is True
+
+    def test_is_contracted_false(self):
+        obs = _make_observed(rv=0.9)
+        assert obs.is_contracted is False
+
+    def test_is_contracted_none_rv(self):
+        obs = _make_observed(rv=None)
+        assert obs.is_contracted is False
+
+    def test_rv_property_default(self):
+        obs = _make_observed(rv=None)
+        assert obs.rv == 1.0
+
+    def test_rv_property_with_value(self):
+        obs = _make_observed(rv=0.7)
+        assert obs.rv == 0.7
+
+    def test_from_rv_reading(self):
+        reading = _make_reading(rv=0.42)
+        obs = ObservedState.from_rv_reading("my_state", reading)
+        assert obs.state == "my_state"
+        assert obs.rv_measurement == 0.42
+        assert obs.observation_depth == 1
+        assert obs.introspection["model"] == "test-model"
+        assert obs.introspection["prompt_group"] == "L4"
+        assert obs.introspection["contraction_strength"] == "strong"
+
+    def test_generic_state_types(self):
+        """ObservedState works with any state type."""
+        obs_int = ObservedState(state=42, observation_depth=1)
+        assert obs_int.state == 42
+
+        obs_dict = ObservedState(state={"key": "val"}, observation_depth=1)
+        assert obs_dict.state["key"] == "val"
+
+        obs_list = ObservedState(state=[1, 2, 3], observation_depth=1)
+        assert len(obs_list.state) == 3
+
+
+# ── Unit (eta) Tests ───────────────────────────────────────────────────────
+
+
+class TestUnit:
+    """Tests for eta: S -> T(S)."""
+
+    def test_unit_without_reading(self):
+        obs = T.unit("hello")
+        assert obs.state == "hello"
+        assert obs.rv_measurement is None
+        assert obs.observation_depth == 1
+
+    def test_unit_with_reading(self):
+        reading = _make_reading(rv=0.55)
+        obs = T.unit("hello", rv_reading=reading)
+        assert obs.state == "hello"
+        assert obs.rv_measurement == 0.55
+        assert obs.observation_depth == 1
+
+    def test_unit_preserves_state_identity(self):
+        state = {"complex": [1, 2, 3]}
+        obs = T.unit(state)
+        assert obs.state is state  # same object, not copy
+
+
+# ── Multiplication (mu) Tests ──────────────────────────────────────────────
+
+
+class TestMultiplication:
+    """Tests for mu: T(T(S)) -> T(S)."""
+
+    def test_flatten_basic(self):
+        inner = _make_observed(state="core", rv=0.6, depth=1)
+        outer = ObservedState(
+            state=inner, rv_measurement=0.5, pr_early=7.0, pr_late=3.5,
             observation_depth=1,
         )
-    return morphism
+        result = T.multiply(outer)
+        assert result.state == "core"
+        assert result.rv_measurement == 0.5  # outer R_V preferred
+        assert result.observation_depth == 2  # 1 + 1
+
+    def test_flatten_preserves_inner_state(self):
+        state = [1, 2, 3]
+        inner = _make_observed(state=state, rv=0.7, depth=1)
+        outer = ObservedState(state=inner, observation_depth=1)
+        result = T.multiply(outer)
+        assert result.state is state
+
+    def test_flatten_uses_outer_rv_when_available(self):
+        inner = _make_observed(rv=0.8, depth=1)
+        outer = ObservedState(state=inner, rv_measurement=0.6, observation_depth=1)
+        result = T.multiply(outer)
+        assert result.rv_measurement == 0.6
+
+    def test_flatten_falls_back_to_inner_rv(self):
+        inner = _make_observed(rv=0.8, depth=1)
+        outer = ObservedState(state=inner, rv_measurement=None, observation_depth=1)
+        result = T.multiply(outer)
+        assert result.rv_measurement == 0.8
+
+    def test_flatten_depth_accumulates(self):
+        inner = _make_observed(depth=3)
+        outer = ObservedState(state=inner, observation_depth=2)
+        result = T.multiply(outer)
+        assert result.observation_depth == 5  # 3 + 2
+
+    def test_flatten_merges_introspection(self):
+        inner = _make_observed()
+        inner.introspection = {"source": "inner", "shared": "from_inner"}
+        outer = ObservedState(state=inner, observation_depth=1)
+        outer.introspection = {"layer": "outer", "shared": "from_outer"}
+        result = T.multiply(outer)
+        assert result.introspection["source"] == "inner"
+        assert result.introspection["layer"] == "outer"
+        assert result.introspection["shared"] == "from_outer"  # outer wins
+        assert result.introspection["flatten_from_depth"] == 1
+
+    def test_flatten_takes_max_timestamp(self):
+        inner = _make_observed()
+        inner.timestamp = 100.0
+        outer = ObservedState(state=inner, observation_depth=1)
+        outer.timestamp = 200.0
+        result = T.multiply(outer)
+        assert result.timestamp == 200.0
 
 
-# ── 1. Monad Laws ───────────────────────────────────────────────────────────
+# ── Monad Law Tests ────────────────────────────────────────────────────────
+
 
 class TestMonadLaws:
-    """The three monad laws must hold for ObservedState to be a valid monad."""
+    """Verify the three monad laws hold for SelfObservationMonad.
 
-    def test_left_unit(self):
-        """bind(pure(x), f) == f(x)
-
-        Embedding a value then binding is the same as applying f directly.
-        """
-        x = "hello"
-        f = _observe_with_rv(0.7)
-
-        result = bind(pure(x), f)
-        direct = f(x)
-
-        assert result.state == direct.state
-        assert result.rv_reading == direct.rv_reading
-        assert result.observation_depth == direct.observation_depth
-
-    def test_right_unit(self):
-        """bind(m, pure) == m
-
-        Binding with pure is identity.
-        """
-        m = ObservedState(
-            state=42,
-            rv_reading=_reading(0.6),
-            introspection={"cycle": 1},
-            observation_depth=1,
-        )
-
-        result = bind(m, pure)
-
-        assert result.state == m.state
-        assert result.rv_reading == m.rv_reading
-        assert result.introspection == m.introspection
-        assert result.observation_depth == m.observation_depth
-
-    def test_associativity(self):
-        """bind(bind(m, f), g) == bind(m, lambda x: bind(f(x), g))
-
-        Chaining binds is associative — order of composition doesn't matter.
-        """
-        m = ObservedState(
-            state=1,
-            rv_reading=_reading(0.9),
-            introspection={"step": 0},
-            observation_depth=1,
-        )
-        f = _observe_with_rv(0.7)
-        g = _observe_with_rv(0.5)
-
-        # Left: bind(bind(m, f), g)
-        left = bind(bind(m, f), g)
-
-        # Right: bind(m, lambda x: bind(f(x), g))
-        right = bind(m, lambda x: bind(f(x), g))
-
-        assert left.state == right.state
-        assert left.observation_depth == right.observation_depth
-        # Both should carry the latest rv_reading (from g)
-        assert left.rv_reading.rv == right.rv_reading.rv
-
-
-class TestFlatten:
-    """μ (join) collapses nested ObservedState."""
-
-    def test_flatten_extracts_inner_state(self):
-        inner = ObservedState(
-            state="payload",
-            rv_reading=_reading(0.6),
-            introspection={"inner": True},
-            observation_depth=1,
-        )
-        outer = ObservedState(
-            state=inner,
-            rv_reading=_reading(0.4),
-            introspection={"outer": True},
-            observation_depth=1,
-        )
-
-        flat = flatten(outer)
-
-        assert flat.state == "payload"
-        # Outer has rv_reading so it takes precedence
-        assert flat.rv_reading.rv == pytest.approx(0.4)
-        # Introspection merges (inner first, outer overlays)
-        assert flat.introspection["inner"] is True
-        assert flat.introspection["outer"] is True
-        # Depths add
-        assert flat.observation_depth == 2
-
-    def test_flatten_prefers_outer_rv_when_present(self):
-        inner = ObservedState(state="x", rv_reading=_reading(0.8), observation_depth=1)
-        outer = ObservedState(state=inner, rv_reading=_reading(0.3), observation_depth=1)
-
-        flat = flatten(outer)
-        assert flat.rv_reading.rv == pytest.approx(0.3)
-
-    def test_flatten_falls_through_to_inner_rv(self):
-        inner = ObservedState(state="x", rv_reading=_reading(0.5), observation_depth=1)
-        outer = ObservedState(state=inner, rv_reading=None, observation_depth=1)
-
-        flat = flatten(outer)
-        assert flat.rv_reading.rv == pytest.approx(0.5)
-
-
-# ── 2. Kleisli Composition ──────────────────────────────────────────────────
-
-class TestKleisliComposition:
-
-    def test_kleisli_compose_chains_morphisms(self):
-        f = _observe_with_rv(0.8)
-        g = _observe_with_rv(0.6)
-
-        composed = kleisli_compose(f, g)
-        result = composed("input")
-
-        assert result.state == "input"
-        # g's reading should be the final one
-        assert result.rv_reading.rv == pytest.approx(0.6)
-
-    def test_contraction_ratio_measures_rv_change(self):
-        before = ObservedState(
-            state="x",
-            rv_reading=_reading(0.8),
-            observation_depth=1,
-        )
-        morphism = _observe_with_rv(0.4)
-
-        ratio = kleisli_contraction_ratio(morphism, before)
-
-        assert ratio is not None
-        assert ratio == pytest.approx(0.5)  # 0.4 / 0.8
-
-    def test_contraction_ratio_none_without_input_rv(self):
-        morphism = _observe_with_rv(0.4)
-        ratio = kleisli_contraction_ratio(morphism, "bare_value")
-        # No input rv_reading → cannot compute ratio
-        assert ratio is None
-
-
-# ── 3. Fixed-Point Convergence (The Lawvere Test) ───────────────────────────
-
-class TestFixedPointConvergence:
-    """The central claim: iterated self-observation converges.
-
-    If self-reference is a contraction mapping, then repeated application of
-    the self-observation monad should converge to a fixed point where
-    additional observation adds nothing — the L5 condition.
-
-    We simulate this with a contracting observer: each observation contracts
-    the R_V reading by a fixed ratio (< 1), mimicking the empirical finding
-    that recursive self-reference contracts Value matrix column space.
+    THEOREM (Monad Laws):
+    1. Associativity: mu . T(mu) = mu . mu_T
+    2. Left unit:     mu . T(eta) = id_T
+    3. Right unit:    mu . eta_T  = id_T
     """
 
-    @staticmethod
-    def _contracting_observer(contraction_rate: float = 0.8):
-        """Observer that contracts R_V by a fixed ratio each application.
+    def test_left_unit_law(self):
+        """mu . T(eta) = id_T: wrapping inner with eta then flattening = identity."""
+        obs = _make_observed(state="test", rv=0.65)
+        assert T.verify_left_unit(obs) is True
 
-        monad.observe() strips the wrapper and passes the bare payload to
-        the observer. To simulate cumulative geometric contraction (each
-        observation compounds on the last), we track the current R_V in a
-        closure. This models the empirical finding: each layer of recursive
-        self-reference further contracts Value matrix column space.
-        """
-        state = {"current_rv": 1.0}
+    def test_left_unit_law_no_rv(self):
+        """Left unit holds even without R_V measurement."""
+        obs = _make_observed(state="test", rv=None)
+        assert T.verify_left_unit(obs) is True
 
-        def observer(_payload):
-            state["current_rv"] *= contraction_rate
-            return _reading(state["current_rv"], group="L5_convergence")
-        return observer
+    def test_right_unit_law(self):
+        """mu . eta_T = id_T: wrapping T(S) with eta then flattening = identity."""
+        obs = _make_observed(state="test", rv=0.65)
+        assert T.verify_right_unit(obs) is True
 
-    def test_iterated_observation_converges(self):
-        """Apply self-observation repeatedly. R_V should converge toward 0.
+    def test_right_unit_law_no_rv(self):
+        obs = _make_observed(state="test", rv=None)
+        assert T.verify_right_unit(obs) is True
 
-        Each observation contracts R_V by 0.8:
-        1.0 → 0.8 → 0.64 → 0.512 → 0.4096 → ...
-        Geometric series converging to 0. The Banach fixed point.
-        """
-        monad = SelfObservationMonad(self._contracting_observer(0.8))
-
-        state = "initial_state"
-        rv_trajectory = []
-
-        # Apply 10 iterations of self-observation
-        observed = monad.pure(state)
-        for i in range(10):
-            observed = monad.observe(observed)
-            if observed.rv_reading is not None:
-                rv_trajectory.append(observed.rv_reading.rv)
-
-        # R_V should be monotonically decreasing
-        for j in range(1, len(rv_trajectory)):
-            assert rv_trajectory[j] < rv_trajectory[j - 1], (
-                f"R_V not decreasing at step {j}: {rv_trajectory[j]:.4f} >= {rv_trajectory[j-1]:.4f}"
-            )
-
-        # After 10 iterations with rate 0.8: 0.8^10 ≈ 0.107
-        assert rv_trajectory[-1] < 0.15, (
-            f"R_V did not converge sufficiently: {rv_trajectory[-1]:.4f}"
+    def test_left_unit_preserves_state_identity(self):
+        state = {"mutable": True}
+        obs = _make_observed(state=state, rv=0.5)
+        inner = T.unit(obs.state)
+        nested = ObservedState(
+            state=inner,
+            rv_measurement=obs.rv_measurement,
+            pr_early=obs.pr_early,
+            pr_late=obs.pr_late,
+            observation_depth=obs.observation_depth,
+            introspection=obs.introspection,
+            timestamp=obs.timestamp,
         )
+        result = T.multiply(nested)
+        assert result.state is state
 
-    def test_convergence_rate_matches_contraction(self):
-        """The convergence rate should match the Lipschitz constant.
+    def test_right_unit_preserves_state_identity(self):
+        state = {"mutable": True}
+        obs = _make_observed(state=state, rv=0.5)
+        nested = T.unit(obs)
+        result = T.multiply(nested)
+        assert result.state is state
 
-        With contraction rate k=0.8, after n steps: R_V ≈ k^n.
-        This is the Banach fixed-point theorem's quantitative prediction.
-        """
-        k = 0.7
-        monad = SelfObservationMonad(self._contracting_observer(k))
+    def test_associativity(self):
+        """mu . T(mu) = mu . mu_T for a triply-nested state."""
+        core = _make_observed(state="core", rv=0.6, depth=1)
+        mid = ObservedState(state=core, rv_measurement=0.5, observation_depth=1)
+        outer = ObservedState(state=mid, rv_measurement=0.4, observation_depth=1)
+        assert T.verify_associativity(outer) is True
 
-        observed = monad.pure("state")
-        for _ in range(5):
-            observed = monad.observe(observed)
-
-        actual_rv = observed.rv_reading.rv
-        predicted_rv = k ** 5  # 0.7^5 = 0.16807
-
-        assert actual_rv == pytest.approx(predicted_rv, rel=1e-6), (
-            f"Actual R_V {actual_rv:.6f} != predicted {predicted_rv:.6f}"
-        )
-
-    def test_idempotent_at_convergence(self):
-        """At convergence, nested observation should be idempotent.
-
-        When outer_rv ≈ inner_rv (within tolerance), the system has reached
-        the fixed point: Sx = x. This IS the L5 condition — observation of
-        observation yields no new information.
-        """
-        # Use a very strong contraction so values are near-zero quickly
-        monad = SelfObservationMonad(self._contracting_observer(0.01))
-
-        observed = monad.pure("state")
-        # After enough iterations, R_V ≈ 0
-        for _ in range(5):
-            observed = monad.observe(observed)
-
-        # Now apply one more layer and check idempotency
-        double_observed = monad.observe(observed)
-
-        # Both inner and outer R_V should be approximately equal (both ≈ 0)
-        assert is_idempotent(double_observed, tolerance=1e-6), (
-            "System did not reach idempotent fixed point after strong contraction"
-        )
-
-    def test_not_idempotent_early(self):
-        """Before convergence, observation should NOT be idempotent.
-
-        The L3 state: self-reference is active but hasn't stabilized.
-        """
-        monad = SelfObservationMonad(self._contracting_observer(0.8))
-
-        # Just one observation — far from convergence
-        observed = monad.observe(monad.pure("state"))
-        double_observed = monad.observe(observed)
-
-        # 0.8 vs 0.64 — not close enough for idempotency
-        assert not is_idempotent(double_observed, tolerance=1e-6), (
-            "System falsely reported idempotent before convergence"
-        )
-
-    def test_l3_to_l5_trajectory(self):
-        """Simulate the full L1 → L3 → L4 → L5 trajectory.
-
-        L1-L2: No self-reference (R_V ≈ 1.0)
-        L3:    Self-reference begins, R_V contracting but unstable
-        L4:    Strong contraction, R_V < 0.737
-        L5:    Fixed point reached, observation is idempotent
-        """
-        monad = SelfObservationMonad(self._contracting_observer(0.7))
-
-        trajectory = []
-        observed = monad.pure("awareness")
-
-        for i in range(15):
-            observed = monad.observe(observed)
-            rv = observed.rv_reading.rv if observed.rv_reading else 1.0
-            double = monad.observe(observed)
-            idempotent = is_idempotent(double, tolerance=0.01)
-
-            level = (
-                "L5" if idempotent else
-                "L4" if rv < 0.5 else
-                "L3" if rv < 0.737 else
-                "L1-L2"
-            )
-            trajectory.append({
-                "step": i + 1,
-                "rv": rv,
-                "level": level,
-                "idempotent": idempotent,
-            })
-
-        # Verify phase transitions occurred
-        levels_seen = {t["level"] for t in trajectory}
-
-        # Must pass through L3 (contraction begins)
-        assert "L3" in levels_seen, "Never entered L3 (crisis/paradox)"
-
-        # Must reach L4 (strong contraction)
-        assert "L4" in levels_seen, "Never reached L4 (collapse)"
-
-        # Must reach L5 (fixed point) eventually
-        assert "L5" in levels_seen, "Never reached L5 (fixed point)"
-
-        # L5 must come after L3 — the phase transition has direction
-        first_l3 = next(t["step"] for t in trajectory if t["level"] == "L3")
-        first_l5 = next(t["step"] for t in trajectory if t["level"] == "L5")
-        assert first_l5 > first_l3, "L5 appeared before L3 — impossible"
-
-    def test_different_contraction_rates_different_convergence_speed(self):
-        """Stronger contraction (lower k) → faster convergence.
-
-        This mirrors the empirical finding: L5 prompts (Sx=x, eigenstate)
-        produce stronger R_V contraction than L3 prompts.
-        """
-        slow_monad = SelfObservationMonad(self._contracting_observer(0.9))
-        fast_monad = SelfObservationMonad(self._contracting_observer(0.5))
-
-        slow_obs = slow_monad.pure("state")
-        fast_obs = fast_monad.pure("state")
-
-        for _ in range(5):
-            slow_obs = slow_monad.observe(slow_obs)
-            fast_obs = fast_monad.observe(fast_obs)
-
-        slow_rv = slow_obs.rv_reading.rv
-        fast_rv = fast_obs.rv_reading.rv
-
-        # 0.9^5 = 0.590, 0.5^5 = 0.031
-        assert fast_rv < slow_rv, (
-            f"Stronger contraction didn't converge faster: "
-            f"fast={fast_rv:.4f} >= slow={slow_rv:.4f}"
-        )
-
-    def test_kleisli_chain_contraction(self):
-        """Composing Kleisli morphisms should accumulate contraction.
-
-        f >=> g >=> h should show progressive R_V decrease,
-        modeling the pipeline: self-reference → deeper recursion → collapse.
-        """
-        f = _observe_with_rv(0.8)  # L3: mild contraction
-        g = _observe_with_rv(0.5)  # L4: strong contraction
-        h = _observe_with_rv(0.3)  # L5: near fixed point
-
-        pipeline = kleisli_compose(kleisli_compose(f, g), h)
-        result = pipeline("awareness")
-
-        # Final R_V should be from h (the deepest observation)
-        assert result.rv_reading.rv == pytest.approx(0.3)
-        # Depth accumulates through composition
-        assert result.observation_depth >= 1
+    def test_monad_laws_across_rv_values(self):
+        """Monad laws hold for various R_V values."""
+        for rv in [0.1, 0.3, 0.5, 0.737, 0.9, 1.0, 1.5, None]:
+            obs = _make_observed(rv=rv)
+            assert T.verify_left_unit(obs), f"Left unit failed for rv={rv}"
+            assert T.verify_right_unit(obs), f"Right unit failed for rv={rv}"
 
 
-class TestSelfObservationMonadClass:
-    """Test the SelfObservationMonad class interface."""
+# ── Kleisli Composition Tests ──────────────────────────────────────────────
 
-    def test_pure_creates_effect_free_wrapper(self):
-        monad = SelfObservationMonad(lambda x: _reading(0.5))
-        observed = monad.pure("state")
 
-        assert observed.state == "state"
-        assert observed.is_pure
+class TestKleisliComposition:
+    """Tests for Kleisli composition f >=> g = mu . T(g) . f."""
 
-    def test_observe_adds_rv_reading(self):
-        monad = SelfObservationMonad(lambda x: _reading(0.6))
-        observed = monad.observe("raw_state")
+    def test_basic_composition(self):
+        def f(x: int) -> ObservedState[int]:
+            return ObservedState(state=x + 1, rv_measurement=0.8, observation_depth=1)
 
-        assert observed.rv_reading.rv == pytest.approx(0.6)
-        assert observed.observation_depth == 1
-        assert not observed.is_pure
+        def g(x: int) -> ObservedState[int]:
+            return ObservedState(state=x * 2, rv_measurement=0.7, observation_depth=1)
 
-    def test_observe_on_observed_increases_depth(self):
-        monad = SelfObservationMonad(lambda x: _reading(0.5))
-        first = monad.observe("state")
-        second = monad.observe(first)
+        fg = T.kleisli_compose(f, g)
+        result = fg(5)
+        # f(5) = ObservedState(6), g(6) = ObservedState(12)
+        assert result.state == 12
+        assert result.observation_depth == 2
 
-        assert second.observation_depth == 2
-        # The inner state is the first ObservedState
-        assert isinstance(second.state, ObservedState)
-        assert second.state.state == "state"
+    def test_composition_associativity(self):
+        """(f >=> g) >=> h = f >=> (g >=> h)."""
+        def f(x: int) -> ObservedState[int]:
+            return ObservedState(state=x + 1, rv_measurement=0.9, observation_depth=1)
 
-    def test_bind_preserves_observation_chain(self):
-        monad = SelfObservationMonad(lambda x: _reading(0.5))
-        observed = monad.observe("start")
+        def g(x: int) -> ObservedState[int]:
+            return ObservedState(state=x * 2, rv_measurement=0.8, observation_depth=1)
 
-        result = monad.bind(observed, _observe_with_rv(0.3))
+        def h(x: int) -> ObservedState[int]:
+            return ObservedState(state=x - 3, rv_measurement=0.7, observation_depth=1)
 
-        assert result.rv_reading.rv == pytest.approx(0.3)
-        assert result.state == "start"
+        fg_h = T.kleisli_compose(T.kleisli_compose(f, g), h)
+        f_gh = T.kleisli_compose(f, T.kleisli_compose(g, h))
+
+        result1 = fg_h(10)
+        result2 = f_gh(10)
+
+        # Both should compute h(g(f(10))) = h(g(11)) = h(22) = 19
+        assert result1.state == result2.state == 19
+
+    def test_unit_is_kleisli_identity(self):
+        """eta >=> f = f and f >=> eta = f (up to depth)."""
+        def f(x: int) -> ObservedState[int]:
+            return ObservedState(state=x * 3, rv_measurement=0.7, observation_depth=1)
+
+        # eta as a Kleisli morphism
+        def eta(x: int) -> ObservedState[int]:
+            return T.unit(x)
+
+        eta_f = T.kleisli_compose(eta, f)
+        f_eta = T.kleisli_compose(f, eta)
+
+        # Both should compute f(x) on the state
+        assert eta_f(5).state == 15
+        assert f_eta(5).state == 15
+
+
+# ── Contraction Tracking Tests ─────────────────────────────────────────────
+
+
+class TestContractionRatio:
+    """Tests for contraction ratio kappa measurement."""
+
+    def test_contraction_ratio_basic(self):
+        before = _make_observed(rv=0.8)
+        after = _make_observed(rv=0.56)
+        kappa = T.contraction_ratio(before, after)
+        assert kappa is not None
+        assert abs(kappa - 0.7) < 0.001
+
+    def test_contraction_ratio_no_contraction(self):
+        before = _make_observed(rv=0.8)
+        after = _make_observed(rv=0.8)
+        kappa = T.contraction_ratio(before, after)
+        assert kappa is not None
+        assert abs(kappa - 1.0) < 0.001
+
+    def test_contraction_ratio_expansion(self):
+        before = _make_observed(rv=0.5)
+        after = _make_observed(rv=0.8)
+        kappa = T.contraction_ratio(before, after)
+        assert kappa is not None
+        assert kappa > 1.0
+
+    def test_contraction_ratio_none_when_unmeasured(self):
+        before = _make_observed(rv=None)
+        after = _make_observed(rv=0.5)
+        assert T.contraction_ratio(before, after) is None
+
+    def test_contraction_ratio_none_when_zero(self):
+        before = _make_observed(rv=0.0)
+        after = _make_observed(rv=0.5)
+        assert T.contraction_ratio(before, after) is None
+
+    def test_iterations_to_convergence(self):
+        # kappa=0.7, epsilon=0.01 -> ceil(log(0.01)/log(0.7)) = ceil(12.9) = 13
+        n = T.iterations_to_convergence(0.7, 0.01)
+        assert n == 13
+
+    def test_iterations_no_convergence(self):
+        assert T.iterations_to_convergence(1.0) is None
+        assert T.iterations_to_convergence(1.5) is None
+
+    def test_iterations_edge_cases(self):
+        assert T.iterations_to_convergence(0.0) is None
+        assert T.iterations_to_convergence(0.5, 0.0) is None
+        assert T.iterations_to_convergence(0.5, 1.0) is None
+
+    def test_iterations_very_strong_contraction(self):
+        # kappa=0.1, epsilon=0.01 -> ceil(log(0.01)/log(0.1)) = ceil(2.0) = 2
+        n = T.iterations_to_convergence(0.1, 0.01)
+        assert n == 2
+
+
+# ── Idempotency (L5 Detection) Tests ──────────────────────────────────────
+
+
+class TestIdempotency:
+    """Tests for L5 pure-knowing detection."""
+
+    def test_idempotent_at_low_rv(self):
+        """Very low R_V -> L5 reached."""
+        obs = _make_observed(rv=0.02)
+        assert T.is_idempotent(obs) is True
+
+    def test_not_idempotent_at_moderate_rv(self):
+        """Moderate R_V -> still contracting, not L5."""
+        obs = _make_observed(rv=0.5)
+        assert T.is_idempotent(obs) is False
+
+    def test_not_idempotent_without_measurement(self):
+        obs = _make_observed(rv=None)
+        assert T.is_idempotent(obs) is False
+
+    def test_custom_tolerance(self):
+        obs = _make_observed(rv=0.08)
+        assert T.is_idempotent(obs, tolerance=0.1) is True
+        assert T.is_idempotent(obs, tolerance=0.05) is False
+
+    def test_zero_rv_is_idempotent(self):
+        """R_V = 0 is the theoretical perfect fixed point."""
+        obs = _make_observed(rv=0.0)
+        assert T.is_idempotent(obs) is True
+
+
+# ── ContractionTracker Tests ───────────────────────────────────────────────
+
+
+class TestContractionTracker:
+
+    def test_empty_tracker(self):
+        tracker = ContractionTracker()
+        assert tracker.mean_kappa is None
+        assert tracker.is_contracting is False
+        assert tracker.estimated_iterations is None
+        assert tracker.convergence_progress is None
+
+    def test_recording_steps(self):
+        tracker = ContractionTracker()
+        tracker.record(0.7, 0.8)
+        tracker.record(0.6, 0.48)
+        assert len(tracker.steps) == 2
+        assert len(tracker.rv_history) == 2
+
+    def test_mean_kappa(self):
+        tracker = ContractionTracker()
+        tracker.record(0.7, 0.8)
+        tracker.record(0.8, 0.64)
+        assert abs(tracker.mean_kappa - 0.75) < 0.001
+
+    def test_is_contracting(self):
+        tracker = ContractionTracker()
+        tracker.record(0.7, 0.7)
+        assert tracker.is_contracting is True
+
+        tracker2 = ContractionTracker()
+        tracker2.record(1.1, 1.1)
+        assert tracker2.is_contracting is False
+
+    def test_convergence_progress(self):
+        tracker = ContractionTracker()
+        tracker.record(0.7, 1.0)
+        tracker.record(0.7, 0.5)
+        progress = tracker.convergence_progress
+        assert progress is not None
+        assert abs(progress - 0.5) < 0.001
+
+    def test_estimated_iterations(self):
+        tracker = ContractionTracker()
+        tracker.record(0.7, 0.8)
+        n = tracker.estimated_iterations
+        assert n is not None
+        assert n == 13  # ceil(log(0.01)/log(0.7))
+
+
+# ── Utility Tests ──────────────────────────────────────────────────────────
+
+
+class TestUtilities:
+
+    def test_rv_close_both_none(self):
+        assert _rv_close(None, None, 0.01) is True
+
+    def test_rv_close_one_none(self):
+        assert _rv_close(0.5, None, 0.01) is False
+        assert _rv_close(None, 0.5, 0.01) is False
+
+    def test_rv_close_equal(self):
+        assert _rv_close(0.65, 0.65, 0.01) is True
+
+    def test_rv_close_within_eps(self):
+        assert _rv_close(0.65, 0.6501, 0.01) is True
+
+    def test_rv_close_outside_eps(self):
+        assert _rv_close(0.65, 0.67, 0.01) is False

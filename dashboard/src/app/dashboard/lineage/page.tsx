@@ -102,15 +102,15 @@ export default function LineagePage() {
       id: `le-${i}`,
       source: e.source,
       target: e.target,
-      label: e.relation,
+      label: e.label,
       labelStyle: { fill: colors.sumi[600], fontSize: 9 },
       style: {
-        stroke: relationColors[e.relation] ?? colors.sumi[600],
+        stroke: relationColors[e.label] ?? colors.sumi[600],
         strokeWidth: 1.5,
       },
       markerEnd: {
         type: MarkerType.ArrowClosed,
-        color: relationColors[e.relation] ?? colors.sumi[600],
+        color: relationColors[e.label] ?? colors.sumi[600],
       },
       animated: true,
     }));

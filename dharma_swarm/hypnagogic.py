@@ -188,6 +188,8 @@ async def _load_recent_dreams(
                 ts_str = d.get("timestamp", "")
                 if ts_str:
                     ts = datetime.fromisoformat(ts_str.replace("Z", "+00:00"))
+                    if ts.tzinfo is None:
+                        ts = ts.replace(tzinfo=timezone.utc)
                     if ts < cutoff:
                         continue
                 if float(d.get("salience", 0)) < min_salience:

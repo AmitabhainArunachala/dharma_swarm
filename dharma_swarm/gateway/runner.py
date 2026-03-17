@@ -150,11 +150,12 @@ class GatewayRunner:
         self._cron_stop.clear()
 
         def _cron_loop() -> None:
+            from dharma_swarm.cron_runner import run_cron_job
             from dharma_swarm.cron_scheduler import tick
             logger.info("Cron tick thread started (interval=%ds)", interval)
             while not self._cron_stop.is_set():
                 try:
-                    tick(verbose=False)
+                    tick(verbose=False, run_fn=run_cron_job)
                 except Exception:
                     logger.exception("Cron tick error")
                 self._cron_stop.wait(timeout=interval)

@@ -7,6 +7,8 @@
 import { usePathname } from "next/navigation";
 import { Command, ChevronRight, MessageCircle } from "lucide-react";
 import { useCallback, useEffect } from "react";
+import { resolveChatProfile, shortProfileLabel } from "@/lib/chatProfiles";
+import { useChatWorkspace } from "@/hooks/useChatWorkspace";
 
 interface HeaderProps {
   onToggleChat?: () => void;
@@ -15,6 +17,8 @@ interface HeaderProps {
 
 export function Header({ onToggleChat, chatOpen }: HeaderProps) {
   const pathname = usePathname();
+  const { profileId } = useChatWorkspace();
+  const activeProfile = resolveChatProfile(null, profileId);
 
   // Build breadcrumb segments from the path.
   const segments = pathname
@@ -72,7 +76,7 @@ export function Header({ onToggleChat, chatOpen }: HeaderProps) {
             title="Toggle split chat panel"
           >
             <MessageCircle size={12} />
-            <span className="font-mono">Claude</span>
+            <span className="font-mono">{shortProfileLabel(activeProfile)}</span>
           </button>
         )}
 

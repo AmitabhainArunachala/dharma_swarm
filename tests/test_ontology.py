@@ -26,7 +26,7 @@ class TestOntologyRegistry:
             assert entity.id == eid
             assert entity.type in {
                 "research_paper", "application", "module",
-                "infrastructure", "knowledge_base",
+                "infrastructure", "knowledge_base", "venture_cell",
             }
             assert isinstance(entity.canonical_path, Path)
             assert entity.status in {"active", "submitted", "blocked", "dormant", "complete"}

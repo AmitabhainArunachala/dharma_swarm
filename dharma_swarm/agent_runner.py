@@ -30,7 +30,9 @@ from dharma_swarm.telos_gates import check_with_reflective_reroute
 
 logger = logging.getLogger(__name__)
 
-_HEARTBEAT_THRESHOLD = timedelta(seconds=60)
+from dharma_swarm.config import DEFAULT_CONFIG as _SWARM_CFG
+
+_HEARTBEAT_THRESHOLD = timedelta(seconds=_SWARM_CFG.agent.heartbeat_threshold_seconds)
 _ERROR_PREFIXES = (
     "error",
     "api error:",
@@ -660,12 +662,29 @@ def _looks_like_provider_failure(content: str) -> bool:
 
 
 def _task_file_path(task: Task) -> str:
-    """Infer file path context for a task mark."""
+    """Infer file path context for a task mark.
+
+    Priority:
+    1. Explicit metadata keys (file_path / target_file / path)
+    2. File path extracted from task title or description via regex
+    3. Fallback: task:<id>
+    """
+    import re
+
     meta = task.metadata or {}
     for key in ("file_path", "target_file", "path"):
         value = meta.get(key)
         if isinstance(value, str) and value.strip():
             return value.strip()
+
+    # Try to extract a file path from the task text
+    text = f"{task.title} {task.description}"
+    # Match paths like dharma_swarm/foo.py, ~/foo/bar.md, ./foo.json, /abs/path.txt
+    pattern = r'(?:[\w./~-]+/[\w./~-]*\.(?:py|md|json|yaml|yml|txt|ts|js|toml|cfg|ini|sh))'
+    match = re.search(pattern, text)
+    if match:
+        return match.group(0)
+
     return f"task:{task.id}"
 
 
@@ -734,11 +753,13 @@ class AgentRunner:
         provider: CompletionProvider | RoutedCompletionProvider | None = None,
         sandbox: CodeSandbox | None = None,
         memory: AgentMemoryBank | None = None,
+        message_bus: Any | None = None,
     ) -> None:
         self._config = config
         self._provider = provider
         self._sandbox = sandbox
         self._memory = memory
+        self._message_bus = message_bus
         self._state = _state_from_config(config)
         self._lock = asyncio.Lock()
 
@@ -786,6 +807,9 @@ class AgentRunner:
 
         try:
             meta = task.metadata if isinstance(task.metadata, dict) else {}
+            telic_agent_id = self.agent_id
+            telic_cell_id = str(meta.get("cell_id", "") or "")
+            telic_task_type = str(meta.get("task_type", "general") or "general")
             spec_ref = str(meta.get("spec_ref", "")).strip() or None
             req_refs_raw = meta.get("requirement_refs", [])
             if isinstance(req_refs_raw, str):
@@ -829,6 +853,17 @@ class AgentRunner:
                 content=request.messages[0]["content"],
                 turn_index=1,
             )
+            # Unified conversation log
+            try:
+                from dharma_swarm.conversation_log import log_agent_turn
+                log_agent_turn(
+                    agent_id=self._config.name,
+                    task_id=task.id,
+                    role="user",
+                    content=request.messages[0]["content"][:5000],
+                )
+            except Exception:
+                pass
 
             # Inject agent self-editing memory into system prompt
             if self._memory is not None:
@@ -867,6 +902,19 @@ class AgentRunner:
                 content=result,
                 turn_index=2,
             )
+            # Unified conversation log
+            try:
+                from dharma_swarm.conversation_log import log_agent_turn
+                log_agent_turn(
+                    agent_id=self._config.name,
+                    task_id=task.id,
+                    role="assistant",
+                    content=result[:5000],
+                    model=getattr(response, "model", ""),
+                    provider=getattr(response, "provider", ""),
+                )
+            except Exception:
+                pass
             self._record_router_feedback(
                 task=task,
                 request=request,
@@ -903,6 +951,37 @@ class AgentRunner:
             # Strange loop: score agent output and emit fitness signal
             self._emit_fitness_signal(task, result)
 
+            # ── Telic Seam: record Outcome + ValueEvent + Contribution ──
+            try:
+                from dharma_swarm.telic_seam import get_seam
+                seam = get_seam()
+                outcome_id = seam.record_outcome(
+                    task,
+                    telic_agent_id,
+                    success=True,
+                    result_summary=result[:200] if result else "",
+                    duration_ms=completion_latency_ms,
+                )
+                if outcome_id:
+                    ve_id = seam.record_value_event(
+                        outcome_id, task, telic_agent_id,
+                        result_text=result[:200] if result else "",
+                        success=True,
+                        duration_ms=completion_latency_ms,
+                        cell_id=telic_cell_id,
+                    )
+                    if ve_id:
+                        ve_obj = seam.registry.get_object(ve_id)
+                        cv = ve_obj.properties.get("composite_value", 0.0) if ve_obj else 0.0
+                        seam.record_contribution(
+                            ve_id, telic_agent_id,
+                            composite_value=cv,
+                            cell_id=telic_cell_id,
+                            task_type=telic_task_type,
+                        )
+            except Exception:
+                pass  # Seam recording is never fatal
+
             logger.info(
                 "Agent %s finished task %s", self._config.name, task.id
             )
@@ -937,6 +1016,37 @@ class AgentRunner:
             self._record_follow_up_shard_outcome(task, outcome="failure", evidence_text=str(exc))
             self._mark_idea_outcome(task, outcome="failure")
             self._record_retrieval_outcome(task, outcome="failure")
+
+            # ── Telic Seam: record failure Outcome + ValueEvent + Contribution ──
+            try:
+                from dharma_swarm.telic_seam import get_seam
+                seam = get_seam()
+                outcome_id = seam.record_outcome(
+                    task,
+                    telic_agent_id,
+                    success=False,
+                    error=str(exc)[:200],
+                    duration_ms=completion_latency_ms,
+                )
+                if outcome_id:
+                    ve_id = seam.record_value_event(
+                        outcome_id, task, telic_agent_id,
+                        result_text=str(exc)[:200],
+                        success=False,
+                        duration_ms=completion_latency_ms,
+                        cell_id=telic_cell_id,
+                    )
+                    if ve_id:
+                        ve_obj = seam.registry.get_object(ve_id)
+                        cv = ve_obj.properties.get("composite_value", 0.0) if ve_obj else 0.0
+                        seam.record_contribution(
+                            ve_id, telic_agent_id,
+                            composite_value=cv,
+                            cell_id=telic_cell_id,
+                            task_type=telic_task_type,
+                        )
+            except Exception:
+                pass  # Seam recording is never fatal
 
             async with self._lock:
                 self._state.status = AgentStatus.IDLE
@@ -1037,6 +1147,7 @@ class AgentRunner:
 
         Closes the strange loop: every agent output gets a behavioral
         score that feeds into the recognition seed via the signal bus.
+        Also persists to MessageBus for cross-process durability.
         Best-effort — never fails the task.
         """
         try:
@@ -1044,16 +1155,33 @@ class AgentRunner:
             from dharma_swarm.signal_bus import SignalBus
 
             sig = MetricsAnalyzer().analyze(result)
-            bus = SignalBus.get()
-            bus.emit({
-                "type": "AGENT_FITNESS",
+            payload = {
                 "agent": self._config.name,
                 "task_id": task.id,
                 "swabhaav_ratio": sig.swabhaav_ratio,
                 "entropy": sig.entropy,
                 "recognition_type": sig.recognition_type.value,
                 "word_count": sig.word_count,
-            })
+            }
+            # In-memory signal (same-process consumers)
+            bus = SignalBus.get()
+            bus.emit({"type": "AGENT_FITNESS", **payload})
+
+            # Durable persistence (cross-process consumers)
+            if self._message_bus is not None:
+                import asyncio
+                try:
+                    loop = asyncio.get_running_loop()
+                    loop.create_task(
+                        self._message_bus.emit_event(
+                            "AGENT_FITNESS",
+                            task_id=task.id,
+                            agent_id=self._config.name,
+                            payload=payload,
+                        )
+                    )
+                except RuntimeError:
+                    pass  # No running loop — skip durable emit
         except Exception as exc:
             logger.debug("Fitness signal emission failed: %s", exc)
 
@@ -1267,6 +1395,7 @@ class AgentPool:
         provider: CompletionProvider | RoutedCompletionProvider | None = None,
         sandbox: CodeSandbox | None = None,
         memory: AgentMemoryBank | None = None,
+        message_bus: Any | None = None,
     ) -> AgentRunner:
         """Create, start, and register an agent.
 
@@ -1275,11 +1404,12 @@ class AgentPool:
             provider: Optional LLM provider.
             sandbox: Optional code sandbox.
             memory: Optional self-editing memory bank.
+            message_bus: Optional persistent MessageBus for durable fitness events.
 
         Returns:
             The started AgentRunner.
         """
-        runner = AgentRunner(config, provider=provider, sandbox=sandbox, memory=memory)
+        runner = AgentRunner(config, provider=provider, sandbox=sandbox, memory=memory, message_bus=message_bus)
         await runner.start()
         async with self._lock:
             self._agents[config.id] = runner

@@ -1,36 +1,60 @@
-This is a [Next.js](https://nextjs.org) project bootstrapped with [`create-next-app`](https://nextjs.org/docs/app/api-reference/cli/create-next-app).
+# DHARMA COMMAND Dashboard
 
-## Getting Started
+This directory is the canonical base for the newer web operator UI.
 
-First, run the development server:
+It is not a consumer product site. It is the browser control surface for
+`dharma_swarm`.
+
+## Canonical stance
+
+- TUI is the primary operator cockpit.
+- This dashboard is the canonical web operator surface.
+- `SwarmLens` remains a legacy/alternate web surface in
+  `dharma_swarm/swarmlens_app.py`.
+- The richer operator-shell reference snapshot is commit `6b1ad1b`.
+- Recovery and upgrades should be surgical. Do not invent a third website.
+
+## Web V1 scope
+
+Keep the stable web surface focused on:
+
+- Overview
+- Tasks
+- Agents
+- Doctor
+- Claude/operator chat lane
+
+Defer or hide pages that are not backed by stable data contracts.
+
+## Local development
+
+Start the API:
 
 ```bash
-npm run dev
-# or
-yarn dev
-# or
-pnpm dev
-# or
-bun dev
+cd /Users/dhyana/dharma_swarm
+python3 -m uvicorn api.main:app --host 0.0.0.0 --port 8420
 ```
 
-Open [http://localhost:3000](http://localhost:3000) with your browser to see the result.
+Start the dashboard:
 
-You can start editing the page by modifying `app/page.tsx`. The page auto-updates as you edit the file.
+```bash
+cd /Users/dhyana/dharma_swarm/dashboard
+npm run dev -- --port 3420
+```
 
-This project uses [`next/font`](https://nextjs.org/docs/app/building-your-application/optimizing/fonts) to automatically optimize and load [Geist](https://vercel.com/font), a new font family for Vercel.
+Open:
 
-## Learn More
+- Dashboard: `http://localhost:3420/dashboard`
+- API docs: `http://localhost:8420/docs`
 
-To learn more about Next.js, take a look at the following resources:
+## Important note
 
-- [Next.js Documentation](https://nextjs.org/docs) - learn about Next.js features and API.
-- [Learn Next.js](https://nextjs.org/learn) - an interactive Next.js tutorial.
+The current dev setup depends on the Turbopack root being pinned to the
+dashboard directory in `next.config.ts`.
 
-You can check out [the Next.js GitHub repository](https://github.com/vercel/next.js) - your feedback and contributions are welcome!
+## Related references
 
-## Deploy on Vercel
-
-The easiest way to deploy your Next.js app is to use the [Vercel Platform](https://vercel.com/new?utm_medium=default-template&filter=next.js&utm_source=create-next-app&utm_campaign=create-next-app-readme) from the creators of Next.js.
-
-Check out our [Next.js deployment documentation](https://nextjs.org/docs/app/building-your-application/deploying) for more details.
+- Website alignment note:
+  `docs/doctor/WEBSITE_ALIGNMENT_NOTE_2026-03-17.md`
+- Overnight Doctor setup:
+  `docs/doctor/DOCTOR_OVERNIGHT_WATCH_SETUP_2026-03-17.md`

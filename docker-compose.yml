@@ -1,0 +1,50 @@
+version: "3.8"
+
+services:
+  web:
+    build: .
+    container_name: dharmic-quant-web
+    ports:
+      - "8080:8080"
+    volumes:
+      - ginko-data:/root/.dharma/ginko
+    environment:
+      - OPENROUTER_API_KEY=${OPENROUTER_API_KEY:-}
+      - FRED_API_KEY=${FRED_API_KEY:-}
+      - FINNHUB_API_KEY=${FINNHUB_API_KEY:-}
+      - OLLAMA_API_KEY=${OLLAMA_API_KEY:-}
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8080/api/fleet"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+
+  cron:
+    build: .
+    container_name: dharmic-quant-cron
+    volumes:
+      - ginko-data:/root/.dharma/ginko
+    environment:
+      - OPENROUTER_API_KEY=${OPENROUTER_API_KEY:-}
+      - FRED_API_KEY=${FRED_API_KEY:-}
+      - FINNHUB_API_KEY=${FINNHUB_API_KEY:-}
+    entrypoint: ["python3", "-c", "
+import asyncio, time, logging;
+logging.basicConfig(level=logging.INFO);
+logger = logging.getLogger('ginko-cron');
+async def run_cycle():
+    from dharma_swarm.ginko_orchestrator import action_full_cycle;
+    result = await action_full_cycle();
+    logger.info('Cycle complete: %s', {k: 'OK' if not isinstance(v, dict) or 'error' not in v else v['error'] for k, v in result.items() if k != 'total_duration_ms'});
+    return result;
+while True:
+    try: asyncio.run(run_cycle());
+    except Exception as e: logger.error('Cycle failed: %s', e);
+    time.sleep(21600);
+"]
+    restart: unless-stopped
+
+volumes:
+  ginko-data:
+    driver: local

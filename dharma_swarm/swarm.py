@@ -14,7 +14,7 @@ import logging
 import time
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
-from typing import Any
+from typing import Any, TYPE_CHECKING, TypeVar
 from uuid import uuid4
 
 from pydantic import BaseModel, Field
@@ -37,7 +37,42 @@ from dharma_swarm.models import (
 )
 from dharma_swarm.providers import create_default_router
 
+if TYPE_CHECKING:
+    from dharma_swarm.adaptive_autonomy import AdaptiveAutonomy
+    from dharma_swarm.agent_memory import AgentMemoryBank
+    from dharma_swarm.agent_runner import AgentPool
+    from dharma_swarm.canary import CanaryDeployer
+    from dharma_swarm.context_search import ContextSearchEngine
+    from dharma_swarm.dharma_corpus import DharmaCorpus
+    from dharma_swarm.dharma_kernel import KernelGuard
+    from dharma_swarm.engine.event_memory import EventMemoryStore
+    from dharma_swarm.evolution import DarwinEngine
+    from dharma_swarm.handoff import HandoffProtocol
+    from dharma_swarm.intent_router import IntentRouter
+    from dharma_swarm.memory import StrangeLoopMemory
+    from dharma_swarm.message_bus import MessageBus
+    from dharma_swarm.monitor import SystemMonitor
+    from dharma_swarm.orchestrator import Orchestrator
+    from dharma_swarm.policy_compiler import PolicyCompiler
+    from dharma_swarm.profiles import ProfileManager
+    from dharma_swarm.skill_composer import SkillComposer
+    from dharma_swarm.skills import SkillRegistry
+    from dharma_swarm.stigmergy import StigmergyStore
+    from dharma_swarm.task_board import TaskBoard
+    from dharma_swarm.thinkodynamic_director import ThinkodynamicDirector
+    from dharma_swarm.thread_manager import ThreadManager
+    from dharma_swarm.traces import TraceStore
+
 logger = logging.getLogger(__name__)
+
+_T = TypeVar("_T")
+
+
+class SubsystemNotReady(RuntimeError):
+    """Raised when a required subsystem hasn't been initialized yet.
+
+    Ashby's requisite variety: type system variety must match runtime variety.
+    """
 
 
 def _make_trace_id() -> str:
@@ -78,59 +113,101 @@ class SwarmManager:
         self._running = False
         self._daemon = daemon_config or DaemonConfig()
 
-        # Lazily initialized components
-        self._task_board: Any = None
-        self._agent_pool: Any = None
-        self._message_bus: Any = None
-        self._memory: Any = None
-        self._event_memory: Any = None
-        self._orchestrator: Any = None
-        self._gatekeeper: Any = None
-        self._thread_mgr: Any = None
+        # ── Subsystem declarations (typed, not Any) ──
+        # CRITICAL: must init or swarm cannot operate
+        self._task_board: TaskBoard | None = None
+        self._agent_pool: AgentPool | None = None
+        self._message_bus: MessageBus | None = None
+        self._orchestrator: Orchestrator | None = None
+        self._gatekeeper: Any = None  # TelosGatekeeper (no stable type yet)
+
+        # CRITICAL: core infrastructure
+        self._memory: StrangeLoopMemory | None = None
+        self._event_memory: EventMemoryStore | None = None
+        self._thread_mgr: ThreadManager | None = None
         self._router = create_default_router()
 
-        # v0.2.0 subsystems
-        self._engine: Any = None       # DarwinEngine
-        self._monitor: Any = None      # SystemMonitor
-        self._trace_store: Any = None  # TraceStore
+        # v0.2.0 subsystems (CRITICAL: evolution + monitoring)
+        self._engine: DarwinEngine | None = None
+        self._monitor: SystemMonitor | None = None
+        self._trace_store: TraceStore | None = None
 
-        # v0.3.0: Gödel Claw subsystems
-        self._kernel_guard: Any = None    # KernelGuard
-        self._corpus: Any = None          # DharmaCorpus
-        self._compiler: Any = None        # PolicyCompiler
-        self._canary: Any = None          # CanaryDeployer
-        self._bridge_rv: Any = None       # ResearchBridge
-        self._stigmergy: Any = None       # StigmergyStore
+        # v0.3.0: Gödel Claw (CRITICAL: kernel + corpus)
+        self._kernel_guard: KernelGuard | None = None
+        self._corpus: DharmaCorpus | None = None
+        self._compiler: PolicyCompiler | None = None
+        self._canary: CanaryDeployer | None = None
+        self._bridge_rv: Any = None  # ResearchBridge (optional)
+        self._stigmergy: StigmergyStore | None = None
 
-        # v0.4.0: Oz-inspired systems
-        self._skill_registry: Any = None   # SkillRegistry
-        self._profile_mgr: Any = None      # ProfileManager
-        self._intent_router: Any = None    # IntentRouter
-        self._context_search: Any = None   # ContextSearchEngine
-        self._autonomy: Any = None         # AdaptiveAutonomy
-        self._skill_composer: Any = None  # SkillComposer
-        self._handoff: Any = None         # HandoffProtocol
-        self._agent_memories: dict[str, Any] = {}  # name -> AgentMemoryBank
+        # v0.4.0: Oz-inspired (OPTIONAL: can fail gracefully)
+        self._skill_registry: SkillRegistry | None = None
+        self._profile_mgr: ProfileManager | None = None
+        self._intent_router: IntentRouter | None = None
+        self._context_search: ContextSearchEngine | None = None
+        self._autonomy: AdaptiveAutonomy | None = None
+        self._skill_composer: SkillComposer | None = None
+        self._handoff: HandoffProtocol | None = None
+        self._agent_memories: dict[str, AgentMemoryBank] = {}
 
-        # v0.5.0: Thinkodynamic Director
-        self._director: Any = None               # ThinkodynamicDirector
-        self._director_interval_ticks: int = 10  # Run director every N ticks
+        # v0.5.0: Thinkodynamic Director (OPTIONAL)
+        self._director: ThinkodynamicDirector | None = None
         self._tick_count: int = 0
-        self._living_interval_ticks: int = 3   # Run living layers every N ticks
 
-        # v0.6.0: Hermes-inspired integration
+        # Central config (Beer's S5 — identity at the parameter level)
+        from dharma_swarm.config import DEFAULT_CONFIG
+        self._config = DEFAULT_CONFIG
+        _sm = self._config.swarm
+        self._director_interval_ticks: int = _sm.director_interval_ticks
+        self._living_interval_ticks: int = _sm.living_interval_ticks
+
+        # v0.6.0: Hermes-inspired integration (OPTIONAL)
         self._tool_registry: Any = None    # ToolRegistry
         self._cron_scheduler: Any = None   # module ref
         self._gateway: Any = None          # GatewayRunner
+
+        # Subsystem initialization tracking
+        self._initialized: set[str] = set()
 
         # Daemon state
         self._last_contribution: datetime | None = None
         self._daily_contributions: int = 0
         self._daily_reset: datetime | None = None
         self._last_auto_rescue_scan: datetime | None = None
-        self._auto_rescue_scan_interval_seconds = 300.0
-        self._auto_rescue_max_age = timedelta(hours=24)
-        self._auto_rescue_max_attempts = 1
+        self._auto_rescue_scan_interval_seconds = _sm.auto_rescue_scan_interval_seconds
+        self._auto_rescue_max_age = timedelta(hours=_sm.auto_rescue_max_age_hours)
+        self._auto_rescue_max_attempts = _sm.auto_rescue_max_attempts
+
+    # ── Subsystem access helpers ──
+
+    # Subsystems classified by criticality
+    _CRITICAL_SUBSYSTEMS = frozenset({
+        "task_board", "agent_pool", "orchestrator", "gatekeeper",
+    })
+    _OPTIONAL_SUBSYSTEMS = frozenset({
+        "stigmergy", "bridge_rv", "director", "skill_registry",
+        "profile_mgr", "intent_router", "context_search", "autonomy",
+        "skill_composer", "handoff", "tool_registry", "cron_scheduler",
+        "gateway",
+    })
+
+    def _require_subsystem(self, name: str) -> Any:
+        """Return a subsystem or raise SubsystemNotReady.
+
+        Ashby: the check variety must match the failure variety.
+        """
+        attr = f"_{name}"
+        value = getattr(self, attr, None)
+        if value is None:
+            raise SubsystemNotReady(
+                f"Subsystem {name!r} not initialized. "
+                f"Call init() first or check is_ready({name!r})."
+            )
+        return value
+
+    def is_ready(self, subsystem_name: str) -> bool:
+        """Check if a subsystem has been initialized."""
+        return getattr(self, f"_{subsystem_name}", None) is not None
 
     async def init(self) -> None:
         """Initialize all subsystems."""
@@ -298,7 +375,7 @@ class SwarmManager:
 
             logger.info("v0.4.0+ Oz-inspired systems initialized")
         except Exception as e:
-            logger.debug("v0.4.0 systems init failed (non-fatal): %s", e)
+            logger.warning("v0.4.0 systems init failed (non-fatal): %s", e)
 
         # v0.5.0: Thinkodynamic Director
         try:
@@ -311,7 +388,34 @@ class SwarmManager:
             await self._director.init()
             logger.info("ThinkodynamicDirector initialized")
         except Exception as e:
-            logger.debug("ThinkodynamicDirector init failed (non-fatal): %s", e)
+            logger.warning("ThinkodynamicDirector init failed (non-fatal): %s", e)
+
+        # Track which subsystems successfully initialized
+        for name, attr in [
+            ("task_board", self._task_board),
+            ("agent_pool", self._agent_pool),
+            ("message_bus", self._message_bus),
+            ("orchestrator", self._orchestrator),
+            ("gatekeeper", self._gatekeeper),
+            ("memory", self._memory),
+            ("event_memory", self._event_memory),
+            ("engine", self._engine),
+            ("monitor", self._monitor),
+            ("kernel_guard", self._kernel_guard),
+            ("corpus", self._corpus),
+            ("stigmergy", self._stigmergy),
+            ("skill_registry", self._skill_registry),
+            ("director", self._director),
+        ]:
+            if attr is not None:
+                self._initialized.add(name)
+
+        logger.info(
+            "Subsystems initialized: %d/%d critical, %d optional",
+            len(self._initialized & self._CRITICAL_SUBSYSTEMS),
+            len(self._CRITICAL_SUBSYSTEMS),
+            len(self._initialized - self._CRITICAL_SUBSYSTEMS),
+        )
 
     # --- Agent Operations ---
 
@@ -353,7 +457,7 @@ class SwarmManager:
             # Route through the shared ModelRouter so live agent tasks contribute
             # to routing memory, retries, and audit trails while staying pinned
             # to config.provider unless task metadata widens the lane set.
-            runner = await self._agent_pool.spawn(config, provider=self._router)
+            runner = await self._agent_pool.spawn(config, provider=self._router, message_bus=self._message_bus)
             await self._memory.remember(
                 f"Agent spawned: {name} ({role.value})"
                 + (f" [thread: {thread}]" if thread else ""),
@@ -908,8 +1012,8 @@ class SwarmManager:
             try:
                 decayed = await self._stigmergy.decay()
                 summary["stigmergy_decayed"] = decayed
-            except Exception:
-                pass
+            except Exception as exc:
+                logger.info("Stigmergy decay failed (transient): %s", exc)
         return summary
 
     def _derive_failure_source(self, task: Task) -> str:
@@ -1633,14 +1737,70 @@ class SwarmManager:
 
     # --- Shutdown ---
 
-    async def shutdown(self) -> None:
-        """Graceful shutdown of entire swarm."""
+    async def shutdown(self, drain_timeout: float = 30.0) -> None:
+        """Graceful ordered shutdown of entire swarm.
+
+        Varela's autopoiesis: clean death is part of the lifecycle.
+        Teardown order is reverse of init — coordination first,
+        then agents, then infrastructure.
+        """
         self._running = False
+        logger.info("Swarm shutdown initiated (drain_timeout=%.1fs)", drain_timeout)
+
+        # 1. Stop orchestrator (cancel in-flight tasks with drain)
         if self._orchestrator:
-            self._orchestrator.stop()
+            try:
+                await self._orchestrator.graceful_stop(timeout=drain_timeout)
+            except Exception as exc:
+                logger.warning("Orchestrator graceful stop failed: %s", exc)
+                self._orchestrator.stop()
+
+        # 2. Stop director (optional subsystem)
+        if self._director:
+            try:
+                stop_fn = getattr(self._director, "stop", None)
+                if stop_fn:
+                    result = stop_fn()
+                    if asyncio.iscoroutine(result):
+                        await result
+            except Exception as exc:
+                logger.debug("Director stop failed (non-fatal): %s", exc)
+
+        # 3. Shutdown agents
         if self._agent_pool:
-            await self._agent_pool.shutdown_all()
+            try:
+                await self._agent_pool.shutdown_all()
+            except Exception as exc:
+                logger.warning("Agent pool shutdown failed: %s", exc)
+
+        # 4. Close closeable providers in the router
+        try:
+            for provider in getattr(self._router, "_providers", {}).values():
+                close_fn = getattr(provider, "close", None)
+                if close_fn:
+                    result = close_fn()
+                    if asyncio.iscoroutine(result):
+                        await result
+        except Exception as exc:
+            logger.debug("Provider close failed (non-fatal): %s", exc)
+
+        # 5. Record shutdown in memory
         if self._memory:
-            await self._memory.remember(
-                "Swarm shutdown", layer=MemoryLayer.SESSION, source="swarm"
-            )
+            try:
+                await self._memory.remember(
+                    "Swarm shutdown", layer=MemoryLayer.SESSION, source="swarm"
+                )
+            except Exception:
+                pass
+
+        self._initialized.clear()
+        logger.info("Swarm shutdown complete")
+
+    async def __aenter__(self) -> "SwarmManager":
+        """Async context manager: init on enter."""
+        await self.init()
+        return self
+
+    async def __aexit__(self, exc_type: Any, exc_val: Any, exc_tb: Any) -> None:
+        """Async context manager: shutdown on exit."""
+        await self.shutdown()

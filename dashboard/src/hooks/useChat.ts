@@ -4,6 +4,7 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import { create } from "zustand";
 import { persist, createJSONStorage } from "zustand/middleware";
 import { BASE_URL, fetchChatStatus } from "@/lib/api";
+import { DEFAULT_CHAT_PROFILE_ID } from "@/lib/chatProfiles";
 import type { ChatStatusOut } from "@/lib/types";
 
 // ---------------------------------------------------------------------------
@@ -31,15 +32,18 @@ export interface ChatMessage {
 // ---------------------------------------------------------------------------
 
 interface ChatStore {
-  messages: ChatMessage[];
+  messagesByProfile: Record<string, ChatMessage[]>;
   isStreaming: boolean;
   activeTools: string[];
   error: string | null;
-  _setMessages: (fn: (prev: ChatMessage[]) => ChatMessage[]) => void;
+  _setMessages: (
+    profileId: string,
+    fn: (prev: ChatMessage[]) => ChatMessage[],
+  ) => void;
   _setStreaming: (v: boolean) => void;
   _setActiveTools: (fn: (prev: string[]) => string[]) => void;
   _setError: (v: string | null) => void;
-  clearMessages: () => void;
+  clearMessages: (profileId: string) => void;
 }
 
 let msgCounter = 0;
@@ -50,18 +54,32 @@ function nextId(): string {
 const useChatStore = create<ChatStore>()(
   persist(
     (set) => ({
-      messages: [],
+      messagesByProfile: {},
       isStreaming: false,
       activeTools: [],
       error: null,
 
-      _setMessages: (fn) => set((s) => ({ messages: fn(s.messages) })),
+      _setMessages: (profileId, fn) =>
+        set((s) => ({
+          messagesByProfile: {
+            ...s.messagesByProfile,
+            [profileId]: fn(s.messagesByProfile[profileId] ?? []),
+          },
+        })),
       _setStreaming: (v) => set({ isStreaming: v }),
       _setActiveTools: (fn) => set((s) => ({ activeTools: fn(s.activeTools) })),
       _setError: (v) => set({ error: v }),
 
-      clearMessages: () =>
-        set({ messages: [], error: null, activeTools: [], isStreaming: false }),
+      clearMessages: (profileId) =>
+        set((s) => ({
+          messagesByProfile: {
+            ...s.messagesByProfile,
+            [profileId]: [],
+          },
+          error: null,
+          activeTools: [],
+          isStreaming: false,
+        })),
     }),
     {
       name: "dharma-chat",
@@ -79,7 +97,7 @@ const useChatStore = create<ChatStore>()(
       }),
       // Only persist messages — streaming/activeTools are ephemeral
       partialize: (state) => ({
-        messages: state.messages,
+        messagesByProfile: state.messagesByProfile,
       }),
       // Reset ephemeral state on rehydrate (prevents stuck spinner)
       onRehydrateStorage: () => (state) => {
@@ -103,6 +121,7 @@ interface UseChatReturn {
   activeTools: string[];
   error: string | null;
   status: ChatStatusOut | null;
+  profileId: string;
   sendMessage: (content: string, context?: string) => Promise<void>;
   clearMessages: () => void;
   stopStreaming: () => void;
@@ -110,9 +129,9 @@ interface UseChatReturn {
 
 const DEFAULT_HISTORY_MESSAGE_LIMIT = 120;
 
-export function useChat(): UseChatReturn {
+export function useChat(profileId: string = DEFAULT_CHAT_PROFILE_ID): UseChatReturn {
   const {
-    messages,
+    messagesByProfile,
     isStreaming,
     activeTools,
     error,
@@ -123,6 +142,7 @@ export function useChat(): UseChatReturn {
     clearMessages,
   } = useChatStore();
   const [status, setStatus] = useState<ChatStatusOut | null>(null);
+  const messages = messagesByProfile[profileId] ?? [];
 
   const abortRef = useRef<AbortController | null>(null);
 
@@ -156,6 +176,8 @@ export function useChat(): UseChatReturn {
       _setError(null);
       _setActiveTools(() => []);
 
+      const currentProfileId = profileId || status?.default_profile_id || DEFAULT_CHAT_PROFILE_ID;
+
       const userMsg: ChatMessage = {
         id: nextId(),
         role: "user",
@@ -171,7 +193,7 @@ export function useChat(): UseChatReturn {
         toolEvents: [],
       };
 
-      _setMessages((prev) => [...prev, userMsg, assistantMsg]);
+      _setMessages(currentProfileId, (prev) => [...prev, userMsg, assistantMsg]);
       _setStreaming(true);
 
       const controller = new AbortController();
@@ -179,7 +201,8 @@ export function useChat(): UseChatReturn {
 
       try {
         // Snapshot current messages for the API payload
-        const currentMessages = useChatStore.getState().messages;
+        const currentMessages =
+          useChatStore.getState().messagesByProfile[currentProfileId] ?? [];
         const historyForApi = currentMessages
           .filter((m) => m.role !== "system")
           .slice(-(status?.history_message_limit ?? DEFAULT_HISTORY_MESSAGE_LIMIT))
@@ -191,6 +214,7 @@ export function useChat(): UseChatReturn {
           body: JSON.stringify({
             messages: historyForApi,
             context: context || undefined,
+            profile_id: currentProfileId,
           }),
           signal: controller.signal,
         });
@@ -230,7 +254,7 @@ export function useChat(): UseChatReturn {
               if (parsed.tool_call) {
                 const toolName = parsed.tool_call.name;
                 _setActiveTools((prev) => [...prev, toolName]);
-                _setMessages((prev) => {
+                _setMessages(currentProfileId, (prev) => {
                   const updated = [...prev];
                   const last = updated[updated.length - 1];
                   if (last?.role === "assistant") {
@@ -255,7 +279,7 @@ export function useChat(): UseChatReturn {
               if (parsed.tool_result) {
                 const toolName = parsed.tool_result.name;
                 _setActiveTools((prev) => prev.filter((t) => t !== toolName));
-                _setMessages((prev) => {
+                _setMessages(currentProfileId, (prev) => {
                   const updated = [...prev];
                   const last = updated[updated.length - 1];
                   if (last?.role === "assistant") {
@@ -278,7 +302,7 @@ export function useChat(): UseChatReturn {
               }
 
               if (parsed.content) {
-                _setMessages((prev) => {
+                _setMessages(currentProfileId, (prev) => {
                   const updated = [...prev];
                   const last = updated[updated.length - 1];
                   if (last?.role === "assistant") {
@@ -307,7 +331,7 @@ export function useChat(): UseChatReturn {
         abortRef.current = null;
       }
     },
-    [_setMessages, _setStreaming, _setActiveTools, _setError, status],
+    [_setMessages, _setStreaming, _setActiveTools, _setError, profileId, status],
   );
 
   return {
@@ -316,8 +340,9 @@ export function useChat(): UseChatReturn {
     activeTools,
     error,
     status,
+    profileId,
     sendMessage,
-    clearMessages,
+    clearMessages: () => clearMessages(profileId),
     stopStreaming,
   };
 }
