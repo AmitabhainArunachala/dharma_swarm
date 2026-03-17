@@ -256,3 +256,61 @@ class SwarmOverview(BaseModel):
     health_status: str = "unknown"
     stigmergy_density: int = 0
     evolution_entries: int = 0
+
+
+# ── Truth Modules ────────────────────────────────────────────────
+
+class ModuleProcessOut(BaseModel):
+    pid: int
+    live: bool = False
+    source: str = ""
+    command: str | None = None
+    observed_paths: list[str] = Field(default_factory=list)
+
+
+class ModuleProjectOut(BaseModel):
+    label: str
+    path: str
+    exists: bool = False
+    kind: str = "project"
+    modified_at: str | None = None
+
+
+class ModuleWireOut(BaseModel):
+    direction: str
+    target: str
+    detail: str = ""
+
+
+class ModuleHistoryOut(BaseModel):
+    timestamp: str | None = None
+    title: str
+    detail: str = ""
+    source: str = ""
+    status: str = "info"
+
+
+class ModuleSalientOut(BaseModel):
+    kind: str = "file"
+    title: str
+    detail: str = ""
+    path: str | None = None
+    timestamp: str | None = None
+    reason: str = ""
+    score: float = 0.0
+
+
+class ModuleTruthOut(BaseModel):
+    id: str
+    name: str
+    status: str = "unknown"
+    live: bool = False
+    summary: str = ""
+    status_reason: str = ""
+    last_activity: str | None = None
+    metrics: dict[str, str] = Field(default_factory=dict)
+    processes: list[ModuleProcessOut] = Field(default_factory=list)
+    projects: list[ModuleProjectOut] = Field(default_factory=list)
+    wiring: list[ModuleWireOut] = Field(default_factory=list)
+    history: list[ModuleHistoryOut] = Field(default_factory=list)
+    salient: list[ModuleSalientOut] = Field(default_factory=list)

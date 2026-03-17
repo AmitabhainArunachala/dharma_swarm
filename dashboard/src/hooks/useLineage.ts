@@ -13,7 +13,7 @@ export interface LineageDag {
   edges: {
     source: string;
     target: string;
-    relation: string;
+    label: string;
   }[];
 }
 

@@ -8,6 +8,8 @@
 import { motion } from "framer-motion";
 import { X, Maximize2, Minimize2 } from "lucide-react";
 import { useState } from "react";
+import { resolveChatProfile } from "@/lib/chatProfiles";
+import { useChatWorkspace } from "@/hooks/useChatWorkspace";
 import { ChatInterface } from "./ChatInterface";
 import { colors } from "@/lib/theme";
 
@@ -17,6 +19,9 @@ interface ChatPanelProps {
 
 export function ChatPanel({ onClose }: ChatPanelProps) {
   const [wide, setWide] = useState(false);
+  const { profileId, setProfile } = useChatWorkspace();
+  const profile = resolveChatProfile(null, profileId);
+  const accentClass = profile.accent === "kinpaku" ? "text-kinpaku" : "text-aozora";
 
   return (
     <motion.div
@@ -34,8 +39,8 @@ export function ChatPanel({ onClose }: ChatPanelProps) {
         className="flex items-center justify-between border-b px-4 py-3"
         style={{ borderColor: colors.sumi[700] + "66" }}
       >
-        <span className="font-heading text-sm font-bold tracking-wide text-aozora">
-          Claude Opus 4.6 — Split View
+        <span className={`font-heading text-sm font-bold tracking-wide ${accentClass}`}>
+          {profile.label} — Split View
         </span>
         <div className="flex items-center gap-1">
           <button
@@ -56,7 +61,11 @@ export function ChatPanel({ onClose }: ChatPanelProps) {
       </div>
 
       {/* Chat */}
-      <ChatInterface showHeader={false} />
+      <ChatInterface
+        showHeader={false}
+        profileId={profileId}
+        onProfileChange={setProfile}
+      />
     </motion.div>
   );
 }

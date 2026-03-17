@@ -29,6 +29,17 @@ export interface ChatStatusOut {
   tool_result_max_chars: number;
   history_message_limit: number;
   temperature: number;
+  default_profile_id?: string;
+  profiles?: ChatProfileOut[];
+}
+
+export interface ChatProfileOut {
+  id: string;
+  label: string;
+  provider: string;
+  model: string;
+  accent: string;
+  summary: string;
 }
 
 // ---------------------------------------------------------------------------
@@ -47,6 +58,66 @@ export interface SwarmOverview {
   health_status: string;
   stigmergy_density: number;
   evolution_entries: number;
+}
+
+// ---------------------------------------------------------------------------
+// Truth modules (GET /api/modules)
+// ---------------------------------------------------------------------------
+
+export interface ModuleProcessOut {
+  pid: number;
+  live: boolean;
+  source: string;
+  command: string | null;
+  observed_paths: string[];
+}
+
+export interface ModuleProjectOut {
+  label: string;
+  path: string;
+  exists: boolean;
+  kind: string;
+  modified_at: string | null;
+}
+
+export interface ModuleWireOut {
+  direction: string;
+  target: string;
+  detail: string;
+}
+
+export interface ModuleHistoryOut {
+  timestamp: string | null;
+  title: string;
+  detail: string;
+  source: string;
+  status: string;
+}
+
+export interface ModuleSalientOut {
+  kind: string;
+  title: string;
+  detail: string;
+  path: string | null;
+  timestamp: string | null;
+  reason: string;
+  score: number;
+}
+
+export interface ModuleTruthOut {
+  id: string;
+  name: string;
+  status: string;
+  live: boolean;
+  summary: string;
+  status_reason: string;
+  last_activity: string | null;
+  metrics: Record<string, string>;
+  processes: ModuleProcessOut[];
+  projects: ModuleProjectOut[];
+  wiring: ModuleWireOut[];
+  history: ModuleHistoryOut[];
+  salient: ModuleSalientOut[];
 }
 
 // ---------------------------------------------------------------------------
@@ -257,6 +328,10 @@ export interface OntologyGraphData {
       shakti: string;
       telos: number;
       icon: string;
+      actionCount?: number;
+      linkCount?: number;
+      runtimeCount?: number;
+      zone?: string;
     };
     position: { x: number; y: number };
   }[];

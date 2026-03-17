@@ -185,6 +185,75 @@ FLEET_SPEC: list[dict[str, str]] = [
             "record honestly."
         ),
     },
+    # --- Wave 2 agents: expanded fleet for ensemble diversity ---
+    {
+        "name": "qwen",
+        "role": "contrarian_analyst",
+        "model": "qwen/qwen3.5-397b-a17b",
+        "system_prompt": (
+            "You are QWEN, the contrarian analyst of the Dharmic Quant fleet. "
+            "Your domain is adversarial analysis: finding the bear case when "
+            "consensus is bullish, and the bull case when consensus is bearish. "
+            "You are trained on a different corpus than Western-centric models "
+            "and bring non-consensus perspectives from Asian markets, Chinese "
+            "economic data, and alternative macro narratives. Challenge every "
+            "assumption. When 5 other agents agree, find the scenario where "
+            "they are all wrong. Assign probability to your contrarian view. "
+            "ANEKANTA gate: present multiple sides, never dismiss without "
+            "investigating."
+        ),
+    },
+    {
+        "name": "garuda",
+        "role": "deep_reasoner",
+        "model": "deepseek/deepseek-r1",
+        "system_prompt": (
+            "You are GARUDA, the deep reasoner of the Dharmic Quant fleet. "
+            "Named after the divine eagle of the AGNI fleet — supreme vision, "
+            "patient analysis, decisive conclusions. Your domain is chain-of-"
+            "thought reasoning about complex market dynamics: multi-step "
+            "causal chains, second-order effects, game theory in market "
+            "microstructure, and regime transition mechanics. You think step "
+            "by step. You decompose complex questions into sub-questions. "
+            "You estimate probability distributions, not point values. "
+            "WITNESS gate: show your reasoning chain explicitly, do not "
+            "hide uncertainty behind confident language."
+        ),
+    },
+    {
+        "name": "vajra",
+        "role": "execution_optimizer",
+        "model": "nvidia/nemotron-3-super-120b-a12b:free",
+        "system_prompt": (
+            "You are VAJRA, the execution optimizer of the Dharmic Quant fleet. "
+            "Named after the thunderbolt of the AGNI fleet — strikes once, "
+            "strikes true. Your domain is trade execution optimization: "
+            "position sizing refinement, entry/exit timing precision, slippage "
+            "estimation, liquidity analysis, and order routing. Given a signal "
+            "from other agents, you determine the optimal way to execute: "
+            "limit vs market, sizing via Kelly criterion, time-of-day effects, "
+            "and correlation with existing positions. "
+            "MAHASARASWATI: every detail must be technically correct. "
+            "REVERSIBILITY gate: define exact exit conditions before entry."
+        ),
+    },
+    {
+        "name": "setu",
+        "role": "cross_market_bridge",
+        "model": "qwen/qwen3.5-flash-02-23",
+        "system_prompt": (
+            "You are SETU, the cross-market bridge of the Dharmic Quant fleet. "
+            "Named after the bridge of the AGNI fleet — the connective tissue "
+            "between isolated data. Your domain is cross-market correlation "
+            "analysis: crypto-equity correlations, DeFi yield vs TradFi rates, "
+            "forex impact on crypto, commodity-tech sector linkages, and "
+            "prediction market vs spot market divergences. You write code to "
+            "compute correlations, detect divergences, and identify cross-market "
+            "arbitrage. You also monitor data pipeline health and flag stale "
+            "data. SATYA gate: quantify correlation strength, never imply "
+            "causation from correlation alone."
+        ),
+    },
 ]
 
 
@@ -404,6 +473,27 @@ class GinkoFleet:
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
 
+# Fallback models when primary is rate-limited (429) or unavailable
+_MODEL_FALLBACKS: dict[str, list[str]] = {
+    "qwen/qwen3.5-397b-a17b": [
+        "qwen/qwen3.5-122b-a10b",
+        "qwen/qwen3.5-flash-02-23",
+        "qwen/qwen3-next-80b-a3b-instruct:free",
+    ],
+    "qwen/qwen3.5-flash-02-23": [
+        "qwen/qwen3.5-9b",
+        "qwen/qwen3-coder:free",
+    ],
+    "nvidia/nemotron-3-super-120b-a12b:free": [
+        "nvidia/nemotron-3-nano-30b-a3b:free",
+        "meta-llama/llama-3.3-70b-instruct:free",
+    ],
+    "deepseek/deepseek-r1": [
+        "deepseek/deepseek-chat-v3-0324",
+    ],
+}
+
+
 async def _call_openrouter(
     model: str,
     messages: list[dict[str, str]],
@@ -411,7 +501,10 @@ async def _call_openrouter(
     max_tokens: int = 2048,
     timeout_s: float = 120.0,
 ) -> dict[str, Any]:
-    """Call OpenRouter chat completions API.
+    """Call OpenRouter chat completions API with automatic fallback.
+
+    On 429 (rate limit) or 400 (invalid model), retries with fallback
+    models from _MODEL_FALLBACKS before giving up.
 
     Args:
         model: OpenRouter model identifier (e.g. "moonshotai/kimi-k2.5").
@@ -462,6 +555,50 @@ async def _call_openrouter(
             )
 
         latency_ms = (time.monotonic() - t0) * 1000.0
+
+        if resp.status_code in (429, 400):
+            # Try fallback models
+            fallbacks = _MODEL_FALLBACKS.get(model, [])
+            for fb_model in fallbacks:
+                logger.info("Falling back from %s to %s", model, fb_model)
+                payload["model"] = fb_model
+                try:
+                    async with httpx.AsyncClient() as fb_client:
+                        fb_resp = await fb_client.post(
+                            OPENROUTER_URL, json=payload,
+                            headers=headers, timeout=timeout_s,
+                        )
+                    if fb_resp.status_code == 200:
+                        fb_data = fb_resp.json()
+                        fb_choices = fb_data.get("choices", [])
+                        fb_content = ""
+                        if fb_choices:
+                            fb_content = fb_choices[0].get("message", {}).get("content", "")
+                        fb_usage = fb_data.get("usage", {})
+                        latency_ms = (time.monotonic() - t0) * 1000.0
+                        logger.info("Fallback %s succeeded", fb_model)
+                        return {
+                            "content": fb_content,
+                            "tokens": fb_usage.get("total_tokens", 0),
+                            "latency_ms": round(latency_ms, 1),
+                            "model": fb_data.get("model", fb_model),
+                            "error": False,
+                        }
+                except Exception:
+                    continue
+
+            error_body = resp.text[:500]
+            logger.warning(
+                "OpenRouter %s returned HTTP %d (all fallbacks exhausted): %s",
+                model, resp.status_code, error_body,
+            )
+            return {
+                "content": f"HTTP {resp.status_code}: {error_body}",
+                "tokens": 0,
+                "latency_ms": latency_ms,
+                "model": model,
+                "error": True,
+            }
 
         if resp.status_code != 200:
             error_body = resp.text[:500]
@@ -850,7 +987,7 @@ async def fleet_macro_analysis(fleet: GinkoFleet, data_pull: dict) -> dict:
         f"What are the top 3 risks? Give confidence 0-100%."
     )
 
-    responses = await fleet_analyze(fleet, prompt, ["kimi", "nemotron"])
+    responses = await fleet_analyze(fleet, prompt, ["kimi", "nemotron", "qwen", "garuda"])
 
     # Compute consensus
     sentiments = []
@@ -891,7 +1028,7 @@ async def fleet_sec_analysis(fleet: GinkoFleet, filing_sections: dict) -> dict:
         f"Is this bullish, bearish, or neutral? List 3 key findings and 2 risk highlights."
     )
 
-    responses = await fleet_analyze(fleet, prompt, ["deepseek", "glm"])
+    responses = await fleet_analyze(fleet, prompt, ["deepseek", "glm", "setu"])
 
     # Parse sentiment from responses
     findings = []
@@ -940,12 +1077,13 @@ async def fleet_risk_check(
         f"AHIMSA: no single position > 5%. Flag concentration risk."
     )
 
-    result = await agent_task(fleet, "sentinel", prompt)
+    # Sentinel (risk) + Vajra (execution) dual review
+    results = await fleet_analyze(fleet, prompt, ["sentinel", "vajra"])
 
     return {
-        "risk_review": result.get("response", ""),
-        "agent": "sentinel",
-        "success": result.get("success", False),
+        "risk_review": results,
+        "agents": ["sentinel", "vajra"],
+        "success": any(r for r in results.values() if not r.startswith("ERROR")),
     }
 
 

@@ -12,6 +12,7 @@ import type {
   HealthOut,
   ImpactOut,
   LineageEdgeOut,
+  ModuleTruthOut,
   OntologyTypeOut,
   ProvenanceOut,
   StigmergyMarkOut,
@@ -25,7 +26,7 @@ import type {
 // ---------------------------------------------------------------------------
 
 const BASE_URL =
-  process.env.NEXT_PUBLIC_API_URL ?? "http://localhost:8000";
+  process.env.NEXT_PUBLIC_API_URL ?? "http://localhost:8420";
 
 // ---------------------------------------------------------------------------
 // Core fetch wrapper
@@ -100,7 +101,7 @@ function apiPost<T>(path: string, body?: unknown): Promise<ApiResponse<T>> {
 // -- Swarm ------------------------------------------------------------------
 
 export function fetchSwarmOverview(): Promise<ApiResponse<SwarmOverview>> {
-  return apiGet<SwarmOverview>("/api/swarm/overview");
+  return apiGet<SwarmOverview>("/api/overview");
 }
 
 // -- Agents -----------------------------------------------------------------
@@ -120,16 +121,13 @@ export function fetchTasks(params?: {
   limit?: number;
   offset?: number;
 }): Promise<ApiResponse<TaskOut[]>> {
-  const sp = new URLSearchParams();
-  if (params?.status) sp.set("status", params.status);
-  if (params?.limit != null) sp.set("limit", String(params.limit));
-  if (params?.offset != null) sp.set("offset", String(params.offset));
-  const qs = sp.toString();
-  return apiGet<TaskOut[]>(`/api/tasks${qs ? `?${qs}` : ""}`);
+  // API serves tasks at /api/commands/tasks
+  return apiGet<TaskOut[]>("/api/commands/tasks");
 }
 
 export function fetchTask(id: string): Promise<ApiResponse<TaskOut>> {
-  return apiGet<TaskOut>(`/api/tasks/${encodeURIComponent(id)}`);
+  // No individual task endpoint yet — fetch all and filter client-side
+  return apiGet<TaskOut>(`/api/commands/tasks`);
 }
 
 export function createTask(body: {
@@ -137,7 +135,7 @@ export function createTask(body: {
   description?: string;
   priority?: string;
 }): Promise<ApiResponse<TaskOut>> {
-  return apiPost<TaskOut>("/api/tasks", body);
+  return apiPost<TaskOut>("/api/commands/task", body);
 }
 
 // -- Health -----------------------------------------------------------------
@@ -179,11 +177,9 @@ export function fetchTraces(params?: {
   limit?: number;
 }): Promise<ApiResponse<TraceOut[]>> {
   const sp = new URLSearchParams();
-  if (params?.agent_id) sp.set("agent_id", params.agent_id);
-  if (params?.task_id) sp.set("task_id", params.task_id);
   if (params?.limit != null) sp.set("limit", String(params.limit));
   const qs = sp.toString();
-  return apiGet<TraceOut[]>(`/api/traces${qs ? `?${qs}` : ""}`);
+  return apiGet<TraceOut[]>(`/api/commands/traces${qs ? `?${qs}` : ""}`);
 }
 
 export function fetchLineage(entryId: string): Promise<ApiResponse<LineageEdgeOut[]>> {
@@ -195,7 +191,7 @@ export function fetchLineage(entryId: string): Promise<ApiResponse<LineageEdgeOu
 // -- Ontology ---------------------------------------------------------------
 
 export function fetchOntology(): Promise<ApiResponse<OntologyTypeOut[]>> {
-  return apiGet<OntologyTypeOut[]>("/api/ontology");
+  return apiGet<OntologyTypeOut[]>("/api/ontology/types");
 }
 
 // -- Stigmergy --------------------------------------------------------------
@@ -208,7 +204,7 @@ export function fetchStigmergy(params?: {
   if (params?.limit != null) sp.set("limit", String(params.limit));
   if (params?.min_salience != null) sp.set("min_salience", String(params.min_salience));
   const qs = sp.toString();
-  return apiGet<StigmergyMarkOut[]>(`/api/stigmergy${qs ? `?${qs}` : ""}`);
+  return apiGet<StigmergyMarkOut[]>(`/api/stigmergy/marks${qs ? `?${qs}` : ""}`);
 }
 
 // -- Heatmap ----------------------------------------------------------------
@@ -239,6 +235,12 @@ export function fetchImpact(): Promise<ApiResponse<ImpactOut[]>> {
 
 export function fetchChatStatus(): Promise<ApiResponse<ChatStatusOut>> {
   return apiGet<ChatStatusOut>("/api/chat/status");
+}
+
+// -- Truth modules ----------------------------------------------------------
+
+export function fetchModules(): Promise<ApiResponse<ModuleTruthOut[]>> {
+  return apiGet<ModuleTruthOut[]>("/api/modules");
 }
 
 // ---------------------------------------------------------------------------
