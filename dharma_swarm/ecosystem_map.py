@@ -81,6 +81,15 @@ ECOSYSTEM: dict[str, dict] = {
             ("~/agni-workspace/knowledge/evergreen/triple-mapping.md", "2,500 year convergent validity"),
         ],
     },
+    "dharma_swarm": {
+        "description": "dharma_swarm system -- unified thinkodynamic agent orchestrator",
+        "paths": [
+            ("~/dharma_swarm/CLAUDE.md", "v4 operating context -- the genome document"),
+            ("~/dharma_swarm/dharma_swarm/", "Core source (90+ Python modules)"),
+            ("~/.dharma/", "Runtime state (SQLite, stigmergy, agent memory)"),
+            ("~/.claude/", "Claude Code config, skills, memory"),
+        ],
+    },
     "jagat_kalyan": {
         "description": "Jagat Kalyan -- AI-coordinated ecological restoration",
         "paths": [
@@ -99,14 +108,39 @@ ECOSYSTEM: dict[str, dict] = {
             ("~/.dharma/shared/jk_alert.md", "HIGH URGENCY alerts for morning brief"),
         ],
     },
-    "dgc": {
-        "description": "DGC system itself",
+    "foundations": {
+        "description": "Intellectual pillars -- 10 thinkers, syntheses, architecture principles",
         "paths": [
-            ("~/dgc-core/", "THIS system -- Claude Code native DGC"),
-            ("~/DHARMIC_GODEL_CLAW/", "Old DGC (75K lines, mostly dead)"),
-            ("~/DHARMIC_GODEL_CLAW/src/core/telos_layer.py", "7 gates -- ported to hooks/"),
-            ("~/DHARMIC_GODEL_CLAW/src/core/strange_memory.py", "Memory -- ported to memory/"),
-            ("~/.claude/", "Claude Code config, agents, memory"),
+            ("~/dharma_swarm/foundations/INDEX.md", "Pillar index with domain mapping"),
+            ("~/dharma_swarm/foundations/META_SYNTHESIS.md", "All pillars unified -- 5 convergence axes"),
+            ("~/dharma_swarm/foundations/PILLAR_01_LEVIN.md", "Multi-scale cognition, cognitive light cone"),
+            ("~/dharma_swarm/foundations/PILLAR_02_KAUFFMAN.md", "Adjacent possible, autocatalytic sets"),
+            ("~/dharma_swarm/foundations/PILLAR_03_JANTSCH.md", "Self-organizing universe, dissipative structures"),
+            ("~/dharma_swarm/foundations/PILLAR_05_DEACON.md", "Absential causation, autogenesis"),
+            ("~/dharma_swarm/foundations/PILLAR_06_FRISTON.md", "Free energy principle, active inference"),
+            ("~/dharma_swarm/foundations/PILLAR_07_HOFSTADTER.md", "Strange loops, tangled hierarchies"),
+            ("~/dharma_swarm/foundations/PILLAR_08_AUROBINDO.md", "Supramental descent, Overmind Error"),
+            ("~/dharma_swarm/foundations/PILLAR_09_DADA_BHAGWAN.md", "Witness architecture, karma mechanics"),
+            ("~/dharma_swarm/foundations/PILLAR_10_VARELA.md", "Autopoiesis, enactive cognition"),
+            ("~/dharma_swarm/foundations/PILLAR_11_BEER.md", "Viable System Model, requisite variety"),
+            ("~/dharma_swarm/foundations/FOUNDATIONS_SYNTHESIS.md", "Levin-Kauffman-Jantsch lattice"),
+            ("~/dharma_swarm/foundations/SYNTHESIS_DEACON_FRISTON.md", "Absential causation meets active inference"),
+            ("~/dharma_swarm/architecture/PRINCIPLES.md", "11 engineering principles traced to pillars"),
+        ],
+    },
+    "telos_engine": {
+        "description": "Telos Engine vision and strategy research -- civilization-scale AI",
+        "paths": [
+            ("~/dharma_swarm/docs/telos-engine/INDEX.md", "Research document index"),
+            ("~/dharma_swarm/docs/telos-engine/01_SATTVA_VISION.md", "What conscious AI actually does"),
+            ("~/dharma_swarm/docs/telos-engine/02_COMPETITIVE_ANALYSIS.md", "10D chess vs AI giants"),
+            ("~/dharma_swarm/docs/telos-engine/03_SELF_EVOLVING_ARCH.md", "Agent-building-agents architecture"),
+            ("~/dharma_swarm/docs/telos-engine/04_MEMETIC_ENGINEERING.md", "12 principles of dharmic memetics"),
+            ("~/dharma_swarm/docs/telos-engine/05_PLATFORM_SPAWNING.md", "Triple governance, spawning protocol"),
+            ("~/dharma_swarm/docs/telos-engine/06_AI_ZEITGEIST.md", "March 2026 field intelligence"),
+            ("~/dharma_swarm/docs/telos-engine/07_VSM_GOVERNANCE.md", "Beer VSM mapping, 5 gaps"),
+            ("~/dharma_swarm/docs/telos-engine/08_SATTVA_ECONOMICS.md", "Welfare-ton numbers, 10-year arc"),
+            ("~/dharma_swarm/docs/telos-engine/09_WHERE_IT_SITS.md", "Option F analysis -- everything inside dharma_swarm"),
         ],
     },
 }

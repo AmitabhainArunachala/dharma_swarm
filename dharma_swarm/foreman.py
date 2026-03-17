@@ -672,4 +672,26 @@ def create_foreman_cron_job(
         prompt=level,
         schedule=every,
         name=f"foreman-forge-{level}",
+        handler="foreman",
     )
+
+
+def custodians_forge_fn(job: dict[str, Any]) -> tuple[bool, str, str | None]:
+    """Cron tick run_fn: runs custodian cycle then triggers a quality re-scan.
+
+    Wraps custodians.custodians_run_fn and appends a foreman observe pass
+    to capture quality deltas from the maintenance work.
+    """
+    from dharma_swarm.custodians import custodians_run_fn
+
+    ok, output, err = custodians_run_fn(job)
+
+    # After custodians finish, run a quick observe scan so quality scores update
+    try:
+        report = run_cycle(level="observe", skip_tests=False)
+        output += f"\n--- Post-custodian quality scan: {report.duration_seconds}s\n"
+    except Exception as e:
+        logger.warning("Post-custodian quality scan failed: %s", e)
+        output += f"\n--- Post-custodian quality scan failed: {e}\n"
+
+    return ok, output, err

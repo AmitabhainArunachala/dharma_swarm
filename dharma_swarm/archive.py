@@ -551,3 +551,45 @@ class EvolutionArchive:
             f"✓ Archive verified: {chain_length} entries, "
             f"Merkle root: {root_display}"
         )
+
+    # -- Methods required by API routers ------------------------------------
+
+    def stats(self) -> dict:
+        """Summary statistics for the evolution archive."""
+        entries = list(self._entries.values())
+        by_status: dict[str, int] = {}
+        by_component: dict[str, int] = {}
+        for e in entries:
+            by_status[e.status] = by_status.get(e.status, 0) + 1
+            if e.component:
+                by_component[e.component] = by_component.get(e.component, 0) + 1
+        applied = [e for e in entries if e.status == "applied"]
+        avg_fitness = (
+            sum(e.fitness.weighted() for e in applied) / len(applied)
+            if applied
+            else 0.0
+        )
+        return {
+            "total": len(entries),
+            "by_status": by_status,
+            "by_component": by_component,
+            "avg_applied_fitness": round(avg_fitness, 4),
+        }
+
+    def entries_by_component(self, component: str) -> list:
+        """Return entries filtered by component (sync, for API compatibility)."""
+        return [e for e in self._entries.values() if e.component == component]
+
+    def lineage(self, entry_id: str) -> list:
+        """Sync wrapper for get_lineage (API router calls this synchronously)."""
+        chain: list = []
+        current = self._entries.get(entry_id)
+        seen: set[str] = set()
+        while current and current.id not in seen:
+            chain.append(current)
+            seen.add(current.id)
+            if current.parent_id:
+                current = self._entries.get(current.parent_id)
+            else:
+                break
+        return chain

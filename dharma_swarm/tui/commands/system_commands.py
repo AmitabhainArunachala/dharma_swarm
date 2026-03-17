@@ -42,6 +42,8 @@ _SYNC_COMMANDS = frozenset(
         "moltbook",
         "evidence",
         "dashboard",
+        "foundations",
+        "telos",
     }
 )
 _ASYNC_COMMANDS = frozenset(
@@ -204,6 +206,10 @@ class SystemCommandHandler:
             return self._handle_moltbook(), None
         elif cmd == "evidence":
             return self._handle_evidence(), None
+        elif cmd == "foundations":
+            return self._handle_foundations(arg), None
+        elif cmd == "telos":
+            return self._handle_telos(arg), None
         # Threaded commands (need @work in the app layer)
         elif cmd in _ASYNC_COMMANDS:
             return "", f"async:{cmd}:{arg}"
@@ -285,6 +291,11 @@ class SystemCommandHandler:
             f"  [{INDIGO}]/corpus[/{INDIGO}]          List corpus claims\n"
             f"  [{INDIGO}]/stigmergy[/{INDIGO}]       Hot paths and high salience marks\n"
             f"  [{INDIGO}]/hum[/{INDIGO}]             Subconscious dreams\n"
+            f"\n[bold {INDIGO}]--- Foundations & Telos ---[/bold {INDIGO}]\n"
+            f"  [{INDIGO}]/foundations[/{INDIGO}]      10 intellectual pillars + syntheses\n"
+            f"  [{INDIGO}]/foundations[/{INDIGO}] <name>  Preview a specific pillar\n"
+            f"  [{INDIGO}]/telos[/{INDIGO}]             Telos Engine research docs\n"
+            f"  [{INDIGO}]/telos[/{INDIGO}] <name>      Preview a specific research doc\n"
             f"\n[bold {INDIGO}]--- Chat & Control ---[/bold {INDIGO}]\n"
             f"  [{INDIGO}]/thread[/{INDIGO}] [name]   Show/set research thread\n"
             f"  [{INDIGO}]/net[/{INDIGO}] [on|off]    Internet access for the active route\n"
@@ -538,3 +549,78 @@ class SystemCommandHandler:
                 f"  [bold {INDIGO_DIM}]Hash[/bold {INDIGO_DIM}]: {ev.get('hash', 'n/a')}"
             )
         return "[dim]Evidence bundle unreadable.[/dim]"
+
+    def _handle_foundations(self, arg: str) -> str:
+        """Show intellectual pillar summaries or a specific pillar."""
+        fdir = DHARMA_SWARM / "foundations"
+        if not fdir.exists():
+            return f"[{BENGARA}]No foundations/ directory found.[/{BENGARA}]"
+
+        if arg.strip():
+            # Show specific pillar
+            query = arg.strip().upper()
+            matches = sorted(fdir.glob(f"*{query}*.md"))
+            if not matches:
+                return f"[{BENGARA}]No pillar matching '{arg}'[/{BENGARA}]"
+            target = matches[0]
+            try:
+                lines = target.read_text().split("\n")[:40]
+                header = f"[bold {INDIGO}]{target.name}[/bold {INDIGO}]"
+                body = "\n".join(f"  {l}" for l in lines)
+                return f"{header}\n{body}\n  [dim]... ({len(target.read_text().split(chr(10)))} lines total)[/dim]"
+            except Exception as exc:
+                return f"[{BENGARA}]Read error: {exc}[/{BENGARA}]"
+
+        # List all pillars
+        pillars = sorted(fdir.glob("PILLAR_*.md"))
+        synths = sorted(fdir.glob("*SYNTHESIS*.md"))
+        arch = DHARMA_SWARM / "architecture" / "PRINCIPLES.md"
+        lines = [f"[bold {INDIGO}]--- Intellectual Pillars ({len(pillars)}) ---[/bold {INDIGO}]"]
+        for p in pillars:
+            name = p.stem.replace("PILLAR_", "").replace("_", " ")
+            size = len(p.read_text().split("\n"))
+            lines.append(f"  [{INDIGO}]{p.name}[/{INDIGO}]  {name}  ({size} lines)")
+        if synths:
+            lines.append(f"\n[bold {INDIGO}]--- Syntheses ({len(synths)}) ---[/bold {INDIGO}]")
+            for s in synths:
+                size = len(s.read_text().split("\n"))
+                lines.append(f"  [{INDIGO}]{s.name}[/{INDIGO}]  ({size} lines)")
+        if arch.exists():
+            size = len(arch.read_text().split("\n"))
+            lines.append(f"\n  [{INDIGO}]PRINCIPLES.md[/{INDIGO}]  Architecture bridge ({size} lines)")
+        lines.append(f"\n[dim]Usage: /foundations <name> to preview (e.g. /foundations hofstadter)[/dim]")
+        return "\n".join(lines)
+
+    def _handle_telos(self, arg: str) -> str:
+        """Show telos engine research documents."""
+        tdir = DHARMA_SWARM / "docs" / "telos-engine"
+        if not tdir.exists():
+            return f"[{BENGARA}]No docs/telos-engine/ directory found.[/{BENGARA}]"
+
+        if arg.strip():
+            query = arg.strip().lower()
+            matches = sorted(tdir.glob(f"*{query}*.md"))
+            if not matches:
+                matches = sorted(tdir.glob("*.md"))
+                matches = [m for m in matches if query in m.name.lower()]
+            if not matches:
+                return f"[{BENGARA}]No doc matching '{arg}'[/{BENGARA}]"
+            target = matches[0]
+            try:
+                lines = target.read_text().split("\n")[:40]
+                header = f"[bold {INDIGO}]{target.name}[/bold {INDIGO}]"
+                body = "\n".join(f"  {l}" for l in lines)
+                return f"{header}\n{body}\n  [dim]... ({len(target.read_text().split(chr(10)))} lines total)[/dim]"
+            except Exception as exc:
+                return f"[{BENGARA}]Read error: {exc}[/{BENGARA}]"
+
+        docs = sorted(f for f in tdir.glob("*.md") if f.name != "INDEX.md")
+        lines = [f"[bold {INDIGO}]--- Telos Engine Research ({len(docs)} docs) ---[/bold {INDIGO}]"]
+        for d in docs:
+            name = d.stem
+            # Strip leading number prefix for display
+            display = name.lstrip("0123456789_").replace("_", " ")
+            size = len(d.read_text().split("\n"))
+            lines.append(f"  [{INDIGO}]{d.name}[/{INDIGO}]  {display}  ({size} lines)")
+        lines.append(f"\n[dim]Usage: /telos <name> to preview (e.g. /telos competitive)[/dim]")
+        return "\n".join(lines)

@@ -229,6 +229,19 @@ async def _get_swarm(state_dir: str = ".dharma"):
     return swarm
 
 
+async def _get_task_board(state_dir: str = ".dharma"):
+    """Thin path: open just the TaskBoard without booting the full swarm.
+
+    Used by CLI task create/list/show to avoid spawning agents and seed tasks.
+    """
+    from dharma_swarm.task_board import TaskBoard
+
+    db_path = Path(state_dir) / "db" / "tasks.db"
+    tb = TaskBoard(db_path)
+    await tb.init_db()
+    return tb
+
+
 def _pid_alive(pid: int) -> bool:
     try:
         if pid <= 1:
@@ -1805,32 +1818,30 @@ def cmd_spawn(name: str, role: str, model: str) -> None:
 
 
 def cmd_task_create(title: str, description: str, priority: str) -> None:
-    """Create a new task."""
+    """Create a new task (thin path — no full swarm boot)."""
     async def _create():
         from dharma_swarm.models import TaskPriority
 
-        swarm = await _get_swarm()
         try:
             p = TaskPriority(priority)
         except ValueError:
             print(f"Invalid priority: {priority}")
-            await swarm.shutdown()
             sys.exit(1)
-        task = await swarm.create_task(title=title, description=description, priority=p)
+        tb = await _get_task_board(state_dir=str(DHARMA_STATE))
+        task = await tb.create(title=title, description=description, priority=p)
         print(f"Created task: {task.title} -- ID: {task.id}")
-        await swarm.shutdown()
 
     _run(_create())
 
 
 def cmd_task_list(status_filter: str | None) -> None:
-    """List tasks."""
+    """List tasks (thin path — no full swarm boot)."""
     async def _list():
         from dharma_swarm.models import TaskStatus
 
-        swarm = await _get_swarm()
+        tb = await _get_task_board(state_dir=str(DHARMA_STATE))
         s = TaskStatus(status_filter) if status_filter else None
-        tasks = await swarm.list_tasks(status=s)
+        tasks = await tb.list_tasks(status=s)
         if not tasks:
             print("No tasks.")
         else:
@@ -1838,7 +1849,6 @@ def cmd_task_list(status_filter: str | None) -> None:
             print("-" * 70)
             for t in tasks:
                 print(f"{t.id[:8]}  {t.status.value:<10}  {t.priority.value:<8}  {(t.assigned_to or '-'):<10}  {t.title}")
-        await swarm.shutdown()
 
     _run(_list())
 
@@ -1864,16 +1874,20 @@ def cmd_evolve_propose(component: str, description: str, change_type: str, diff:
 
 def cmd_evolve_trend(component: str | None) -> None:
     """Show fitness trend over time."""
-    from dharma_swarm.archive import EvolutionArchive
+    async def _trend():
+        from dharma_swarm.archive import EvolutionArchive
 
-    archive = EvolutionArchive()
-    trend = archive.fitness_over_time(component=component)
-    if not trend:
-        print("No fitness data yet.")
-    else:
-        print("Fitness Trend:")
-        for ts, fitness in trend:
-            print(f"  {ts[:19]}  {fitness:.3f}")
+        archive = EvolutionArchive()
+        await archive.load()
+        trend = archive.fitness_over_time(component=component)
+        if not trend:
+            print("No fitness data yet.")
+        else:
+            print("Fitness Trend:")
+            for ts, fitness in trend:
+                print(f"  {ts[:19]}  {fitness:.3f}")
+
+    _run(_trend())
 
 
 def cmd_dharma_status() -> None:
@@ -3242,6 +3256,72 @@ def cmd_tui() -> None:
         run_tui()
 
 
+def cmd_ui(surface: str = "list") -> None:
+    """Print the canonical operator-surface map."""
+    root = HOME / "dharma_swarm"
+    dashboard_dir = root / "dashboard"
+    lines: list[str] = []
+
+    if surface == "tui":
+        lines.extend(
+            [
+                "TUI",
+                f"- primary operator cockpit: dgc dashboard",
+                f"- direct module: python3 -m dharma_swarm.tui",
+                f"- code: {root / 'dharma_swarm' / 'tui' / 'app.py'}",
+            ]
+        )
+    elif surface == "api":
+        lines.extend(
+            [
+                "API",
+                f"- command: cd {root} && python3 -m uvicorn api.main:app --port 8000",
+                "- url: http://127.0.0.1:8000",
+                "- docs: http://127.0.0.1:8000/docs",
+            ]
+        )
+    elif surface == "next":
+        lines.extend(
+            [
+                "DHARMA COMMAND",
+                f"- command: cd {dashboard_dir} && npm run dev",
+                "- url: http://127.0.0.1:3000/dashboard",
+                "- backend dependency: api.main on port 8000",
+                f"- frontend root: {dashboard_dir}",
+            ]
+        )
+    elif surface == "lens":
+        lines.extend(
+            [
+                "SWARMLENS",
+                f"- command: cd {root} && python3 -m uvicorn dharma_swarm.swarmlens_app:app --port 8080",
+                "- url: http://127.0.0.1:8080",
+                "- likely the older website you remember",
+                f"- code: {root / 'dharma_swarm' / 'swarmlens_app.py'}",
+            ]
+        )
+    else:
+        lines.extend(
+            [
+                "Operator surfaces",
+                "- `dgc dashboard` -> primary terminal TUI",
+                f"  code: {root / 'dharma_swarm' / 'tui' / 'app.py'}",
+                "- `dgc ui next` -> newer web control plane",
+                f"  launch: cd {dashboard_dir} && npm run dev",
+                "  url: http://127.0.0.1:3000/dashboard",
+                "  needs backend: python3 -m uvicorn api.main:app --port 8000",
+                "- `dgc ui lens` -> older SwarmLens website",
+                f"  launch: cd {root} && python3 -m uvicorn dharma_swarm.swarmlens_app:app --port 8080",
+                "  url: http://127.0.0.1:8080",
+                "  note: this is likely the older website you remember",
+                "- `dgc ui api` -> backend API only",
+                "  url: http://127.0.0.1:8000/docs",
+            ]
+        )
+
+    print("\n".join(lines))
+
+
 def _build_chat_context_snapshot() -> str:
     """Build a compact DGC context snapshot for Claude chat sessions."""
     from dharma_swarm.prompt_builder import build_state_context_snapshot
@@ -4536,6 +4616,16 @@ def _build_parser() -> argparse.ArgumentParser:
     # -- dashboard --
     sub.add_parser("dashboard", help="Launch DGC dashboard (TUI)")
 
+    # -- ui --
+    p_ui = sub.add_parser("ui", help="Show canonical operator-surface launch paths")
+    p_ui.add_argument(
+        "surface",
+        nargs="?",
+        default="list",
+        choices=("list", "tui", "api", "next", "lens"),
+        help="Surface to describe: list, tui, api, next, or lens",
+    )
+
     # -- up --
     p_up = sub.add_parser("up", help="Start the daemon")
     p_up.add_argument("--background", action="store_true")
@@ -4979,6 +5069,47 @@ def _build_parser() -> argparse.ArgumentParser:
     p_ouro_record.add_argument("--workspace-root", default=None)
     p_ouro_record.add_argument("--provenance-root", default=None)
 
+    # -- eval --
+    p_eval = sub.add_parser("eval", help="ECC eval harness — measure system health")
+    eval_sub = p_eval.add_subparsers(dest="eval_cmd")
+    eval_sub.add_parser("run", help="Run all evals and print scorecard")
+    eval_sub.add_parser("report", help="Print latest eval report")
+    eval_sub.add_parser("trend", help="Show historical pass rates")
+
+    # -- self-improve --
+    p_si = sub.add_parser("self-improve", help="Self-improvement cycle — strange loop")
+    si_sub = p_si.add_subparsers(dest="si_cmd")
+    si_sub.add_parser("status", help="Show self-improvement status")
+    si_sub.add_parser("history", help="Show cycle history")
+    si_sub.add_parser("run", help="Run one cycle manually (requires DHARMA_SELF_IMPROVE=1)")
+
+    # -- log --
+    p_log = sub.add_parser("log", help="Conversation log — what was said + promises")
+    log_sub = p_log.add_subparsers(dest="log_cmd")
+    log_sub.add_parser("recent", help="Show recent conversation entries (default)")
+    log_sub.add_parser("promises", help="Show detected promises/commitments")
+    log_sub.add_parser("stats", help="Conversation statistics")
+    p_log_search = log_sub.add_parser("search", help="Search promises")
+    p_log_search.add_argument("query", nargs="+", help="Search query")
+
+    # -- audit --
+    p_audit = sub.add_parser("audit", help="Harness audit — 7-dimension scorecard")
+    audit_sub = p_audit.add_subparsers(dest="audit_cmd")
+    audit_sub.add_parser("run", help="Run audit and print scorecard (default)")
+    audit_sub.add_parser("trend", help="Show audit trend over time")
+
+    # -- review --
+    sub.add_parser("review", help="Review bridge — ruff findings as evolution proposals")
+
+    # -- instincts --
+    p_inst = sub.add_parser("instincts", help="Instinct bridge — ECC ↔ fitness signals")
+    inst_sub = p_inst.add_subparsers(dest="instinct_cmd")
+    inst_sub.add_parser("status", help="Show bridge status")
+    inst_sub.add_parser("sync", help="Process new observations and emit signals")
+
+    # -- loop-status --
+    sub.add_parser("loop-status", help="Loop supervisor — health of all loops")
+
     # -- skills --
     sub.add_parser("skills", help="List discovered skills (v0.4.0)")
 
@@ -5138,9 +5269,23 @@ def _build_parser() -> argparse.ArgumentParser:
     ginko_sub = p_ginko.add_subparsers(dest="ginko_cmd")
     ginko_sub.add_parser("status", help="Ginko VentureCell status + Brier dashboard")
     ginko_sub.add_parser("dashboard", help="Full Brier score dashboard report")
-    ginko_sub.add_parser("predict", help="Record a new prediction")
     ginko_sub.add_parser("register-crons", help="Register Ginko cron jobs")
     ginko_sub.add_parser("edge", help="Check edge validation status")
+    ginko_sub.add_parser("pull", help="Pull market data from all sources")
+    ginko_sub.add_parser("signals", help="Generate signal report")
+    p_ginko_predict = ginko_sub.add_parser("predict", help="Record a new prediction")
+    p_ginko_predict.add_argument("question", help="Yes/no question to predict")
+    p_ginko_predict.add_argument("probability", type=float, help="Probability of YES (0.0-1.0)")
+    p_ginko_predict.add_argument("--category", default="general", help="Prediction category")
+    p_ginko_predict.add_argument("--resolve-by", default=None, help="Resolution date (ISO format)")
+    p_ginko_resolve = ginko_sub.add_parser("resolve", help="Resolve a prediction")
+    p_ginko_resolve.add_argument("prediction_id", help="Prediction ID to resolve")
+    p_ginko_resolve.add_argument("outcome", type=float, help="Outcome: 1.0=YES, 0.0=NO")
+    ginko_sub.add_parser("brier", help="Show Brier score dashboard")
+    ginko_sub.add_parser("report", help="Generate daily intelligence report")
+    ginko_sub.add_parser("portfolio", help="Show paper portfolio status")
+    ginko_sub.add_parser("cycle", help="Run full daily cycle")
+    ginko_sub.add_parser("fleet", help="List all agents with status and fitness")
 
     # -- foundations (intellectual pillars and syntheses) --
     p_foundations = sub.add_parser("foundations", help="Intellectual pillars and syntheses")
@@ -5183,8 +5328,8 @@ def _build_parser() -> argparse.ArgumentParser:
     p_fm_cron.add_argument("--schedule", default="every 4h", help="Cron schedule")
     p_fm_cron.add_argument("--level", default="advise", choices=["observe", "advise", "build"], help="Execution level")
 
-    # -- review (Phase 13: Quality Ratchet) --
-    p_review = sub.add_parser("review", help="Generate 6-hour review cycle report")
+    # -- review-cycle (Phase 13: Quality Ratchet) -- renamed to avoid conflict with 'review' subparser
+    p_review = sub.add_parser("review-cycle", help="Generate 6-hour review cycle report")
     p_review.add_argument("--hours", type=float, default=6.0, help="Review window in hours")
     p_review.add_argument("--skip-tests", action="store_true", help="Skip running tests")
 
@@ -5368,6 +5513,8 @@ def main() -> None:
             )
         case "dashboard":
             cmd_tui()
+        case "ui":
+            cmd_ui(getattr(args, "surface", "list"))
         case "status":
             cmd_status()
         case "runtime-status":
@@ -5702,6 +5849,96 @@ def main() -> None:
             cmd_stigmergy(args.stig_file)
         case "hum":
             cmd_hum()
+        case "eval":
+            from dharma_swarm.ecc_eval_harness import (
+                cmd_eval_run, cmd_eval_report, cmd_eval_trend,
+            )
+            match args.eval_cmd:
+                case "run":
+                    import asyncio as _aio
+                    rc = _aio.run(cmd_eval_run())
+                    if rc != 0:
+                        raise SystemExit(rc)
+                case "report":
+                    rc = cmd_eval_report()
+                    if rc != 0:
+                        raise SystemExit(rc)
+                case "trend":
+                    rc = cmd_eval_trend()
+                    if rc != 0:
+                        raise SystemExit(rc)
+                case _:
+                    parser.parse_args(["eval", "--help"])
+        case "log":
+            import subprocess as _sp_log
+            checker = str(Path.home() / ".dharma" / "conversation_log" / "promise_checker.py")
+            match args.log_cmd:
+                case "promises":
+                    _sp_log.run([sys.executable, checker, "--promises"])
+                case "stats":
+                    _sp_log.run([sys.executable, checker, "--stats"])
+                case "search":
+                    _sp_log.run([sys.executable, checker, "--search", " ".join(args.query)])
+                case _:
+                    _sp_log.run([sys.executable, checker, "--log"])
+        case "self-improve":
+            match args.si_cmd:
+                case "status":
+                    from dharma_swarm.self_improve import cmd_self_improve_status
+                    rc = cmd_self_improve_status()
+                    if rc != 0:
+                        raise SystemExit(rc)
+                case "history":
+                    from dharma_swarm.self_improve import cmd_self_improve_history
+                    rc = cmd_self_improve_history()
+                    if rc != 0:
+                        raise SystemExit(rc)
+                case "run":
+                    from dharma_swarm.self_improve import cmd_self_improve_run
+                    import asyncio as _aio3
+                    rc = _aio3.run(cmd_self_improve_run())
+                    if rc != 0:
+                        raise SystemExit(rc)
+                case _:
+                    from dharma_swarm.self_improve import cmd_self_improve_status
+                    cmd_self_improve_status()
+        case "audit":
+            match args.audit_cmd:
+                case "trend":
+                    from dharma_swarm.harness_audit import cmd_audit_trend
+                    rc = cmd_audit_trend()
+                    if rc != 0:
+                        raise SystemExit(rc)
+                case _:
+                    from dharma_swarm.harness_audit import cmd_audit
+                    rc = cmd_audit()
+                    if rc != 0:
+                        raise SystemExit(rc)
+        case "review":
+            from dharma_swarm.review_bridge import cmd_review_scan
+            rc = cmd_review_scan()
+            if rc != 0:
+                raise SystemExit(rc)
+        case "instincts":
+            match args.instinct_cmd:
+                case "status":
+                    from dharma_swarm.instinct_bridge import cmd_instincts_status
+                    rc = cmd_instincts_status()
+                    if rc != 0:
+                        raise SystemExit(rc)
+                case "sync":
+                    from dharma_swarm.instinct_bridge import cmd_instincts_sync
+                    import asyncio as _aio2
+                    rc = _aio2.run(cmd_instincts_sync())
+                    if rc != 0:
+                        raise SystemExit(rc)
+                case _:
+                    parser.parse_args(["instincts", "--help"])
+        case "loop-status":
+            from dharma_swarm.loop_supervisor import cmd_loop_status
+            rc = cmd_loop_status()
+            if rc != 0:
+                raise SystemExit(rc)
         case "skills":
             cmd_skills()
         case "route":
@@ -5823,8 +6060,104 @@ def main() -> None:
                                 print(f"  Created: {j['name']} ({j.get('schedule_display', '')})")
                         else:
                             print("  All Ginko crons already registered.")
+                    case "pull":
+                        import asyncio as _aio
+                        from dharma_swarm.ginko_orchestrator import action_data_pull
+                        result = _aio.run(action_data_pull())
+                        print(f"Data pull complete:")
+                        print(f"  Macro: {'yes' if result.get('macro_available') else 'no'}")
+                        print(f"  Stocks: {result.get('stocks_count', 0)}")
+                        print(f"  Crypto: {result.get('crypto_count', 0)}")
+                        if result.get('errors'):
+                            print(f"  Errors: {', '.join(result['errors'])}")
+                    case "signals":
+                        import asyncio as _aio
+                        from dharma_swarm.ginko_orchestrator import action_generate_signals
+                        result = _aio.run(action_generate_signals())
+                        if result.get("error"):
+                            print(f"Error: {result['error']}")
+                        else:
+                            print(result.get("report_text", "No report generated"))
+                    case "predict":
+                        from dharma_swarm.ginko_brier import record_prediction
+                        from datetime import datetime, timedelta, timezone
+                        resolve_by = args.resolve_by or (datetime.now(timezone.utc) + timedelta(days=7)).isoformat()
+                        pred = record_prediction(
+                            question=args.question,
+                            probability=args.probability,
+                            resolve_by=resolve_by,
+                            category=args.category,
+                        )
+                        print(f"Prediction recorded:")
+                        print(f"  ID: {pred.id}")
+                        print(f"  Question: {pred.question}")
+                        print(f"  Probability: {pred.probability:.0%}")
+                        print(f"  Resolve by: {pred.resolve_by}")
+                    case "resolve":
+                        from dharma_swarm.ginko_brier import resolve_prediction
+                        pred = resolve_prediction(args.prediction_id, args.outcome)
+                        if pred:
+                            print(f"Resolved: {pred.question}")
+                            print(f"  Outcome: {'YES' if pred.outcome == 1.0 else 'NO'}")
+                            print(f"  Brier score: {pred.brier_score:.4f}")
+                        else:
+                            print(f"Prediction {args.prediction_id} not found or already resolved")
+                    case "brier":
+                        from dharma_swarm.ginko_brier import format_dashboard_report
+                        print(format_dashboard_report())
+                    case "report":
+                        import asyncio as _aio
+                        from dharma_swarm.ginko_orchestrator import action_generate_report
+                        result = _aio.run(action_generate_report())
+                        print(result.get("report_text", "No report generated"))
+                    case "portfolio":
+                        try:
+                            from dharma_swarm.ginko_paper_trade import PaperPortfolio
+                            import json as _json
+                            p = PaperPortfolio()
+                            stats = p.get_portfolio_stats()
+                            print("Dharmic Quant — Paper Portfolio")
+                            print("=" * 40)
+                            print(f"  Total value: ${stats.get('total_value', 0):,.2f}")
+                            print(f"  Cash: ${stats.get('cash', 0):,.2f}")
+                            print(f"  P&L: {stats.get('total_pnl_pct', 0):+.2f}%")
+                            print(f"  Open positions: {stats.get('open_positions', 0)}")
+                            print(f"  Sharpe ratio: {stats.get('sharpe_ratio', 0):.2f}")
+                            print(f"  Max drawdown: {stats.get('max_drawdown', 0):.1%}")
+                            print(f"  Win rate: {stats.get('win_rate', 0):.1%}")
+                            print(f"  Trades: {stats.get('trade_count', 0)}")
+                        except Exception as e:
+                            print(f"Portfolio not available: {e}")
+                    case "cycle":
+                        import asyncio as _aio
+                        from dharma_swarm.ginko_orchestrator import action_full_cycle
+                        print("Running full Ginko cycle...")
+                        result = _aio.run(action_full_cycle())
+                        import json as _json
+                        for phase, data in result.items():
+                            if phase == "total_duration_ms":
+                                continue
+                            status = "ERROR" if isinstance(data, dict) and "error" in data else "OK"
+                            print(f"  {phase}: {status}")
+                        print(f"\nTotal duration: {result.get('total_duration_ms', 0)}ms")
+                    case "fleet":
+                        try:
+                            from dharma_swarm.ginko_agents import GinkoFleet
+                            fleet = GinkoFleet()
+                            agents = fleet.list_agents()
+                            print("Dharmic Quant — Agent Fleet")
+                            print("=" * 40)
+                            for a in agents:
+                                status = a.status if hasattr(a, 'status') else 'unknown'
+                                fitness = a.fitness if hasattr(a, 'fitness') else 0.0
+                                calls = a.total_calls if hasattr(a, 'total_calls') else 0
+                                name = a.name if hasattr(a, 'name') else str(a)
+                                role = a.role if hasattr(a, 'role') else ''
+                                print(f"  {name.upper():12s} {role:20s} fitness={fitness:.0%} calls={calls} [{status}]")
+                        except Exception as e:
+                            print(f"Fleet not available: {e}")
                     case _:
-                        print("Usage: dgc ginko {status|dashboard|edge|register-crons}")
+                        print("Usage: dgc ginko {status|pull|signals|predict|resolve|brier|report|portfolio|cycle|fleet|dashboard|edge|register-crons}")
             except Exception as e:
                 print(f"Ginko command failed: {e}")
                 raise SystemExit(2)
@@ -5853,7 +6186,7 @@ def main() -> None:
                 skip_tests=getattr(args, "skip_tests", False),
                 schedule=getattr(args, "schedule", "every 4h"),
             )
-        case "review":
+        case "review-cycle":
             cmd_review(
                 hours=args.hours,
                 skip_tests=args.skip_tests,

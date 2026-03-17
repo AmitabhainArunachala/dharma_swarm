@@ -11,6 +11,23 @@ set -e
 
 cd ~/dharma_swarm
 
+STATE_DIR="${HOME}/.dharma"
+LOG_DIR="${STATE_DIR}/logs"
+PID_FILE="${STATE_DIR}/daemon.pid"
+mkdir -p "$LOG_DIR"
+
+# --- PID lock: prevent double daemon ---
+if [ -f "$PID_FILE" ]; then
+  EXISTING_PID=$(cat "$PID_FILE")
+  if kill -0 "$EXISTING_PID" 2>/dev/null; then
+    echo "[run_daemon] Daemon already running (PID $EXISTING_PID). Aborting." >&2
+    exit 1
+  else
+    echo "[run_daemon] Stale PID file (PID $EXISTING_PID not running). Cleaning up."
+    rm -f "$PID_FILE"
+  fi
+fi
+
 # --- Mission preflight (fail-closed) ---
 MISSION_PREFLIGHT="${MISSION_PREFLIGHT:-1}"
 if [[ "${MISSION_PREFLIGHT}" == "1" ]]; then
@@ -20,19 +37,24 @@ if [[ "${MISSION_PREFLIGHT}" == "1" ]]; then
   }
 fi
 
-export OPENROUTER_API_KEY="${OPENROUTER_API_KEY:-$(grep -s OPENROUTER_API_KEY ~/.zshrc ~/.zprofile ~/.bash_profile 2>/dev/null | head -1 | sed 's/.*=//' | tr -d '"' | tr -d "'" | tr -d ' ')}"
-export ANTHROPIC_API_KEY="${ANTHROPIC_API_KEY:-$(grep -s ANTHROPIC_API_KEY ~/.zshrc ~/.zprofile ~/.bash_profile 2>/dev/null | head -1 | sed 's/.*=//' | tr -d '"' | tr -d "'" | tr -d ' ')}"
-
-STATE_DIR="${HOME}/.dharma"
-LOG_DIR="${STATE_DIR}/logs"
-mkdir -p "$LOG_DIR"
+# --- Load secrets from daemon.env (preferred) or environment ---
+DAEMON_ENV="${STATE_DIR}/daemon.env"
+if [ -f "$DAEMON_ENV" ]; then
+  # shellcheck disable=SC1090
+  set -a
+  source "$DAEMON_ENV"
+  set +a
+  echo "[run_daemon] Loaded secrets from $DAEMON_ENV"
+else
+  echo "[run_daemon] WARNING: $DAEMON_ENV not found, using environment variables"
+fi
 
 echo "$(date -u +%Y-%m-%dT%H:%M:%SZ) dharma_swarm daemon starting" | tee -a "$LOG_DIR/daemon.log"
 echo "  state_dir: $STATE_DIR"
 echo "  pid: $$"
 
 # Write PID file
-echo $$ > "$STATE_DIR/daemon.pid"
+echo $$ > "$PID_FILE"
 
 # Interval: 30s for interactive testing, omit --interval for full 6h daemon mode
 INTERVAL="${DHARMA_INTERVAL:-30}"

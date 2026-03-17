@@ -21,7 +21,7 @@ def test_ecosystem_map_imports():
 def test_ecosystem_has_domains():
     """ECOSYSTEM contains the expected domains."""
     from dharma_swarm.ecosystem_map import ECOSYSTEM
-    expected_core = {"research", "content", "ops", "identity", "vault", "dgc"}
+    expected_core = {"research", "content", "ops", "identity", "vault", "foundations"}
     assert expected_core.issubset(set(ECOSYSTEM.keys()))
     assert "jagat_kalyan" in ECOSYSTEM
 

@@ -68,6 +68,16 @@ def test_dgc_cli_dashboard_command_dispatch():
             mock_tui.assert_called_once()
 
 
+def test_dgc_cli_ui_command_dispatch():
+    """main() dispatches explicit `ui` command to cmd_ui()."""
+    from dharma_swarm.dgc_cli import main
+
+    with patch("sys.argv", ["dgc", "ui", "lens"]):
+        with patch("dharma_swarm.dgc_cli.cmd_ui") as mock_ui:
+            main()
+            mock_ui.assert_called_once_with("lens")
+
+
 def test_dgc_cli_legacy_tui_arg_routes_to_tui():
     """main() with legacy `tui` arg should launch canonical TUI."""
     from dharma_swarm.dgc_cli import main
@@ -207,6 +217,82 @@ def test_dgc_cli_health_command():
         with patch("dharma_swarm.dgc_cli.cmd_health") as mock:
             main()
             mock.assert_called_once()
+
+
+def test_cmd_ui_list_mentions_swarmlens_and_next(capsys):
+    import dharma_swarm.dgc_cli as cli
+
+    cli.cmd_ui()
+
+    out = capsys.readouterr().out
+    assert "SwarmLens" in out or "swarmlens" in out.lower()
+    assert "http://127.0.0.1:8080" in out
+    assert "http://127.0.0.1:3000/dashboard" in out
+
+
+def test_dgc_cli_doctor_schedule_dispatch():
+    """main() dispatches `doctor schedule` flags to cmd_doctor."""
+    from dharma_swarm.dgc_cli import main
+
+    with patch("sys.argv", ["dgc", "doctor", "schedule", "--schedule", "every 2h", "--quick"]):
+        with patch("dharma_swarm.dgc_cli.cmd_doctor", return_value=0) as mock:
+            main()
+
+    assert mock.call_args.kwargs["doctor_cmd"] == "schedule"
+    assert mock.call_args.kwargs["schedule"] == "every 2h"
+    assert mock.call_args.kwargs["quick"] is True
+
+
+def test_dgc_cli_doctor_watch_dispatch():
+    """main() dispatches `doctor watch` loop flags to cmd_doctor."""
+    from dharma_swarm.dgc_cli import main
+
+    with patch(
+        "sys.argv",
+        ["dgc", "doctor", "watch", "--interval-sec", "45", "--max-runs", "2"],
+    ):
+        with patch("dharma_swarm.dgc_cli.cmd_doctor", return_value=0) as mock:
+            main()
+
+    assert mock.call_args.kwargs["doctor_cmd"] == "watch"
+    assert mock.call_args.kwargs["interval_sec"] == 45.0
+    assert mock.call_args.kwargs["max_runs"] == 2
+
+
+def test_cmd_context_uses_absorbed_ecosystem_map(monkeypatch, capsys):
+    """cmd_context should use the in-repo ecosystem map first."""
+    import dharma_swarm.dgc_cli as cli
+
+    monkeypatch.setattr(
+        "dharma_swarm.ecosystem_map.get_context_for",
+        lambda domain: f"context:{domain}",
+        raising=True,
+    )
+
+    cli.cmd_context("ops")
+
+    assert capsys.readouterr().out.strip() == "context:ops"
+
+
+def test_cmd_health_uses_absorbed_ecosystem_map(monkeypatch, capsys):
+    """cmd_health should report from the in-repo ecosystem map."""
+    import dharma_swarm.dgc_cli as cli
+
+    monkeypatch.setattr(
+        "dharma_swarm.ecosystem_map.check_health",
+        lambda: {
+            "ok": 3,
+            "missing": 1,
+            "details": {"~/missing/path": "MISSING -- example"},
+        },
+        raising=True,
+    )
+
+    cli.cmd_health()
+
+    out = capsys.readouterr().out
+    assert "Ecosystem: 3 OK, 1 MISSING" in out
+    assert "~/missing/path -- MISSING -- example" in out
 
 
 def test_dgc_cli_xray_packet_command_dispatch():

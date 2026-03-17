@@ -30,17 +30,20 @@ from typing import Any
 
 logger = logging.getLogger(__name__)
 
+from dharma_swarm.config import DEFAULT_CONFIG
+
 HOME = Path.home()
 STATE_DIR = HOME / ".dharma"
 LOG_DIR = STATE_DIR / "logs"
 
-# Orchestrator defaults (overridable via env)
-SWARM_TICK = int(os.environ.get("DGC_SWARM_TICK", "60"))
-PULSE_INTERVAL = int(os.environ.get("DGC_PULSE_INTERVAL", "300"))
-EVOLUTION_INTERVAL = int(os.environ.get("DGC_EVOLUTION_INTERVAL", "600"))
-HEALTH_INTERVAL = int(os.environ.get("DGC_HEALTH_INTERVAL", "120"))
-LIVING_INTERVAL = int(os.environ.get("DGC_LIVING_INTERVAL", "180"))
-MAX_DAILY = int(os.environ.get("DGC_MAX_DAILY", "50"))
+# Orchestrator defaults — sourced from central config (env overrides baked in)
+_ll = DEFAULT_CONFIG.live_loop
+SWARM_TICK = _ll.swarm_tick_seconds
+PULSE_INTERVAL = _ll.pulse_interval_seconds
+EVOLUTION_INTERVAL = _ll.evolution_interval_seconds
+HEALTH_INTERVAL = _ll.health_interval_seconds
+LIVING_INTERVAL = _ll.living_interval_seconds
+MAX_DAILY = _ll.max_daily_tasks
 
 
 def _log(system: str, msg: str) -> None:
@@ -168,10 +171,24 @@ async def run_evolution_loop(shutdown_event: asyncio.Event) -> None:
     )
     await engine.init()
 
+    # Connect to MessageBus for durable fitness event consumption
+    from dharma_swarm.message_bus import MessageBus as _MBus
+    db_dir = STATE_DIR / "db"
+    _bus = _MBus(db_dir / "messages.db")
+    await _bus.init_db()
+
     while not shutdown_event.is_set():
         try:
             count = len(engine.archive._entries) if engine.archive else 0
             _log("evolution", f"Archive: {count} entries")
+
+            # Consume durable fitness events from MessageBus
+            try:
+                events = await _bus.consume_events("AGENT_FITNESS", limit=50)
+                if events:
+                    _log("evolution", f"Consumed {len(events)} fitness events from bus")
+            except Exception as exc:
+                _log("evolution", f"Bus consume error: {exc}")
 
             # Check fitness trend
             try:
@@ -181,6 +198,14 @@ async def run_evolution_loop(shutdown_event: asyncio.Event) -> None:
                     _log("evolution", f"Fitness trend (last {len(trend)}): avg={avg:.3f}")
             except Exception:
                 pass  # fitness_trend may not exist
+
+            # Bus metrics for observability
+            try:
+                stats = await _bus.event_stats()
+                if stats.get("queued", 0) > 0:
+                    _log("evolution", f"Bus: {stats['queued']} queued, {stats['consumed']} consumed")
+            except Exception:
+                pass
 
         except Exception as e:
             _log("evolution", f"Error: {e}")
@@ -329,6 +354,51 @@ async def _run_recognition_loop(shutdown_event: asyncio.Event) -> None:
             pass
 
 
+async def run_conductor_loop(shutdown_event: asyncio.Event) -> None:
+    """Run persistent conductor agents alongside the orchestrator.
+
+    Each conductor has its own wake interval and restart logic.
+    If one crashes, the other keeps running.
+    """
+    from dharma_swarm.persistent_agent import PersistentAgent
+    from dharma_swarm.conductors import CONDUCTOR_CONFIGS
+
+    _log("conductors", f"Initializing {len(CONDUCTOR_CONFIGS)} conductors...")
+
+    conductors: list[PersistentAgent] = []
+    for cfg in CONDUCTOR_CONFIGS:
+        agent = PersistentAgent(
+            name=cfg["name"],
+            role=cfg["role"],
+            provider_type=cfg["provider_type"],
+            model=cfg["model"],
+            state_dir=STATE_DIR,
+            wake_interval_seconds=cfg["wake_interval_seconds"],
+            system_prompt=cfg["system_prompt"],
+            max_turns=cfg.get("max_turns", 25),
+        )
+        conductors.append(agent)
+        _log("conductors", f"  {cfg['name']}: {cfg['model']} every {cfg['wake_interval_seconds']}s")
+
+    async def _run_with_restart(conductor: PersistentAgent, delay: float) -> None:
+        await asyncio.sleep(delay)
+        while not shutdown_event.is_set():
+            try:
+                await conductor.run_loop(shutdown_event)
+            except Exception as e:
+                _log("conductors", f"{conductor.name} crashed: {e}. Restarting in 60s")
+                try:
+                    await asyncio.wait_for(shutdown_event.wait(), timeout=60)
+                    break
+                except asyncio.TimeoutError:
+                    pass
+
+    await asyncio.gather(
+        _run_with_restart(conductors[0], 10),   # Claude starts +10s
+        _run_with_restart(conductors[1], 30),   # Codex starts +30s
+    )
+
+
 async def orchestrate(background: bool = False) -> None:
     """Main entry point — run all systems concurrently."""
     STATE_DIR.mkdir(parents=True, exist_ok=True)
@@ -366,15 +436,21 @@ async def orchestrate(background: bool = False) -> None:
 
     # Strange Loop Phase 0: unified swarm tick handles evolution + living layers + health
     # Only genuinely independent loops remain as separate tasks
+    from dharma_swarm.context_agent import run_context_agent_loop
+
     tasks = [
         asyncio.create_task(run_swarm_loop(shutdown_event, signal_bus=bus), name="swarm"),
         asyncio.create_task(run_pulse_loop(shutdown_event), name="pulse"),
         asyncio.create_task(
             _run_recognition_loop(shutdown_event), name="recognition"
         ),
+        asyncio.create_task(run_conductor_loop(shutdown_event), name="conductors"),
+        asyncio.create_task(
+            run_context_agent_loop(shutdown_event, signal_bus=bus), name="context-agent"
+        ),
     ]
 
-    _log("orchestrator", f"All {len(tasks)} systems launched")
+    _log("orchestrator", f"All {len(tasks)} systems launched (incl. conductors + context-agent)")
 
     try:
         # Wait for shutdown or first failure

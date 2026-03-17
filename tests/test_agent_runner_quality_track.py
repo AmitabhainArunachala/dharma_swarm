@@ -303,6 +303,27 @@ def test_task_file_path_prefers_metadata_and_falls_back():
     assert ar._task_file_path(t_fallback).startswith("task:")
 
 
+def test_task_file_path_extracts_from_title_and_description():
+    # File path in title
+    t_title = Task(title="Refactor dharma_swarm/evolution.py for speed")
+    assert ar._task_file_path(t_title) == "dharma_swarm/evolution.py"
+
+    # File path in description only
+    t_desc = Task(title="cleanup", description="See dharma_swarm/stigmergy.py for context")
+    assert ar._task_file_path(t_desc) == "dharma_swarm/stigmergy.py"
+
+    # Metadata still wins over text extraction
+    t_meta_wins = Task(
+        title="Fix dharma_swarm/evolution.py",
+        metadata={"file_path": "dharma_swarm/pulse.py"},
+    )
+    assert ar._task_file_path(t_meta_wins) == "dharma_swarm/pulse.py"
+
+    # Markdown file
+    t_md = Task(title="Update specs/KERNEL_CORE_SPEC.md with new axioms")
+    assert ar._task_file_path(t_md) == "specs/KERNEL_CORE_SPEC.md"
+
+
 @pytest.mark.asyncio
 async def test_leave_task_mark_best_effort(monkeypatch):
     captured = {}

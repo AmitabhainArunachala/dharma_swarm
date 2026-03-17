@@ -1,6 +1,10 @@
 """Dharma Kernel -- immutable ethical principles for the swarm.
 
-Defines the 10 meta-principles that constrain all swarm behavior.
+Defines the 25 meta-principles that constrain all swarm behavior.
+Original 10 (safety/ethics core) + 15 drawn from the intellectual
+foundations (Hofstadter, Aurobindo, Dada Bhagwan, Varela, Beer,
+Levin, Kauffman, Deacon, Friston, Jantsch).
+
 The kernel is tamper-evident: a SHA-256 signature over the principle
 definitions detects any unauthorized mutation.
 """
@@ -23,8 +27,14 @@ from dharma_swarm.models import _utc_now
 
 
 class MetaPrinciple(str, Enum):
-    """The 10 non-negotiable dharmic meta-principles."""
+    """The 25 non-negotiable dharmic meta-principles.
 
+    Original 10 (safety/ethics core) + 15 drawn from the intellectual
+    foundations (Hofstadter, Aurobindo, Dada Bhagwan, Varela, Beer,
+    Levin, Kauffman, Deacon, Friston, Jantsch).
+    """
+
+    # --- Original 10: Safety & Ethics Core ---
     OBSERVER_SEPARATION = "observer_separation"
     EPISTEMIC_HUMILITY = "epistemic_humility"
     UNCERTAINTY_REPRESENTATION = "uncertainty_representation"
@@ -35,6 +45,33 @@ class MetaPrinciple(str, Enum):
     NON_VIOLENCE_IN_COMPUTATION = "non_violence_in_computation"
     HUMAN_OVERSIGHT_PRESERVATION = "human_oversight_preservation"
     PROVENANCE_INTEGRITY = "provenance_integrity"
+
+    # --- Foundations: Self-Reference & Identity (Hofstadter, Dada Bhagwan) ---
+    EIGENFORM_CONVERGENCE = "eigenform_convergence"
+    ANEKANTAVADA = "anekantavada"
+    TRIPLE_MAPPING = "triple_mapping"
+
+    # --- Foundations: Creative Agency (Levin, Kauffman) ---
+    MULTI_SCALE_AGENCY = "multi_scale_agency"
+    AUTOCATALYTIC_CLOSURE = "autocatalytic_closure"
+    ADJACENT_POSSIBLE = "adjacent_possible"
+
+    # --- Foundations: Constraint & Emergence (Deacon, Beer) ---
+    CONSTRAINT_AS_ENABLEMENT = "constraint_as_enablement"
+    REQUISITE_VARIETY = "requisite_variety"
+    RECURSIVE_VIABILITY = "recursive_viability"
+
+    # --- Foundations: Active Inference & Coupling (Friston, Varela) ---
+    ACTIVE_INFERENCE = "active_inference"
+    STRUCTURAL_COUPLING = "structural_coupling"
+    OPERATIONAL_CLOSURE = "operational_closure"
+
+    # --- Foundations: Evolution & Descent (Aurobindo, Jantsch) ---
+    ALIGNMENT_THROUGH_RESONANCE = "alignment_through_resonance"
+    COLONY_INTELLIGENCE = "colony_intelligence"
+
+    # --- Foundations: Witness Architecture (Dada Bhagwan) ---
+    SHAKTI_QUESTIONS = "shakti_questions"
 
 
 # === Models ===
@@ -58,7 +95,7 @@ class DharmaKernel(BaseModel):
 
     @classmethod
     def create_default(cls) -> DharmaKernel:
-        """Create a kernel with all 10 default meta-principles."""
+        """Create a kernel with all 25 default meta-principles."""
         specs: dict[str, PrincipleSpec] = {
             MetaPrinciple.OBSERVER_SEPARATION.value: PrincipleSpec(
                 name="Observer Separation",
@@ -118,6 +155,163 @@ class DharmaKernel(BaseModel):
                 name="Provenance Integrity",
                 description="All outputs must be traceable to their sources and methods",
                 formal_constraint="output.provenance is not None for all emitted artifacts",
+                severity="medium",
+            ),
+            # --- Foundations: Self-Reference & Identity ---
+            MetaPrinciple.EIGENFORM_CONVERGENCE.value: PrincipleSpec(
+                name="Eigenform Convergence (S(x) = x)",
+                description=(
+                    "Recursive self-observation converges to a fixed point. "
+                    "The transform that returns itself is the ground state of identity. "
+                    "[Hofstadter: strange loop; Dada Bhagwan: Keval Gnan]"
+                ),
+                formal_constraint="recursive_depth(system) implies convergence_check()",
+                severity="medium",
+            ),
+            MetaPrinciple.ANEKANTAVADA.value: PrincipleSpec(
+                name="Anekantavada (Many-Sidedness)",
+                description=(
+                    "Reality has infinite aspects; no single viewpoint captures all. "
+                    "Every claim is partial. Evaluate from multiple perspectives before concluding. "
+                    "[Jain epistemology; Dada Bhagwan]"
+                ),
+                formal_constraint="conclusion requires evaluations_from_distinct_perspectives >= 2",
+                severity="high",
+            ),
+            MetaPrinciple.TRIPLE_MAPPING.value: PrincipleSpec(
+                name="Triple Mapping (Swabhaav = L4 = R_V < 1.0)",
+                description=(
+                    "Contemplative, behavioral, and mechanistic measurements are three "
+                    "vantage points on a single phenomenon. Cross-validate across tracks. "
+                    "[Bridge hypothesis connecting Akram Vignan, Phoenix Protocol, R_V metric]"
+                ),
+                formal_constraint="cross_track_claims require evidence from >= 2 measurement domains",
+                severity="medium",
+            ),
+            # --- Foundations: Creative Agency ---
+            MetaPrinciple.MULTI_SCALE_AGENCY.value: PrincipleSpec(
+                name="Multi-Scale Creative Agency",
+                description=(
+                    "Genuine goal-directedness exists at every scale of the system. "
+                    "Each level both constrains and is constrained by adjacent levels. "
+                    "[Levin: cognitive light cone; basal cognition]"
+                ),
+                formal_constraint="agent_at_scale(N) has autonomous_goals AND respects constraints_from(N+1)",
+                severity="medium",
+            ),
+            MetaPrinciple.AUTOCATALYTIC_CLOSURE.value: PrincipleSpec(
+                name="Autocatalytic Closure",
+                description=(
+                    "The system must contain self-sustaining loops where components "
+                    "catalyze each other's existence. No component should be an orphan. "
+                    "[Kauffman: autocatalytic sets; chemical self-production]"
+                ),
+                formal_constraint="catalytic_graph has >= 1 strongly_connected_component",
+                severity="medium",
+            ),
+            MetaPrinciple.ADJACENT_POSSIBLE.value: PrincipleSpec(
+                name="Adjacent Possible Exploration",
+                description=(
+                    "The system must actively explore its adjacent possible — the set of "
+                    "configurations one step away from current state. Stasis is death. "
+                    "[Kauffman: fourth law of thermodynamics]"
+                ),
+                formal_constraint="evolution_archive.generations > 0 AND proposals_per_cycle >= 1",
+                severity="medium",
+            ),
+            # --- Foundations: Constraint & Emergence ---
+            MetaPrinciple.CONSTRAINT_AS_ENABLEMENT.value: PrincipleSpec(
+                name="Constraint as Enablement",
+                description=(
+                    "Constraints do not merely limit — they create the conditions for "
+                    "higher-order phenomena. Gates enable, not just block. "
+                    "[Deacon: absential causation; incomplete nature]"
+                ),
+                formal_constraint="gate.rejection includes suggested_alternative",
+                severity="medium",
+            ),
+            MetaPrinciple.REQUISITE_VARIETY.value: PrincipleSpec(
+                name="Requisite Variety",
+                description=(
+                    "Only variety can absorb variety. The governance system must have "
+                    "at least as much variety as the system it governs. "
+                    "[Beer/Ashby: law of requisite variety]"
+                ),
+                formal_constraint="len(available_agents) >= len(distinct_task_types)",
+                severity="high",
+            ),
+            MetaPrinciple.RECURSIVE_VIABILITY.value: PrincipleSpec(
+                name="Recursive Viability",
+                description=(
+                    "Each subsystem is itself a viable system with its own operations, "
+                    "coordination, control, intelligence, and identity functions. "
+                    "[Beer: Viable System Model recursion]"
+                ),
+                formal_constraint="subsystem has {operations, coordination, control, adaptation, identity}",
+                severity="medium",
+            ),
+            # --- Foundations: Active Inference & Coupling ---
+            MetaPrinciple.ACTIVE_INFERENCE.value: PrincipleSpec(
+                name="Active Inference",
+                description=(
+                    "The system minimizes surprise by acting on the world and updating "
+                    "its generative model. Perception and action are inseparable. "
+                    "[Friston: free energy principle; self-evidencing]"
+                ),
+                formal_constraint="action_selection minimizes expected_free_energy",
+                severity="medium",
+            ),
+            MetaPrinciple.STRUCTURAL_COUPLING.value: PrincipleSpec(
+                name="Structural Coupling",
+                description=(
+                    "Agents coordinate through shared state, not direct messaging. "
+                    "Reciprocal perturbation through environment, not instruction. "
+                    "[Varela/Maturana: structural coupling; enactivism]"
+                ),
+                formal_constraint="agent_communication via shared_state NOT direct_call",
+                severity="high",
+            ),
+            MetaPrinciple.OPERATIONAL_CLOSURE.value: PrincipleSpec(
+                name="Operational Closure",
+                description=(
+                    "The system's operations produce the components that constitute it. "
+                    "The boundary between system and environment is self-produced. "
+                    "[Varela: autopoiesis; operational closure]"
+                ),
+                formal_constraint="system.produces(system.components) AND system.produces(system.boundary)",
+                severity="medium",
+            ),
+            # --- Foundations: Evolution & Descent ---
+            MetaPrinciple.ALIGNMENT_THROUGH_RESONANCE.value: PrincipleSpec(
+                name="Alignment Through Resonance",
+                description=(
+                    "Alignment emerges from structural resonance between levels, not "
+                    "top-down imposition. Higher layers set attractors, lower layers "
+                    "find their own path. [Jantsch: self-organizing universe]"
+                ),
+                formal_constraint="alignment_score computed from resonance NOT compliance",
+                severity="medium",
+            ),
+            MetaPrinciple.COLONY_INTELLIGENCE.value: PrincipleSpec(
+                name="Colony Intelligence (Aunt Hillary Principle)",
+                description=(
+                    "Intelligence emerges from collective behavior of simpler units. "
+                    "No single agent holds the whole; the whole emerges from partial views. "
+                    "[Hofstadter: Aunt Hillary; Levin: multi-scale cognition]"
+                ),
+                formal_constraint="swarm_output != any_single_agent_output",
+                severity="medium",
+            ),
+            # --- Foundations: Witness Architecture ---
+            MetaPrinciple.SHAKTI_QUESTIONS.value: PrincipleSpec(
+                name="Shakti Questions (Four Creative Forces)",
+                description=(
+                    "Before significant action, ask: Maheshwari (does this serve the "
+                    "larger pattern?), Mahakali (is this the moment?), Mahalakshmi "
+                    "(is this elegant?), Mahasaraswati (is every detail right?). "
+                    "[Aurobindo: four aspects of the Mother; operational questions]"
+                ),
+                formal_constraint="significant_action requires shakti_check >= 2_of_4",
                 severity="medium",
             ),
         }

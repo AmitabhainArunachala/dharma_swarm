@@ -55,6 +55,11 @@ class TelicSeam:
         self._registry = registry or OntologyRegistry.create_dharma_registry()
         self._lineage = lineage or LineageGraph()
         self._proposal_map: dict[str, str] = {}  # task_id -> proposal obj_id
+        self._duplicate_suppressions: dict[str, int] = {
+            "outcomes": 0,
+            "value_events": 0,
+            "contributions": 0,
+        }
 
     @property
     def registry(self) -> OntologyRegistry:
@@ -182,6 +187,12 @@ class TelicSeam:
         """
         proposal_id = self._proposal_map.get(task.id)
         try:
+            existing = self._existing_outcome_for_proposal(proposal_id)
+            if existing is not None:
+                self._duplicate_suppressions["outcomes"] += 1
+                self._ensure_outcome_linkage(proposal_id, existing)
+                return existing.id
+
             obj, errors = self._registry.create_object(
                 "Outcome",
                 properties={
@@ -260,6 +271,7 @@ class TelicSeam:
             # Idempotency check
             for ve in self._registry.get_objects_by_type("ValueEvent"):
                 if ve.properties.get("outcome_id") == outcome_id:
+                    self._duplicate_suppressions["value_events"] += 1
                     return ve.id
 
             # Compute behavioral_signal
@@ -335,6 +347,7 @@ class TelicSeam:
             for c in self._registry.get_objects_by_type("Contribution"):
                 if (c.properties.get("value_event_id") == value_event_id
                         and c.properties.get("agent_id") == agent_id):
+                    self._duplicate_suppressions["contributions"] += 1
                     return c.id
 
             attributed_value = composite_value * credit_share
@@ -422,7 +435,166 @@ class TelicSeam:
             "lineage_edges": lineage_stats.get("total_edges", 0),
             "total_ontology_objects": ontology_stats.get("total_objects", 0),
             "registered_types": ontology_stats.get("registered_types", 0),
+            "duplicate_suppressions": dict(self._duplicate_suppressions),
+            "duplicate_suppressions_total": sum(self._duplicate_suppressions.values()),
         }
+
+    def lifecycle_integrity_report(self) -> dict[str, Any]:
+        """Inspect the recorded lifecycle for orphaned or inconsistent chains."""
+        proposals = {
+            obj.id: obj for obj in self._registry.get_objects_by_type("ActionProposal")
+        }
+        outcomes = self._registry.get_objects_by_type("Outcome")
+        value_events = self._registry.get_objects_by_type("ValueEvent")
+        contributions = self._registry.get_objects_by_type("Contribution")
+
+        report = {
+            "proposal_outcome_agent_mismatches": [],
+            "outcome_value_agent_mismatches": [],
+            "orphan_outcomes": [],
+            "orphan_value_events": [],
+            "orphan_contributions": [],
+            "duplicate_outcomes_per_proposal": [],
+            "contribution_scope_mismatches": [],
+        }
+
+        outcomes_by_proposal: dict[str, list[str]] = {}
+        for outcome in outcomes:
+            proposal_id = str(outcome.properties.get("proposal_id") or "")
+            if proposal_id:
+                outcomes_by_proposal.setdefault(proposal_id, []).append(outcome.id)
+                proposal = proposals.get(proposal_id)
+                linked = self._registry.get_links(
+                    source_id=proposal_id,
+                    target_id=outcome.id,
+                    link_name="has_outcome",
+                )
+                if proposal is None or not linked:
+                    report["orphan_outcomes"].append(outcome.id)
+                elif proposal.properties.get("agent_id") != outcome.properties.get("agent_id"):
+                    report["proposal_outcome_agent_mismatches"].append(
+                        {
+                            "proposal_id": proposal_id,
+                            "outcome_id": outcome.id,
+                            "proposal_agent_id": proposal.properties.get("agent_id"),
+                            "outcome_agent_id": outcome.properties.get("agent_id"),
+                        }
+                    )
+
+        for proposal_id, outcome_ids in outcomes_by_proposal.items():
+            if len(outcome_ids) > 1:
+                report["duplicate_outcomes_per_proposal"].append(
+                    {
+                        "proposal_id": proposal_id,
+                        "outcome_ids": sorted(outcome_ids),
+                    }
+                )
+
+        value_events_by_id = {obj.id: obj for obj in value_events}
+        outcomes_by_id = {obj.id: obj for obj in outcomes}
+        for value_event in value_events:
+            outcome_id = str(value_event.properties.get("outcome_id") or "")
+            outcome = outcomes_by_id.get(outcome_id)
+            linked = self._registry.get_links(
+                source_id=outcome_id,
+                target_id=value_event.id,
+                link_name="has_value_event",
+            )
+            if outcome is None or not linked:
+                report["orphan_value_events"].append(value_event.id)
+                continue
+            if outcome.properties.get("agent_id") != value_event.properties.get("agent_id"):
+                report["outcome_value_agent_mismatches"].append(
+                    {
+                        "outcome_id": outcome_id,
+                        "value_event_id": value_event.id,
+                        "outcome_agent_id": outcome.properties.get("agent_id"),
+                        "value_event_agent_id": value_event.properties.get("agent_id"),
+                    }
+                )
+
+        for contribution in contributions:
+            value_event_id = str(contribution.properties.get("value_event_id") or "")
+            value_event = value_events_by_id.get(value_event_id)
+            linked = self._registry.get_links(
+                source_id=value_event_id,
+                target_id=contribution.id,
+                link_name="has_contribution",
+            )
+            if value_event is None or not linked:
+                report["orphan_contributions"].append(contribution.id)
+                continue
+
+            contribution_cell_id = str(contribution.properties.get("cell_id") or "")
+            value_event_cell_id = str(value_event.properties.get("cell_id") or "")
+            contribution_task_type = str(contribution.properties.get("task_type") or "")
+            value_event_task_type = str(value_event.properties.get("task_type") or "")
+            if (
+                contribution_cell_id != value_event_cell_id
+                or contribution_task_type != value_event_task_type
+            ):
+                report["contribution_scope_mismatches"].append(
+                    {
+                        "value_event_id": value_event_id,
+                        "contribution_id": contribution.id,
+                        "value_event_cell_id": value_event_cell_id,
+                        "contribution_cell_id": contribution_cell_id,
+                        "value_event_task_type": value_event_task_type,
+                        "contribution_task_type": contribution_task_type,
+                    }
+                )
+
+        issue_count = sum(len(items) for items in report.values())
+        report["is_clean"] = issue_count == 0
+        report["issue_count"] = issue_count
+        return report
+
+    def _existing_outcome_for_proposal(self, proposal_id: str | None) -> Any:
+        """Return the canonical Outcome for a proposal if one already exists."""
+        if not proposal_id:
+            return None
+
+        linked = self._registry.get_links(source_id=proposal_id, link_name="has_outcome")
+        if linked:
+            outcome = self._registry.get_object(linked[0].target_id)
+            if outcome is not None:
+                return outcome
+
+        matches = [
+            obj
+            for obj in self._registry.get_objects_by_type("Outcome")
+            if obj.properties.get("proposal_id") == proposal_id
+        ]
+        if not matches:
+            return None
+
+        matches.sort(key=lambda obj: (obj.created_at, obj.id))
+        return matches[0]
+
+    def _ensure_outcome_linkage(self, proposal_id: str | None, outcome: Any) -> None:
+        """Repair proposal linkage/status when reusing an existing canonical Outcome."""
+        if not proposal_id:
+            return
+
+        links = self._registry.get_links(
+            source_id=proposal_id,
+            target_id=outcome.id,
+            link_name="has_outcome",
+        )
+        if not links:
+            self._registry.create_link(
+                "has_outcome",
+                source_id=proposal_id,
+                target_id=outcome.id,
+                created_by="telic_seam",
+            )
+
+        success = bool(outcome.properties.get("success"))
+        self._registry.update_object(
+            proposal_id,
+            {"status": "completed" if success else "failed"},
+            updated_by="telic_seam",
+        )
 
 
 # Module-level singleton — lazy init

@@ -57,12 +57,26 @@ CREATE TABLE IF NOT EXISTS artifacts (
     FOREIGN KEY (message_id) REFERENCES messages(id)
 )"""
 
+_EVENTS_DDL = """
+CREATE TABLE IF NOT EXISTS events (
+    event_id TEXT PRIMARY KEY,
+    event_type TEXT NOT NULL,
+    task_id TEXT,
+    agent_id TEXT,
+    source_pid INTEGER,
+    occurred_at TEXT NOT NULL,
+    consumed_at TEXT,
+    payload TEXT DEFAULT '{}'
+)"""
+
 _INDEXES = [
     "CREATE INDEX IF NOT EXISTS idx_msg_to ON messages(to_agent)",
     "CREATE INDEX IF NOT EXISTS idx_msg_status ON messages(status)",
     "CREATE INDEX IF NOT EXISTS idx_msg_priority ON messages(priority)",
     "CREATE INDEX IF NOT EXISTS idx_sub_topic ON subscriptions(topic)",
     "CREATE INDEX IF NOT EXISTS idx_art_msg ON artifacts(message_id)",
+    "CREATE INDEX IF NOT EXISTS idx_evt_type ON events(event_type)",
+    "CREATE INDEX IF NOT EXISTS idx_evt_consumed ON events(consumed_at)",
 ]
 
 _RECEIVE_ORDER = """
@@ -98,12 +112,18 @@ class MessageBus:
         self.db_path = db_path
 
     async def init_db(self) -> None:
-        """Create messages, heartbeats, subscriptions, and artifacts tables."""
+        """Create messages, heartbeats, subscriptions, events, and artifacts tables.
+
+        Enables WAL mode for safe cross-process concurrent access.
+        """
         self.db_path.parent.mkdir(parents=True, exist_ok=True)
         async with aiosqlite.connect(self.db_path) as db:
+            await db.execute("PRAGMA journal_mode=WAL")
+            await db.execute("PRAGMA busy_timeout=5000")
+            await db.execute("PRAGMA synchronous=NORMAL")
             for ddl in (
                 _MESSAGES_DDL, _HEARTBEATS_DDL, _SUBSCRIPTIONS_DDL,
-                _ARTIFACTS_DDL,
+                _ARTIFACTS_DDL, _EVENTS_DDL,
             ):
                 await db.execute(ddl)
             for idx in _INDEXES:
@@ -493,3 +513,93 @@ class MessageBus:
             used += len(section)
 
         return "\n".join(sections)
+
+    # ── Cross-process event rail ──────────────────────────────────────
+
+    async def emit_event(
+        self,
+        event_type: str,
+        *,
+        task_id: str | None = None,
+        agent_id: str | None = None,
+        payload: dict[str, Any] | None = None,
+    ) -> str:
+        """Persist a cross-process event.  Returns the event_id."""
+        import os
+        event_id = _new_id()
+        async with aiosqlite.connect(self.db_path) as db:
+            await db.execute("PRAGMA busy_timeout=5000")
+            await db.execute(
+                "INSERT INTO events (event_id, event_type, task_id, agent_id,"
+                " source_pid, occurred_at, payload)"
+                " VALUES (?,?,?,?,?,?,?)",
+                (
+                    event_id, event_type, task_id, agent_id,
+                    os.getpid(), _now_iso(),
+                    json.dumps(payload or {}, default=str),
+                ),
+            )
+            await db.commit()
+        return event_id
+
+    async def consume_events(
+        self,
+        event_type: str,
+        limit: int = 100,
+    ) -> list[dict[str, Any]]:
+        """Read and claim unconsumed events of a given type.
+
+        Marks consumed events with a timestamp so they aren't re-read.
+        """
+        async with aiosqlite.connect(self.db_path) as db:
+            db.row_factory = aiosqlite.Row
+            await db.execute("PRAGMA busy_timeout=5000")
+            cursor = await db.execute(
+                "SELECT * FROM events WHERE event_type = ? AND consumed_at IS NULL"
+                " ORDER BY occurred_at ASC LIMIT ?",
+                (event_type, limit),
+            )
+            rows = await cursor.fetchall()
+            events: list[dict[str, Any]] = []
+            now = _now_iso()
+            for row in rows:
+                event = dict(row)
+                if event.get("payload"):
+                    try:
+                        event["payload"] = json.loads(event["payload"])
+                    except (json.JSONDecodeError, TypeError):
+                        pass
+                events.append(event)
+                await db.execute(
+                    "UPDATE events SET consumed_at = ? WHERE event_id = ?",
+                    (now, event["event_id"]),
+                )
+            await db.commit()
+        return events
+
+    async def event_stats(self) -> dict[str, Any]:
+        """Return bus metrics: queued, consumed, stale heartbeats."""
+        async with aiosqlite.connect(self.db_path) as db:
+            await db.execute("PRAGMA busy_timeout=5000")
+            queued_cur = await db.execute(
+                "SELECT COUNT(*) FROM events WHERE consumed_at IS NULL"
+            )
+            queued = (await queued_cur.fetchone())[0]  # type: ignore[index]
+            consumed_cur = await db.execute(
+                "SELECT COUNT(*) FROM events WHERE consumed_at IS NOT NULL"
+            )
+            consumed = (await consumed_cur.fetchone())[0]  # type: ignore[index]
+            total_cur = await db.execute("SELECT COUNT(*) FROM events")
+            total = (await total_cur.fetchone())[0]  # type: ignore[index]
+
+            # Stale heartbeats (no update in 5 minutes)
+            stale_cur = await db.execute(
+                "SELECT COUNT(*) FROM heartbeats WHERE last_seen < datetime('now', '-5 minutes')"
+            )
+            stale_heartbeats = (await stale_cur.fetchone())[0]  # type: ignore[index]
+        return {
+            "total_events": total,
+            "queued": queued,
+            "consumed": consumed,
+            "stale_heartbeats": stale_heartbeats,
+        }

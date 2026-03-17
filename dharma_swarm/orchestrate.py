@@ -282,8 +282,7 @@ def plan_full_build() -> SwarmPlan:
                 name="synthesizer",
                 role="Synthesis",
                 prompt=(
-                    "Read ALL codebases: ~/dgc-core/, ~/dharma_swarm/, "
-                    "~/DHARMIC_GODEL_CLAW/swarm/, ~/.chaiwala/. "
+                    "Read the unified codebase: ~/dharma_swarm/. "
                     "Find what works, what's dead, what overlaps. "
                     "Write unified module list to ~/.dharma/shared/synthesis.md."
                 ),

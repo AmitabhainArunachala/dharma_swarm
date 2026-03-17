@@ -1276,7 +1276,8 @@ _VENTURE_CELL = ObjectType(
         "description": PropertyDef(name="description", property_type=PropertyType.TEXT),
         "domain": PropertyDef(name="domain", property_type=PropertyType.ENUM,
                               enum_values=["research", "engineering", "product",
-                                          "infrastructure", "governance", "community"]),
+                                          "infrastructure", "governance", "community",
+                                          "economic"]),
         "autonomy_stage": PropertyDef(name="autonomy_stage", property_type=PropertyType.INTEGER,
                                       description="1=research-only → 5=mostly autonomous"),
         "status": PropertyDef(name="status", property_type=PropertyType.ENUM,
@@ -1503,6 +1504,14 @@ def _build_ontology() -> dict[str, Entity]:
             relationships=("depends_on:welfare_calc", "feeds:grant_app"),
             actions=("test", "edit", "deploy"),
         ),
+        "shakti_ginko": Entity(
+            id="shakti_ginko", type="venture_cell",
+            canonical_path=_HOME / "dharma_swarm" / "dharma_swarm" / "ginko_orchestrator.py",
+            status="active",
+            description="Autonomous economic engine — market intel, signals, Brier-scored predictions",
+            relationships=("depends_on:dharma_swarm", "feeds:jagat_kalyan"),
+            actions=("test", "edit", "deploy"),
+        ),
     }
 
 
@@ -1569,6 +1578,42 @@ def deadline_summary() -> str:
 # PUBLIC API
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
+def create_ginko_cell(registry: OntologyRegistry) -> OntologyObj:
+    """Create the Shakti Ginko VentureCell in the ontology.
+
+    Autonomy stage 1 (research-only). Domain: economic.
+    Returns the created OntologyObj or raises on validation failure.
+    """
+    obj, errors = registry.create_object(
+        "VentureCell",
+        properties={
+            "name": "Shakti Ginko",
+            "description": (
+                "Autonomous economic engine — market intelligence, "
+                "Brier-scored predictions, signal generation, "
+                "paper trading. Named after the Ginkgo tree "
+                "(270M years old, survived Hiroshima)."
+            ),
+            "domain": "economic",
+            "autonomy_stage": 1,
+            "status": "incubating",
+            "budget_tokens": 0,
+            "kpis": {
+                "brier_score": {"target": 0.125, "current": None},
+                "sharpe_ratio": {"target": 1.5, "current": None},
+                "max_drawdown": {"target": 0.15, "current": None},
+                "prediction_count": {"target": 500, "current": 0},
+                "revenue_usd": {"target": 0, "current": 0},
+            },
+        },
+        created_by="system",
+    )
+    if errors:
+        raise ValueError(f"Failed to create Ginko VentureCell: {errors}")
+    assert obj is not None
+    return obj
+
+
 __all__ = [
     # New ontology API
     "ActionDef",
@@ -1587,6 +1632,7 @@ __all__ = [
     "check_security",
     "validate_link",
     "validate_object",
+    "create_ginko_cell",
     # Legacy API (backward compat)
     "Entity",
     "ONTOLOGY",

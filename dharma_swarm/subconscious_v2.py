@@ -437,7 +437,7 @@ Discard any association that is just a paraphrase of something a source file alr
                             "model": "anthropic/claude-3-haiku",
                             "messages": [{"role": "user", "content": extraction_template.replace("{dream_prose}", dream_prose)}],
                             "temperature": 0.2,
-                            "max_tokens": 2000,
+                            "max_tokens": 4000,
                         },
                         headers={
                             "Authorization": f"Bearer {openrouter_key}",
@@ -470,7 +470,7 @@ Discard any association that is just a paraphrase of something a source file alr
                 # Pass 2
                 r2 = await ac.messages.create(
                     model="claude-haiku-4-5-20251001",
-                    max_tokens=2000,
+                    max_tokens=4000,
                     temperature=0.2,
                     messages=[{"role": "user", "content": extraction_template.replace("{dream_prose}", dream_prose)}],
                 )

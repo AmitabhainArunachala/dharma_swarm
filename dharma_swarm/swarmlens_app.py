@@ -155,13 +155,66 @@ def _load_mission_report() -> str:
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
 
+def _load_ginko_agent(agent_dir: Path) -> dict:
+    """Load a ginko fleet agent identity and translate to swarmlens format."""
+    identity_file = agent_dir / "identity.json"
+    try:
+        data = json.loads(identity_file.read_text())
+    except Exception:
+        return {"name": agent_dir.name, "error": "unreadable"}
+
+    # Map ginko role names to display-friendly versions
+    role = data.get("role", "unknown").replace("_", "-")
+    model = data.get("model", "unknown")
+
+    # Icon mapping by role
+    role_icons = {
+        "macro-oracle": "🌙", "quant-architect": "🧠", "intelligence-synthesizer": "⚡",
+        "pipeline-smith": "🔨", "risk-warden": "🛡️", "alpha-hunter": "🔍",
+        "contrarian-analyst": "🔮", "deep-reasoner": "🦅", "execution-optimizer": "⚡",
+        "cross-market-bridge": "🌉",
+    }
+
+    return {
+        "name": data.get("name", agent_dir.name),
+        "icon": role_icons.get(role, "🤖"),
+        "role": role,
+        "cell": "ginko",
+        "model": model,
+        "provider": "openrouter",
+        "status": data.get("status", "idle"),
+        "current_fitness": data.get("fitness", 0.5),
+        "fitness_trend": "stable",
+        "tasks_completed": data.get("tasks_completed", 0),
+        "tasks_failed": data.get("tasks_failed", 0),
+        "total_calls": data.get("total_calls", 0),
+        "total_tokens": data.get("total_tokens_used", 0),
+        "total_cost_usd": 0.0,
+        "avg_quality": data.get("avg_quality", 0.0),
+        "success_rate": (
+            data.get("tasks_completed", 0) / max(1, data.get("total_calls", 1))
+        ),
+        "last_active": data.get("last_active", "never"),
+    }
+
+
 @app.get("/api/agents")
 def api_list_agents():
     AGENTS_DIR.mkdir(parents=True, exist_ok=True)
     agents = []
+    seen_names: set[str] = set()
+    # Load from general agent store
     for d in sorted(AGENTS_DIR.iterdir()):
         if d.is_dir() and (d / "identity.json").exists():
             agents.append(_load_agent(d.name))
+            seen_names.add(d.name)
+    # Also load ginko fleet agents (may live in a separate directory)
+    ginko_agents_dir = GINKO_DIR / "agents"
+    if ginko_agents_dir.exists():
+        for d in sorted(ginko_agents_dir.iterdir()):
+            if d.is_dir() and d.name not in seen_names and (d / "identity.json").exists():
+                agents.append(_load_ginko_agent(d))
+                seen_names.add(d.name)
     return {"agents": agents, "count": len(agents)}
 
 
@@ -287,9 +340,18 @@ def api_fund():
                 "stop_loss": pos.stop_loss,
                 "quantity": pos.quantity,
             })
-        return {**stats, "positions": positions}
+        # Load regime from orchestrator state
+        regime = "unknown"
+        state_file = GINKO_DIR / "ginko_state.json"
+        if state_file.exists():
+            try:
+                state = json.loads(state_file.read_text())
+                regime = state.get("current_regime", "unknown")
+            except Exception:
+                pass
+        return {**stats, "positions": positions, "regime": regime}
     except Exception as e:
-        return {"error": str(e), "total_value": 100000, "cash": 100000, "positions": [], "total_pnl": 0, "total_pnl_pct": 0, "sharpe_ratio": 0, "max_drawdown": 0, "win_rate": 0, "trade_count": 0}
+        return {"error": str(e), "total_value": 100000, "cash": 100000, "positions": [], "total_pnl": 0, "total_pnl_pct": 0, "sharpe_ratio": 0, "max_drawdown": 0, "win_rate": 0, "trade_count": 0, "regime": "unknown"}
 
 
 @app.get("/api/fund/equity-curve")
@@ -848,78 +910,364 @@ setInterval(refresh, 5000);
 
 @app.get("/fund", response_class=HTMLResponse)
 def landing_page():
-    return """<!DOCTYPE html>
+    return _FUND_HTML
+
+
+# ---------------------------------------------------------------------------
+# Fund dashboard HTML — complete operational console
+# ---------------------------------------------------------------------------
+
+_FUND_HTML = r"""<!DOCTYPE html>
 <html lang="en"><head>
 <meta charset="UTF-8"><meta name="viewport" content="width=device-width,initial-scale=1.0">
-<title>Dharmic Quant</title>
+<title>Shakti Ginko — Dharmic Quant</title>
 <style>
+:root{--bg:#08090d;--card:#0e1017;--border:#1a1d2e;--g:#00ff88;--g2:#00cc6a;--r:#ff4466;--y:#ffaa00;--b:#3399ff;--dim:#555;--txt:#c8ccd4}
 *{margin:0;padding:0;box-sizing:border-box}
-body{background:#0a0a0f;color:#e0e0e0;font-family:'JetBrains Mono','Fira Code',monospace}
-.hero{text-align:center;padding:80px 20px 40px}
-.hero h1{font-size:2.8em;color:#00ff88;letter-spacing:3px}
-.hero .sub{color:#888;font-size:1.1em;margin-top:10px;max-width:600px;margin-left:auto;margin-right:auto}
-.container{max-width:1000px;margin:0 auto;padding:20px}
-.cols{display:grid;grid-template-columns:repeat(3,1fr);gap:20px;margin:40px 0}
-.col{background:#111;border:1px solid #1a1a1a;border-radius:10px;padding:20px;text-align:center}
-.col h3{color:#00ff88;margin-bottom:8px}
-.col p{color:#888;font-size:0.85em;line-height:1.5}
-.stats-live{display:flex;justify-content:center;gap:30px;margin:30px 0;flex-wrap:wrap}
-.sl{text-align:center}
-.sl .v{font-size:2em;color:#00ff88;font-weight:bold}
-.sl .l{color:#555;font-size:0.7em;text-transform:uppercase}
-.dharmic{background:#111;border:1px solid #1a1a1a;border-radius:10px;padding:30px;margin:30px 0}
-.dharmic h2{color:#00ff88;margin-bottom:15px}
-.dharmic .gate{display:inline-block;background:#00ff8822;color:#00ff88;padding:4px 12px;border-radius:15px;margin:4px;font-size:0.85em}
-.waitlist{text-align:center;margin:40px 0;padding:40px;background:#111;border-radius:10px}
-.waitlist input{background:#0a0a0f;border:1px solid #333;color:#fff;padding:10px 15px;border-radius:6px;font-family:inherit;width:250px;margin-right:8px}
-.waitlist button{background:#00ff88;color:#0a0a0f;border:none;padding:10px 20px;border-radius:6px;font-family:inherit;font-weight:bold;cursor:pointer}
-.waitlist button:hover{background:#00cc66}
-.footer{text-align:center;color:#333;font-size:0.75em;padding:30px;border-top:1px solid #111;margin-top:40px}
+body{background:var(--bg);color:var(--txt);font-family:'JetBrains Mono','SF Mono','Fira Code',monospace;font-size:13px;overflow-x:hidden}
+a{color:var(--b);text-decoration:none}a:hover{text-decoration:underline}
+
+/* Top bar */
+.topbar{display:flex;align-items:center;justify-content:space-between;padding:12px 24px;border-bottom:1px solid var(--border);background:#0a0b10}
+.topbar h1{color:var(--g);font-size:1.3em;letter-spacing:2px}
+.topbar .tag{background:#00ff8818;color:var(--g);padding:3px 10px;border-radius:10px;font-size:0.75em;margin-left:10px}
+.topbar .right{display:flex;gap:16px;align-items:center;color:var(--dim);font-size:0.8em}
+.topbar .live{width:8px;height:8px;background:var(--g);border-radius:50%;display:inline-block;animation:pulse 2s infinite}
+@keyframes pulse{0%,100%{opacity:1}50%{opacity:0.3}}
+
+/* Grid layout */
+.grid{display:grid;grid-template-columns:1fr 1fr 1fr;gap:1px;background:var(--border);margin-top:1px}
+.grid2{display:grid;grid-template-columns:1fr 1fr;gap:1px;background:var(--border)}
+
+/* Panels */
+.panel{background:var(--card);padding:16px 20px;min-height:120px}
+.panel h2{color:var(--g);font-size:0.85em;text-transform:uppercase;letter-spacing:1.5px;margin-bottom:12px;display:flex;align-items:center;gap:8px}
+.panel h2 .icon{font-size:1.1em}
+
+/* Stat cards */
+.stats{display:flex;gap:20px;flex-wrap:wrap}
+.stat{flex:1;min-width:80px}
+.stat .val{font-size:1.8em;font-weight:700;line-height:1.1}
+.stat .label{color:var(--dim);font-size:0.7em;text-transform:uppercase;letter-spacing:1px;margin-top:2px}
+.stat.green .val{color:var(--g)}
+.stat.red .val{color:var(--r)}
+.stat.yellow .val{color:var(--y)}
+.stat.blue .val{color:var(--b)}
+
+/* Autonomy ladder */
+.ladder{display:flex;gap:4px;margin:8px 0}
+.ladder .step{flex:1;height:28px;border-radius:4px;display:flex;align-items:center;justify-content:center;font-size:0.7em;font-weight:700;transition:all 0.3s}
+.ladder .step.active{background:var(--g);color:#000}
+.ladder .step.future{background:#1a1d2e;color:#444}
+.ladder .step.next{background:#1a3a2a;color:var(--g);border:1px dashed var(--g)}
+
+/* Tables */
+.tbl{width:100%;border-collapse:collapse;font-size:0.85em}
+.tbl th{text-align:left;color:var(--dim);font-weight:400;padding:4px 0;border-bottom:1px solid var(--border);font-size:0.8em;text-transform:uppercase;letter-spacing:0.5px}
+.tbl td{padding:5px 0;border-bottom:1px solid #111318}
+.tbl .mono{font-variant-numeric:tabular-nums}
+.tbl .pos{color:var(--g)}.tbl .neg{color:var(--r)}.tbl .neut{color:var(--dim)}
+
+/* Prediction feed */
+.pred-feed{max-height:280px;overflow-y:auto;scrollbar-width:thin;scrollbar-color:#222 transparent}
+.pred{display:flex;gap:10px;padding:6px 0;border-bottom:1px solid #111318;align-items:center}
+.pred .tf{background:#1a1d2e;color:var(--dim);padding:2px 6px;border-radius:3px;font-size:0.75em;min-width:28px;text-align:center}
+.pred .tf.h4{color:var(--y);background:#332a10}.pred .tf.h24{color:var(--b);background:#102033}.pred .tf.d7{color:#bb66ff;background:#1a1030}
+.pred .q{flex:1;color:var(--txt);font-size:0.85em}
+.pred .p{font-weight:700;min-width:45px;text-align:right}
+.pred .p.high{color:var(--g)}.pred .p.low{color:var(--r)}.pred .p.mid{color:var(--dim)}
+.pred .status{font-size:0.75em;min-width:20px;text-align:center}
+.pred .status.win{color:var(--g)}.pred .status.loss{color:var(--r)}.pred .status.pending{color:var(--dim)}
+
+/* Fleet */
+.agent-row{display:flex;align-items:center;gap:10px;padding:5px 0;border-bottom:1px solid #111318}
+.agent-row .name{font-weight:700;min-width:90px;color:var(--txt)}
+.agent-row .role{color:var(--dim);font-size:0.8em;flex:1}
+.agent-row .fitness-bar{width:60px;height:6px;background:#1a1d2e;border-radius:3px;overflow:hidden}
+.agent-row .fitness-bar .fill{height:100%;border-radius:3px;transition:width 0.5s}
+.agent-row .fitness-val{font-size:0.85em;min-width:35px;text-align:right;font-variant-numeric:tabular-nums}
+
+/* Gates */
+.gates{display:flex;gap:6px;flex-wrap:wrap;margin:8px 0}
+.gate{padding:4px 10px;border-radius:12px;font-size:0.75em;font-weight:600}
+.gate.pass{background:#00ff8815;color:var(--g);border:1px solid #00ff8833}
+.gate.warn{background:#ffaa0015;color:var(--y);border:1px solid #ffaa0033}
+
+/* Chart area */
+.chart-area{height:140px;background:#0a0b10;border-radius:6px;display:flex;align-items:flex-end;gap:1px;padding:8px 4px 0;overflow:hidden}
+.chart-bar{flex:1;background:var(--g);min-width:2px;border-radius:2px 2px 0 0;transition:height 0.3s;opacity:0.7}
+.chart-bar:hover{opacity:1}
+.chart-bar.neg{background:var(--r)}
+
+/* Calibration */
+.cal-row{display:flex;align-items:center;gap:8px;padding:3px 0;font-size:0.8em}
+.cal-bar-bg{flex:1;height:10px;background:#1a1d2e;border-radius:5px;overflow:hidden;position:relative}
+.cal-bar-pred{height:100%;background:var(--b);border-radius:5px;position:absolute;top:0;left:0;opacity:0.5}
+.cal-bar-act{height:100%;background:var(--g);border-radius:5px;position:absolute;top:0;left:0}
+
+/* Waitlist */
+.wl{display:flex;gap:8px;margin-top:12px}
+.wl input{background:#0a0b10;border:1px solid var(--border);color:#fff;padding:8px 12px;border-radius:6px;font-family:inherit;font-size:0.85em;flex:1}
+.wl button{background:var(--g);color:#000;border:none;padding:8px 16px;border-radius:6px;font-family:inherit;font-weight:700;cursor:pointer;font-size:0.85em;white-space:nowrap}
+.wl button:hover{background:var(--g2)}
+
+/* Footer */
+.footer{padding:12px 24px;color:#2a2a2a;font-size:0.7em;text-align:center;border-top:1px solid #111}
+
+/* Responsive */
+@media(max-width:900px){.grid{grid-template-columns:1fr 1fr}.grid2{grid-template-columns:1fr}}
+@media(max-width:600px){.grid{grid-template-columns:1fr}}
 </style></head><body>
-<div class="hero">
-<h1>DHARMIC QUANT</h1>
-<div class="sub">The AI-Native Hedge Fund That Publishes Every Miss</div>
-<p style="color:#555;margin-top:8px">6 frontier AI agents. Every prediction Brier-scored. Radical transparency.</p>
+
+<div class="topbar">
+  <div style="display:flex;align-items:center">
+    <h1>SHAKTI GINKO</h1>
+    <span class="tag">STAGE <span id="stage">1</span>/5</span>
+    <span class="tag" style="background:#3399ff18;color:var(--b)" id="regime-tag">REGIME: —</span>
+  </div>
+  <div class="right">
+    <span><span class="live"></span> LIVE</span>
+    <span id="clock"></span>
+  </div>
 </div>
-<div class="container">
-<div class="cols">
-<div class="col"><h3>Analyze</h3><p>Regime detection + SEC 10-K filings + macro indicators. HMM, GARCH, and 6 AI agents synthesize the signal from noise.</p></div>
-<div class="col"><h3>Predict</h3><p>Every directional call is Brier-scored. No hiding losses. Predictions resolve against real market data.</p></div>
-<div class="col"><h3>Evolve</h3><p>Darwin Engine evolves agent prompts. Only the fittest strategies survive. Continuous improvement, not static rules.</p></div>
+
+<!-- Row 1: Portfolio + Brier + Autonomy -->
+<div class="grid">
+  <div class="panel">
+    <h2><span class="icon">&#9733;</span> Portfolio</h2>
+    <div class="stats" id="portfolio-stats">
+      <div class="stat green"><div class="val" id="pf-value">$100,000</div><div class="label">Total Value</div></div>
+      <div class="stat"><div class="val" id="pf-pnl">+$0</div><div class="label">P&amp;L</div></div>
+    </div>
+    <div style="margin-top:12px">
+      <div class="stats">
+        <div class="stat blue"><div class="val" id="pf-sharpe">0.00</div><div class="label">Sharpe</div></div>
+        <div class="stat yellow"><div class="val" id="pf-dd">0.0%</div><div class="label">Max DD</div></div>
+        <div class="stat"><div class="val" id="pf-trades">0</div><div class="label">Trades</div></div>
+      </div>
+    </div>
+  </div>
+
+  <div class="panel">
+    <h2><span class="icon">&#9678;</span> Brier Scorecard</h2>
+    <div class="stats">
+      <div class="stat"><div class="val" id="br-score">—</div><div class="label">Brier Score</div></div>
+      <div class="stat"><div class="val" id="br-wr">—</div><div class="label">Win Rate</div></div>
+    </div>
+    <div style="margin-top:10px" class="stats">
+      <div class="stat blue"><div class="val" id="br-total">0</div><div class="label">Total Preds</div></div>
+      <div class="stat green"><div class="val" id="br-resolved">0</div><div class="label">Resolved</div></div>
+      <div class="stat yellow"><div class="val" id="br-pending">0</div><div class="label">Pending</div></div>
+    </div>
+    <div style="margin-top:8px;font-size:0.75em;color:var(--dim)">
+      Edge: <span id="br-edge" style="font-weight:700">NOT VALIDATED</span> &mdash; Target: Brier &lt; 0.125 over 500+ predictions
+    </div>
+  </div>
+
+  <div class="panel">
+    <h2><span class="icon">&#9650;</span> Autonomy Ladder</h2>
+    <div class="ladder" id="ladder">
+      <div class="step active">1</div>
+      <div class="step future">2</div>
+      <div class="step future">3</div>
+      <div class="step future">4</div>
+      <div class="step future">5</div>
+    </div>
+    <div id="ladder-labels" style="display:flex;gap:4px;font-size:0.65em;color:var(--dim);margin-bottom:10px">
+      <div style="flex:1;text-align:center">Signal</div>
+      <div style="flex:1;text-align:center">Paper</div>
+      <div style="flex:1;text-align:center">$500</div>
+      <div style="flex:1;text-align:center">$5K</div>
+      <div style="flex:1;text-align:center">Auto</div>
+    </div>
+    <div class="gates" id="gates"></div>
+    <div style="font-size:0.75em;color:var(--dim);margin-top:6px" id="stage-gap"></div>
+  </div>
 </div>
-<div class="stats-live" id="live-stats"></div>
-<div class="dharmic">
-<h2>The Dharmic Edge</h2>
-<p style="color:#888;margin-bottom:12px">Not just a hedge fund. A governance-first approach to AI-driven finance.</p>
-<span class="gate">SATYA &mdash; Publish all scores including misses</span>
-<span class="gate">AHIMSA &mdash; No single position &gt; 5%</span>
-<span class="gate">REVERSIBILITY &mdash; Every trade has a stop loss</span>
+
+<!-- Row 2: Prediction Feed + Fleet + Calibration -->
+<div class="grid">
+  <div class="panel" style="grid-column:span 2">
+    <h2><span class="icon">&#9672;</span> Prediction Feed <span style="color:var(--dim);font-weight:400;font-size:0.8em;margin-left:auto" id="pred-count"></span></h2>
+    <div class="pred-feed" id="pred-feed"></div>
+  </div>
+
+  <div class="panel">
+    <h2><span class="icon">&#9881;</span> Agent Fleet</h2>
+    <div id="fleet"></div>
+    <div style="margin-top:12px">
+      <h2 style="margin-top:8px"><span class="icon">&#9632;</span> Calibration</h2>
+      <div id="calibration"></div>
+    </div>
+  </div>
 </div>
-<div class="waitlist">
-<h2 style="color:#00ff88;margin-bottom:15px">Join the Waitlist</h2>
-<p style="color:#888;margin-bottom:15px">Get daily intelligence reports when we launch.</p>
-<input type="email" id="wl-email" placeholder="your@email.com">
-<button onclick="joinWaitlist()">Join Waitlist</button>
-<div id="wl-msg" style="margin-top:10px;color:#00ff88"></div>
+
+<!-- Row 3: Equity Chart + Waitlist -->
+<div class="grid2">
+  <div class="panel">
+    <h2><span class="icon">&#9652;</span> Equity Curve</h2>
+    <div class="chart-area" id="equity-chart"><div style="color:var(--dim);font-size:0.8em;margin:auto">Accumulating data...</div></div>
+  </div>
+  <div class="panel">
+    <h2><span class="icon">&#10084;</span> Dharmic Edge</h2>
+    <p style="color:var(--dim);font-size:0.85em;line-height:1.6;margin-bottom:10px">
+      <em>"All wealth belongs to the Divine and those who hold it are trustees, not possessors."</em>
+      <span style="color:#444"> &mdash; Sri Aurobindo</span>
+    </p>
+    <div class="gates">
+      <span class="gate pass">SATYA &mdash; Publish every miss</span>
+      <span class="gate pass">AHIMSA &mdash; Max 5% per position</span>
+      <span class="gate pass">REVERSIBILITY &mdash; Stop loss required</span>
+    </div>
+    <div style="margin-top:16px">
+      <div style="color:var(--dim);font-size:0.8em;margin-bottom:6px">Join the waitlist for daily intelligence reports</div>
+      <div class="wl">
+        <input type="email" id="wl-email" placeholder="your@email.com">
+        <button onclick="joinWL()">Join Waitlist</button>
+      </div>
+      <div id="wl-msg" style="margin-top:6px;font-size:0.8em;color:var(--g)"></div>
+    </div>
+  </div>
 </div>
-<div class="footer">Built on dharma_swarm &mdash; 100K+ lines, 4,300+ tests. Powered by frontier AI.</div>
+
+<div class="footer">
+  Shakti Ginko &mdash; dharma_swarm (118K lines, 4,300+ tests) &mdash;
+  Four Shaktis: Maheshwari (vision) &middot; Mahakali (force) &middot; Mahalakshmi (harmony) &middot; Mahasaraswati (precision)
 </div>
+
 <script>
-async function loadLiveStats() {
-  try {
-    const [f,b] = await Promise.all([fetch('/api/fleet').then(r=>r.json()), fetch('/api/brier').then(r=>r.json())]);
-    document.getElementById('live-stats').innerHTML =
-      '<div class="sl"><div class="v">'+f.agent_count+'</div><div class="l">AI Agents</div></div>'+
-      '<div class="sl"><div class="v">'+(b.total_predictions||0)+'</div><div class="l">Predictions</div></div>'+
-      '<div class="sl"><div class="v">'+(b.overall_brier!==null&&b.overall_brier!==undefined?b.overall_brier.toFixed(4):'N/A')+'</div><div class="l">Brier Score</div></div>'+
-      '<div class="sl"><div class="v">'+((b.win_rate||0)*100).toFixed(0)+'%</div><div class="l">Win Rate</div></div>';
-  } catch(e) {}
+const $ = id => document.getElementById(id);
+const fmt = (n,d=2) => n!=null ? n.toLocaleString(undefined,{minimumFractionDigits:d,maximumFractionDigits:d}) : '—';
+const fmtUSD = n => n!=null ? (n>=0?'+':'')+'\$'+Math.abs(n).toLocaleString(undefined,{minimumFractionDigits:0,maximumFractionDigits:0}) : '—';
+
+function updateClock(){$('clock').textContent=new Date().toISOString().slice(0,19).replace('T',' ')+' UTC'}
+setInterval(updateClock,1000);updateClock();
+
+async function refresh(){
+  try{
+    const [fund,brier,fleet,preds,eq] = await Promise.all([
+      fetch('/api/fund').then(r=>r.json()),
+      fetch('/api/brier').then(r=>r.json()),
+      fetch('/api/fleet').then(r=>r.json()),
+      fetch('/api/brier/predictions').then(r=>r.json()),
+      fetch('/api/fund/equity-curve').then(r=>r.json())
+    ]);
+
+    // Portfolio
+    const tv=fund.total_value||100000, pnl=fund.total_pnl||0, pnlPct=fund.total_pnl_pct||0;
+    $('pf-value').textContent='$'+fmt(tv,0);
+    $('pf-pnl').textContent=fmtUSD(pnl)+' ('+fmt(pnlPct,2)+'%)';
+    $('pf-pnl').parentElement.className='stat '+(pnl>=0?'green':'red');
+    $('pf-sharpe').textContent=fmt(fund.sharpe_ratio||0,2);
+    $('pf-dd').textContent=fmt((fund.max_drawdown||0)*100,1)+'%';
+    $('pf-trades').textContent=fund.trade_count||0;
+
+    // Brier
+    const bs=brier.overall_brier, wr=brier.win_rate;
+    $('br-score').textContent=bs!=null?fmt(bs,4):'—';
+    $('br-score').parentElement.className='stat '+(bs!=null&&bs<0.125?'green':bs!=null&&bs<0.2?'yellow':'red');
+    $('br-wr').textContent=wr!=null?(wr*100).toFixed(0)+'%':'—';
+    $('br-wr').parentElement.className='stat '+(wr!=null&&wr>0.55?'green':'yellow');
+    $('br-total').textContent=brier.total_predictions||0;
+    $('br-resolved').textContent=brier.resolved_predictions||0;
+    $('br-pending').textContent=brier.pending_predictions||0;
+    $('br-edge').textContent=brier.edge_validated?'VALIDATED':'NOT YET';
+    $('br-edge').style.color=brier.edge_validated?'var(--g)':'var(--r)';
+
+    // Stage (read from brier thresholds)
+    const res=brier.resolved_predictions||0;
+    let stage=1;
+    if(res>=2000&&bs!=null&&bs<0.08)stage=5;
+    else if(res>=1000&&bs!=null&&bs<0.1)stage=4;
+    else if(res>=500&&bs!=null&&bs<0.125)stage=3;
+    else if(res>=100&&bs!=null&&bs<0.2)stage=2;
+    $('stage').textContent=stage;
+    const steps=$('ladder').children;
+    for(let i=0;i<5;i++){
+      steps[i].className='step '+(i<stage?'active':i===stage?'next':'future');
+    }
+    // Stage gap
+    const gaps=[];
+    if(stage<2){gaps.push('Need '+(100-res)+' more resolved');if(bs!=null&&bs>=0.2)gaps.push('Brier '+fmt(bs,4)+' > 0.20');}
+    else if(stage<3){gaps.push('Need '+(500-res)+' more resolved');if(bs!=null&&bs>=0.125)gaps.push('Brier '+fmt(bs,4)+' > 0.125');}
+    $('stage-gap').textContent=gaps.join(' | ')||'On track';
+
+    // Regime
+    // Try to extract from latest prediction metadata or use state
+    $('regime-tag').textContent='REGIME: '+(fund.regime||'UNKNOWN').toUpperCase();
+
+    // Gates
+    $('gates').innerHTML=[
+      {n:'SATYA',s:true},{n:'AHIMSA',s:true},{n:'REVERSIBILITY',s:true},
+      {n:'EDGE',s:brier.edge_validated}
+    ].map(g=>'<span class="gate '+(g.s?'pass':'warn')+'">'+g.n+'</span>').join('');
+
+    // Predictions feed
+    const allPreds=(preds.predictions||[]).slice(0,40);
+    $('pred-count').textContent=allPreds.length+' latest';
+    $('pred-feed').innerHTML=allPreds.map(p=>{
+      const tf=p.metadata?.timeframe||'24h';
+      const tfClass=tf==='4h'?'h4':tf==='7d'?'d7':'h24';
+      const prob=p.probability;
+      const pClass=prob>0.58?'high':prob<0.42?'low':'mid';
+      let statusIcon='&#8987;',statusClass='pending';
+      if(p.outcome!=null){statusIcon=p.outcome===1.0?'&#10003;':'&#10007;';statusClass=p.outcome===1.0?((prob>0.5)?'win':'loss'):((prob<0.5)?'win':'loss');}
+      const sym=p.metadata?.symbol||p.question.split(' ')[1]||'';
+      return '<div class="pred">'+
+        '<span class="tf '+tfClass+'">'+tf+'</span>'+
+        '<span style="font-weight:700;min-width:40px;color:var(--txt)">'+sym+'</span>'+
+        '<span class="q">'+p.question.replace(/Will \w+ be /,'').slice(0,45)+'</span>'+
+        '<span class="p '+pClass+'">'+(prob*100).toFixed(0)+'%</span>'+
+        '<span class="status '+statusClass+'">'+statusIcon+'</span>'+
+        '</div>';
+    }).join('');
+
+    // Fleet
+    const agents=fleet.agents||[];
+    $('fleet').innerHTML=agents.map(a=>{
+      const f=a.fitness||0;
+      const color=f>0.7?'var(--g)':f>0.4?'var(--y)':'var(--r)';
+      return '<div class="agent-row">'+
+        '<span class="name">'+(a.icon||'')+' '+a.name+'</span>'+
+        '<span class="role">'+a.role+'</span>'+
+        '<span class="fitness-val" style="color:'+color+'">'+fmt(f,2)+'</span>'+
+        '<div class="fitness-bar"><div class="fill" style="width:'+(f*100)+'%;background:'+color+'"></div></div>'+
+        '</div>';
+    }).join('');
+
+    // Calibration
+    const bins=brier.calibration_bins||[];
+    $('calibration').innerHTML=bins.map(b=>{
+      const pred=b.predicted_mean*100,act=b.actual_mean*100;
+      return '<div class="cal-row">'+
+        '<span style="min-width:30px;text-align:right;font-variant-numeric:tabular-nums">'+pred.toFixed(0)+'%</span>'+
+        '<div class="cal-bar-bg"><div class="cal-bar-pred" style="width:'+pred+'%"></div><div class="cal-bar-act" style="width:'+act+'%"></div></div>'+
+        '<span style="min-width:30px;font-variant-numeric:tabular-nums">'+act.toFixed(0)+'%</span>'+
+        '</div>';
+    }).join('')||'<div style="color:var(--dim);font-size:0.8em">Need more resolved predictions</div>';
+
+    // Equity chart
+    const curve=eq.curve||[];
+    if(curve.length>1){
+      const vals=curve.map(c=>c.daily_return||0);
+      const maxAbs=Math.max(...vals.map(Math.abs),0.001);
+      $('equity-chart').innerHTML=vals.map(v=>{
+        const h=Math.abs(v)/maxAbs*100;
+        return '<div class="chart-bar'+(v<0?' neg':'')+'" style="height:'+Math.max(h,2)+'%" title="'+(v*100).toFixed(3)+'%"></div>';
+      }).join('');
+    }
+
+  }catch(e){console.error('Refresh error:',e)}
 }
-async function joinWaitlist() {
-  const email = document.getElementById('wl-email').value;
-  const r = await fetch('/api/waitlist', {method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({email})});
-  const d = await r.json();
-  document.getElementById('wl-msg').textContent = d.success ? 'You are #'+d.count+' on the waitlist!' : d.error || 'Error';
+
+async function joinWL(){
+  const email=$('wl-email').value;
+  if(!email){$('wl-msg').textContent='Enter email';return}
+  const r=await fetch('/api/waitlist',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({email})});
+  const d=await r.json();
+  $('wl-msg').textContent=d.success?'You are #'+d.count+' on the waitlist!':d.error||'Error';
 }
-loadLiveStats();
+
+refresh();
+setInterval(refresh,5000);
 </script></body></html>"""

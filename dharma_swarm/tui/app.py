@@ -1169,6 +1169,14 @@ class DGCApp(App):
                 status.turn_count = self._session.turn_count
                 self._set_status_activity(status, "assistant")
                 self._append_chat(role="assistant", content=ev.content)
+                # Log assistant response to conversation log
+                try:
+                    from dharma_swarm.conversation_log import log_exchange
+                    log_exchange("assistant", ev.content, interface="tui",
+                                 session_id=getattr(self, "_provider_session_id", ""),
+                                 metadata={"model": getattr(self, "_active_model", "")})
+                except Exception:
+                    pass
             else:
                 self._set_status_activity(status, "progress")
 
@@ -1553,6 +1561,13 @@ class DGCApp(App):
             if notice:
                 return
             output.write_user(text)
+            # Log user input to conversation log
+            try:
+                from dharma_swarm.conversation_log import log_exchange
+                log_exchange("user", text, interface="tui",
+                             session_id=getattr(self, "_provider_session_id", ""))
+            except Exception:
+                pass
             if self._maybe_handle_inline_model_switch(text):
                 return
             self._send_to_claude(text)

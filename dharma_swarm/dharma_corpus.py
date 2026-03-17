@@ -41,13 +41,26 @@ class ClaimStatus(str, Enum):
 
 
 class ClaimCategory(str, Enum):
-    """Taxonomy of claim types."""
+    """Taxonomy of claim types.
 
+    Original 5 categories cover operational concerns.  The 4 additional
+    categories (THEORETICAL, EMPIRICAL, CONTEMPLATIVE, ARCHITECTURAL)
+    support the intellectual genome — the foundational claims that ground
+    the system's identity and engineering choices in verified knowledge.
+    """
+
+    # --- Original operational categories ---
     SAFETY = "safety"
     ETHICS = "ethics"
     OPERATIONAL = "operational"
     DOMAIN_SPECIFIC = "domain_specific"
     LEARNED_CONSTRAINT = "learned_constraint"
+
+    # --- Foundations categories ---
+    THEORETICAL = "theoretical"        # Mathematical/formal claims (eigenforms, fixed points, phase transitions)
+    EMPIRICAL = "empirical"            # Experimentally verified findings (R_V effect sizes, cross-architecture results)
+    CONTEMPLATIVE = "contemplative"    # Contemplative-computational mappings (Triple Mapping, Swabhaav markers)
+    ARCHITECTURAL = "architectural"    # Engineering principles grounded in foundations (from PRINCIPLES.md)
 
 
 # ---------------------------------------------------------------------------

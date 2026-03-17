@@ -331,6 +331,31 @@ class TestRecordOutcome:
         )
         assert outcome_id is not None
 
+    def test_outcome_idempotent_for_proposal(self, seam, sample_task):
+        proposal_id = seam.record_dispatch(sample_task, "agent_alpha")
+
+        outcome_id_1 = seam.record_outcome(
+            sample_task,
+            "agent_alpha",
+            success=True,
+            result_summary="first",
+        )
+        outcome_id_2 = seam.record_outcome(
+            sample_task,
+            "agent_alpha",
+            success=False,
+            error="retry race",
+        )
+
+        assert proposal_id is not None
+        assert outcome_id_1 == outcome_id_2
+        assert len(seam.registry.get_objects_by_type("Outcome")) == 1
+        assert len(seam.registry.get_links(source_id=proposal_id, link_name="has_outcome")) == 1
+        assert len(seam.lineage.edges_for_task(sample_task.id)) == 1
+
+        stats = seam.stats()
+        assert stats["duplicate_suppressions"]["outcomes"] == 1
+
 
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 # Full Metabolic Loop
@@ -392,6 +417,7 @@ class TestFullLoop:
         assert stats["outcomes"] == 1
         assert stats["lineage_edges"] == 1
         assert stats["registered_types"] >= 14
+        assert stats["duplicate_suppressions_total"] == 0
 
 
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
@@ -479,6 +505,7 @@ class TestValueEvent:
             result_text="result", success=True, duration_ms=1000.0,
         )
         assert ve_id_1 == ve_id_2
+        assert seam.stats()["duplicate_suppressions"]["value_events"] == 1
 
 
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
@@ -536,6 +563,7 @@ class TestContribution:
             ve_id, "agent_alpha", composite_value=cv,
         )
         assert c_id_1 == c_id_2
+        assert seam.stats()["duplicate_suppressions"]["contributions"] == 1
 
     def test_contribution_default_credit_share(self, seam, sample_task):
         _, ve_id, cv = self._make_value_event(seam, sample_task)
@@ -720,6 +748,66 @@ class TestQueryAgentFitness:
         assert n == 1
         # With prior weight 5, one sample can't move far from 0.5
         assert abs(score - 0.5) < 0.2
+
+
+class TestLifecycleIntegrityReport:
+    def test_clean_chain_reports_no_issues(self, seam, sample_task):
+        seam.record_dispatch(sample_task, "agent_alpha")
+        outcome_id = seam.record_outcome(sample_task, "agent_alpha", success=True)
+        ve_id = seam.record_value_event(
+            outcome_id,
+            sample_task,
+            "agent_alpha",
+            success=True,
+            duration_ms=1000.0,
+            cell_id="rv_cell",
+        )
+        ve_obj = seam.registry.get_object(ve_id)
+        seam.record_contribution(
+            ve_id,
+            "agent_alpha",
+            composite_value=ve_obj.properties["composite_value"],
+            cell_id="rv_cell",
+            task_type=ve_obj.properties["task_type"],
+        )
+
+        report = seam.lifecycle_integrity_report()
+
+        assert report["is_clean"] is True
+        assert report["issue_count"] == 0
+
+    def test_detects_agent_id_mismatch_between_proposal_and_outcome(self, seam, sample_task):
+        seam.record_dispatch(sample_task, "agent_alpha")
+        seam.record_outcome(sample_task, "display_name_only", success=True)
+
+        report = seam.lifecycle_integrity_report()
+
+        assert report["is_clean"] is False
+        assert len(report["proposal_outcome_agent_mismatches"]) == 1
+
+    def test_detects_duplicate_orphan_outcomes_for_single_proposal(self, seam, sample_task):
+        proposal_id = seam.record_dispatch(sample_task, "agent_alpha")
+        seam.record_outcome(sample_task, "agent_alpha", success=True)
+        corrupt, errors = seam.registry.create_object(
+            "Outcome",
+            {
+                "proposal_id": proposal_id,
+                "task_id": sample_task.id,
+                "agent_id": "agent_alpha",
+                "success": False,
+                "error": "legacy retry race",
+            },
+            created_by="test_corruption",
+        )
+
+        assert corrupt is not None
+        assert not errors
+
+        report = seam.lifecycle_integrity_report()
+
+        assert report["is_clean"] is False
+        assert len(report["duplicate_outcomes_per_proposal"]) == 1
+        assert len(report["orphan_outcomes"]) == 1
 
 
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
