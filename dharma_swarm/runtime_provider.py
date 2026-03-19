@@ -29,14 +29,18 @@ DEFAULT_NIM_MODEL = "meta/llama-3.3-70b-instruct"
 DEFAULT_PROVIDER_TIMEOUT_SECONDS = 300
 
 DEFAULT_RUNTIME_PROVIDERS: tuple[ProviderType, ...] = (
-    ProviderType.ANTHROPIC,
-    ProviderType.OPENAI,
-    ProviderType.OPENROUTER,
-    ProviderType.NVIDIA_NIM,
+    # FREE providers first — this order is a hard constraint, not a suggestion.
+    # See: tap/providers.py for the canonical rationale.
+    ProviderType.OLLAMA,           # Free: Ollama Cloud (kimi-k2.5, glm-5)
+    ProviderType.NVIDIA_NIM,       # Free: NVIDIA NIM (llama-3.3-70b)
+    ProviderType.OPENROUTER_FREE,  # Free: OpenRouter free tier
+    # Subprocess providers (use existing Claude/Codex auth)
     ProviderType.CLAUDE_CODE,
     ProviderType.CODEX,
-    ProviderType.OPENROUTER_FREE,
-    ProviderType.OLLAMA,
+    # PAID providers — overflow only
+    ProviderType.OPENROUTER,
+    ProviderType.ANTHROPIC,
+    ProviderType.OPENAI,
 )
 
 
@@ -60,6 +64,13 @@ def _env_value(env: Mapping[str, str], key: str) -> str | None:
     return value or None
 
 
+def _normalized_value(value: Any) -> str | None:
+    if value is None:
+        return None
+    normalized = str(value).strip()
+    return normalized or None
+
+
 def resolve_runtime_provider_config(
     provider: ProviderType,
     *,
@@ -74,50 +85,54 @@ def resolve_runtime_provider_config(
 
     env_map = env or os.environ
     timeout = int(timeout_seconds or DEFAULT_PROVIDER_TIMEOUT_SECONDS)
-    cwd = str(Path(working_dir or os.getcwd()))
+    resolved_model = _normalized_value(model)
+    resolved_api_key = _normalized_value(api_key)
+    resolved_base_url = _normalized_value(base_url)
+    resolved_working_dir = _normalized_value(working_dir)
+    cwd = str(Path(resolved_working_dir or os.getcwd()))
 
     if provider == ProviderType.ANTHROPIC:
-        token = api_key or _env_value(env_map, "ANTHROPIC_API_KEY")
+        token = resolved_api_key or _env_value(env_map, "ANTHROPIC_API_KEY")
         return RuntimeProviderConfig(
             provider=provider,
             api_key=token,
-            default_model=model or DEFAULT_CLAUDE_MODEL,
+            default_model=resolved_model or DEFAULT_CLAUDE_MODEL,
             available=bool(token),
         )
 
     if provider == ProviderType.OPENAI:
-        token = api_key or _env_value(env_map, "OPENAI_API_KEY")
+        token = resolved_api_key or _env_value(env_map, "OPENAI_API_KEY")
         return RuntimeProviderConfig(
             provider=provider,
             api_key=token,
-            default_model=model or DEFAULT_OPENAI_MODEL,
+            default_model=resolved_model or DEFAULT_OPENAI_MODEL,
             available=bool(token),
         )
 
     if provider == ProviderType.OPENROUTER:
-        token = api_key or _env_value(env_map, "OPENROUTER_API_KEY")
+        token = resolved_api_key or _env_value(env_map, "OPENROUTER_API_KEY")
         return RuntimeProviderConfig(
             provider=provider,
             api_key=token,
-            base_url=(base_url or OPENROUTER_BASE_URL).rstrip("/"),
-            default_model=model or DEFAULT_OPENROUTER_MODEL,
+            base_url=(resolved_base_url or OPENROUTER_BASE_URL).rstrip("/"),
+            default_model=resolved_model or DEFAULT_OPENROUTER_MODEL,
             available=bool(token),
         )
 
     if provider == ProviderType.OPENROUTER_FREE:
-        token = api_key or _env_value(env_map, "OPENROUTER_API_KEY")
+        token = resolved_api_key or _env_value(env_map, "OPENROUTER_API_KEY")
         return RuntimeProviderConfig(
             provider=provider,
             api_key=token,
-            base_url=(base_url or OPENROUTER_BASE_URL).rstrip("/"),
-            default_model=model,
+            base_url=(resolved_base_url or OPENROUTER_BASE_URL).rstrip("/"),
+            default_model=resolved_model,
             available=bool(token),
         )
 
     if provider == ProviderType.NVIDIA_NIM:
-        token = api_key or _env_value(env_map, "NVIDIA_NIM_API_KEY")
+        token = resolved_api_key or _env_value(env_map, "NVIDIA_NIM_API_KEY")
         resolved_base = (
-            base_url
+            resolved_base_url
             or _env_value(env_map, "NVIDIA_NIM_BASE_URL")
             or NVIDIA_NIM_BASE_URL
         ).rstrip("/")
@@ -125,15 +140,15 @@ def resolve_runtime_provider_config(
             provider=provider,
             api_key=token,
             base_url=resolved_base,
-            default_model=model or DEFAULT_NIM_MODEL,
+            default_model=resolved_model or DEFAULT_NIM_MODEL,
             available=bool(token),
         )
 
     if provider == ProviderType.OLLAMA:
-        token = api_key or _env_value(env_map, "OLLAMA_API_KEY")
-        resolved_base = resolve_ollama_base_url(base_url=base_url, api_key=token)
+        token = resolved_api_key or _env_value(env_map, "OLLAMA_API_KEY")
+        resolved_base = resolve_ollama_base_url(base_url=resolved_base_url, api_key=token)
         resolved_model = resolve_ollama_model(
-            model,
+            resolved_model,
             base_url=resolved_base,
             api_key=token,
         )
@@ -164,7 +179,7 @@ def resolve_runtime_provider_config(
         binary = shutil.which("claude")
         return RuntimeProviderConfig(
             provider=provider,
-            default_model=model or DEFAULT_CLAUDE_MODEL,
+            default_model=resolved_model or DEFAULT_CLAUDE_MODEL,
             working_dir=cwd,
             timeout_seconds=timeout,
             binary_path=binary,
@@ -176,7 +191,11 @@ def resolve_runtime_provider_config(
         binary = shutil.which("codex")
         return RuntimeProviderConfig(
             provider=provider,
-            default_model=model or _env_value(env_map, "DGC_DIRECTOR_CODEX_MODEL") or "gpt-5.4",
+            default_model=(
+                resolved_model
+                or _env_value(env_map, "DGC_DIRECTOR_CODEX_MODEL")
+                or "gpt-5.4"
+            ),
             working_dir=cwd,
             timeout_seconds=timeout,
             binary_path=binary,
@@ -215,6 +234,8 @@ def create_runtime_provider(config: RuntimeProviderConfig) -> Any:
         kwargs = {}
         if config.api_key is not None:
             kwargs["api_key"] = config.api_key
+        if config.base_url is not None:
+            kwargs["base_url"] = config.base_url
         return OpenRouterProvider(**kwargs)
     if config.provider == ProviderType.OPENROUTER_FREE:
         kwargs = {}
@@ -222,6 +243,8 @@ def create_runtime_provider(config: RuntimeProviderConfig) -> Any:
             kwargs["api_key"] = config.api_key
         if config.default_model is not None:
             kwargs["model"] = config.default_model
+        if config.base_url is not None:
+            kwargs["base_url"] = config.base_url
         return OpenRouterFreeProvider(**kwargs)
     if config.provider == ProviderType.NVIDIA_NIM:
         kwargs = {"default_model": config.default_model or DEFAULT_NIM_MODEL}

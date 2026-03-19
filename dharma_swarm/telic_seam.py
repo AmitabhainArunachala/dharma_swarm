@@ -609,6 +609,12 @@ def get_seam() -> TelicSeam:
     return _SEAM
 
 
+def _set_seam(seam: TelicSeam) -> None:
+    """Install a pre-configured TelicSeam as the module singleton."""
+    global _SEAM
+    _SEAM = seam
+
+
 def reset_seam() -> None:
     """Reset the singleton (for testing)."""
     global _SEAM

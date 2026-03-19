@@ -442,7 +442,7 @@ def _check_doctor_schedule(checks: list[DoctorCheck]) -> None:
 
 
 def _check_env_autoload(checks: list[DoctorCheck]) -> None:
-    cli_path = HOME / "dharma_swarm" / "dharma_swarm" / "dgc_cli.py"
+    cli_path = Path(__file__).resolve().with_name("dgc_cli.py")
     cli_has_bootstrap = False
     if cli_path.exists():
         try:

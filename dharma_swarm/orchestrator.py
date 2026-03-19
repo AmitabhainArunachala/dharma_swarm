@@ -81,6 +81,7 @@ class Orchestrator:
         session_id: str | None = None,
         event_memory: Any = None,
         yoga: YogaScheduler | None = None,
+        telic_seam: Any = None,
     ) -> None:
         from dharma_swarm.config import DEFAULT_CONFIG
         _cfg = DEFAULT_CONFIG.orchestrator
@@ -90,6 +91,7 @@ class Orchestrator:
         self._bus = message_bus
         self._event_memory = event_memory
         self._yoga = yoga
+        self._telic_seam = telic_seam
         self._ledger = ledger or SessionLedger(
             base_dir=ledger_dir,
             session_id=session_id,
@@ -192,6 +194,14 @@ class Orchestrator:
         dispatches: list[TaskDispatch] = []
         available = list(idle)
         for task in ready:
+            # Semantic intent analysis (best-effort)
+            import os as _os
+            if _os.getenv("ENABLE_INTENT_ROUTING", "1").lower() not in ("0", "false", "no"):
+                try:
+                    self._enrich_task_with_intent(task)
+                except Exception:
+                    pass  # Intent enrichment is never fatal
+
             agent = self._select_idle_agent(task, available)
             if agent is None:
                 break
@@ -600,6 +610,24 @@ class Orchestrator:
         td.metadata["claim_expires_monotonic"] = time.monotonic() + claim_timeout_seconds
         td.metadata["retry_count"] = retry_count
         td.metadata["max_retries"] = max_retries
+
+        # Inject coordination context for agent awareness
+        try:
+            coord = self._last_coordination_result
+            if coord is not None:
+                context_lines = []
+                if coord.global_truths:
+                    truths = [d.content[:100] for d in coord.global_truths[:3]]
+                    context_lines.append("Agreed: " + "; ".join(truths))
+                if coord.productive_disagreements:
+                    keys = [h.claim_key for h in coord.productive_disagreements[:3]]
+                    context_lines.append("Debated: " + ", ".join(keys))
+                if context_lines:
+                    meta["coordination_context"] = "\n".join(context_lines)
+                    meta["coordination_coherent"] = coord.is_globally_coherent
+        except Exception:
+            pass  # Context injection is never fatal
+
         return meta
 
     def _memory_plane_db_path(self, task: Task | None) -> Path | None:
@@ -694,6 +722,40 @@ class Orchestrator:
             return ["reviewer", "researcher", "general"]
         return []
 
+    _SKILL_TO_ROLE: dict[str, str] = {
+        "cartographer": "cartographer",
+        "surgeon": "surgeon",
+        "architect": "architect",
+        "archeologist": "archeologist",
+        "validator": "validator",
+        "researcher": "researcher",
+        "builder": "coder",
+        "deployer": "coder",
+        "monitor": "general",
+    }
+
+    def _enrich_task_with_intent(self, task: Task) -> None:
+        """Run IntentRouter on task, inject results into metadata."""
+        meta = task.metadata if isinstance(task.metadata, dict) else {}
+        if meta.get("intent_analyzed"):
+            return  # Idempotent
+
+        from dharma_swarm.intent_router import IntentRouter
+        router = IntentRouter(enable_semantic=True)
+        intent = router.analyze(task.title + " " + (task.description or ""))
+
+        preferred_role = self._SKILL_TO_ROLE.get(intent.primary_skill, "")
+        existing_roles = meta.get("coordination_preferred_roles", [])
+        if preferred_role and not existing_roles:
+            meta["coordination_preferred_roles"] = [preferred_role]
+
+        meta["intent_analyzed"] = True
+        meta["intent_skill"] = intent.primary_skill
+        meta["intent_confidence"] = round(intent.confidence, 3)
+        meta["intent_complexity"] = intent.complexity
+        meta["intent_risk"] = intent.risk_level
+        task.metadata = meta
+
     _EXPLORATION_RATE = 0.1  # 10% random exploration
 
     def _select_idle_agent(
@@ -738,15 +800,28 @@ class Orchestrator:
         if len(candidates) <= 1:
             return candidates[0] if candidates else None
 
-        # Feature flag: ENABLE_FITNESS_ROUTING (default off until enough data)
+        # Resolve seam: prefer passed instance, fall back to module singleton
+        seam = getattr(self, "_telic_seam", None)
+        if seam is None:
+            from dharma_swarm.telic_seam import get_seam
+            seam = get_seam()
+
+        # Feature flag: ENABLE_FITNESS_ROUTING (default auto)
         import os
-        if os.getenv("ENABLE_FITNESS_ROUTING", "").lower() not in ("1", "true", "yes"):
-            return None  # Falls through to FIFO
+        flag = os.getenv("ENABLE_FITNESS_ROUTING", "auto").lower()
+        if flag in ("0", "false", "no"):
+            return None  # Explicitly disabled
+        if flag not in ("1", "true", "yes"):
+            # Auto-enable when seam has contribution data
+            try:
+                stats = seam.stats()
+                if stats.get("contributions", 0) < 1:
+                    return None  # No fitness data yet — stay FIFO
+            except Exception:
+                return None
 
         try:
             import random
-            from dharma_swarm.telic_seam import get_seam
-            seam = get_seam()
 
             # Exploration: 10% of the time, pick randomly
             if random.random() < self._EXPLORATION_RATE:
@@ -1248,6 +1323,24 @@ class Orchestrator:
             if discovery is not None:
                 protocol.publish(discovery.agent_id, [discovery])
 
+        # Bridge high-salience stigmergy marks into sheaf discoveries
+        try:
+            from dharma_swarm.stigmergy import StigmergyStore
+            store = StigmergyStore()
+            high_marks = await store.high_salience(threshold=0.6, limit=10)
+            for mark in high_marks:
+                if mark.agent in agent_ids:
+                    stig_discovery = Discovery(
+                        agent_id=mark.agent,
+                        claim_key=f"stigmergy:{mark.file_path}",
+                        content=mark.observation,
+                        confidence=mark.salience,
+                        perspective="stigmergy",
+                    )
+                    protocol.publish(mark.agent, [stig_discovery])
+        except Exception as exc:
+            logger.debug("Stigmergy-sheaf bridge failed: %s", exc)
+
         result = protocol.coordinate()
         self._last_coordination_result = result.model_copy(deep=True)
         summary = {
@@ -1449,8 +1542,11 @@ class Orchestrator:
         proposal_id: str | None = None
         if task_for_gate is not None:
             try:
-                from dharma_swarm.telic_seam import get_seam
-                proposal_id = get_seam().record_dispatch(
+                _seam = self._telic_seam
+                if _seam is None:
+                    from dharma_swarm.telic_seam import get_seam
+                    _seam = get_seam()
+                proposal_id = _seam.record_dispatch(
                     task_for_gate, td.agent_id,
                     topology=td.topology.value if td.topology else "dispatch",
                 )
@@ -1480,8 +1576,11 @@ class Orchestrator:
         # ── Telic Seam: record GateDecision in ontology ──
         if proposal_id is not None:
             try:
-                from dharma_swarm.telic_seam import get_seam
-                get_seam().record_gate_decision(
+                _seam2 = self._telic_seam
+                if _seam2 is None:
+                    from dharma_swarm.telic_seam import get_seam
+                    _seam2 = get_seam()
+                _seam2.record_gate_decision(
                     proposal_id, gate.result,
                     witness_reroutes=gate.attempts,
                 )

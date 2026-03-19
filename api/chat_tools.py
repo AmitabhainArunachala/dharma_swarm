@@ -346,7 +346,15 @@ TOOL_DEFINITIONS = [
                     },
                     "role": {
                         "type": "string",
-                        "description": "Role for new agent (for spawn)",
+                        "description": "Role for new agent (for spawn). Valid: coder, reviewer, researcher, tester, orchestrator, general, cartographer, archeologist, surgeon, architect, validator, conductor",
+                    },
+                    "model": {
+                        "type": "string",
+                        "description": "Model ID for new agent (for spawn), e.g. 'glm-5', 'meta-llama/llama-3.3-70b-instruct:free'",
+                    },
+                    "provider": {
+                        "type": "string",
+                        "description": "Provider for new agent (for spawn), e.g. 'ollama_cloud', 'openrouter', 'nvidia_nim', 'claude_code'",
                     },
                 },
                 "required": ["action"],
@@ -543,11 +551,13 @@ async def exec_swarm_status(args: dict) -> str:
         try:
             report = await monitor.check_health()
             hs = report.overall_status.value if hasattr(report.overall_status, "value") else str(report.overall_status)
+            mean_fitness = getattr(report, "mean_fitness", None)
+            mean_fitness_str = f"{mean_fitness:.4f}" if isinstance(mean_fitness, (int, float)) else "n/a"
             parts.append(
                 f"\nHealth: {hs}, {report.total_traces} total traces, "
                 f"{report.traces_last_hour} last hour, "
                 f"failure_rate={report.failure_rate:.2%}, "
-                f"mean_fitness={report.mean_fitness:.4f}"
+                f"mean_fitness={mean_fitness_str}"
             )
             if include_anomalies and report.anomalies:
                 parts.append("\nAnomalies:")
@@ -564,7 +574,8 @@ async def exec_swarm_status(args: dict) -> str:
                 traces = await trace_store.get_recent(limit=20)
                 parts.append("\nRecent traces:")
                 for t in traces:
-                    parts.append(f"  [{t.timestamp}] {t.agent_id} — {t.action} → {t.state}")
+                    agent_name = getattr(t, "agent", getattr(t, "agent_id", "?"))
+                    parts.append(f"  [{t.timestamp}] {agent_name} — {t.action} → {t.state}")
             except Exception as e:
                 parts.append(f"Traces error: {e}")
 
@@ -724,7 +735,8 @@ async def exec_trace_query(args: dict) -> str:
 
         filtered = []
         for t in traces:
-            if agent_filter and agent_filter.lower() not in getattr(t, "agent_id", "").lower():
+            agent_name = getattr(t, "agent", getattr(t, "agent_id", ""))
+            if agent_filter and agent_filter.lower() not in agent_name.lower():
                 continue
             if action_filter and action_filter.lower() not in getattr(t, "action", "").lower():
                 continue
@@ -737,7 +749,7 @@ async def exec_trace_query(args: dict) -> str:
             entry = {
                 "id": getattr(t, "id", "?"),
                 "timestamp": str(getattr(t, "timestamp", "")),
-                "agent": getattr(t, "agent_id", "?"),
+                "agent": getattr(t, "agent", getattr(t, "agent_id", "?")),
                 "action": getattr(t, "action", "?"),
                 "state": getattr(t, "state", "?"),
                 "metadata": getattr(t, "metadata", {}),
@@ -755,12 +767,29 @@ async def exec_agent_control(args: dict) -> str:
         swarm = get_swarm()
 
         if action == "spawn":
+            from dharma_swarm.models import AgentRole, ProviderType
             name = args.get("name", "")
-            role = args.get("role", "researcher")
+            role_str = args.get("role", "researcher")
+            model = args.get("model", "")
+            provider_str = args.get("provider", "")
             if not name:
                 return "ERROR: name is required for spawn"
-            agent = await swarm.spawn_agent(name=name, role=role)
-            return f"OK: Spawned agent '{name}' with role '{role}', id={getattr(agent, 'id', '?')}"
+            try:
+                role = AgentRole(role_str)
+            except ValueError:
+                valid_roles = [r.value for r in AgentRole]
+                return f"ERROR: Invalid role '{role_str}'. Valid roles: {valid_roles}"
+            # Resolve provider
+            spawn_kwargs: dict = {"name": name, "role": role}
+            if model:
+                spawn_kwargs["model"] = model
+            if provider_str:
+                try:
+                    spawn_kwargs["provider_type"] = ProviderType(provider_str)
+                except ValueError:
+                    pass
+            agent = await swarm.spawn_agent(**spawn_kwargs)
+            return f"OK: Spawned agent '{name}' with role '{role.value}', id={getattr(agent, 'id', '?')}"
 
         elif action == "stop":
             agent_id = args.get("agent_id", "")

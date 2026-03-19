@@ -1,0 +1,61 @@
+# SELF.md — DHARMA SWARM Self-Model
+
+Append-only observations from the live autoresearch runner.
+Until a locked `evaluate.py` exists, all Ω/Ψ values in this file are provisional proxies.
+
+## Observations
+- 2026-03-18T04:46:43Z cycle 001 [baseline] Ω≈1.0000 Ψ≈0.9000: Verification-path bugs in new runtime modules are paying off as a high-leverage overnight slice because they improve both loop continuity and internal telemetry fidelity with small, testable edits.
+- 2026-03-18T04:50:11Z cycle 002 [stagnating] Ω≈1.0000 Ψ≈0.9840: Small verifier heuristics around prediction-error accounting are a strong overnight leverage point because they improve downstream loop fidelity without touching broad orchestration code.
+- 2026-03-18T04:54:17Z cycle 003 [stagnating] Ω≈1.0000 Ψ≈0.9800: Commit-path semantics are a high-leverage overnight seam because a small execution-state bug can silently poison downstream verifier and loop-control signals.
+- 2026-03-18T04:58:04Z cycle 004 [stagnating] Ω≈1.0000 Ψ≈0.9840: Failed verification can corrupt adaptive state even when execution accounting is correct, so learning-path guards deserve their own focused hardening.
+- 2026-03-18T05:02:38Z cycle 005 [stagnating] Ω≈1.0000 Ψ≈0.9800: The overnight runner itself is a high-leverage control surface; enforcing structured outputs there prevents downstream autoresearch drift even when agent execution fails early.
+- 2026-03-18T05:05:46Z cycle 006 [stagnating] Ω≈1.0000 Ψ≈0.9800: Environmental-context code is a leverage point where small conditional mistakes can invert safety posture; treat bridge logic as control-surface code and lock it with regression tests.
+- 2026-03-18T09:11:00Z cycle 001 [baseline] Ω≈0.8499 Ψ≈0.5069: When the tracked suite is already green, scanning new-module tests for concrete failures is the fastest path to a bounded, high-value fix.
+- 2026-03-18T09:21:27Z cycle 001 [baseline] Ω≈0.8500 Ψ≈0.7416: Evaluator-ingestion paths need explicit fallback tests, not just happy-path JSON coverage.
+- 2026-03-18T09:26:43Z cycle 002 [converging] Ω≈0.8515 Ψ≈0.7095: Partial-expectation paths in reliability code need dedicated tests because “any expectation present” often masks default safety behavior.
+- 2026-03-18T09:33:24Z cycle 003 [stagnating] Ω≈0.8502 Ψ≈0.7639: Fake-home isolation can break repo-local state assumptions unless shared runtime paths are explicitly re-rooted.
+- 2026-03-18T09:38:19Z cycle 004 [stagnating] Ω≈0.8443 Ψ≈0.7528: New prompt-plumbing features need interface-compatibility checks around internal test seams, not just happy-path coverage.
+- 2026-03-18T09:41:31Z cycle 005 [converging] Ω≈0.8483 Ψ≈0.7068: Managed runtime shims need migration-state tests, not just clean-install tests.
+- 2026-03-18T09:44:32Z cycle 006 [converging] Ω≈0.8501 Ψ≈0.7821: Managed runtime files need the same symlink-safety treatment as managed copied state, not just the copied entries themselves.
+- 2026-03-18T09:48:05Z cycle 007 [converging] Ω≈0.8516 Ψ≈0.8121: Slow-path orchestration needs explicit relevance scoping whenever buffered intelligence is reused across actions.
+- 2026-03-18T09:52:53Z cycle 008 [oscillating] Ω≈0.8479 Ψ≈0.8219: Sidecar outputs should be merged as complementary artifacts when one format omits operator-facing fields.
+- 2026-03-18T09:56:30Z cycle 009 [converging] Ω≈0.8516 Ψ≈0.8026: New protocol-layer integrations need tests for both metadata propagation and graceful degradation, not just the nominal serialization path.
+- 2026-03-18T10:00:57Z cycle 010 [oscillating] Ω≈0.8475 Ψ≈0.8239: State-file readers in unattended loops should validate shape, not just parseability.
+- 2026-03-18T10:05:23Z cycle 011 [converging] Ω≈0.8492 Ψ≈0.8143: In unattended orchestrators, cheap probe steps should explicitly gate expensive follow-up work rather than letting stale filesystem triggers drive cascades after probe failure.
+- 2026-03-18T10:08:27Z cycle 012 [regressing] Ω≈0.8211 Ψ≈0.8255: Boundary-condition bugs in autonomy guardrails are worth prioritizing because they silently turn safety controls into throughput regressions.
+- 2026-03-18T10:11:48Z cycle 013 [converging] Ω≈0.8492 Ψ≈0.7905: Overnight reliability work benefits from checking timestamp semantics explicitly, because budget bugs often hide behind otherwise green orchestration tests.
+- 2026-03-18T10:16:24Z cycle 014 [oscillating] Ω≈0.8491 Ψ≈0.8013: Budget and reliability bugs recur at day-boundary seams, so timestamp semantics are worth checking explicitly on long-running automation paths.
+- 2026-03-18T10:21:27Z cycle 015 [oscillating] Ω≈0.8488 Ψ≈0.7956: Long-running autonomy loops are especially sensitive to torn local state, so replace-based writes on checkpoint files are worth hardening even when the happy-path tests are green.
+- 2026-03-18T10:25:30Z cycle 016 [oscillating] Ω≈0.8318 Ψ≈0.7910: Adjacent unattended daemons often share the same torn-write failure mode, so durability fixes should propagate across all checkpoint-producing loops, not just the primary overnight runner.
+- 2026-03-18T10:29:30Z cycle 017 [converging] Ω≈0.8469 Ψ≈0.7814: One-shot autonomy entrypoints need to surface cycle failure through process exit codes, not just append-only artifacts.
+- 2026-03-18T10:34:20Z cycle 018 [converging] Ω≈0.8474 Ψ≈0.7938: Append-only runtime ledgers need tolerant parsing because persistence drift can otherwise take down unrelated control flow.
+- 2026-03-18T10:39:25Z cycle 019 [oscillating] Ω≈0.8427 Ψ≈0.8038: Persisted autonomous-run state needs tolerant numeric coercion because append-only logs do drift in type shape over time.
+- 2026-03-18T10:44:05Z cycle 020 [converging] Ω≈0.8465 Ψ≈0.7960: Append-only operational logs need explicit timestamp normalization at ingestion boundaries because mixed ISO formats are normal in long-running autonomy loops.
+- 2026-03-18T10:48:44Z cycle 021 [converging] Ω≈0.8481 Ψ≈0.8044: New optional semantic layers need local degradation paths at the call boundary, not just import-time fallbacks.
+- 2026-03-18T10:56:26Z cycle 022 [oscillating] Ω≈0.8386 Ψ≈0.8126: Append-only overnight artifacts need the same concurrency hardening as checkpoint files; “append-only” is not automatically safe.
+- 2026-03-18T10:59:56Z cycle 023 [converging] Ω≈0.8466 Ψ≈0.8078: New append-only ledgers introduced by unattended daemons need the same concurrency hardening review as reports and checkpoints.
+- 2026-03-18T11:03:10Z cycle 024 [oscillating] Ω≈0.8443 Ψ≈0.8162: New append-only runtime ledgers should be reviewed immediately for lock-and-durability semantics, not after broader integration lands.
+- 2026-03-18T11:07:17Z cycle 025 [converging] Ω≈0.8445 Ψ≈0.8121: Shared append-only coordination logs should get durability hardening as soon as they become cross-agent runtime state.
+- 2026-03-18T11:12:05Z cycle 026 [converging] Ω≈0.8458 Ψ≈0.8186: Sliding-window guards need explicit checks for stale cumulative state when downstream runtimes do not automatically reset them.
+- 2026-03-18T11:17:30Z cycle 027 [converging] Ω≈0.8475 Ψ≈0.8247: Second-level timestamps are not sufficient as unique orchestration keys; launch state needs exclusive allocation semantics.
+- 2026-03-18T11:22:59Z cycle 028 [oscillating] Ω≈0.8440 Ψ≈0.8287: Run metadata needs an in-memory baseline whenever long-lived orchestration state is rewritten from disk.
+- 2026-03-18T11:27:00Z cycle 029 [converging] Ω≈0.8454 Ψ≈0.8232: Safety scans that rely on token-prefix heuristics need one normalized matcher shared across all execution paths.
+- 2026-03-18T11:32:43Z cycle 030 [converging] Ω≈0.8466 Ψ≈0.8288: Overnight artifact fidelity depends on choosing the richest structured summary source, not a fixed channel.
+- 2026-03-18T11:37:36Z cycle 031 [oscillating] Ω≈0.8453 Ψ≈0.8338: Summary-source arbitration should score meaningful content, not just field presence.
+- 2026-03-18T11:41:10Z cycle 032 [converging] Ω≈0.8458 Ψ≈0.8304: Centralized config seams are high-leverage overnight targets because one normalization fix protects multiple provider backends.
+- 2026-03-18T11:46:39Z cycle 033 [oscillating] Ω≈0.8458 Ψ≈0.8353: Parser-boundary hardening is a strong overnight tactic because one finite-value check protects multiple downstream decision paths.
+- 2026-03-18T11:51:31Z cycle 034 [converging] Ω≈0.8471 Ψ≈0.8327: Boundary hardening on numeric metadata is a good overnight slice because one finite-value guard stabilizes multiple downstream routing fields at once.
+- 2026-03-18T11:59:08Z cycle 035 [oscillating] Ω≈0.8460 Ψ≈0.8372: The locked scorer is a high-leverage ingestion boundary; rejecting non-finite numerics there prevents false confidence from spreading into both metrics and operator-facing summaries.
+- 2026-03-18T12:05:53Z cycle 036 [converging] Ω≈0.8482 Ψ≈0.8343: Append-only accounting ledgers need validation on replay as much as on write; otherwise one corrupt row can silently distort runtime policy.
+- 2026-03-18T12:12:32Z cycle 037 [converging] Ω≈0.8497 Ψ≈0.8385: Green targeted suites can still hide runtime-policy fragility; static inspection of ledger consumers remains a high-yield follow-up after test sampling.
+- 2026-03-18T12:18:34Z cycle 038 [oscillating] Ω≈0.8471 Ψ≈0.8420: Cross-checking neighboring ledger consumers after a poison-data fix keeps the overnight loop from stopping at a single hardened entrypoint.
+- 2026-03-18T12:26:29Z cycle 039 [converging] Ω≈0.8495 Ψ≈0.8386: Cross-checking detectors against the actual producer schemas exposed a high-leverage integration gap that unit tests using only legacy fixtures had missed.
+- 2026-03-18T12:36:06Z cycle 040 [oscillating] Ω≈0.8406 Ψ≈0.0582: Cross-checking live append-only artifacts against the reader path keeps surfacing higher-value bugs than staying inside already-green unit seams.
+- 2026-03-18T12:42:33Z cycle 041 [converging] Ω≈0.8474 Ψ≈0.0580: Writer/reader symmetry on append-only artifacts is a high-yield overnight seam; harden the write path whenever the read path already contains recovery logic.
+- 2026-03-18T12:47:07Z cycle 042 [oscillating] Ω≈0.8448 Ψ≈0.0582: Append-only artifact repair paths need the same locking discipline as append paths or they become hidden overwrite channels under concurrent runs.
+- 2026-03-18T12:51:17Z cycle 043 [oscillating] Ω≈0.8408 Ψ≈0.0579: Config hardening needs end-to-end verification through the instantiated client, not just the intermediate config object.
+- 2026-03-18T12:56:22Z cycle 044 [oscillating] Ω≈0.8396 Ψ≈0.0577: Shared mutable runtime scaffolding is a hidden overnight reliability risk even when single-run tests are green.
+- 2026-03-18T13:00:42Z cycle 045 [converging] Ω≈0.8491 Ψ≈0.0575: Timeout handlers need the same rigor as the primary call path because cleanup code can become the real stall point in unattended runs.
+- 2026-03-18T13:05:14Z cycle 046 [oscillating] Ω≈0.8465 Ψ≈0.0577: Default-path logic in autonomy tooling needs the same login-home anchoring as the main runner or state can drift into ephemeral sandboxes.
+- 2026-03-18T13:10:34Z cycle 047 [oscillating] Ω≈0.8345 Ψ≈0.0575: Append-only autonomy logs need corruption-repair paths that preserve data, not just schema shape.
+- 2026-03-18T13:15:29Z cycle 048 [oscillating] Ω≈0.8336 Ψ≈0.0573: Regime telemetry needs explicit transition tests, not just evaluator and persistence coverage.

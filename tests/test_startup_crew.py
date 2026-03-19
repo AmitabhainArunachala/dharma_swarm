@@ -48,7 +48,16 @@ class _FakeSwarm:
 
 
 def _effective_crew() -> list[dict]:
-    """Return the crew that spawn_default_crew would actually use."""
+    """Return the crew that spawn_default_crew would actually use.
+
+    spawn_default_crew tries Command Fleet first (10 agents),
+    then falls back to skill-based or DEFAULT_CREW.
+    """
+    try:
+        from dharma_swarm.command_fleet import COMMAND_FLEET
+        return COMMAND_FLEET
+    except ImportError:
+        pass
     return sc._crew_from_skills() or sc.DEFAULT_CREW
 
 
@@ -77,6 +86,13 @@ async def test_spawn_default_crew_skips_existing_names():
 @pytest.mark.asyncio
 async def test_spawn_default_crew_passes_provider_and_model_from_spec(monkeypatch):
     monkeypatch.setattr(sc, "_crew_from_skills", lambda: None)
+
+    # Disable command fleet so DEFAULT_CREW fallback is tested
+    import dharma_swarm.command_fleet as _cf
+    async def _no_fleet(swarm):
+        raise ImportError("disabled for test")
+    monkeypatch.setattr(_cf, "spawn_command_fleet", _no_fleet)
+
     swarm = _FakeSwarm()
     await sc.spawn_default_crew(swarm)
 
@@ -92,8 +108,14 @@ async def test_spawn_default_crew_defaults_provider_and_model_when_missing(monke
     custom = [{"name": "x", "role": AgentRole.GENERAL, "thread": "mechanistic"}]
     monkeypatch.setattr(sc, "DEFAULT_CREW", custom)
     monkeypatch.setattr(sc, "_crew_from_skills", lambda: None)
-    swarm = _FakeSwarm()
 
+    # Disable command fleet so DEFAULT_CREW fallback is tested
+    import dharma_swarm.command_fleet as _cf
+    async def _no_fleet(swarm):
+        raise ImportError("disabled for test")
+    monkeypatch.setattr(_cf, "spawn_command_fleet", _no_fleet)
+
+    swarm = _FakeSwarm()
     await sc.spawn_default_crew(swarm)
     assert len(swarm.spawn_calls) == 1
     assert swarm.spawn_calls[0]["provider_type"] == ProviderType.CLAUDE_CODE
@@ -113,8 +135,14 @@ async def test_spawn_default_crew_merges_existing_system_prompt(monkeypatch):
     }]
     monkeypatch.setattr(sc, "DEFAULT_CREW", custom)
     monkeypatch.setattr(sc, "_crew_from_skills", lambda: None)
-    swarm = _FakeSwarm()
 
+    # Disable command fleet so DEFAULT_CREW fallback is tested
+    import dharma_swarm.command_fleet as _cf
+    async def _no_fleet(swarm):
+        raise ImportError("disabled for test")
+    monkeypatch.setattr(_cf, "spawn_command_fleet", _no_fleet)
+
+    swarm = _FakeSwarm()
     await sc.spawn_default_crew(swarm)
     prompt = swarm.spawn_calls[0]["system_prompt"]
     assert "CUSTOM BASE" in prompt

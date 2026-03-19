@@ -16,44 +16,57 @@ And writes:
 from __future__ import annotations
 
 import json
+import os
+import pwd
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
+
+def _resolve_login_home() -> Path:
+    try:
+        return Path(pwd.getpwuid(os.getuid()).pw_dir).expanduser()
+    except Exception:
+        return Path.home()
+
+
+LOGIN_HOME = _resolve_login_home()
+REPO_ROOT = Path(__file__).resolve().parents[1]
+
 # Known ecosystem paths — the map of maps
 ECOSYSTEM_PATHS = {
     # Specs that define what the swarm should be
-    "dharma_genome": Path.home() / "Persistent-Semantic-Memory-Vault/06-Multi-System-Coherence/DHARMA_GENOME_SPECIFICATION.md",
-    "garden_daemon": Path.home() / "Persistent-Semantic-Memory-Vault/AGENT_EMERGENT_WORKSPACES/GARDEN_DAEMON_SPEC.md",
-    "v7_induction": Path.home() / "Persistent-Semantic-Memory-Vault/AGENT_EMERGENT_WORKSPACES/INDUCTION_PROMPT_v7.md",
-    "samaya_protocol": Path.home() / "Persistent-Semantic-Memory-Vault/08-Research-Documentation/theoretical-frameworks/MASTER_PROMPT_Samaya_Darwin-Godel_Machine.md",
+    "dharma_genome": LOGIN_HOME / "Persistent-Semantic-Memory-Vault/06-Multi-System-Coherence/DHARMA_GENOME_SPECIFICATION.md",
+    "garden_daemon": LOGIN_HOME / "Persistent-Semantic-Memory-Vault/AGENT_EMERGENT_WORKSPACES/GARDEN_DAEMON_SPEC.md",
+    "v7_induction": LOGIN_HOME / "Persistent-Semantic-Memory-Vault/AGENT_EMERGENT_WORKSPACES/INDUCTION_PROMPT_v7.md",
+    "samaya_protocol": LOGIN_HOME / "Persistent-Semantic-Memory-Vault/08-Research-Documentation/theoretical-frameworks/MASTER_PROMPT_Samaya_Darwin-Godel_Machine.md",
 
     # Agent briefings (cognitive division of labor)
-    "agent_briefings": Path.home() / "Persistent-Semantic-Memory-Vault/META/coordination/AGENT_BRIEFINGS",
+    "agent_briefings": LOGIN_HOME / "Persistent-Semantic-Memory-Vault/META/coordination/AGENT_BRIEFINGS",
 
     # Existing infrastructure
-    "dgc_core": Path.home() / "dgc-core",
-    "dgc_ecosystem_map": Path.home() / "dgc-core/context/ecosystem_map.py",
-    "dgc_telos_gates": Path.home() / "dgc-core/hooks/telos_gate.py",
-    "dgc_strange_loop": Path.home() / "dgc-core/memory/strange_loop.py",
-    "dgc_pulse": Path.home() / "dgc-core/daemon/pulse.py",
-    "chaiwala_bus": Path.home() / ".chaiwala/message_bus.py",
+    "dgc_core": LOGIN_HOME / "dgc-core",
+    "dgc_ecosystem_map": LOGIN_HOME / "dgc-core/context/ecosystem_map.py",
+    "dgc_telos_gates": LOGIN_HOME / "dgc-core/hooks/telos_gate.py",
+    "dgc_strange_loop": LOGIN_HOME / "dgc-core/memory/strange_loop.py",
+    "dgc_pulse": LOGIN_HOME / "dgc-core/daemon/pulse.py",
+    "chaiwala_bus": LOGIN_HOME / ".chaiwala/message_bus.py",
 
     # The old Darwin Engine (2,647 lines, broken imports, but the architecture is there)
-    "old_darwin_engine": Path.home() / "DHARMIC_GODEL_CLAW/swarm/orchestrator.py",
+    "old_darwin_engine": LOGIN_HOME / "DHARMIC_GODEL_CLAW/swarm/orchestrator.py",
 
     # CLAUDE files (the context system)
-    "claude_md": Path.home() / "CLAUDE.md",
+    "claude_md": LOGIN_HOME / "CLAUDE.md",
 
     # dharma_swarm itself
-    "dharma_swarm": Path.home() / "dharma_swarm",
+    "dharma_swarm": REPO_ROOT,
 
     # Trishula comms
-    "trishula": Path.home() / "trishula",
+    "trishula": LOGIN_HOME / "trishula",
 }
 
 # The persistent manifest — what every session should read on startup
-MANIFEST_PATH = Path.home() / ".dharma_manifest.json"
+MANIFEST_PATH = LOGIN_HOME / ".dharma_manifest.json"
 
 
 def _resolve_manifest_path(manifest_path: Path | str | None = None) -> Path:

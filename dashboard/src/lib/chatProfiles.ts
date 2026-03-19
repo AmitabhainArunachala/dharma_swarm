@@ -6,18 +6,18 @@ export const DEFAULT_CHAT_PROFILES: ChatProfileOut[] = [
   {
     id: "claude_opus",
     label: "Claude Opus 4.6",
-    provider: "openrouter",
-    model: "anthropic/claude-opus-4-6",
+    provider: "claude_max",
+    model: "claude-opus-4-6",
     accent: "aozora",
-    summary: "Strategic operator with full swarm tooling and broad system context.",
+    summary: "Strategic operator using the locally authenticated Claude Max runtime.",
   },
   {
     id: "codex_operator",
     label: "Codex 5.4",
-    provider: "openrouter",
-    model: "openai/gpt-5-codex",
+    provider: "resident_codex",
+    model: "gpt-5.4",
     accent: "kinpaku",
-    summary: "Implementation-focused control agent for edits, verification, and fast fixes.",
+    summary: "Resident Codex operator living inside the swarm with persistent session state.",
   },
 ];
 

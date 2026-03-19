@@ -3,6 +3,8 @@
 import sqlite3
 from unittest.mock import patch
 
+import pytest
+
 from dharma_swarm.context import (
     CONTEXT_BUDGET,
     ROLE_PROFILES,
@@ -11,6 +13,7 @@ from dharma_swarm.context import (
     _VISION_FILES,
     _compress,
     _compress_full,
+    _compress_header,
     _compress_medium,
     _compress_minimal,
     _compress_tail,
@@ -395,9 +398,10 @@ def test_surgeon_gets_less_vision():
     assert isinstance(arch_ctx, str)
 
 
-def test_context_includes_ops_layer():
+def test_context_includes_ops_layer(tmp_path):
     """All roles should include operational context."""
-    result = build_agent_context(role="surgeon")
+    # Use a clean state_dir so real ~/.dharma data doesn't blow the budget
+    result = build_agent_context(role="surgeon", state_dir=tmp_path)
     assert "Operations Layer" in result or "Trishula" in result or "Memory" in result
 
 
@@ -603,6 +607,31 @@ def test_compress_dispatcher_tiers(tmp_path):
         results[tier] = _compress(f, tier, 200)
         assert results[tier] is not None
         assert len(results[tier]) <= 200
+
+
+@pytest.mark.parametrize(
+    ("tier", "fallback"),
+    [
+        ("semantic", _compress_full),
+        ("principled", _compress_medium),
+        ("telos", _compress_minimal),
+        ("seed", _compress_header),
+    ],
+)
+def test_compress_dispatcher_semantic_tiers_fall_back_on_runtime_failure(
+    tmp_path,
+    tier,
+    fallback,
+):
+    """Runtime TPP compression failures should degrade, not drop the block."""
+    f = tmp_path / "test.txt"
+    content = "# Title\n\n" + ("Important causal detail. " * 40)
+    f.write_text(content)
+
+    with patch("dharma_swarm.tpp.compress_semantic", side_effect=RuntimeError("boom")):
+        result = _compress(f, tier, 120)
+
+    assert result == fallback(content, 120)
 
 
 # === Transmission Resolution ===

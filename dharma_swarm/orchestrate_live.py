@@ -438,6 +438,124 @@ async def orchestrate(background: bool = False) -> None:
     # Only genuinely independent loops remain as separate tasks
     from dharma_swarm.context_agent import run_context_agent_loop
 
+    # v0.3.0: Viveka architecture — perception-action loop + algedonic scanning
+    from dharma_swarm.perception_action_loop import (
+        PerceptionActionLoop, LoopConfig,
+        stigmergy_sensor, health_sensor, signal_sensor,
+    )
+    from dharma_swarm.cost_ledger import CostLedger
+    from dharma_swarm.loop_detector import LoopDetector
+    from dharma_swarm.algedonic import AlgedonicChannel, AlgedonicSignal
+
+    # Initialize the perception-action loop with real sensors + action dispatch
+    from dharma_swarm.action_dispatch import ActionDispatcher, SwarmContext
+
+    pal_config = LoopConfig(
+        base_period_seconds=60.0,
+        min_period_seconds=10.0,
+        max_period_seconds=600.0,
+    )
+
+    # Shared loop detector with persistence
+    loop_persist = STATE_DIR / "loops" / "session_actions.jsonl"
+    shared_detector = LoopDetector(persist_path=loop_persist)
+    shared_detector.load()
+
+    # Build context — subsystems attached later when swarm initializes
+    dispatch_ctx = SwarmContext(
+        cost_ledger=CostLedger(),
+        state_dir=STATE_DIR,
+    )
+
+    # Optional viveka gate and deliberation
+    _viveka_gate = None
+    _deliberation_tri = None
+    try:
+        from dharma_swarm.viveka import VivekaGate
+        _viveka_gate = VivekaGate(precision=0.5)
+    except ImportError:
+        pass
+    try:
+        from dharma_swarm.deliberation import DeliberationTriangle
+        _deliberation_tri = DeliberationTriangle()
+    except ImportError:
+        pass
+
+    dispatcher = ActionDispatcher(
+        context=dispatch_ctx,
+        viveka=_viveka_gate,
+        deliberation=_deliberation_tri,
+    )
+
+    pal = PerceptionActionLoop(
+        config=pal_config,
+        sensors=[stigmergy_sensor, health_sensor, signal_sensor],
+        action_handler=dispatcher.handle,
+        cost_ledger=dispatch_ctx.cost_ledger,
+        loop_detector=shared_detector,
+    )
+    pal.load_state()  # Resume from crash if state exists
+
+    # Initialize algedonic channel
+    algedonic = AlgedonicChannel()
+
+    async def run_perception_action(shutdown_event: asyncio.Event) -> None:
+        """v0.3.0: Precision-gated perception-action cycle.
+
+        Replaces fixed-interval health/living/evolution loops with
+        adaptive endogenous timing. The system itself decides when
+        to sense and when to act.
+        """
+        _log("viveka", f"Perception-action loop starting (precision={pal.precision:.2f})")
+        await pal.run(shutdown_event)
+
+    async def run_algedonic_scan(shutdown_event: asyncio.Event) -> None:
+        """v0.3.0: Periodic algedonic emergency scanning.
+
+        Checks for budget depletion, error spikes, coherence collapse.
+        Escalates stale unacknowledged signals.
+        """
+        _log("algedonic", "Emergency scanner starting")
+        await asyncio.sleep(30)  # Let other systems init
+
+        while not shutdown_event.is_set():
+            try:
+                # Check for pending emergencies
+                pending = algedonic.pending()
+                if pending:
+                    _log("algedonic", f"{len(pending)} pending signals")
+                    # Escalate stale signals
+                    escalated = algedonic.escalate_stale(max_age_seconds=300)
+                    if escalated:
+                        _log("algedonic", f"Escalated {len(escalated)} stale signals")
+
+                # Run detector checks
+                from dharma_swarm.algedonic import run_detectors
+                signals = await run_detectors()
+                if signals:
+                    _log("algedonic", f"Detectors fired: {[s.category for s in signals]}")
+
+            except Exception as e:
+                _log("algedonic", f"Scan error: {e}")
+
+            try:
+                await asyncio.wait_for(shutdown_event.wait(), timeout=120)
+                break
+            except asyncio.TimeoutError:
+                pass
+
+    # v0.3.1: Evolution feedback loop — closes fitness→evolution circle
+    async def run_evolution_feedback(shutdown_event: asyncio.Event) -> None:
+        """Monitor agent fitness and trigger evolution proposals."""
+        try:
+            from dharma_swarm.evolution_feedback import start_feedback_loop
+            feedback = await start_feedback_loop()
+            _log("evolution-fb", "Feedback loop started")
+            await shutdown_event.wait()
+            await feedback.stop()
+        except Exception as e:
+            _log("evolution-fb", f"Error: {e}")
+
     tasks = [
         asyncio.create_task(run_swarm_loop(shutdown_event, signal_bus=bus), name="swarm"),
         asyncio.create_task(run_pulse_loop(shutdown_event), name="pulse"),
@@ -448,9 +566,14 @@ async def orchestrate(background: bool = False) -> None:
         asyncio.create_task(
             run_context_agent_loop(shutdown_event, signal_bus=bus), name="context-agent"
         ),
+        # v0.3.0: Viveka architecture
+        asyncio.create_task(run_perception_action(shutdown_event), name="viveka-pal"),
+        asyncio.create_task(run_algedonic_scan(shutdown_event), name="algedonic"),
+        # v0.3.1: Evolution feedback loop
+        asyncio.create_task(run_evolution_feedback(shutdown_event), name="evolution-fb"),
     ]
 
-    _log("orchestrator", f"All {len(tasks)} systems launched (incl. conductors + context-agent)")
+    _log("orchestrator", f"All {len(tasks)} systems launched (v0.3.1 + evolution feedback)")
 
     try:
         # Wait for shutdown or first failure

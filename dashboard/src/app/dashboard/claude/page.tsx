@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useMemo, useState } from "react";
+import { useMemo, useState } from "react";
 import { motion } from "framer-motion";
 import {
   Bot,
@@ -48,20 +48,15 @@ export default function ClaudePage() {
   const { health } = useHealth();
   const { graph, isLoading } = useOntologyGraph();
   const [selectedType, setSelectedType] = useState<string | null>(null);
-  const { typeDetail } = useOntologyType(selectedType);
+  const activeSelectedType = selectedType ?? graph?.nodes[0]?.data.label ?? null;
+  const { typeDetail } = useOntologyType(activeSelectedType);
   const { openOverlay, openPanel } = useChatWorkspace();
-
-  useEffect(() => {
-    if (!selectedType && graph?.nodes?.length) {
-      setSelectedType(graph.nodes[0].data.label);
-    }
-  }, [graph, selectedType]);
 
   const nodes = useMemo<Node[]>(() => {
     if (!graph) return [];
     return graph.nodes.map((node) => {
       const accent = categoryColors[node.type] ?? colors.aozora;
-      const isSelected = selectedType === node.data.label;
+      const isSelected = activeSelectedType === node.data.label;
       return {
         id: node.id,
         position: node.position,
@@ -122,7 +117,7 @@ export default function ClaudePage() {
         },
       };
     });
-  }, [graph, selectedType]);
+  }, [activeSelectedType, graph]);
 
   const edges = useMemo<Edge[]>(() => {
     if (!graph) return [];
@@ -131,12 +126,12 @@ export default function ClaudePage() {
       source: edge.source,
       target: edge.target,
       label: edge.label,
-      animated: selectedType === edge.source || selectedType === edge.target,
+      animated: activeSelectedType === edge.source || activeSelectedType === edge.target,
       style: { stroke: colors.sumi[600], strokeWidth: 1.3 },
       labelStyle: { fill: colors.sumi[600], fontSize: 10 },
       markerEnd: { type: MarkerType.ArrowClosed, color: colors.sumi[600] },
     }));
-  }, [graph, selectedType]);
+  }, [activeSelectedType, graph]);
 
   const onNodeClick: NodeMouseHandler = (_event, node) => {
     const label = typeof node.data?.name === "string" ? node.data.name : null;
@@ -224,14 +219,14 @@ export default function ClaudePage() {
                   onClick: () => openOverlay("codex_operator"),
                 },
                 {
-                  label: "Open Codex Split View",
-                  caption: "Half-screen control console for live steering",
+                  label: "Open Dual Command Post",
+                  caption: "Claude and Codex side by side with a live relay rail",
                   accent: colors.kinpaku,
                   onClick: () => openPanel("codex_operator"),
                 },
                 {
                   label: "Open Claude Strategist",
-                  caption: "Strategic operator for diagnosis and system framing",
+                  caption: "Floating strategist window for diagnosis and system framing",
                   accent: colors.aozora,
                   onClick: () => openOverlay("claude_opus"),
                 },
@@ -320,9 +315,9 @@ export default function ClaudePage() {
                   Deep read on the currently selected ontology type.
                 </p>
               </div>
-              {selectedType && (
+              {activeSelectedType && (
                 <span className="rounded-full border border-aozora/30 bg-aozora/10 px-2.5 py-1 font-mono text-[10px] text-aozora">
-                  {selectedType}
+                  {activeSelectedType}
                 </span>
               )}
             </div>

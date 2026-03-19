@@ -10,12 +10,18 @@ Usage:
 from __future__ import annotations
 
 import logging
+import os
 from contextlib import asynccontextmanager
 from pathlib import Path
 from typing import Any
 
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
+
+from dharma_swarm.models import ProviderType
+from dharma_swarm.operator_router import router as operator_router
+from dharma_swarm.operator_router import wire_operator
+from dharma_swarm.resident_operator import ResidentOperator
 
 logger = logging.getLogger(__name__)
 
@@ -48,6 +54,26 @@ def get_monitor():
     return _state["monitor"]
 
 
+def get_codex_operator() -> ResidentOperator:
+    """Get or create the resident Codex operator for the dashboard."""
+    if "codex_operator" not in _state:
+        from api.routers.chat import CODEX_SYSTEM_PROMPT
+
+        model = os.getenv("DASHBOARD_CODEX_MODEL", "").strip() or "gpt-5.4"
+        operator = ResidentOperator(
+            name="codex_resident",
+            model=model,
+            provider_type=ProviderType.CODEX,
+            wake_interval=300.0,
+            state_dir=Path.home() / ".dharma",
+            base_system_prompt=CODEX_SYSTEM_PROMPT,
+        )
+        operator.set_swarm(get_swarm())
+        wire_operator(operator)
+        _state["codex_operator"] = operator
+    return _state["codex_operator"]
+
+
 # ── Lifespan ──────────────────────────────────────────────────────
 
 @asynccontextmanager
@@ -66,10 +92,22 @@ async def lifespan(app: FastAPI):
     except Exception as e:
         logger.warning("Swarm init partial: %s", e)
 
+    codex_operator = get_codex_operator()
+    try:
+        await codex_operator.start()
+    except Exception as e:
+        logger.warning("Resident Codex operator init partial: %s", e)
+
     logger.info("DHARMA COMMAND API ready on port 8000")
     yield
 
     logger.info("DHARMA COMMAND API shutting down")
+    codex_operator = _state.get("codex_operator")
+    if codex_operator is not None:
+        try:
+            await codex_operator.stop()
+        except Exception as e:
+            logger.warning("Resident Codex operator shutdown partial: %s", e)
     _state.clear()
 
 
@@ -104,6 +142,7 @@ from api.routers.chat import router as chat_router
 from api.routers.modules import router as modules_router
 from api.routers.dashboard_new import router as dashboard_new_router
 
+app.include_router(operator_router)
 app.include_router(health_router)
 app.include_router(agents_router)
 app.include_router(evolution_router)

@@ -71,6 +71,31 @@ class SpawnAgentRequest(BaseModel):
     model: str | None = None
 
 
+class FleetAgentConfig(BaseModel):
+    name: str
+    role: str
+    provider: str
+    model: str
+    display_name: str = ""
+    model_display_name: str = ""
+    tier: str = ""
+    strengths: list[str] = []
+    available: bool = False
+    tool_name: str = ""
+    thread: str = ""
+
+
+class UpdateAgentConfigRequest(BaseModel):
+    model: str | None = None
+    role: str | None = None
+    provider: str | None = None
+
+
+class UpdateModelProfileRequest(BaseModel):
+    custom_label: str | None = None
+    short_name: str | None = None
+
+
 # ── Tasks ─────────────────────────────────────────────────────────
 
 class TaskOut(BaseModel):

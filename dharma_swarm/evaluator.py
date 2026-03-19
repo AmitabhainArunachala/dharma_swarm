@@ -3,7 +3,9 @@
 from __future__ import annotations
 
 import asyncio
+import fcntl
 import json
+import os
 import re
 from collections import defaultdict
 from dataclasses import dataclass, field
@@ -473,7 +475,14 @@ class OutputEvaluator:
     async def _append(self, evaluation: OutputEvaluation) -> None:
         def _write_sync() -> None:
             self.evaluations_path.parent.mkdir(parents=True, exist_ok=True)
+            line = json.dumps(evaluation.to_record(), sort_keys=True) + "\n"
             with open(self.evaluations_path, "a", encoding="utf-8") as handle:
-                handle.write(json.dumps(evaluation.to_record(), sort_keys=True) + "\n")
+                fcntl.flock(handle.fileno(), fcntl.LOCK_EX)
+                try:
+                    handle.write(line)
+                    handle.flush()
+                    os.fsync(handle.fileno())
+                finally:
+                    fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
 
         await asyncio.to_thread(_write_sync)

@@ -416,18 +416,56 @@ ALL_ASYNC_EVALS = [
 ]
 
 
-async def run_all_evals() -> EvalReport:
+async def run_all_evals(
+    *,
+    repo_root: Path | None = None,
+    state_dir: Path | None = None,
+) -> EvalReport:
     """Execute all evals and produce an aggregated report."""
+    global STATE_DIR, EVALS_DIR, HISTORY_FILE, DHARMA_SWARM_DIR, PACKAGE_DIR
     t0 = time.monotonic()
     results: list[EvalResult] = []
+    resolved_repo_root = (repo_root or DHARMA_SWARM_DIR).expanduser()
+    resolved_state_dir = (state_dir or STATE_DIR).expanduser()
+    previous_globals = (
+        STATE_DIR,
+        EVALS_DIR,
+        HISTORY_FILE,
+        DHARMA_SWARM_DIR,
+        PACKAGE_DIR,
+    )
+    STATE_DIR = resolved_state_dir
+    EVALS_DIR = resolved_state_dir / "evals"
+    HISTORY_FILE = EVALS_DIR / "history.jsonl"
+    DHARMA_SWARM_DIR = resolved_repo_root
+    PACKAGE_DIR = resolved_repo_root / "dharma_swarm"
 
-    # Sync evals
-    for fn in ALL_SYNC_EVALS:
-        results.append(fn())
+    try:
+        try:
+            import dharma_swarm.stigmergy as stigmergy_mod
+            previous_stigmergy_base = stigmergy_mod._DEFAULT_BASE
+            stigmergy_mod._DEFAULT_BASE = resolved_state_dir / "stigmergy"
+        except Exception:
+            stigmergy_mod = None
+            previous_stigmergy_base = None
 
-    # Async evals
-    for fn in ALL_ASYNC_EVALS:
-        results.append(await fn())
+        # Sync evals
+        for fn in ALL_SYNC_EVALS:
+            results.append(fn())
+
+        # Async evals
+        for fn in ALL_ASYNC_EVALS:
+            results.append(await fn())
+    finally:
+        if stigmergy_mod is not None and previous_stigmergy_base is not None:
+            stigmergy_mod._DEFAULT_BASE = previous_stigmergy_base
+        (
+            STATE_DIR,
+            EVALS_DIR,
+            HISTORY_FILE,
+            DHARMA_SWARM_DIR,
+            PACKAGE_DIR,
+        ) = previous_globals
 
     total = len(results)
     passed = sum(1 for r in results if r.passed)

@@ -308,3 +308,23 @@ async def test_codex_stream_surfaces_progress_and_command_execution(
     ]
     assert len(final_text) == 1
     assert final_text[0].content == "/Users/dhyana/dharma_swarm"
+
+
+def test_codex_build_command_uses_resume_subcommand(tmp_path: Path) -> None:
+    adapter = CodexAdapter(
+        config=ProviderConfig(provider_id="codex", default_model="gpt-5.4")
+    )
+
+    cmd = adapter._build_command(
+        CompletionRequest(
+            messages=[{"role": "user", "content": "resume"}],
+            resume_session_id="thread-123",
+        ),
+        output_path=tmp_path / "last.txt",
+    )
+
+    assert cmd[:3] == ["codex", "exec", "resume"]
+    assert "thread-123" in cmd
+    assert "-C" not in cmd
+    assert "--json" in cmd
+    assert "--full-auto" in cmd

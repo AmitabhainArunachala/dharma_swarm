@@ -15,7 +15,7 @@ import logging
 import os
 import re
 import subprocess
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
 
@@ -298,3 +298,119 @@ class ZeitgeistScanner:
     def clear(self) -> None:
         """Reset in-memory signal list (does not delete persisted files)."""
         self._signals = []
+
+    def _parse_witness_timestamp(self, value: Any) -> datetime | None:
+        """Parse witness timestamps from append-only logs into UTC datetimes."""
+        text = str(value or "").strip()
+        if not text:
+            return None
+        try:
+            parsed = datetime.fromisoformat(text.replace("Z", "+00:00"))
+        except ValueError:
+            return None
+        if parsed.tzinfo is None:
+            parsed = parsed.replace(tzinfo=timezone.utc)
+        return parsed.astimezone(timezone.utc)
+
+    # -- S3↔S4 bridge --------------------------------------------------
+
+    async def ingest_gate_patterns(self, window_hours: float = 24) -> list[ZeitgeistSignal]:
+        """S3->S4: Read gate results and detect operational patterns.
+
+        This closes the S3<->S4 gap identified in the VSM audit.
+        Gates (S3) produce witness logs; zeitgeist (S4) detects patterns in them.
+
+        Args:
+            window_hours: How far back to look in witness logs.
+
+        Returns:
+            List of newly generated signals from gate pattern analysis.
+        """
+        witness_dir = self._state_dir / "witness"
+        if not witness_dir.exists():
+            return []
+
+        cutoff = datetime.now(timezone.utc) - timedelta(hours=window_hours)
+        total = 0
+        outcomes: dict[str, int] = {"PASS": 0, "BLOCKED": 0, "WARN": 0}
+
+        for log_file in sorted(witness_dir.glob("witness_*.jsonl"), reverse=True):
+            try:
+                for line in log_file.read_text().splitlines():
+                    if not line.strip():
+                        continue
+                    try:
+                        entry = json.loads(line)
+                    except json.JSONDecodeError:
+                        continue
+                    ts = self._parse_witness_timestamp(entry.get("ts"))
+                    if ts is None:
+                        continue
+                    if ts < cutoff:
+                        continue
+                    total += 1
+                    outcome = entry.get("outcome", "").upper()
+                    if outcome in outcomes:
+                        outcomes[outcome] += 1
+            except Exception:
+                continue
+
+        if total == 0:
+            return []
+
+        signals: list[ZeitgeistSignal] = []
+        block_rate = outcomes["BLOCKED"] / total
+        review_rate = outcomes["WARN"] / total
+
+        if block_rate > 0.3:
+            sig = ZeitgeistSignal(
+                source="gate_pattern",
+                category="threat",
+                title="High gate block rate",
+                relevance_score=round(min(1.0, block_rate), 2),
+                keywords=["gate", "block", "safety"],
+                description=(
+                    f"{outcomes['BLOCKED']}/{total} gate checks blocked "
+                    f"({block_rate:.0%}) in last {window_hours}h"
+                ),
+            )
+            signals.append(sig)
+
+        if review_rate > 0.5:
+            sig = ZeitgeistSignal(
+                source="gate_pattern",
+                category="opportunity",
+                title="Many reviews suggest evolving gate parameters",
+                relevance_score=round(min(1.0, review_rate * 0.8), 2),
+                keywords=["gate", "review", "evolution"],
+                description=(
+                    f"{outcomes['WARN']}/{total} gate checks triggered review "
+                    f"({review_rate:.0%}) in last {window_hours}h"
+                ),
+            )
+            signals.append(sig)
+
+        self._signals.extend(signals)
+        return signals
+
+    def emit_to_gates(self) -> dict:
+        """S4->S3: Summarize environmental intelligence for gate consumption.
+
+        Returns a dict that telos_gates can read to adjust behavior.
+        Keys:
+            threat_level: Fraction of current signals that are threats (0.0-1.0).
+            opportunity_count: Number of opportunity signals.
+            latest_signals: Last 5 signal summaries for context.
+        """
+        total = len(self._signals)
+        threat_count = sum(1 for s in self._signals if s.category == "threat")
+        opportunity_count = sum(1 for s in self._signals if s.category == "opportunity")
+
+        return {
+            "threat_level": round(threat_count / total, 3) if total > 0 else 0.0,
+            "opportunity_count": opportunity_count,
+            "latest_signals": [
+                {"category": s.category, "title": s.title, "relevance": s.relevance_score}
+                for s in self._signals[-5:]
+            ],
+        }

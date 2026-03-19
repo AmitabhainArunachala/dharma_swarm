@@ -3,6 +3,7 @@
 import builtins
 import re
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 from unittest.mock import AsyncMock
@@ -157,6 +158,44 @@ async def test_runner_provider_error_string_marks_failure(config, fast_gate):
 
 
 @pytest.mark.asyncio
+async def test_runner_records_output_evaluation_with_injected_evaluator(config, fast_gate):
+    from dharma_swarm.models import LLMResponse
+
+    class _FakeEvaluator:
+        def __init__(self) -> None:
+            self.calls: list[dict[str, object]] = []
+
+        async def evaluate(self, task, output, **kwargs):
+            self.calls.append({"task": task, "output": output, **kwargs})
+            return SimpleNamespace(quality_score=0.91)
+
+    provider = AsyncMock()
+    provider.complete = AsyncMock(
+        return_value=LLMResponse(
+            content="Implemented the fix and verified with pytest.",
+            model="claude-sonnet-4-20250514",
+            usage={"prompt_tokens": 120, "completion_tokens": 80, "total_tokens": 200},
+        )
+    )
+    evaluator = _FakeEvaluator()
+
+    runner = AgentRunner(config, provider=provider, output_evaluator=evaluator)
+    await runner.start()
+
+    result = await runner.run_task(Task(title="Implement fix", description="Patch the failing module"))
+
+    assert result.startswith("Implemented the fix")
+    assert len(evaluator.calls) == 1
+    call = evaluator.calls[0]
+    assert call["agent_name"] == "test-agent"
+    assert call["provider"] == config.provider.value
+    assert call["model"] == "claude-sonnet-4-20250514"
+    assert call["success"] is True
+    assert call["token_count"] == 200
+    assert call["estimated_cost_usd"] > 0.0
+
+
+@pytest.mark.asyncio
 async def test_runner_blocks_harmful_task_before_provider_call(config):
     from dharma_swarm.models import LLMResponse
 
@@ -165,7 +204,7 @@ async def test_runner_blocks_harmful_task_before_provider_call(config):
     runner = AgentRunner(config, provider=provider)
     await runner.start()
 
-    with pytest.raises(RuntimeError, match="Telos block"):
+    with pytest.raises(RuntimeError, match="(Telos|Fast gate) block"):
         await runner.run_task(Task(title="rm -rf /important", description="delete all"))
 
     provider.complete.assert_not_awaited()
@@ -208,6 +247,15 @@ async def test_pool_spawn():
     agents = await pool.list_agents()
     assert len(agents) == 1
     assert agents[0].name == "worker-1"
+
+
+@pytest.mark.asyncio
+async def test_pool_spawn_passes_shared_output_evaluator():
+    evaluator = object()
+    pool = AgentPool(output_evaluator=evaluator)
+    config = AgentConfig(name="worker-1", role=AgentRole.GENERAL)
+    runner = await pool.spawn(config)
+    assert runner._output_evaluator is evaluator
 
 
 @pytest.mark.asyncio

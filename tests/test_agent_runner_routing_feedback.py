@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import pytest
+from types import SimpleNamespace
 
 from dharma_swarm.agent_runner import AgentRunner
 from dharma_swarm.decision_router import RoutePath
@@ -151,3 +152,34 @@ async def test_run_task_records_failure_feedback_for_routed_provider(fast_gate) 
     assert feedback["success"] is False
     assert feedback["quality_score"] == 0.0
     assert "Provider returned empty response" in feedback["metadata"]["error"]
+
+
+@pytest.mark.asyncio
+async def test_run_task_uses_output_evaluation_for_router_feedback(fast_gate) -> None:
+    class _FakeEvaluator:
+        async def evaluate(self, *args, **kwargs):
+            return SimpleNamespace(quality_score=0.93)
+
+    provider = _RoutedProvider(content="Implemented fix in `module.py` with tests.")
+    runner = AgentRunner(
+        AgentConfig(
+            name="router-agent",
+            role=AgentRole.CODER,
+            provider=ProviderType.OPENAI,
+            model="gpt-4.1",
+        ),
+        provider=provider,
+        output_evaluator=_FakeEvaluator(),
+    )
+    await runner.start()
+
+    await runner.run_task(
+        Task(
+            id="task-route-4",
+            title="Implement module fix",
+            description="Apply patch and update the failing test.",
+        )
+    )
+
+    feedback = provider.feedback[0]
+    assert feedback["quality_score"] == pytest.approx(0.93)

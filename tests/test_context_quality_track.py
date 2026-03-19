@@ -86,6 +86,7 @@ def test_read_manifest_unreadable_json(tmp_path, monkeypatch):
     assert ctx.read_manifest() == "Manifest unreadable."
 
 
+@pytest.mark.real_memory
 def test_read_memory_context_returns_error_when_table_missing(tmp_path):
     db_dir = tmp_path / "db"
     db_dir.mkdir()

@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import json
 import logging
+import math
 import time
 from dataclasses import asdict, dataclass
 from pathlib import Path
@@ -66,6 +67,19 @@ class CostEntry:
     tier: str = ""
 
 
+def _parse_finite_float(value: object) -> float | None:
+    """Return a finite float or None for malformed replayed values."""
+    if value is None or isinstance(value, bool):
+        return None
+    try:
+        parsed = float(value)
+    except (TypeError, ValueError):
+        return None
+    if not math.isfinite(parsed):
+        return None
+    return parsed
+
+
 def log_cost(
     *,
     provider: str,
@@ -97,22 +111,28 @@ def log_cost(
     return entry
 
 
-def read_cost_log(since_hours: float = 24.0) -> list[CostEntry]:
+def read_cost_log(since_hours: float = 24.0, state_dir: Path | None = None) -> list[CostEntry]:
     """Read cost entries from the last N hours."""
-    if not _COST_LOG.exists():
+    cost_log = (state_dir / "cost_log.jsonl") if state_dir is not None else _COST_LOG
+    if not cost_log.exists():
         return []
     cutoff = time.time() - (since_hours * 3600)
     entries = []
     try:
-        with open(_COST_LOG) as f:
+        with open(cost_log) as f:
             for line in f:
                 line = line.strip()
                 if not line:
                     continue
                 try:
                     data = json.loads(line)
-                    if data.get("timestamp", 0) >= cutoff:
-                        entries.append(CostEntry(**data))
+                    timestamp = _parse_finite_float(data.get("timestamp"))
+                    cost = _parse_finite_float(data.get("estimated_cost_usd"))
+                    if timestamp is None or cost is None or timestamp < cutoff:
+                        continue
+                    data["timestamp"] = timestamp
+                    data["estimated_cost_usd"] = cost
+                    entries.append(CostEntry(**data))
                 except (json.JSONDecodeError, TypeError):
                     continue
     except Exception as exc:

@@ -102,6 +102,20 @@ export function ChatInterface({
     inputRef.current?.focus();
   }, []);
 
+  useEffect(() => {
+    function handleFocusRequest(event: Event) {
+      const detail = (event as CustomEvent<{ profileId?: string }>).detail;
+      if (detail?.profileId && detail.profileId !== activeProfile.id) return;
+      inputRef.current?.focus();
+      inputRef.current?.setSelectionRange(inputRef.current.value.length, inputRef.current.value.length);
+    }
+
+    window.addEventListener("command-post-focus-input", handleFocusRequest as EventListener);
+    return () => {
+      window.removeEventListener("command-post-focus-input", handleFocusRequest as EventListener);
+    };
+  }, [activeProfile.id]);
+
   const handleSend = () => {
     const trimmed = input.trim();
     if (!trimmed || isStreaming) return;

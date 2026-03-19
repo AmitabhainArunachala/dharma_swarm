@@ -11,8 +11,10 @@ Handoff chain tracking gives full lineage of collaborative work.
 
 from __future__ import annotations
 
+import fcntl
 import json
 import logging
+import os
 import uuid
 from datetime import datetime, timezone
 from enum import Enum
@@ -22,6 +24,19 @@ from typing import Any
 from pydantic import BaseModel, Field
 
 logger = logging.getLogger(__name__)
+
+
+def _append_locked_jsonl(path: Path, line: str, *, encoding: str = "utf-8") -> None:
+    """Append a single JSONL row durably under an advisory lock."""
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with path.open("a", encoding=encoding) as handle:
+        fcntl.flock(handle.fileno(), fcntl.LOCK_EX)
+        try:
+            handle.write(line)
+            handle.flush()
+            os.fsync(handle.fileno())
+        finally:
+            fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
 
 
 class ArtifactType(str, Enum):
@@ -35,6 +50,7 @@ class ArtifactType(str, Enum):
     FILE_LIST = "file_list"
     ERROR_REPORT = "error_report"
     METRIC = "metric"
+    TPP_FRAGMENT = "tpp_fragment"  # TPP-formatted prompt fragment for injection
 
 
 class HandoffPriority(str, Enum):
@@ -76,6 +92,9 @@ class Handoff(BaseModel):
     status: str = "pending"  # pending, delivered, acknowledged, rejected
     reject_reason: str = ""
     created_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
+    # TPP telos threading — intent propagates through handoff chains
+    intent_thread: dict[str, Any] = Field(default_factory=dict)
+    telos_alignment: float = 0.0  # How well this handoff serves the root telos
 
     def summary(self) -> str:
         """One-line summary of this handoff."""
@@ -116,6 +135,8 @@ class HandoffProtocol:
         artifacts: list[Artifact],
         priority: HandoffPriority = HandoffPriority.IMPORTANT,
         requires_ack: bool = False,
+        intent_thread: dict[str, Any] | None = None,
+        telos_alignment: float = 0.0,
     ) -> Handoff:
         """Create and store a new handoff.
 
@@ -126,6 +147,8 @@ class HandoffProtocol:
             artifacts: List of typed artifacts being handed off.
             priority: Processing priority for the receiver.
             requires_ack: Whether the sender requires acknowledgement.
+            intent_thread: TPP intent thread dict for telos continuity.
+            telos_alignment: Score (0-1) of how well this handoff serves root telos.
 
         Returns:
             The created Handoff with a generated ID.
@@ -139,12 +162,73 @@ class HandoffProtocol:
             priority=priority,
             requires_ack=requires_ack,
             status="pending",
+            intent_thread=intent_thread or {},
+            telos_alignment=telos_alignment,
         )
         self._pending[handoff.id] = handoff
         self._history.append(handoff)
         await self._persist(handoff)
         logger.debug("Created handoff %s: %s", handoff.id, handoff.summary())
         return handoff
+
+    async def create_tpp_handoff(
+        self,
+        from_agent: str,
+        from_role: str,
+        to_agent: str,
+        task_context: str,
+        findings: str,
+        confidence: float = 0.5,
+        telos_alignment: float = 0.5,
+        intent_thread: dict[str, Any] | None = None,
+        priority: HandoffPriority = HandoffPriority.IMPORTANT,
+    ) -> Handoff:
+        """Create a TPP-formatted handoff — findings structured for prompt injection.
+
+        The findings are formatted as a TPP fragment (ArtifactType.TPP_FRAGMENT)
+        that the receiving agent can directly inject into its prompt context.
+        This preserves causal depth through the handoff chain.
+        """
+        tpp_content = f"[{from_agent} ({from_role})]: {findings}"
+        try:
+            from dharma_swarm.tpp import IntentThread, format_handoff_as_tpp
+
+            thread_obj = None
+            if isinstance(intent_thread, dict) and intent_thread:
+                thread_obj = IntentThread.from_dict(intent_thread)
+            tpp_content = format_handoff_as_tpp(
+                from_agent=from_agent,
+                from_role=from_role,
+                findings=findings,
+                confidence=confidence,
+                telos_alignment=telos_alignment,
+                intent_thread=thread_obj,
+            )
+        except Exception:
+            logger.warning(
+                "TPP handoff formatting failed; falling back to plain fragment",
+                exc_info=True,
+            )
+
+        artifact = Artifact(
+            artifact_type=ArtifactType.TPP_FRAGMENT,
+            content=tpp_content,
+            summary=findings[:120],
+            metadata={
+                "confidence": confidence,
+                "telos_alignment": telos_alignment,
+                "from_role": from_role,
+            },
+        )
+        return await self.create_handoff(
+            from_agent=from_agent,
+            to_agent=to_agent,
+            task_context=task_context,
+            artifacts=[artifact],
+            priority=priority,
+            intent_thread=intent_thread,
+            telos_alignment=telos_alignment,
+        )
 
     async def get_pending(self, agent_name: str) -> list[Handoff]:
         """Get all pending handoffs for an agent.
@@ -317,9 +401,7 @@ class HandoffProtocol:
             handoff: The Handoff to persist.
         """
         try:
-            self._store_path.parent.mkdir(parents=True, exist_ok=True)
-            with open(self._store_path, "a") as f:
-                f.write(handoff.model_dump_json() + "\n")
+            _append_locked_jsonl(self._store_path, handoff.model_dump_json() + "\n")
         except OSError as exc:
             logger.warning("Failed to persist handoff %s: %s", handoff.id, exc)
 

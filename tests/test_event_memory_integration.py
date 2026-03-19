@@ -169,6 +169,7 @@ async def test_event_and_note_records_coexist_in_one_search_surface(tmp_path) ->
     assert "runtime_event" in source_kinds
 
 
+@pytest.mark.real_memory
 def test_read_memory_context_uses_memory_plane_when_strange_loop_absent(tmp_path) -> None:
     from dharma_swarm.context import read_memory_context
 
@@ -189,6 +190,7 @@ def test_read_memory_context_uses_memory_plane_when_strange_loop_absent(tmp_path
 
 
 @pytest.mark.asyncio
+@pytest.mark.real_memory
 async def test_read_memory_context_query_prefers_temporal_hits(tmp_path) -> None:
     from dharma_swarm.context import read_memory_context
 

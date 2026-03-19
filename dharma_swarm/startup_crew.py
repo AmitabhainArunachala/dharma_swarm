@@ -8,13 +8,11 @@ Now skill-driven: reads SKILL.md files from dharma_swarm/skills/ and
 creates profiles + agents from them. Falls back to DEFAULT_CREW if
 no skill files found.
 
-Provider strategy:
-  - OPENROUTER: All agents route through OpenRouter API (fast, no subprocess
-    overhead). Primary workers use llama-3.3-70b-instruct; support roles use
-    mistral-small-3.1-24b for speed/cost.
-  - CLAUDE_CODE/CODEX: Available as subprocess providers for tasks requiring
-    full tool access (file editing, bash). Use spawn_agent() with those types.
-  - ANTHROPIC/OPENAI: Available for direct API calls when keys are set.
+Provider strategy (FREE FIRST — this is a hard constraint):
+  1. OLLAMA Cloud: Free. kimi-k2.5:cloud, glm-5:cloud.
+  2. NVIDIA NIM: Free. llama-3.3-70b-instruct, nemotron-ultra.
+  3. OPENROUTER: PAID — overflow only, last resort for fleet agents.
+  4. CLAUDE_CODE/CODEX: Subprocess providers for tasks requiring tool access.
 """
 
 from __future__ import annotations
@@ -49,29 +47,70 @@ _SKILL_ROLE_MAP = {
 }
 
 _PROVIDER_MAP = {
+    "OLLAMA": ProviderType.OLLAMA,
+    "NVIDIA_NIM": ProviderType.NVIDIA_NIM,
+    "OPENROUTER_FREE": ProviderType.OPENROUTER_FREE,
     "CLAUDE_CODE": ProviderType.CLAUDE_CODE,
     "CODEX": ProviderType.CODEX,
+    "OPENROUTER": ProviderType.OPENROUTER,
     "ANTHROPIC": ProviderType.ANTHROPIC,
     "OPENAI": ProviderType.OPENAI,
-    "OPENROUTER": ProviderType.OPENROUTER,
-    "OPENROUTER_FREE": ProviderType.OPENROUTER_FREE,
     "LOCAL": ProviderType.LOCAL,
 }
 
 
-# OpenRouter models (used when OPENROUTER_API_KEY is set)
+# Models for free providers
+_OLLAMA_CLOUD_MODEL = "kimi-k2.5:cloud"
+_NIM_MODEL = "meta/llama-3.3-70b-instruct"
+# Fallback paid models (overflow only)
 _OR_LARGE = "meta-llama/llama-3.3-70b-instruct"
 _OR_MID = "mistralai/mistral-small-3.1-24b-instruct"
 
 
-def _has_openrouter_key() -> bool:
+def _has_key(env_var: str) -> bool:
     import os
-    return bool(os.environ.get("OPENROUTER_API_KEY", "").strip())
+    return bool(os.environ.get(env_var, "").strip())
 
 
 def _resolve_default_crew() -> list[dict]:
-    """Build crew using OpenRouter if API key available, else Claude Code."""
-    if _has_openrouter_key():
+    """Build crew using FREE providers first, paid as last resort.
+
+    Priority: Ollama Cloud → NVIDIA NIM → OpenRouter (overflow) → Claude Code.
+    """
+    # Ollama Cloud available — use it for primary agents
+    if _has_key("OLLAMA_API_KEY"):
+        crew = [
+            {"name": "cartographer", "role": AgentRole.CARTOGRAPHER,
+             "thread": "mechanistic", "provider": ProviderType.OLLAMA, "model": _OLLAMA_CLOUD_MODEL},
+            {"name": "surgeon", "role": AgentRole.SURGEON,
+             "thread": "alignment", "provider": ProviderType.OLLAMA, "model": "glm-5:cloud"},
+            {"name": "architect", "role": AgentRole.ARCHITECT,
+             "thread": "architectural", "provider": ProviderType.OLLAMA, "model": _OLLAMA_CLOUD_MODEL},
+        ]
+        # Add NIM validator if available (different provider = diversity)
+        if _has_key("NVIDIA_NIM_API_KEY") or _has_key("NIM_API_KEY"):
+            crew.append({"name": "validator", "role": AgentRole.VALIDATOR,
+                         "thread": "scaling", "provider": ProviderType.NVIDIA_NIM, "model": _NIM_MODEL})
+        else:
+            crew.append({"name": "validator", "role": AgentRole.VALIDATOR,
+                         "thread": "scaling", "provider": ProviderType.OLLAMA, "model": "glm-5:cloud"})
+        return crew
+
+    # No Ollama but NIM available
+    if _has_key("NVIDIA_NIM_API_KEY") or _has_key("NIM_API_KEY"):
+        return [
+            {"name": "cartographer", "role": AgentRole.CARTOGRAPHER,
+             "thread": "mechanistic", "provider": ProviderType.NVIDIA_NIM, "model": _NIM_MODEL},
+            {"name": "surgeon", "role": AgentRole.SURGEON,
+             "thread": "alignment", "provider": ProviderType.NVIDIA_NIM, "model": _NIM_MODEL},
+            {"name": "architect", "role": AgentRole.ARCHITECT,
+             "thread": "architectural", "provider": ProviderType.NVIDIA_NIM, "model": _NIM_MODEL},
+            {"name": "validator", "role": AgentRole.VALIDATOR,
+             "thread": "scaling", "provider": ProviderType.NVIDIA_NIM, "model": _NIM_MODEL},
+        ]
+
+    # No free API providers — fall back to OpenRouter then Claude Code
+    if _has_key("OPENROUTER_API_KEY"):
         return [
             {"name": "cartographer", "role": AgentRole.CARTOGRAPHER,
              "thread": "mechanistic", "provider": ProviderType.OPENROUTER, "model": _OR_LARGE},
@@ -83,8 +122,7 @@ def _resolve_default_crew() -> list[dict]:
              "thread": "scaling", "provider": ProviderType.OPENROUTER, "model": _OR_MID},
         ]
 
-    # No API keys — use Claude Code (authenticated via `claude` CLI)
-    # Lean crew: 3 agents to avoid spawning too many subprocesses
+    # Last resort — Claude Code subprocess
     return [
         {"name": "cartographer", "role": AgentRole.CARTOGRAPHER,
          "thread": "mechanistic", "provider": ProviderType.CLAUDE_CODE, "model": "sonnet"},
@@ -189,14 +227,31 @@ def _crew_from_skills() -> list[dict] | None:
 async def spawn_default_crew(swarm) -> list:
     """Spawn the multi-provider agent fleet into the swarm.
 
-    First tries to build crew from SKILL.md files (dynamic, hot-reloadable).
-    Falls back to DEFAULT_CREW if no skill files found.
+    Priority order:
+    1. Command Fleet (10-agent high-powered fleet from command_fleet.py)
+    2. Skill-based crew (from SKILL.md files)
+    3. DEFAULT_CREW fallback (4-agent basic crew)
 
     Returns list of AgentState for spawned agents.
 
     JIKOKU-optimized: Spawns agents in parallel for 3.74x speedup.
     """
-    # Try skill-based crew first
+    # Try Command Fleet first (10-agent high-powered fleet)
+    try:
+        from dharma_swarm.command_fleet import spawn_command_fleet
+        result = await spawn_command_fleet(swarm)
+        if result:
+            logger.info("Command Fleet spawned: %d agents", len(result))
+            return result
+        # If all already existed, fall through to check if we need more
+        existing = await swarm.list_agents()
+        if len(existing) >= 10:
+            logger.info("Command Fleet already fully spawned (%d agents)", len(existing))
+            return []
+    except Exception as e:
+        logger.warning("Command Fleet spawn failed, falling back: %s", e)
+
+    # Try skill-based crew
     crew = _crew_from_skills() or DEFAULT_CREW
 
     existing = await swarm.list_agents()

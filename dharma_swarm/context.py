@@ -36,7 +36,7 @@ TRANSMISSION_DIR = FOUNDATIONS_DIR / "transmissions"
 
 # ── Types ────────────────────────────────────────────────────────────
 
-CompressionTier = Literal["full", "medium", "minimal", "header", "tail"]
+CompressionTier = Literal["full", "medium", "minimal", "header", "tail", "semantic", "principled", "telos", "seed"]
 
 
 @dataclass
@@ -125,12 +125,73 @@ def _compress_tail(content: str, max_chars: int) -> str:
     return content[-max_chars:] if len(content) > max_chars else content
 
 
+def _compress_with_tpp_fallback(
+    content: str,
+    max_chars: int,
+    *,
+    level: str,
+    fallback,
+) -> str:
+    """Use TPP compression when available, otherwise degrade to a legacy tier."""
+    try:
+        from dharma_swarm.tpp import compress_semantic
+
+        compressed, _receipt = compress_semantic(content, level=level, budget=max_chars)
+        return compressed
+    except Exception:
+        return fallback(content, max_chars)
+
+
+def _compress_semantic(content: str, max_chars: int) -> str:
+    """Semantic compression via TPP — preserves causal depth, not just structure."""
+    return _compress_with_tpp_fallback(
+        content,
+        max_chars,
+        level="semantic",
+        fallback=_compress_full,
+    )
+
+
+def _compress_principled(content: str, max_chars: int) -> str:
+    """Principled compression — extract key sentences by information density."""
+    return _compress_with_tpp_fallback(
+        content,
+        max_chars,
+        level="principled",
+        fallback=_compress_medium,
+    )
+
+
+def _compress_telos(content: str, max_chars: int) -> str:
+    """Telos compression — purpose + constraints only."""
+    return _compress_with_tpp_fallback(
+        content,
+        max_chars,
+        level="telos",
+        fallback=_compress_minimal,
+    )
+
+
+def _compress_seed(content: str, max_chars: int) -> str:
+    """Seed compression — single paragraph regeneration seed."""
+    return _compress_with_tpp_fallback(
+        content,
+        max_chars,
+        level="seed",
+        fallback=_compress_header,
+    )
+
+
 _COMPRESSORS = {
     "full": _compress_full,
     "medium": _compress_medium,
     "minimal": _compress_minimal,
     "header": _compress_header,
     "tail": _compress_tail,
+    "semantic": _compress_semantic,
+    "principled": _compress_principled,
+    "telos": _compress_telos,
+    "seed": _compress_seed,
 }
 
 

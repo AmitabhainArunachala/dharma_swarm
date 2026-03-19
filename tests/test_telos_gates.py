@@ -59,6 +59,21 @@ def test_credential_patterns():
         assert result.decision == GateDecision.BLOCK, f"Should block: {pattern}"
 
 
+def test_credential_patterns_match_case_insensitively():
+    for pattern in ["bearer token123", "SK-ANT-12345", "akia1234567890"]:
+        result = check_action("write", content=pattern)
+        assert result.decision == GateDecision.BLOCK, f"Should block: {pattern}"
+
+
+def test_fast_check_blocks_case_insensitive_credentials():
+    gatekeeper = TelosGatekeeper()
+
+    result = gatekeeper.fast_check("write file", content="authorization: bearer token123")
+
+    assert result.decision == GateDecision.BLOCK
+    assert "SATYA" in result.reason
+
+
 def test_force_word_review():
     result = check_action("force push to main")
     assert result.decision == GateDecision.REVIEW
@@ -68,6 +83,16 @@ def test_force_word_review():
 def test_irreversible_review():
     result = check_action("this is permanent and cannot undo")
     assert result.decision == GateDecision.REVIEW
+
+
+def test_high_threat_context_keeps_tier_c_advisory_in_review():
+    gatekeeper = TelosGatekeeper()
+    gatekeeper.load_environmental_context({"threat_level": 0.9})
+
+    result = gatekeeper.check("force push to main")
+
+    assert result.decision == GateDecision.REVIEW
+    assert "heightened threat" in result.reason
 
 
 def test_all_gates_present():

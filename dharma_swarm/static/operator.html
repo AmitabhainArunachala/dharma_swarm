@@ -1,0 +1,270 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+<title>dharma_swarm operator</title>
+<style>
+:root {
+  --bg: #0d1117;
+  --surface: #161b22;
+  --border: #30363d;
+  --text: #c9d1d9;
+  --text-dim: #8b949e;
+  --accent: #58a6ff;
+  --green: #3fb950;
+  --red: #f85149;
+  --yellow: #d29922;
+}
+* { margin: 0; padding: 0; box-sizing: border-box; }
+body {
+  font-family: -apple-system, 'SF Pro', system-ui, sans-serif;
+  background: var(--bg);
+  color: var(--text);
+  height: 100dvh;
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+}
+#status-bar {
+  padding: 8px 16px;
+  background: var(--surface);
+  border-bottom: 1px solid var(--border);
+  font-size: 12px;
+  color: var(--text-dim);
+  display: flex;
+  justify-content: space-between;
+  flex-shrink: 0;
+}
+#status-dot {
+  width: 8px; height: 8px;
+  border-radius: 50%;
+  display: inline-block;
+  margin-right: 6px;
+  vertical-align: middle;
+}
+.connected { background: var(--green); }
+.disconnected { background: var(--red); }
+.connecting { background: var(--yellow); }
+#messages {
+  flex: 1;
+  overflow-y: auto;
+  padding: 16px;
+  -webkit-overflow-scrolling: touch;
+}
+.msg {
+  margin-bottom: 16px;
+  max-width: 85%;
+  line-height: 1.5;
+}
+.msg.user {
+  margin-left: auto;
+  background: #1f3a5f;
+  padding: 10px 14px;
+  border-radius: 16px 16px 4px 16px;
+}
+.msg.assistant {
+  background: var(--surface);
+  padding: 10px 14px;
+  border-radius: 16px 16px 16px 4px;
+  border: 1px solid var(--border);
+}
+.msg.notification {
+  background: #1a1e24;
+  border-left: 3px solid var(--yellow);
+  padding: 8px 12px;
+  font-size: 13px;
+  color: var(--text-dim);
+  max-width: 100%;
+}
+.msg.error {
+  color: var(--red);
+  font-size: 13px;
+}
+.msg pre {
+  background: #0d1117;
+  padding: 8px;
+  border-radius: 6px;
+  overflow-x: auto;
+  font-size: 13px;
+  margin-top: 6px;
+}
+.msg code { font-size: 13px; }
+#input-bar {
+  padding: 12px 16px;
+  background: var(--surface);
+  border-top: 1px solid var(--border);
+  display: flex;
+  gap: 8px;
+  flex-shrink: 0;
+}
+#input {
+  flex: 1;
+  background: var(--bg);
+  border: 1px solid var(--border);
+  border-radius: 20px;
+  padding: 10px 16px;
+  color: var(--text);
+  font-size: 16px;
+  outline: none;
+}
+#input:focus { border-color: var(--accent); }
+#send {
+  background: var(--accent);
+  border: none;
+  border-radius: 50%;
+  width: 40px; height: 40px;
+  color: white;
+  font-size: 18px;
+  cursor: pointer;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+#send:active { opacity: 0.7; }
+.typing { color: var(--text-dim); font-style: italic; font-size: 13px; }
+</style>
+</head>
+<body>
+
+<div id="status-bar">
+  <div>
+    <span id="status-dot" class="disconnected"></span>
+    <span id="status-text">disconnected</span>
+  </div>
+  <div id="autonomy-level">--</div>
+</div>
+
+<div id="messages"></div>
+
+<div id="input-bar">
+  <input id="input" type="text" placeholder="Ask the operator..." autocomplete="off" autofocus>
+  <button id="send" aria-label="Send">&#9654;</button>
+</div>
+
+<script>
+const PORT = 8420;
+const HOST = location.hostname || 'localhost';
+const WS_URL = `ws://${HOST}:${PORT}/api/operator/ws/phone_${Date.now()}`;
+const messagesEl = document.getElementById('messages');
+const inputEl = document.getElementById('input');
+const sendBtn = document.getElementById('send');
+const statusDot = document.getElementById('status-dot');
+const statusText = document.getElementById('status-text');
+const autonomyEl = document.getElementById('autonomy-level');
+
+let ws = null;
+let currentMsgEl = null;
+let reconnectTimer = null;
+
+function setStatus(state) {
+  statusDot.className = state;
+  statusText.textContent = state;
+}
+
+function addMessage(role, content) {
+  const div = document.createElement('div');
+  div.className = `msg ${role}`;
+  div.textContent = content;
+  messagesEl.appendChild(div);
+  messagesEl.scrollTop = messagesEl.scrollHeight;
+  return div;
+}
+
+function connect() {
+  setStatus('connecting');
+  ws = new WebSocket(WS_URL);
+
+  ws.onopen = () => {
+    setStatus('connected');
+    if (reconnectTimer) { clearTimeout(reconnectTimer); reconnectTimer = null; }
+    ws.send(JSON.stringify({ type: 'sync', last_seq: 0 }));
+  };
+
+  ws.onmessage = (evt) => {
+    try {
+      const data = JSON.parse(evt.data);
+      handleEvent(data);
+    } catch (e) { /* ignore parse errors */ }
+  };
+
+  ws.onclose = () => {
+    setStatus('disconnected');
+    currentMsgEl = null;
+    reconnectTimer = setTimeout(connect, 3000);
+  };
+
+  ws.onerror = () => { ws.close(); };
+}
+
+function handleEvent(data) {
+  switch (data.type) {
+    case 'text_delta':
+      if (!currentMsgEl) {
+        currentMsgEl = addMessage('assistant', '');
+      }
+      currentMsgEl.textContent += data.content;
+      messagesEl.scrollTop = messagesEl.scrollHeight;
+      break;
+
+    case 'tool_call':
+      addMessage('notification', `tool: ${data.metadata?.tool || '?'}`);
+      break;
+
+    case 'tool_result':
+      if (data.content) addMessage('notification', data.content);
+      break;
+
+    case 'done':
+      currentMsgEl = null;
+      if (data.metadata?.autonomy_level) {
+        autonomyEl.textContent = data.metadata.autonomy_level;
+      }
+      break;
+
+    case 'notification':
+      addMessage('notification', data.content);
+      break;
+
+    case 'error':
+      addMessage('error', data.content);
+      currentMsgEl = null;
+      break;
+
+    case 'history_catchup':
+      if (data.messages && data.messages.length) {
+        data.messages.forEach(m => addMessage(m.role, m.content));
+      }
+      break;
+
+    case 'pong':
+      break;
+  }
+}
+
+function send() {
+  const text = inputEl.value.trim();
+  if (!text || !ws || ws.readyState !== WebSocket.OPEN) return;
+
+  addMessage('user', text);
+  ws.send(JSON.stringify({ type: 'message', content: text, source: 'phone' }));
+  inputEl.value = '';
+  currentMsgEl = null;
+}
+
+sendBtn.addEventListener('click', send);
+inputEl.addEventListener('keydown', (e) => {
+  if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); send(); }
+});
+
+// Keep-alive ping
+setInterval(() => {
+  if (ws && ws.readyState === WebSocket.OPEN) {
+    ws.send(JSON.stringify({ type: 'ping' }));
+  }
+}, 30000);
+
+connect();
+</script>
+</body>
+</html>

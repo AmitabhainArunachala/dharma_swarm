@@ -163,6 +163,8 @@ class AgentState(BaseModel):
     name: str
     role: AgentRole
     status: AgentStatus = AgentStatus.IDLE
+    provider: str = ""
+    model: str = ""
     current_task: Optional[str] = None
     started_at: Optional[datetime] = None
     last_heartbeat: Optional[datetime] = None

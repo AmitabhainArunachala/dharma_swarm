@@ -210,16 +210,16 @@ def BadFunction():
 
 
 def test_empty_code():
-    """Empty string should not crash and should return perfect score."""
+    """Empty string should not crash and should score 0 (no code to evaluate)."""
     score = evaluate_elegance("")
-    assert score.overall == 1.0
+    assert score.overall == 0.0
     assert score.line_count == 0
 
 
 def test_whitespace_only():
-    """Whitespace-only code is treated as empty."""
+    """Whitespace-only code is treated as empty — scores 0."""
     score = evaluate_elegance("   \n\n  \t  \n")
-    assert score.overall == 1.0
+    assert score.overall == 0.0
     assert score.line_count == 0
 
 

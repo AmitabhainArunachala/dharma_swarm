@@ -1,0 +1,60 @@
+# CRITIC.md — What Not To Do
+
+Append-only record of failure patterns, blocked paths, and prediction misses.
+
+## Entries
+- 2026-03-18T04:46:43Z cycle 001: Avoid trusting green suites alone on freshly added modules; reading for invariant mismatches exposed a real double-counting bug and an exception-escape path that coverage had missed.
+- 2026-03-18T04:50:11Z cycle 002: The initial implementation overfit to toy action names (`write`/`edit`/`create`), so future runtime modules need tests against the repo’s real action vocabulary, not just idealized examples.
+- 2026-03-18T04:54:17Z cycle 003: New runtime tests should not depend on the operator’s real `~/.dharma` state; default filesystem-backed ledgers make supposedly unit-level checks environment-sensitive unless explicitly sandboxed.
+- 2026-03-18T04:58:04Z cycle 004: Precision regressions can hide on neutral fixed points; tests should choose inputs that force a measurable state transition.
+- 2026-03-18T05:02:38Z cycle 005: Leaving schema enforcement to the agent alone is brittle; orchestration code should normalize and default critical handoff fields on failure paths.
+- 2026-03-18T05:05:46Z cycle 006: Adding adaptive behavior without adversarial tests is brittle; the previous high-threat path effectively disabled Tier C review and passed existing suites until directly exercised.
+- 2026-03-18T09:11:00Z cycle 001: Randomized evolution code was relying on probabilistic mutation success; deterministic tests are needed to catch silent no-op paths.
+- 2026-03-18T09:21:27Z cycle 001: Overfitting parsers to one exact log shape is a brittle reliability failure in orchestration code.
+- 2026-03-18T09:26:43Z cycle 002: Treating optional caller hints as a full override of baseline verification is a brittle orchestration anti-pattern that creates false-positive success states.
+- 2026-03-18T09:33:24Z cycle 003: Swapping `HOME` for tool isolation without preserving `~/.dharma` is a subtle orchestration anti-pattern that redirects stateful code onto the wrong filesystem surface.
+- 2026-03-18T09:38:19Z cycle 004: Extending a private helper signature without a compatibility boundary is a common way to break focused suites and downstream overrides even when production logic is otherwise correct.
+- 2026-03-18T09:41:31Z cycle 005: Treating a managed alias directory as removable only when empty leaves hidden split-state failures in long-lived automation homes.
+- 2026-03-18T09:44:32Z cycle 006: Hardening most migration paths while leaving one direct `write_text` on a managed file creates a hidden escape hatch for foreign-file clobbering.
+- 2026-03-18T09:48:05Z cycle 007: Treating a generic importance score as universal applicability creates hidden cross-action contamination in deliberation logic.
+- 2026-03-18T09:52:53Z cycle 008: Blindly preferring the structured artifact can erase essential runtime context when its schema is narrower than the human-readable output.
+- 2026-03-18T09:56:30Z cycle 009: Trusting experimental formatter code inside a core delivery path without a fallback turns optional structure into a transport failure.
+- 2026-03-18T10:00:57Z cycle 010: Treating any JSON decode success as trustworthy schema is a brittle autonomy failure mode.
+- 2026-03-18T10:05:23Z cycle 011: Adding autonomy layers without first defining failure gating for the first-stage sensor is a classic way to turn one broken dependency into a noisy multi-step failure chain.
+- 2026-03-18T10:08:27Z cycle 012: A detector contract that says “exceeds” but triggers on equality is a classic threshold bug that slips through unless boundary tests are explicit.
+- 2026-03-18T10:11:48Z cycle 013: “Daily” append-only ledgers are fragile if they partition by write time instead of event time; this class of bug needs boundary tests around midnight and backfills.
+- 2026-03-18T10:16:24Z cycle 014: Append-only spend ledgers are fragile when they key records off write time rather than event time; midnight-crossing regressions need dedicated tests.
+- 2026-03-18T10:21:27Z cycle 015: Append-only logging is not the only durability risk; small in-place rewrites to “latest” and manifest files can silently poison the next cycle after an interruption.
+- 2026-03-18T10:25:30Z cycle 016: Green tests on control flow can hide persistence hazards; explicitly testing which files flow through hardened write paths catches a class of overnight corruption bugs earlier.
+- 2026-03-18T10:29:30Z cycle 017: Green artifact tests can still miss orchestration breakage if they never assert the wrapper process exit status.
+- 2026-03-18T10:34:20Z cycle 018: Assuming stored telemetry keeps its original types is a recurring reliability trap in unattended loops.
+- 2026-03-18T10:39:25Z cycle 019: Treating JSON persistence as type-stable is a recurring unattended-loop reliability mistake.
+- 2026-03-18T10:44:05Z cycle 020: Treating persisted datetime fields as uniformly timezone-aware is a brittle assumption that can silently disable downstream coordination logic.
+- 2026-03-18T10:48:44Z cycle 021: Treating an extension hook as reliable because its happy-path tests pass is a brittle pattern; failure-mode tests need to sit at the dispatcher seam.
+- 2026-03-18T10:56:26Z cycle 022: Green single-process tests can hide cross-run corruption hazards when append paths skip locking and durability semantics.
+- 2026-03-18T10:59:56Z cycle 023: Passing feature tests can still miss overlap corruption when new append paths quietly bypass locking and durability semantics.
+- 2026-03-18T11:03:10Z cycle 024: Fresh modules that pass functional tests can still hide overlap-corruption risk when they reintroduce raw append writes instead of the repo’s safer JSONL append pattern.
+- 2026-03-18T11:07:17Z cycle 025: Functional roundtrip tests can miss crash-safety and interleaving risk when a JSONL store still uses bare append writes.
+- 2026-03-18T11:12:05Z cycle 026: A detector can look correct under unit tests yet still permanently suppress execution if a “recent behavior” signal is accidentally wired to lifetime counters.
+- 2026-03-18T11:17:30Z cycle 027: Reusing timestamp-derived paths without collision handling can silently blend independent autonomy runs and poison operator handoff state.
+- 2026-03-18T11:22:59Z cycle 028: Rehydrating critical operator artifacts from whatever happens to be on disk invites silent metadata loss after partial deletion or corruption.
+- 2026-03-18T11:27:00Z cycle 029: Duplicated detection logic across fast and full paths quietly creates policy drift and case-sensitivity holes.
+- 2026-03-18T11:32:43Z cycle 030: Blind precedence for a non-empty output file can silently downgrade cycle state even when stdout contains the complete report.
+- 2026-03-18T11:37:36Z cycle 031: Treating `unknown`/`none` placeholders as real signal lets templated artifacts silently degrade autoresearch state.
+- 2026-03-18T11:41:10Z cycle 032: Sanitizing env values but trusting explicit overrides leaves a quiet path for blank user input to poison runtime config.
+- 2026-03-18T11:46:39Z cycle 033: Accepting evaluator numbers with plain `float(...)` is too trusting; non-finite values can silently poison state even when the happy-path tests are green.
+- 2026-03-18T11:51:31Z cycle 034: Metadata parsers that accept raw `float(...)` remain a recurring failure pattern; non-finite inputs need to be rejected consistently at ingestion points, not after they spread.
+- 2026-03-18T11:59:08Z cycle 035: I spent time validating already-green tracked modules before checking the new evaluator seam; when the tree is broadly passing, inspect scorer and ingestion boundaries earlier.
+- 2026-03-18T12:05:53Z cycle 036: I spent too long sampling already-green modules before switching to a targeted data-ingestion review.
+- 2026-03-18T12:12:32Z cycle 037: I spent several probes looking for failing tests before switching to cross-module invariant checking on already-known poisonable accounting paths.
+- 2026-03-18T12:18:34Z cycle 038: I initially spent time sampling already-green provider/runtime paths before following the accounting invariant into the still-vulnerable replay layer.
+- 2026-03-18T12:26:29Z cycle 039: I spent too long sampling already-green subsystems before auditing the ledger schema mismatch at the detector boundary.
+- 2026-03-18T12:36:06Z cycle 040: I still spent time probing multiple green runtime clusters before inspecting the malformed live autoresearch TSV that the scorer actually consumes.
+- 2026-03-18T12:42:33Z cycle 041: I spent too long hunting for a fresh failing test instead of earlier checking whether the newly added legacy-row normalizer was also applied on the forward append path.
+- 2026-03-18T12:47:07Z cycle 042: I initially updated the lock-sequence regression without accounting for the extra repair lock inside `_append_autoresearch_artifacts`, which caused one avoidable red test rerun.
+- 2026-03-18T12:51:17Z cycle 043: I spent extra time probing for failing tests before auditing the config-to-provider handoff, which would have exposed this hidden no-op sooner.
+- 2026-03-18T12:56:22Z cycle 044: I initially spent time rechecking adjacent green suites before committing to the clearer concurrency seam in the overnight runner.
+- 2026-03-18T13:00:42Z cycle 045: I initially spent time probing several green changed surfaces before committing to the subprocess timeout seam, which was the higher-leverage reliability fix.
+- 2026-03-18T13:05:14Z cycle 046: I spent too long confirming green neighboring suites before committing to the tighter evaluator-path seam.
+- 2026-03-18T13:10:34Z cycle 047: I initially over-sampled green suites before validating the live persistence seam with a concrete repro.
+- 2026-03-18T13:15:29Z cycle 048: I spent too long proving adjacent suites were green before auditing the untested decision heuristic directly.

@@ -87,21 +87,50 @@ class ApiResponse(BaseModel):
 def create_app(
     registry: Any | None = None,
     lineage_graph: Any | None = None,
+    operator: Any | None = None,
 ) -> FastAPI:
     """Create the FastAPI application.
 
     Args:
         registry: OntologyRegistry instance.  If None, creates default.
         lineage_graph: LineageGraph instance.  If None, creates default.
+        operator: ResidentOperator instance.  If None, operator endpoints disabled.
 
     Returns:
         Configured FastAPI app.
     """
+    from contextlib import asynccontextmanager
+
+    @asynccontextmanager
+    async def lifespan(app_instance: FastAPI):
+        # Start operator if provided
+        if operator is not None:
+            await operator.start()
+        yield
+        # Shutdown operator
+        if operator is not None:
+            await operator.stop()
+
     app = FastAPI(
         title="dharma_swarm API",
         description="Palantir-grade typed ontology API for consciousness research",
         version="0.1.0",
+        lifespan=lifespan,
     )
+
+    # Wire operator + chat routers if operator is provided
+    if operator is not None:
+        try:
+            from dharma_swarm.operator_router import (
+                router as op_router,
+                wire_operator,
+                wire_chat_router,
+            )
+            wire_operator(operator)
+            app.include_router(op_router)
+            wire_chat_router(app)
+        except ImportError:
+            pass
 
     # Lazy-initialize dependencies
     _state: dict[str, Any] = {}
@@ -348,6 +377,18 @@ def create_app(
                 for s in result.steps
             ],
         })
+
+    # Serve the operator phone page at /operator
+    if operator is not None:
+        from pathlib import Path as _Path
+
+        _static_dir = _Path(__file__).parent / "static"
+        if _static_dir.exists():
+            from fastapi.responses import FileResponse
+
+            @app.get("/operator")
+            async def operator_page():
+                return FileResponse(_static_dir / "operator.html")
 
     return app
 

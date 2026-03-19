@@ -37,6 +37,9 @@ def get_domain(config: dict[str, Any] | None = None) -> LoopDomain:
         eigenform_fn="dharma_swarm.cascade_domains.common.default_eigenform",
         max_iterations=cfg.get("max_iterations", 30),
         fitness_threshold=cfg.get("fitness_threshold", 0.6),
+        mutation_rate=cfg.get("mutation_rate", 1.0),
+        convergence_window=cfg.get("convergence_window", 8),
+        eigenform_epsilon=cfg.get("eigenform_epsilon", 0.005),
     )
 
 
@@ -53,6 +56,7 @@ def generate(seed: dict[str, Any] | None, context: dict[str, Any]) -> dict[str, 
       2. seed["path"]    -- read from filesystem
       3. context["path"] -- read from filesystem
       4. context["component"] -- bare component name, no file read
+      5. FALLBACK: pick a random module from dharma_swarm/ to score
 
     Returns an artifact dict with: content, path, component, change_type, fitness.
     """
@@ -78,6 +82,13 @@ def generate(seed: dict[str, Any] | None, context: dict[str, Any]) -> dict[str, 
         if path:
             content = _read_file(path)
 
+    # FALLBACK: if still no content, pick a real module to score
+    if not content or not content.strip():
+        path, content = _pick_random_module()
+        if path:
+            component = Path(path).stem
+            change_type = "audit"
+
     # Derive component from path if still unknown
     if component == "unknown" and path:
         component = Path(path).stem
@@ -89,6 +100,27 @@ def generate(seed: dict[str, Any] | None, context: dict[str, Any]) -> dict[str, 
         "change_type": change_type,
         "fitness": {},
     }
+
+
+def _pick_random_module() -> tuple[str | None, str]:
+    """Pick a random Python module from dharma_swarm/ to score.
+
+    Returns (path, content). Falls back to ("", "") if nothing found.
+    """
+    import random
+
+    pkg_dir = _PROJECT_ROOT / "dharma_swarm"
+    candidates = [
+        p for p in pkg_dir.glob("*.py")
+        if p.stem != "__init__" and p.stat().st_size > 200
+    ]
+    if not candidates:
+        return None, ""
+    chosen = random.choice(candidates)
+    try:
+        return str(chosen), chosen.read_text(encoding="utf-8")
+    except Exception:
+        return None, ""
 
 
 def _read_file(path: str) -> str:
@@ -311,20 +343,32 @@ def mutate(
     context: dict[str, Any],
     mutation_rate: float = 0.1,
 ) -> dict[str, Any]:
-    """Mark artifact as mutated and perturb metadata.
+    """Mutate a code artifact by picking a different file to score.
 
-    Real mutation (LLM-based code rewriting) is a follow-up. For now this
-    flags the artifact so the loop tracks mutation state properly, and
-    slightly adjusts the change_type to signal the loop iteration.
+    At the current stage (no LLM rewriting), mutation means selecting a
+    different module from the codebase. This gives the cascade real variation
+    across iterations instead of scoring the same file repeatedly.
     """
+    import random
+
     mutated = dict(artifact)
     mutated["metadata"] = mutated.get("metadata", {})
     mutated["metadata"]["mutated"] = True
     mutated["metadata"]["mutation_rate"] = mutation_rate
     mutated["metadata"]["generation"] = mutated["metadata"].get("generation", 0) + 1
 
-    # Advance change_type to reflect iteration
-    if mutated.get("change_type") == "proposal":
-        mutated["change_type"] = "mutation"
+    # With probability = mutation_rate, pick a different file
+    if random.random() < mutation_rate:
+        new_path, new_content = _pick_random_module()
+        if new_path and new_path != mutated.get("path"):
+            mutated["content"] = new_content
+            mutated["path"] = new_path
+            mutated["component"] = Path(new_path).stem
+            mutated["change_type"] = "mutation"
+            # Reset fitness so it gets re-scored
+            mutated["fitness"] = {}
+            mutated.pop("score", None)
+            mutated.pop("test_passed", None)
+            mutated.pop("test_results", None)
 
     return mutated

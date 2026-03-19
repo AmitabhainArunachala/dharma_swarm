@@ -10,6 +10,8 @@ from __future__ import annotations
 
 import json
 import logging
+import os
+import pwd
 import subprocess
 import sys
 from pathlib import Path
@@ -19,8 +21,21 @@ from dharma_swarm.evolution import Proposal
 
 logger = logging.getLogger(__name__)
 
-DHARMA_SWARM_DIR = Path.home() / "dharma_swarm"
-PACKAGE_DIR = DHARMA_SWARM_DIR / "dharma_swarm"
+
+def _resolve_login_home() -> Path:
+    try:
+        return Path(pwd.getpwuid(os.getuid()).pw_dir).expanduser()
+    except Exception:
+        return Path.home()
+
+
+LOGIN_HOME = _resolve_login_home()
+REPO_ROOT = Path(__file__).resolve().parents[1]
+PACKAGE_DIR = Path(__file__).resolve().parent
+_LEGACY_REPO_ROOTS = (
+    REPO_ROOT,
+    LOGIN_HOME / "dharma_swarm",
+)
 
 # Ruff rule severity mapping (subset — extend as needed)
 _CRITICAL_PREFIXES = {"F", "S", "B"}   # pyflakes, bandit, bugbear
@@ -99,12 +114,14 @@ def _finding_to_proposal(finding: dict[str, Any], cycle_id: str | None = None) -
     location = finding.get("location", {})
     row = location.get("row", 0)
 
-    # Make path relative to dharma_swarm dir
     rel_path = filename
-    try:
-        rel_path = str(Path(filename).relative_to(DHARMA_SWARM_DIR))
-    except ValueError:
-        pass
+    file_path = Path(filename).expanduser()
+    for root in _LEGACY_REPO_ROOTS:
+        try:
+            rel_path = str(file_path.relative_to(root))
+            break
+        except ValueError:
+            continue
 
     severity = _classify_severity(code)
 

@@ -113,6 +113,36 @@ def test_dgc_cli_runtime_status_command():
             assert mock.call_args.kwargs["db_path"] == "/tmp/runtime.db"
 
 
+def test_dgc_cli_eval_leaderboard_dispatch():
+    """main() dispatches eval leaderboard to cmd_eval_leaderboard()."""
+    from dharma_swarm.dgc_cli import main
+
+    with patch("sys.argv", ["dgc", "eval", "leaderboard", "--limit", "4"]):
+        with patch("dharma_swarm.dgc_cli.cmd_eval_leaderboard", return_value=0) as mock_cmd:
+            main()
+    mock_cmd.assert_called_once_with(evaluations_path=None, limit=4)
+
+
+def test_dgc_cli_eval_models_dispatch():
+    """main() dispatches eval models to cmd_eval_models()."""
+    from dharma_swarm.dgc_cli import main
+
+    with patch("sys.argv", ["dgc", "eval", "models", "--task-type", "code", "--limit", "5"]):
+        with patch("dharma_swarm.dgc_cli.cmd_eval_models", return_value=0) as mock_cmd:
+            main()
+    mock_cmd.assert_called_once_with(evaluations_path=None, task_type="code", limit=5)
+
+
+def test_dgc_cli_eval_research_dispatch():
+    """main() dispatches eval research to cmd_eval_research()."""
+    from dharma_swarm.dgc_cli import main
+
+    with patch("sys.argv", ["dgc", "eval", "research", "--task-type", "ops", "--limit", "2"]):
+        with patch("dharma_swarm.dgc_cli.cmd_eval_research", return_value=0) as mock_cmd:
+            main()
+    mock_cmd.assert_called_once_with(evaluations_path=None, task_type="ops", limit=2)
+
+
 def test_dgc_cli_ledger_search_dispatch():
     """main() dispatches `ledger search` options to cmd_ledger."""
     from dharma_swarm.dgc_cli import main
@@ -219,15 +249,15 @@ def test_dgc_cli_health_command():
             mock.assert_called_once()
 
 
-def test_cmd_ui_list_mentions_swarmlens_and_next(capsys):
+def test_cmd_ui_list_mentions_surfaces(capsys):
     import dharma_swarm.dgc_cli as cli
 
     cli.cmd_ui()
 
     out = capsys.readouterr().out
-    assert "SwarmLens" in out or "swarmlens" in out.lower()
-    assert "http://127.0.0.1:8080" in out
-    assert "http://127.0.0.1:3000/dashboard" in out
+    assert "lens" in out.lower()  # mentions lens (removed)
+    assert "http://127.0.0.1:8420" in out  # API port
+    assert "3420" in out  # dashboard port
 
 
 def test_dgc_cli_doctor_schedule_dispatch():

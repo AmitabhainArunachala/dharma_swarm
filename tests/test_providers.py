@@ -1,6 +1,7 @@
 """Tests for dharma_swarm.providers."""
 
 import asyncio
+import errno
 from unittest.mock import AsyncMock, patch
 
 import pytest
@@ -14,6 +15,7 @@ from dharma_swarm.providers import (
     NVIDIANIMProvider,
     OpenAIProvider,
     OpenRouterFreeProvider,
+    OpenRouterProvider,
     create_default_router,
 )
 
@@ -34,7 +36,8 @@ def test_openai_provider_init():
     assert p._api_key == "test-key"
 
 
-def test_openai_provider_no_key():
+def test_openai_provider_no_key(monkeypatch):
+    monkeypatch.delenv("OPENAI_API_KEY", raising=False)
     p = OpenAIProvider(api_key=None)
     with pytest.raises(RuntimeError, match="OPENAI_API_KEY"):
         p._client_or_raise()
@@ -55,6 +58,18 @@ def test_build_messages():
     result = OpenAIProvider._build_messages(msgs, system="be helpful")
     assert len(result) == 2
     assert result[0]["role"] == "system"
+
+
+def test_openai_token_limit_kwargs_switches_for_gpt5_family():
+    assert OpenAIProvider._token_limit_kwargs("gpt-5.4", 64) == {
+        "max_completion_tokens": 64,
+    }
+    assert OpenAIProvider._token_limit_kwargs("o3-mini", 64) == {
+        "max_completion_tokens": 64,
+    }
+    assert OpenAIProvider._token_limit_kwargs("gpt-4o", 64) == {
+        "max_tokens": 64,
+    }
 
 
 def test_model_router_missing():
@@ -161,6 +176,42 @@ async def test_claude_code_provider_timeout():
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("provider", "expected_label"),
+    [
+        (ClaudeCodeProvider(timeout=1), "claude-code"),
+        (CodexProvider(timeout=1), "codex"),
+    ],
+)
+async def test_subprocess_provider_timeout_escalates_to_kill_after_grace(
+    provider,
+    expected_label,
+):
+    spawned_proc = None
+
+    async def fake_exec(*args, **kwargs):
+        nonlocal spawned_proc
+        spawned_proc = AsyncMock()
+        spawned_proc.communicate = AsyncMock(side_effect=asyncio.TimeoutError)
+        spawned_proc.terminate = AsyncMock()
+        spawned_proc.kill = AsyncMock()
+        spawned_proc.wait = AsyncMock(side_effect=[asyncio.TimeoutError, None])
+        return spawned_proc
+
+    with patch("dharma_swarm.providers.asyncio.create_subprocess_exec", side_effect=fake_exec):
+        result = await provider.complete(
+            LLMRequest(model=expected_label, messages=[{"role": "user", "content": "test"}])
+        )
+
+    assert result.content == "TIMEOUT: exceeded limit"
+    assert result.model == expected_label
+    assert spawned_proc is not None
+    spawned_proc.terminate.assert_awaited_once()
+    spawned_proc.kill.assert_awaited_once()
+    assert spawned_proc.wait.await_count == 2
+
+
+@pytest.mark.asyncio
 async def test_claude_code_provider_error():
     """Verify non-zero exit code with no stdout returns error content."""
 
@@ -262,6 +313,36 @@ async def test_codex_provider_complete():
     assert result.model == "codex"
 
 
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("provider", "missing_binary", "expected_label"),
+    [
+        (ClaudeCodeProvider(timeout=10), "claude", "claude-code"),
+        (CodexProvider(timeout=10), "codex", "codex"),
+    ],
+)
+async def test_subprocess_provider_missing_binary_returns_error_response(
+    provider,
+    missing_binary,
+    expected_label,
+):
+    with patch(
+        "dharma_swarm.providers.asyncio.create_subprocess_exec",
+        side_effect=FileNotFoundError(
+            errno.ENOENT,
+            "No such file or directory",
+            missing_binary,
+        ),
+    ):
+        result = await provider.complete(
+            LLMRequest(model=expected_label, messages=[{"role": "user", "content": "test"}])
+        )
+
+    assert result.model == expected_label
+    assert result.content.startswith(f"ERROR: failed to launch {expected_label}:")
+    assert missing_binary in result.content
+
+
 # --- OpenRouterFreeProvider tests ---
 
 
@@ -269,6 +350,30 @@ def test_openrouter_free_provider_init():
     p = OpenRouterFreeProvider(api_key="test-key")
     assert p._api_key == "test-key"
     assert "free" in p._preferred_model
+
+
+@pytest.mark.parametrize(
+    ("provider", "expected_base_url"),
+    [
+        (OpenRouterProvider(api_key="test-key", base_url="https://router.proxy/v1/"), "https://router.proxy/v1"),
+        (
+            OpenRouterFreeProvider(
+                api_key="test-key",
+                model="deepseek/deepseek-r1:free",
+                base_url="https://router.proxy/free/",
+            ),
+            "https://router.proxy/free",
+        ),
+    ],
+)
+def test_openrouter_clients_use_configured_base_url(provider, expected_base_url):
+    with patch("openai.AsyncOpenAI") as mock_client:
+        provider._client_or_raise()
+
+    mock_client.assert_called_once_with(
+        api_key="test-key",
+        base_url=expected_base_url,
+    )
 
 
 def test_openrouter_free_no_key():

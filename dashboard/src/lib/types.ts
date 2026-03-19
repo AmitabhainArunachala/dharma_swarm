@@ -29,6 +29,8 @@ export interface ChatStatusOut {
   tool_result_max_chars: number;
   history_message_limit: number;
   temperature: number;
+  persistent_sessions?: boolean;
+  chat_ws_path_template?: string;
   default_profile_id?: string;
   profiles?: ChatProfileOut[];
 }
@@ -137,6 +139,154 @@ export interface AgentOut {
   provider: string;
   model: string;
   error: string | null;
+}
+
+// ---------------------------------------------------------------------------
+// Fleet (GET /api/fleet/config)
+// ---------------------------------------------------------------------------
+
+export interface FleetAgentConfig {
+  name: string;
+  role: string;
+  provider: string;
+  model: string;
+  display_name: string;
+  model_display_name: string;
+  tier: string;
+  strengths: string[];
+  available: boolean;
+  tool_name: string;
+  thread: string;
+}
+
+// ---------------------------------------------------------------------------
+// Provider Status (GET /api/providers/status)
+// ---------------------------------------------------------------------------
+
+export interface ProviderStatusOut {
+  provider: string;
+  available: boolean;
+  model_count?: number;
+  availability_kind?: string;
+}
+
+// ---------------------------------------------------------------------------
+// Agent Detail Extended (GET /api/agents/{id}/detail)
+// ---------------------------------------------------------------------------
+
+export interface AgentConfigOut {
+  provider: string;
+  model: string;
+  role: string;
+  thread: string;
+  display_name: string;
+  tier: string;
+  strengths: string[];
+}
+
+export interface AgentCostOut {
+  daily_spent: number;
+  weekly_spent: number;
+  budget_status: string;
+}
+
+export interface CoreFileOut {
+  file_path: string;
+  count: number;
+  last_touch: string;
+  salience: number;
+}
+
+export interface AvailableModelOut {
+  provider: string;
+  model_id: string;
+  label: string;
+  tier: string;
+  strengths: string[];
+}
+
+export interface ModelVerificationOut {
+  status: string;
+  route: string;
+  latency_ms: number;
+  verified_at: string;
+  response_preview: string;
+  error: string;
+}
+
+export interface TopModelOut {
+  id: string;
+  display_name: string;
+  ui_label: string;
+  custom_label: string;
+  short_name: string;
+  provider: string;
+  routes: string[];
+  available_routes: string[];
+  available: boolean;
+  tier: string;
+  strengths: string[];
+  max_context: number;
+  cost_per_mtok: number;
+  notes: string;
+  aliases: string[];
+  source: string;
+  power_rank: number | null;
+  rank: number;
+  fallbacks: string[];
+  docs_url: string;
+  provider_url: string;
+  profile_updated_at: string;
+  verification: ModelVerificationOut;
+}
+
+export interface ModelProfileOut {
+  model_id: string;
+  display_name: string;
+  custom_label: string;
+  short_name: string;
+  ui_label: string;
+  docs_url: string;
+  provider_url: string;
+  updated_at: string;
+}
+
+export interface VerifyTop10Out {
+  verified_at: string;
+  ok_count: number;
+  results: Array<{
+    model_id: string;
+    display_name: string;
+    status: string;
+    route: string;
+    latency_ms: number;
+    verified_at: string;
+    response_preview: string;
+    error: string;
+  }>;
+}
+
+export interface FitnessHistoryEntry {
+  name: string;
+  success_rate: number;
+  avg_latency: number;
+  avg_quality: number;
+  total_calls: number;
+  total_tokens: number;
+  total_cost_usd: number;
+  speed_score: number;
+  composite_fitness: number;
+  computed_at: string;
+}
+
+export interface TaskLogEntry {
+  task: string;
+  success: boolean;
+  tokens: number;
+  latency_ms: number;
+  cost_usd: number;
+  timestamp: string;
+  response_preview: string;
 }
 
 // ---------------------------------------------------------------------------

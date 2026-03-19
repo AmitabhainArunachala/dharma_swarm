@@ -263,21 +263,45 @@ class CodexAdapter(ProviderAdapter):
         output_path: Path,
     ) -> list[str]:
         model = request.model or self._config.default_model or "gpt-5.4"
-        cmd = [
-            self._cli_path,
-            "exec",
-            "-m",
-            model,
-            "--json",
-            "--full-auto",
-            "--color",
-            "never",
-            "-C",
-            str(self._workdir),
-            "-o",
-            str(output_path),
-            "-",
-        ]
+        provider_options = request.provider_options or {}
+        add_dirs_raw = provider_options.get("add_dirs") or []
+        add_dirs: list[str] = []
+        if isinstance(add_dirs_raw, (str, Path)):
+            add_dirs = [str(add_dirs_raw)]
+        elif isinstance(add_dirs_raw, list):
+            add_dirs = [str(path) for path in add_dirs_raw if str(path).strip()]
+        if request.resume_session_id:
+            cmd = [
+                self._cli_path,
+                "exec",
+                "resume",
+                "-m",
+                model,
+                "--json",
+                "--full-auto",
+                "-o",
+                str(output_path),
+                request.resume_session_id,
+                "-",
+            ]
+        else:
+            cmd = [
+                self._cli_path,
+                "exec",
+                "-m",
+                model,
+                "--json",
+                "--full-auto",
+                "--color",
+                "never",
+                "-C",
+                str(self._workdir),
+                "-o",
+                str(output_path),
+                "-",
+            ]
+            for extra_dir in add_dirs:
+                cmd.extend(["--add-dir", extra_dir])
         return cmd
 
     async def _write_prompt(

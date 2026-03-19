@@ -66,6 +66,29 @@ class TestParserNewCommands:
         args = parser.parse_args(["hum"])
         assert args.command == "hum"
 
+    def test_eval_leaderboard_parses(self):
+        parser = _build_parser()
+        args = parser.parse_args(["eval", "leaderboard", "--limit", "7"])
+        assert args.command == "eval"
+        assert args.eval_cmd == "leaderboard"
+        assert args.limit == 7
+
+    def test_eval_models_parses(self):
+        parser = _build_parser()
+        args = parser.parse_args(["eval", "models", "--task-type", "code", "--limit", "3"])
+        assert args.command == "eval"
+        assert args.eval_cmd == "models"
+        assert args.task_type == "code"
+        assert args.limit == 3
+
+    def test_eval_research_parses(self):
+        parser = _build_parser()
+        args = parser.parse_args(["eval", "research", "--task-type", "research", "--limit", "2"])
+        assert args.command == "eval"
+        assert args.eval_cmd == "research"
+        assert args.task_type == "research"
+        assert args.limit == 2
+
 
 class TestMonitorExtensions:
     """Test monitor fitness_regression and bridge_summary."""

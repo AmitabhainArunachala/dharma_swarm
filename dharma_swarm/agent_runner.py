@@ -7,7 +7,9 @@ Each AgentRunner manages a single agent; AgentPool manages the fleet.
 from __future__ import annotations
 
 import asyncio
+import inspect
 import logging
+import math
 import os
 import time
 from datetime import datetime, timedelta, timezone
@@ -27,7 +29,7 @@ from dharma_swarm.models import (
 )
 from dharma_swarm.agent_memory import AgentMemoryBank
 from dharma_swarm.jikoku_samaya import get_global_tracer as _jikoku_tracer
-from dharma_swarm.telos_gates import check_with_reflective_reroute
+from dharma_swarm.telos_gates import ReflectiveGateOutcome, check_with_reflective_reroute
 
 logger = logging.getLogger(__name__)
 
@@ -151,6 +153,26 @@ def _clamp01(value: float) -> float:
     return max(0.0, min(1.0, float(value)))
 
 
+def _finite_number(value: Any) -> float | None:
+    if isinstance(value, bool):
+        return None
+    if isinstance(value, (int, float)):
+        candidate = float(value)
+    elif isinstance(value, str):
+        text = value.strip()
+        if not text:
+            return None
+        try:
+            candidate = float(text)
+        except ValueError:
+            return None
+    else:
+        return None
+    if not math.isfinite(candidate):
+        return None
+    return candidate
+
+
 def _coerce_bool(value: Any) -> bool | None:
     if isinstance(value, bool):
         return value
@@ -183,19 +205,9 @@ def _task_action_name(task: Task) -> str:
 
 def _metadata_number(metadata: dict[str, Any], *keys: str) -> float | None:
     for key in keys:
-        value = metadata.get(key)
-        if isinstance(value, bool):
-            continue
-        if isinstance(value, (int, float)):
-            return float(value)
-        if isinstance(value, str):
-            text = value.strip()
-            if not text:
-                continue
-            try:
-                return float(text)
-            except ValueError:
-                continue
+        number = _finite_number(metadata.get(key))
+        if number is not None:
+            return number
     return None
 
 
@@ -512,6 +524,57 @@ def _response_total_tokens(response: LLMResponse | None) -> int:
     )
 
 
+def _response_input_tokens(response: LLMResponse | None) -> int:
+    if response is None:
+        return 0
+    usage = response.usage or {}
+    return int(
+        usage.get("input_tokens")
+        or usage.get("prompt_tokens")
+        or 0
+    )
+
+
+def _response_output_tokens(response: LLMResponse | None) -> int:
+    if response is None:
+        return 0
+    usage = response.usage or {}
+    return int(
+        usage.get("output_tokens")
+        or usage.get("completion_tokens")
+        or 0
+    )
+
+
+def _estimated_response_cost_usd(
+    response: LLMResponse | None,
+    *,
+    provider: ProviderType | str | None,
+    fallback_model: str = "",
+) -> float:
+    if response is None:
+        return 0.0
+    provider_name = str(provider.value if hasattr(provider, "value") else provider or "").strip().lower()
+    if provider_name in {
+        ProviderType.OLLAMA.value,
+        ProviderType.NVIDIA_NIM.value,
+        ProviderType.OPENROUTER_FREE.value,
+        ProviderType.LOCAL.value,
+    }:
+        return 0.0
+    model = str(getattr(response, "model", "") or fallback_model or "").strip()
+    tokens_in = _response_input_tokens(response)
+    tokens_out = _response_output_tokens(response)
+    if not model or (tokens_in <= 0 and tokens_out <= 0):
+        return 0.0
+    try:
+        from dharma_swarm.cost_ledger import CostLedger
+
+        return CostLedger().estimate_cost(model, tokens_in, tokens_out)
+    except Exception:
+        return 0.0
+
+
 def _feedback_quality_score(
     task: Task,
     config: AgentConfig,
@@ -556,12 +619,95 @@ def _state_from_config(config: AgentConfig) -> AgentState:
         name=config.name,
         role=config.role,
         status=AgentStatus.STARTING,
+        provider=config.provider.value if hasattr(config.provider, 'value') else str(config.provider or ""),
+        model=config.model or "",
     )
 
 
-def _build_system_prompt(config: AgentConfig) -> str:
-    """Build the system prompt from config, v7 rules, role briefings, and live context."""
+def _build_tpp_system_prompt(config: AgentConfig, task: Task | None = None) -> str | None:
+    """Build a TPP-formatted system prompt if TPP metadata is present.
+
+    Returns None if TPP is not requested, falling through to standard assembly.
+    TPP is activated by setting metadata.tpp=true on the task or config.
+    """
+    metadata = config.metadata or {}
+    task_meta = (task.metadata if task and isinstance(task.metadata, dict) else {})
+
+    use_tpp = (
+        _coerce_bool(task_meta.get("tpp"))
+        or _coerce_bool(metadata.get("tpp"))
+        or _coerce_bool(task_meta.get("use_tpp"))
+    )
+    if not use_tpp:
+        return None
+
+    try:
+        from dharma_swarm.tpp import (
+            IntentThread,
+            compose_from_template,
+        )
+
+        # Map agent roles to TPP templates
+        role_template_map = {
+            "researcher": "research",
+            "archeologist": "research",
+            "surgeon": "builder",
+            "architect": "builder",
+            "cartographer": "synthesizer",
+            "validator": "reviewer",
+            "coder": "builder",
+            "tester": "reviewer",
+        }
+        template_name = role_template_map.get(config.role.value, "research")
+
+        # Build intent thread from task metadata if present
+        intent_thread = None
+        if task_meta.get("intent_thread"):
+            intent_thread = IntentThread.from_dict(task_meta["intent_thread"])
+        elif task_meta.get("operator_intent"):
+            from dharma_swarm.tpp import create_intent_thread
+            intent_thread = create_intent_thread(
+                str(task_meta["operator_intent"]),
+                telos=str(task_meta.get("telos", "Jagat Kalyan")),
+            )
+
+        # Get context from standard context builder
+        from dharma_swarm.context import build_agent_context
+        ctx = build_agent_context(role=config.role.value, thread=config.thread)
+
+        telos = str(task_meta.get("telos", ""))
+        task_desc = _task_text(task) if task else ""
+
+        prompt = compose_from_template(
+            template_name,
+            task_description=task_desc,
+            telos=telos,
+            context=ctx or "",
+            intent_thread=intent_thread,
+            cascade_depth=int(task_meta.get("cascade_depth", 0)),
+            context_budget=int(task_meta.get("context_budget", 5000)),
+        )
+
+        from dharma_swarm.daemon_config import V7_BASE_RULES
+        return V7_BASE_RULES + "\n\n" + prompt.render()
+    except Exception:
+        logger.debug("TPP prompt assembly failed, falling through to standard", exc_info=True)
+        return None
+
+
+def _build_system_prompt(config: AgentConfig, task: Task | None = None) -> str:
+    """Build the system prompt from config, v7 rules, role briefings, and live context.
+
+    If TPP metadata is present (metadata.tpp=true), uses the Transmission Prompt
+    Protocol for structured prompt assembly. Otherwise falls through to standard
+    V7 rules + role briefing + context concatenation.
+    """
     from dharma_swarm.models import ProviderType
+
+    # Try TPP-formatted prompt first (opt-in via metadata)
+    tpp_prompt = _build_tpp_system_prompt(config, task=task)
+    if tpp_prompt:
+        return tpp_prompt
 
     # For non-CLAUDE_CODE providers, explicit system_prompt is final
     if config.system_prompt and config.provider != ProviderType.CLAUDE_CODE:
@@ -595,6 +741,33 @@ def _build_system_prompt(config: AgentConfig) -> str:
     return "\n\n".join(parts)
 
 
+def _resolve_system_prompt(config: AgentConfig, task: Task | None = None) -> str:
+    """Invoke the prompt builder while tolerating legacy one-arg overrides."""
+    builder = _build_system_prompt
+    if task is None:
+        return builder(config)
+
+    try:
+        params = tuple(inspect.signature(builder).parameters.values())
+    except (TypeError, ValueError):
+        return builder(config, task=task)
+
+    if any(param.kind == inspect.Parameter.VAR_KEYWORD for param in params) or any(
+        param.name == "task" for param in params
+    ):
+        return builder(config, task=task)
+    if any(param.kind == inspect.Parameter.VAR_POSITIONAL for param in params):
+        return builder(config, task)
+
+    positional_params = sum(
+        param.kind in (inspect.Parameter.POSITIONAL_ONLY, inspect.Parameter.POSITIONAL_OR_KEYWORD)
+        for param in params
+    )
+    if positional_params >= 2:
+        return builder(config, task)
+    return builder(config)
+
+
 def _build_prompt(
     task: Task,
     config: AgentConfig,
@@ -607,7 +780,7 @@ def _build_prompt(
         config: Agent configuration.
         plan_context: Optional formatted plan to inject (Manus pattern).
     """
-    system = _build_system_prompt(config)
+    system = _resolve_system_prompt(config, task=task)
     user_parts = [f"## Task: {task.title}\n\n{task.description}"]
     metadata = task.metadata if isinstance(task.metadata, dict) else {}
     metadata.pop("_memory_recall_consumer", None)
@@ -713,7 +886,12 @@ async def _leave_task_mark(
 
         salience = _PRIORITY_SALIENCE.get(task.priority, 0.5)
         if not success:
-            salience = max(salience, 0.8)
+            # Only boost failure salience for HIGH+ priority tasks
+            if task.priority in (TaskPriority.HIGH, TaskPriority.URGENT):
+                salience = max(salience, 0.8)
+            # LOW/NORMAL failures get modest boost, not 0.8
+            else:
+                salience = min(salience + 0.1, 0.5)
 
         observation = (result_text or "").strip().replace("\n", " ")
         if not observation:
@@ -755,12 +933,14 @@ class AgentRunner:
         sandbox: CodeSandbox | None = None,
         memory: AgentMemoryBank | None = None,
         message_bus: Any | None = None,
+        output_evaluator: Any | None = None,
     ) -> None:
         self._config = config
         self._provider = provider
         self._sandbox = sandbox
         self._memory = memory
         self._message_bus = message_bus
+        self._output_evaluator = output_evaluator
         self._state = _state_from_config(config)
         self._lock = asyncio.Lock()
 
@@ -805,6 +985,7 @@ class AgentRunner:
         route_decision: Any | None = None
         response: LLMResponse | None = None
         completion_latency_ms = 0.0
+        output_quality_score: float | None = None
 
         _task_tracer = _jikoku_tracer()
         _task_span = _task_tracer.start(
@@ -832,18 +1013,64 @@ class AgentRunner:
                     f"Task={task.title}. Goal: execute safely with bounded changes."
                 )
 
-            gate = check_with_reflective_reroute(
-                action=task.title,
-                content=task.description,
-                tool_name="agent_runner",
-                think_phase="before_complete",
-                reflection=seed_reflection,
-                max_reroutes=2,
-                spec_ref=spec_ref,
-                requirement_refs=req_refs,
-            )
-            if gate.result.decision == GateDecision.BLOCK:
-                raise RuntimeError(f"Telos block: {gate.result.reason}")
+            # v0.3.0: Viveka pre-flight — complexity routing + cost check
+            try:
+                from dharma_swarm.complexity_router import ComplexityRouter
+                from dharma_swarm.cost_ledger import CostLedger
+
+                _router = ComplexityRouter()
+                _classification = _router.classify(
+                    action_type=telic_task_type,
+                    target=task.title,
+                    domains=[str(meta.get("domain", "code"))],
+                )
+
+                # Cost pre-flight
+                _ledger = CostLedger()
+                if _ledger.should_stop():
+                    raise RuntimeError(
+                        f"Budget exhausted: ${_ledger.daily_total():.2f} / "
+                        f"${_ledger.budget.daily_limit_usd:.2f}"
+                    )
+
+                if _classification.is_fast:
+                    # FAST PATH: 3-gate check only
+                    from dharma_swarm.telos_gates import DEFAULT_GATEKEEPER as _gk
+                    fast_result = _gk.fast_check(task.title, task.description)
+                    if fast_result.decision == GateDecision.BLOCK:
+                        raise RuntimeError(f"Fast gate block: {fast_result.reason}")
+                    # Fast path passed — skip full gate check below
+                    gate = ReflectiveGateOutcome(
+                        result=fast_result, attempts=0, reflection="fast_path",
+                    )
+                else:
+                    # SLOW PATH: full reflective gate check
+                    gate = check_with_reflective_reroute(
+                        action=task.title,
+                        content=task.description,
+                        tool_name="agent_runner",
+                        think_phase="before_complete",
+                        reflection=seed_reflection,
+                        max_reroutes=2,
+                        spec_ref=spec_ref,
+                        requirement_refs=req_refs,
+                    )
+                    if gate.result.decision == GateDecision.BLOCK:
+                        raise RuntimeError(f"Telos block: {gate.result.reason}")
+            except ImportError:
+                # Graceful fallback if viveka modules not available
+                gate = check_with_reflective_reroute(
+                    action=task.title,
+                    content=task.description,
+                    tool_name="agent_runner",
+                    think_phase="before_complete",
+                    reflection=seed_reflection,
+                    max_reroutes=2,
+                    spec_ref=spec_ref,
+                    requirement_refs=req_refs,
+                )
+                if gate.result.decision == GateDecision.BLOCK:
+                    raise RuntimeError(f"Telos block: {gate.result.reason}")
 
             plan_context = ""
             if gate.attempts:
@@ -929,6 +1156,23 @@ class AgentRunner:
                 content=result,
                 turn_index=2,
             )
+
+            # v0.3.0: Record cost to ledger
+            try:
+                from dharma_swarm.cost_ledger import CostLedger, InvocationCost
+                _ledger = CostLedger()
+                _ledger.record(InvocationCost(
+                    agent=self._config.name,
+                    provider=getattr(response, "provider", "") if response else "",
+                    model=getattr(response, "model", "") if response else "",
+                    tokens_in=getattr(response, "input_tokens", 0) if response else 0,
+                    tokens_out=getattr(response, "output_tokens", 0) if response else 0,
+                    task_id=task.id,
+                    duration_ms=int(completion_latency_ms),
+                ))
+            except Exception:
+                pass  # Cost recording must never break execution
+
             # Unified conversation log
             try:
                 from dharma_swarm.conversation_log import log_agent_turn
@@ -942,6 +1186,13 @@ class AgentRunner:
                 )
             except Exception:
                 pass
+            output_quality_score = await self._record_output_evaluation(
+                task,
+                result,
+                response=response,
+                latency_ms=completion_latency_ms,
+                success=True,
+            )
             self._record_router_feedback(
                 task=task,
                 request=request,
@@ -951,6 +1202,7 @@ class AgentRunner:
                 latency_ms=completion_latency_ms,
                 success=True,
                 result_text=result,
+                quality_score=output_quality_score,
             )
 
             async with self._lock:
@@ -1026,6 +1278,13 @@ class AgentRunner:
                 content=str(exc),
                 turn_index=2,
             )
+            output_quality_score = await self._record_output_evaluation(
+                task,
+                str(exc),
+                response=response,
+                latency_ms=completion_latency_ms,
+                success=False,
+            )
             self._record_router_feedback(
                 task=task,
                 request=request,
@@ -1035,6 +1294,7 @@ class AgentRunner:
                 latency_ms=completion_latency_ms,
                 success=False,
                 result_text=str(exc),
+                quality_score=output_quality_score,
             )
             await _leave_task_mark(
                 agent_name=self._config.name,
@@ -1105,6 +1365,7 @@ class AgentRunner:
         latency_ms: float,
         success: bool,
         result_text: str,
+        quality_score: float | None = None,
     ) -> None:
         if (
             route_request is None
@@ -1131,11 +1392,15 @@ class AgentRunner:
                 route_request=route_request,
                 request=request,
                 decision=route_decision,
-                quality_score=_feedback_quality_score(
-                    task,
-                    self._config,
-                    success=success,
-                    result_text=result_text,
+                quality_score=(
+                    quality_score
+                    if quality_score is not None
+                    else _feedback_quality_score(
+                        task,
+                        self._config,
+                        success=success,
+                        result_text=result_text,
+                    )
                 ),
                 total_tokens=_response_total_tokens(response),
                 latency_ms=latency_ms,
@@ -1149,6 +1414,56 @@ class AgentRunner:
                 self._config.name,
                 exc,
             )
+
+    async def _record_output_evaluation(
+        self,
+        task: Task,
+        result_text: str,
+        *,
+        response: LLMResponse | None,
+        latency_ms: float,
+        success: bool,
+    ) -> float | None:
+        """Persist output-quality evaluation for a completed task.
+
+        Best-effort only: never affects task success or failure handling.
+        """
+        if self._output_evaluator is None:
+            return None
+        provider_name = getattr(response, "provider", "") if response else ""
+        if not provider_name:
+            provider_name = (
+                self._config.provider.value
+                if hasattr(self._config.provider, "value")
+                else str(self._config.provider or "")
+            )
+        model_name = getattr(response, "model", "") if response else ""
+        if not model_name:
+            model_name = self._config.model or ""
+        try:
+            evaluation = await self._output_evaluator.evaluate(
+                task,
+                result_text,
+                agent_name=self._config.name,
+                provider=provider_name or "unknown",
+                model=model_name or "unknown",
+                latency_ms=latency_ms,
+                estimated_cost_usd=_estimated_response_cost_usd(
+                    response,
+                    provider=provider_name,
+                    fallback_model=model_name,
+                ),
+                success=success,
+                token_count=_response_total_tokens(response),
+            )
+            return float(getattr(evaluation, "quality_score", 0.0))
+        except Exception as exc:
+            logger.debug(
+                "Output evaluation record failed for %s: %s",
+                self._config.name,
+                exc,
+            )
+            return None
 
     # -- memory helpers ---------------------------------------------------
 
@@ -1422,9 +1737,19 @@ class AgentPool:
     Thread-safe via an asyncio lock. All mutating operations are serialised.
     """
 
-    def __init__(self) -> None:
+    def __init__(
+        self,
+        *,
+        evaluations_path: Any | None = None,
+        output_evaluator: Any | None = None,
+    ) -> None:
         self._agents: dict[str, AgentRunner] = {}
         self._lock = asyncio.Lock()
+        if output_evaluator is None and evaluations_path is not None:
+            from dharma_swarm.evaluator import OutputEvaluator
+
+            output_evaluator = OutputEvaluator(evaluations_path=evaluations_path)
+        self._output_evaluator = output_evaluator
 
     async def spawn(
         self,
@@ -1446,7 +1771,14 @@ class AgentPool:
         Returns:
             The started AgentRunner.
         """
-        runner = AgentRunner(config, provider=provider, sandbox=sandbox, memory=memory, message_bus=message_bus)
+        runner = AgentRunner(
+            config,
+            provider=provider,
+            sandbox=sandbox,
+            memory=memory,
+            message_bus=message_bus,
+            output_evaluator=self._output_evaluator,
+        )
         await runner.start()
         async with self._lock:
             self._agents[config.id] = runner

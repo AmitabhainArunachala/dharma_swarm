@@ -173,14 +173,23 @@ class OpenAIProvider(LLMProvider):
         out.extend(msgs)
         return out
 
+    @staticmethod
+    def _token_limit_kwargs(model: str | None, max_tokens: int) -> dict[str, int]:
+        """Use the parameter family expected by newer OpenAI reasoning models."""
+        model_id = (model or "").strip().lower()
+        if model_id.startswith(("gpt-5", "o1", "o3")):
+            return {"max_completion_tokens": max_tokens}
+        return {"max_tokens": max_tokens}
+
     @jikoku_traced_provider
     async def complete(self, request: LLMRequest) -> LLMResponse:
         client = self._client_or_raise()
         messages = self._build_messages(request.messages, request.system)
         kwargs: dict[str, Any] = dict(
             model=request.model, messages=messages,
-            max_tokens=request.max_tokens, temperature=request.temperature,
+            temperature=request.temperature,
         )
+        kwargs.update(self._token_limit_kwargs(request.model, request.max_tokens))
         if request.tools:
             kwargs["tools"] = request.tools
         resp = await client.chat.completions.create(**kwargs)
@@ -201,11 +210,14 @@ class OpenAIProvider(LLMProvider):
 
     async def stream(self, request: LLMRequest) -> AsyncIterator[str]:
         client = self._client_or_raise()
-        resp = await client.chat.completions.create(
-            model=request.model, stream=True,
-            messages=self._build_messages(request.messages, request.system),
-            max_tokens=request.max_tokens, temperature=request.temperature,
-        )
+        kwargs: dict[str, Any] = {
+            "model": request.model,
+            "stream": True,
+            "messages": self._build_messages(request.messages, request.system),
+            "temperature": request.temperature,
+        }
+        kwargs.update(self._token_limit_kwargs(request.model, request.max_tokens))
+        resp = await client.chat.completions.create(**kwargs)
         async for chunk in resp:
             delta = chunk.choices[0].delta if chunk.choices else None
             if delta and delta.content:
@@ -220,8 +232,17 @@ class OpenRouterProvider(LLMProvider):
         max_context_tokens=128_000, provider_family="openrouter",
     )
 
-    def __init__(self, api_key: str | None = None) -> None:
+    def __init__(
+        self,
+        api_key: str | None = None,
+        base_url: str | None = None,
+    ) -> None:
         self._api_key = api_key or os.environ.get("OPENROUTER_API_KEY")
+        self._base_url = (
+            base_url
+            or os.environ.get("OPENROUTER_BASE_URL")
+            or "https://openrouter.ai/api/v1"
+        ).rstrip("/")
         self._client: Any = None
 
     def _client_or_raise(self) -> Any:
@@ -235,7 +256,7 @@ class OpenRouterProvider(LLMProvider):
             raise ImportError("pip install openai") from exc
         self._client = AsyncOpenAI(
             api_key=self._api_key,
-            base_url="https://openrouter.ai/api/v1",
+            base_url=self._base_url,
         )
         return self._client
 
@@ -403,6 +424,63 @@ MEMORY_SURVIVAL_DIRECTIVE = (
 )
 
 
+async def _gracefully_stop_subprocess(
+    proc: Any,
+    *,
+    cli_label: str,
+    grace_seconds: float = 5.0,
+) -> None:
+    """Best-effort subprocess cleanup that escalates from terminate to kill."""
+    wait = getattr(proc, "wait", None)
+    terminate = getattr(proc, "terminate", None)
+    kill = getattr(proc, "kill", None)
+
+    if terminate is not None:
+        try:
+            terminate_result = terminate()
+            if inspect.isawaitable(terminate_result):
+                await terminate_result
+        except ProcessLookupError:
+            return
+        except Exception:
+            logger.debug("Failed to terminate %s subprocess cleanly", cli_label, exc_info=True)
+
+    if wait is None:
+        return
+
+    try:
+        await asyncio.wait_for(wait(), timeout=grace_seconds)
+        return
+    except ProcessLookupError:
+        return
+    except asyncio.TimeoutError:
+        pass
+    except Exception:
+        logger.debug("Waiting for %s subprocess exit failed after terminate", cli_label, exc_info=True)
+        return
+
+    if kill is None:
+        logger.warning("%s subprocess ignored terminate() and has no kill()", cli_label)
+        return
+
+    try:
+        kill_result = kill()
+        if inspect.isawaitable(kill_result):
+            await kill_result
+    except ProcessLookupError:
+        return
+    except Exception:
+        logger.debug("Failed to kill %s subprocess after timeout", cli_label, exc_info=True)
+        return
+
+    try:
+        await asyncio.wait_for(wait(), timeout=grace_seconds)
+    except ProcessLookupError:
+        return
+    except Exception:
+        logger.warning("Timed out waiting for %s subprocess to exit after kill()", cli_label)
+
+
 class _SubprocessProvider(LLMProvider):
     """Base for providers that spawn CLI agents as subprocesses.
 
@@ -456,23 +534,27 @@ class _SubprocessProvider(LLMProvider):
         args = self._build_cli_args(prompt, model=request.model)
         env = self._build_env()
 
-        proc = await asyncio.create_subprocess_exec(
-            *args,
-            stdout=asyncio.subprocess.PIPE,
-            stderr=asyncio.subprocess.PIPE,
-            cwd=self._working_dir,
-            env=env,
-        )
+        try:
+            proc = await asyncio.create_subprocess_exec(
+                *args,
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.PIPE,
+                cwd=self._working_dir,
+                env=env,
+            )
+        except OSError as exc:
+            detail = str(exc).strip() or exc.__class__.__name__
+            return LLMResponse(
+                content=f"ERROR: failed to launch {self._cli_label}: {detail}",
+                model=self._cli_label,
+            )
 
         try:
             stdout, stderr = await asyncio.wait_for(
                 proc.communicate(), timeout=self._timeout
             )
         except asyncio.TimeoutError:
-            terminate_result = proc.terminate()
-            if inspect.isawaitable(terminate_result):
-                await terminate_result
-            await proc.wait()
+            await _gracefully_stop_subprocess(proc, cli_label=self._cli_label)
             return LLMResponse(content="TIMEOUT: exceeded limit", model=self._cli_label)
 
         content = stdout.decode()[:50_000] if stdout else ""
@@ -548,9 +630,19 @@ class OpenRouterFreeProvider(LLMProvider):
     }
     FREE_FLEET_ALL: list[str] = [m for tier in FREE_FLEET_TIERS.values() for m in tier]
 
-    def __init__(self, api_key: str | None = None, model: str | None = None) -> None:
+    def __init__(
+        self,
+        api_key: str | None = None,
+        model: str | None = None,
+        base_url: str | None = None,
+    ) -> None:
         self._api_key = api_key or os.environ.get("OPENROUTER_API_KEY")
         self._preferred_model = model or self.FREE_MODELS[0]
+        self._base_url = (
+            base_url
+            or os.environ.get("OPENROUTER_BASE_URL")
+            or "https://openrouter.ai/api/v1"
+        ).rstrip("/")
         self._client: Any = None
 
     def _client_or_raise(self) -> Any:
@@ -564,7 +656,7 @@ class OpenRouterFreeProvider(LLMProvider):
             raise ImportError("pip install openai") from exc
         self._client = AsyncOpenAI(
             api_key=self._api_key,
-            base_url="https://openrouter.ai/api/v1",
+            base_url=self._base_url,
         )
         return self._client
 

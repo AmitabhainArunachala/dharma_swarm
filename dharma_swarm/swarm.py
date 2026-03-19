@@ -154,6 +154,10 @@ class SwarmManager:
         self._director: ThinkodynamicDirector | None = None
         self._tick_count: int = 0
 
+        # v0.7.0: Operational Intelligence (Palantir pattern)
+        self._ontology_registry: Any = None
+        self._telic_seam: Any = None
+
         # Central config (Beer's S5 — identity at the parameter level)
         from dharma_swarm.config import DEFAULT_CONFIG
         self._config = DEFAULT_CONFIG
@@ -250,6 +254,7 @@ class SwarmManager:
             message_bus=self._message_bus,
             event_memory=self._event_memory,
             yoga=self._yoga,
+            telic_seam=self._telic_seam,
         )
 
         self._running = True
@@ -338,6 +343,34 @@ class SwarmManager:
             logger.debug("Stigmergy module not available yet")
 
         logger.info("Gödel Claw v1 subsystems initialized")
+
+        # v0.7.0: Shared Ontology + TelicSeam (Palantir operational intelligence)
+        try:
+            from dharma_swarm.ontology import OntologyRegistry
+            from dharma_swarm.telic_seam import TelicSeam, _set_seam
+            from dharma_swarm.lineage import LineageGraph
+
+            ontology_path = self.state_dir / "ontology.json"
+            self._ontology_registry = OntologyRegistry.create_dharma_registry()
+            if ontology_path.exists():
+                loaded = self._ontology_registry.load(ontology_path)
+                logger.info("Ontology loaded: %d objects", loaded)
+
+            lineage_db = self.state_dir / "db" / "lineage.db"
+            lineage_db.parent.mkdir(parents=True, exist_ok=True)
+            lineage = LineageGraph(db_path=lineage_db)
+            self._telic_seam = TelicSeam(
+                registry=self._ontology_registry,
+                lineage=lineage,
+            )
+            _set_seam(self._telic_seam)  # install as module-level singleton
+            # Re-wire orchestrator with the now-initialized seam
+            if self._orchestrator is not None:
+                self._orchestrator._telic_seam = self._telic_seam
+            logger.info("Operational ontology initialized (%d objects)",
+                        self._ontology_registry.stats().get("total_objects", 0))
+        except Exception as e:
+            logger.warning("Ontology init failed (non-fatal): %s", e)
 
         # v0.4.0: Oz-inspired systems (skill registry, profiles, intent router,
         # context search, adaptive autonomy)
@@ -1014,6 +1047,36 @@ class SwarmManager:
                 summary["stigmergy_decayed"] = decayed
             except Exception as exc:
                 logger.info("Stigmergy decay failed (transient): %s", exc)
+
+        # Persist ontology state
+        if self._ontology_registry is not None:
+            try:
+                ontology_path = self.state_dir / "ontology.json"
+                self._ontology_registry.save(ontology_path)
+            except Exception as exc:
+                logger.debug("Ontology save failed (transient): %s", exc)
+
+        # Write operational picture (Palantir COP)
+        try:
+            import json as _json
+            coordination = await self.coordination_status(refresh=False)
+            seam_stats = self._telic_seam.stats() if self._telic_seam else {}
+            ontology_stats = self._ontology_registry.stats() if self._ontology_registry else {}
+            stigmergy_density = self._stigmergy.density() if self._stigmergy else 0
+
+            picture = {
+                "timestamp": datetime.now(timezone.utc).isoformat(),
+                "tick_count": self._tick_count,
+                "ontology": ontology_stats,
+                "telic_seam": seam_stats,
+                "stigmergy_density": stigmergy_density,
+                "coordination": coordination.model_dump() if hasattr(coordination, "model_dump") else {},
+            }
+            picture_path = self.state_dir / "operational_picture.json"
+            picture_path.write_text(_json.dumps(picture, indent=2, default=str) + "\n")
+        except Exception as exc:
+            logger.debug("Operational picture write failed: %s", exc)
+
         return summary
 
     def _derive_failure_source(self, task: Task) -> str:
@@ -1329,6 +1392,35 @@ class SwarmManager:
             if callable(observer):
                 observer(state.model_dump())
         return state
+
+    async def operational_snapshot(self) -> dict[str, Any]:
+        """Palantir-style operational snapshot."""
+        status = await self.status()
+        coordination = await self.coordination_status(refresh=False)
+
+        ontology_stats = self._ontology_registry.stats() if self._ontology_registry else {}
+        seam_stats = self._telic_seam.stats() if self._telic_seam else {}
+        stigmergy_density = self._stigmergy.density() if self._stigmergy else 0
+
+        hot_paths: list[dict[str, Any]] = []
+        if self._stigmergy:
+            try:
+                paths = await self._stigmergy.hot_paths(window_hours=24, min_marks=2)
+                hot_paths = [{"path": p[0], "count": p[1]} for p in (paths or [])[:5]]
+            except Exception:
+                pass
+
+        return {
+            "timestamp": datetime.now(timezone.utc).isoformat(),
+            "uptime_seconds": round(time.monotonic() - self._start_time, 1),
+            "tick_count": self._tick_count,
+            "swarm": status.model_dump() if hasattr(status, "model_dump") else {},
+            "coordination": coordination.model_dump() if hasattr(coordination, "model_dump") else {},
+            "ontology": ontology_stats,
+            "telic_seam": seam_stats,
+            "stigmergy": {"density": stigmergy_density, "hot_paths": hot_paths},
+            "subsystems": sorted(getattr(self, "_initialized", [])),
+        }
 
     # --- Thread ---
 

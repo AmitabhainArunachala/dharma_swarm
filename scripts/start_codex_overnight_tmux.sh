@@ -3,6 +3,9 @@ set -euo pipefail
 
 ROOT="${HOME}/dharma_swarm"
 SESSION="${SESSION_NAME:-dgc_codex_night}"
+SOURCE_REPO_ROOT="${DGC_CODEX_NIGHT_REPO_ROOT:-${ROOT}}"
+WORKTREE_ROOT="${DGC_CODEX_NIGHT_WORKTREE_ROOT:-}"
+ISOLATE_WORKTREE="${DGC_CODEX_NIGHT_ISOLATE_WORKTREE:-0}"
 STATE_DIR="${DGC_CODEX_NIGHT_STATE_DIR:-${HOME}/.dharma}"
 HOURS="${1:-8}"
 POLL_SECONDS="${POLL_SECONDS:-60}"
@@ -40,9 +43,15 @@ fi
 
 mkdir -p "${STATE_DIR}"
 
-runner="python3 scripts/codex_overnight_autopilot.py --hours '${HOURS}' --poll-seconds '${POLL_SECONDS}' --cycle-timeout '${CYCLE_TIMEOUT}' --state-dir '${STATE_DIR}'"
+runner="python3 scripts/codex_overnight_autopilot.py --hours '${HOURS}' --poll-seconds '${POLL_SECONDS}' --cycle-timeout '${CYCLE_TIMEOUT}' --repo-root '${SOURCE_REPO_ROOT}' --state-dir '${STATE_DIR}'"
 if [[ "${MAX_CYCLES}" != "0" ]]; then
   runner="${runner} --max-cycles '${MAX_CYCLES}'"
+fi
+if [[ "${ISOLATE_WORKTREE}" == "1" ]]; then
+  runner="${runner} --isolate-worktree"
+fi
+if [[ -n "${WORKTREE_ROOT}" ]]; then
+  runner="${runner} --worktree-root '${WORKTREE_ROOT}'"
 fi
 if [[ -n "${MODEL}" ]]; then
   runner="${runner} --model '${MODEL}'"
@@ -69,6 +78,8 @@ if [[ "${HOURS}" == "0" ]]; then
 fi
 echo "Poll seconds: ${POLL_SECONDS}"
 echo "Cycle timeout: ${CYCLE_TIMEOUT}"
+echo "Source repo: ${SOURCE_REPO_ROOT}"
+echo "Isolate worktree: ${ISOLATE_WORKTREE}"
 echo "Model: ${MODEL:-default}"
 echo "Label: ${LABEL:-codex-overnight}"
 echo "Mode: $([[ "${YOLO}" == "1" ]] && echo "YOLO" || echo "default")"

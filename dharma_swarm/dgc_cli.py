@@ -955,6 +955,111 @@ def cmd_gates(action: str) -> None:
     print(f"Reason: {result.reason}")
 
 
+def cmd_ontology(onto_cmd: str | None, args: Any = None) -> None:  # noqa: C901
+    """Ontology Hub — unified queryable graph of all dharma_swarm entities."""
+    from dharma_swarm.ontology import OntologyRegistry
+    from dharma_swarm.ontology_hub import OntologyHub
+    from dharma_swarm.ontology_adapters import register_hub_types, sync_all
+    from dharma_swarm.ontology_query import OntologyGraph
+
+    hub = OntologyHub()
+    registry = OntologyRegistry.create_dharma_registry()
+    register_hub_types(registry)
+
+    if onto_cmd == "status":
+        # Load existing data from DB into registry
+        loaded = hub.load_into_registry(registry)
+        graph = OntologyGraph(registry)
+        st = graph.stats()
+        print("=== ONTOLOGY HUB STATUS ===")
+        print(f"  Total objects: {st['total_objects']}")
+        print(f"  Total links:   {st['total_links']}")
+        last = hub.last_sync_time()
+        print(f"  Last sync:     {last or 'never'}")
+        if st.get("newest_object"):
+            print(f"  Newest:        {st['newest_object']}")
+        print()
+        if st["object_counts"]:
+            print("  Objects by type:")
+            for t, c in sorted(st["object_counts"].items(), key=lambda x: -x[1]):
+                print(f"    {t:30s} {c:>5d}")
+        if st["link_counts"]:
+            print("\n  Links by name:")
+            for n, c in sorted(st["link_counts"].items(), key=lambda x: -x[1]):
+                print(f"    {n:30s} {c:>5d}")
+        print(f"\n  DB loaded: {loaded.get('objects', 0)} objects, {loaded.get('links', 0)} links")
+
+    elif onto_cmd == "sync":
+        counts = sync_all(registry)
+        synced = hub.sync_from_registry(registry)
+        hub._set_meta("last_sync", datetime.now(timezone.utc).isoformat())
+        as_json = getattr(args, "onto_json", False)
+        if as_json:
+            import json as _json
+            print(_json.dumps({"adapters": counts, "persisted": synced}, indent=2))
+        else:
+            print("=== ONTOLOGY SYNC ===")
+            print("  Adapters:")
+            for name, count in sorted(counts.items()):
+                icon = "+" if count > 0 else " "
+                print(f"    [{icon}] {name:20s} {count:>4d} objects")
+            total = sum(counts.values())
+            print(f"  Total ingested:   {total}")
+            print(f"  Persisted to DB:  {synced.get('objects_synced', 0)} objects, "
+                  f"{synced.get('links_synced', 0)} links")
+
+    elif onto_cmd == "query":
+        hub.load_into_registry(registry)
+        graph = OntologyGraph(registry)
+        type_name = getattr(args, "type_name", "")
+        text = getattr(args, "text", "")
+        limit = getattr(args, "limit", 20)
+        filters_raw = getattr(args, "filter", [])
+        filters = {}
+        for f in filters_raw:
+            if "=" in f:
+                k, v = f.split("=", 1)
+                filters[k] = v
+        results = graph.find(type_name, filters=filters, text_query=text, limit=limit)
+        print(f"Found {len(results)} {type_name} objects:")
+        for obj in results:
+            props_summary = ", ".join(f"{k}={v}" for k, v in list(obj.properties.items())[:4])
+            print(f"  [{obj.id[:12]}] {props_summary}")
+
+    elif onto_cmd == "traverse":
+        hub.load_into_registry(registry)
+        graph = OntologyGraph(registry)
+        obj_id = getattr(args, "obj_id", "")
+        depth = getattr(args, "depth", 3)
+        result = graph.traverse(obj_id, depth=depth)
+        root = result.get("root")
+        if root is None:
+            print(f"Object not found: {obj_id}")
+            return
+        nodes = result.get("nodes", [])
+        edges = result.get("edges", [])
+        print(f"=== TRAVERSE from {root.type_name}:{root.id[:12]} (depth={depth}) ===")
+        print(f"  Nodes reached: {len(nodes)}")
+        print(f"  Edges followed: {len(edges)}")
+        for n in nodes[:20]:
+            print(f"    [{n.type_name:25s}] {n.id[:12]}  {dict(list(n.properties.items())[:2])}")
+        if len(nodes) > 20:
+            print(f"    ... and {len(nodes) - 20} more")
+
+    elif onto_cmd == "schema":
+        type_names = registry.type_names()
+        schema = registry.schema_for_llm(type_names)
+        print(schema)
+
+    else:
+        print("Usage: dgc ontology {status|sync|query|traverse|schema}")
+        print("  status   — Object/link counts and freshness")
+        print("  sync     — Run all adapters, ingest live data")
+        print("  query    — Find objects by type (--filter, --text)")
+        print("  traverse — Walk graph from object ID (--depth)")
+        print("  schema   — Dump OAG schema for LLM context")
+
+
 def cmd_health() -> None:
     """Check ecosystem file health."""
     try:
@@ -1175,6 +1280,123 @@ def cmd_loops() -> None:
         print("\nSignal bus: not available")
 
 
+def _default_output_evaluations_path() -> Path:
+    return DHARMA_STATE / "evaluations.jsonl"
+
+
+def cmd_eval_leaderboard(
+    *,
+    evaluations_path: str | None = None,
+    limit: int = 10,
+) -> int:
+    """Show historical output-quality rankings by agent."""
+
+    async def _show() -> int:
+        from dharma_swarm.evaluator import OutputEvaluator
+
+        path = Path(evaluations_path).expanduser() if evaluations_path else _default_output_evaluations_path()
+        rows = await OutputEvaluator(evaluations_path=path).leaderboard()
+        if not rows:
+            print(f"No output evaluations recorded yet at {path}")
+            return 0
+
+        print("=== OUTPUT QUALITY LEADERBOARD ===")
+        for index, row in enumerate(rows[: max(1, limit)], start=1):
+            print(
+                f"{index:>2}. {row.agent_name:20s} "
+                f"quality={row.mean_quality:.3f} "
+                f"efficiency={row.mean_efficiency:.1f} "
+                f"latency_ms={row.mean_latency_ms:.1f} "
+                f"runs={row.runs}"
+            )
+        return 0
+
+    return int(_run(_show()))
+
+
+def cmd_eval_models(
+    *,
+    evaluations_path: str | None = None,
+    task_type: str | None = None,
+    limit: int = 10,
+) -> int:
+    """Show model-quality rankings from historical output evaluations."""
+
+    async def _show() -> int:
+        from dharma_swarm.evaluator import OutputEvaluator
+
+        path = Path(evaluations_path).expanduser() if evaluations_path else _default_output_evaluations_path()
+        rows = await OutputEvaluator(evaluations_path=path).compare_models(task_type=task_type)
+        if not rows:
+            scope = f" for task_type={task_type}" if task_type else ""
+            print(f"No model evaluations recorded{scope} at {path}")
+            return 0
+
+        title = "=== MODEL QUALITY COMPARISON ==="
+        if task_type:
+            title += f" [{task_type}]"
+        print(title)
+        for index, row in enumerate(rows[: max(1, limit)], start=1):
+            print(
+                f"{index:>2}. {row.model:32s} "
+                f"quality={row.mean_quality:.3f} "
+                f"efficiency={row.mean_efficiency:.1f} "
+                f"latency_ms={row.mean_latency_ms:.1f} "
+                f"runs={row.runs}"
+            )
+        return 0
+
+    return int(_run(_show()))
+
+
+def cmd_eval_research(
+    *,
+    evaluations_path: str | None = None,
+    task_type: str | None = None,
+    limit: int = 5,
+) -> int:
+    """Turn evaluation history into ranked hypotheses and config suggestions."""
+
+    async def _show() -> int:
+        from dharma_swarm.self_research import SelfResearcher
+
+        path = Path(evaluations_path).expanduser() if evaluations_path else _default_output_evaluations_path()
+        researcher = SelfResearcher(evaluations_path=path)
+        evaluations = await researcher.load_evaluations()
+        if task_type:
+            evaluations = [row for row in evaluations if row.task_type == task_type]
+        if not evaluations:
+            scope = f" for task_type={task_type}" if task_type else ""
+            print(f"No output evaluations recorded{scope} at {path}")
+            return 0
+
+        hypotheses = await researcher.generate_hypotheses(evaluations)
+        if not hypotheses:
+            print("No strong output-quality hypotheses yet.")
+            return 0
+
+        print("=== OUTPUT QUALITY RESEARCH ===")
+        for hypothesis in hypotheses[: max(1, limit)]:
+            experiment = await researcher.design_experiment(hypothesis)
+            result = await researcher.run_experiment(experiment, evaluations=evaluations)
+            changes = await researcher.apply_learnings(result)
+            print(f"- {hypothesis.question}")
+            print(f"  rationale: {hypothesis.rationale}")
+            print(
+                f"  result: winner={result.winner or 'n/a'} "
+                f"delta={result.delta:+.3f} confidence={result.confidence:.2f}"
+            )
+            if changes:
+                for change in changes:
+                    print(
+                        f"  suggestion: {change.target}.{change.key}={change.value} "
+                        f"because {change.reason}"
+                    )
+        return 0
+
+    return int(_run(_show()))
+
+
 def cmd_health_check() -> None:
     """Monitor-based system health check (v0.2.0)."""
     async def _check():
@@ -1377,6 +1599,126 @@ def cmd_daemon_status() -> None:
         print("  pulse_log: no entries")
 
 
+def cmd_ask(question: str, session_id: str | None = None) -> None:
+    """Ask the resident operator via HTTP SSE. Streams to stdout."""
+    import urllib.request
+    import urllib.error
+
+    port = 8420
+    url = f"http://localhost:{port}/api/operator/ask"
+    payload = json.dumps({
+        "content": question,
+        "session_id": session_id or f"cli_{int(time.time())}",
+        "client_id": "dgc_cli",
+    }).encode()
+
+    req = urllib.request.Request(
+        url, data=payload,
+        headers={"Content-Type": "application/json"},
+    )
+
+    try:
+        with urllib.request.urlopen(req, timeout=120) as resp:
+            for line_bytes in resp:
+                line = line_bytes.decode("utf-8").strip()
+                if not line or not line.startswith("data: "):
+                    continue
+                data = line[6:]
+                if data == "[DONE]":
+                    break
+                try:
+                    event = json.loads(data)
+                    etype = event.get("type", "")
+                    content = event.get("content", "")
+                    if etype == "text_delta" and content:
+                        print(content, end="", flush=True)
+                    elif etype == "tool_call":
+                        tool = event.get("metadata", {}).get("tool", "")
+                        print(f"\n  [tool: {tool}]", flush=True)
+                    elif etype == "tool_result":
+                        print(f"  → {content[:200]}", flush=True)
+                    elif etype == "error":
+                        print(f"\nERROR: {content}", file=sys.stderr)
+                    elif etype == "done":
+                        print()  # Final newline
+                except json.JSONDecodeError:
+                    pass
+    except urllib.error.URLError:
+        print("Operator not running. Start with: dgc up")
+        print("Falling back to claude -p ...")
+        # Fallback to claude -p
+        env = os.environ.copy()
+        env.pop("CLAUDECODE", None)
+        os.execvpe("claude", ["claude", "-p", question], env)
+
+
+def cmd_operator(operator_cmd: str | None, **kwargs: Any) -> None:
+    """Operator management commands."""
+    if operator_cmd == "status":
+        cmd_operator_status()
+    elif operator_cmd == "token":
+        cmd_operator_token(kwargs.get("token_action", "list"), kwargs.get("prefix", ""))
+    else:
+        print("Usage: dgc operator status | dgc operator token <generate|list|revoke>")
+
+
+def cmd_operator_status() -> None:
+    """Show operator status via HTTP."""
+    import urllib.request
+    import urllib.error
+
+    try:
+        with urllib.request.urlopen(f"http://localhost:8420/api/operator/status", timeout=5) as resp:
+            data = json.loads(resp.read())
+            print("=== Resident Operator ===")
+            print(f"  Running:      {data.get('running', False)}")
+            print(f"  Uptime:       {data.get('uptime_seconds', 0)}s")
+            print(f"  Model:        {data.get('model', '?')}")
+            print(f"  Interactions: {data.get('interaction_count', 0)}")
+            print(f"  Clients:      {data.get('connected_clients', 0)}")
+            grad = data.get("graduation", {})
+            print(f"  Autonomy:     {grad.get('level', '?')} (level {grad.get('level_value', '?')})")
+            print(f"  Consecutive:  {grad.get('consecutive_successes', 0)} successes")
+            print(f"  Mean YSD:     {grad.get('mean_ysd', 0):.4f}")
+    except urllib.error.URLError:
+        print("Operator not running. Start with: dgc up")
+
+
+def cmd_operator_token(action: str, prefix: str = "") -> None:
+    """Manage operator auth tokens."""
+    import urllib.request
+    import urllib.error
+
+    base = "http://localhost:8420/api/operator/tokens"
+
+    try:
+        if action == "generate":
+            req = urllib.request.Request(f"{base}/generate", method="POST")
+            with urllib.request.urlopen(req, timeout=5) as resp:
+                data = json.loads(resp.read())
+                print(f"Token: {data['token']}")
+                print("Store this — it won't be shown again.")
+
+        elif action == "list":
+            with urllib.request.urlopen(base, timeout=5) as resp:
+                data = json.loads(resp.read())
+                print(f"Tokens ({data.get('count', 0)}):")
+                for t in data.get("tokens", []):
+                    print(f"  {t}")
+
+        elif action == "revoke":
+            if not prefix:
+                print("Usage: dgc operator token revoke --prefix <prefix>")
+                return
+            req = urllib.request.Request(f"{base}/{prefix}", method="DELETE")
+            with urllib.request.urlopen(req, timeout=5) as resp:
+                data = json.loads(resp.read())
+                print(f"Revoked {data.get('revoked', 0)} token(s)")
+
+    except urllib.error.URLError:
+        print("Operator not running. Start with: dgc up")
+
+
 def cmd_agni(command: str) -> None:
     """Run command on AGNI VPS."""
     from dharma_swarm.telos_gates import check_with_reflective_reroute
@@ -1569,6 +1911,9 @@ def cmd_swarm(extra_args: list[str]) -> None:
             parser.add_argument("--yolo", action="store_true")
             parser.add_argument("--model", default="")
             parser.add_argument("--mission-file", default="")
+            parser.add_argument("--repo-root", default="")
+            parser.add_argument("--isolate-worktree", action="store_true")
+            parser.add_argument("--worktree-root", default="")
             parser.add_argument("--max-cycles", type=int, default=0)
             parser.add_argument("--poll-seconds", type=int, default=0)
             parser.add_argument("--cycle-timeout", type=int, default=0)
@@ -1583,6 +1928,12 @@ def cmd_swarm(extra_args: list[str]) -> None:
                 env["DGC_CODEX_NIGHT_MODEL"] = parsed.model
             if parsed.mission_file:
                 env["DGC_CODEX_NIGHT_MISSION_FILE"] = parsed.mission_file
+            if parsed.repo_root:
+                env["DGC_CODEX_NIGHT_REPO_ROOT"] = parsed.repo_root
+            if parsed.isolate_worktree:
+                env["DGC_CODEX_NIGHT_ISOLATE_WORKTREE"] = "1"
+            if parsed.worktree_root:
+                env["DGC_CODEX_NIGHT_WORKTREE_ROOT"] = parsed.worktree_root
             if parsed.max_cycles > 0:
                 env["MAX_CYCLES"] = str(parsed.max_cycles)
             if parsed.poll_seconds > 0:
@@ -1662,7 +2013,7 @@ def cmd_swarm(extra_args: list[str]) -> None:
 
         print(
             "Usage:\n"
-            "  dgc swarm codex-night start [HOURS] [--yolo] [--mission-file PATH] [--model MODEL]\n"
+            "  dgc swarm codex-night start [HOURS] [--yolo] [--mission-file PATH] [--model MODEL] [--isolate-worktree]\n"
             "  dgc swarm codex-night yolo [HOURS]\n"
             "  dgc swarm codex-night stop\n"
             "  dgc swarm codex-night status\n"
@@ -2209,6 +2560,106 @@ def cmd_evolve_daemon(
     _run(_daemon())
 
 
+def cmd_graph(graph_cmd: str, args: Any = None) -> None:
+    """Knowledge graph commands."""
+    from dharma_swarm.knowledge_graph import KnowledgeGraph
+
+    kg = KnowledgeGraph()
+
+    if graph_cmd == "status":
+        s = kg.stats()
+        print(f"=== Knowledge Graph ===")
+        print(f"  Nodes: {s['node_count']}")
+        print(f"  Edges: {s['edge_count']}")
+        print(f"  Clusters: {s.get('cluster_count', '?')}")
+        if s.get('by_type'):
+            print(f"\n  By type:")
+            for t, c in s['by_type'].items():
+                print(f"    {t}: {c}")
+        if s.get('by_domain'):
+            print(f"\n  By domain:")
+            for d, c in s['by_domain'].items():
+                print(f"    {d}: {c}")
+
+    elif graph_cmd == "query":
+        node_label = args.node if hasattr(args, 'node') else ""
+        depth = args.depth if hasattr(args, 'depth') else 2
+        # Search for node by label
+        results = kg.search(node_label, limit=1)
+        if not results:
+            print(f"No node matching '{node_label}'")
+            return
+        node = results[0]
+        print(f"Node: {node['label']} (type={node['type']}, domain={node.get('domain','')})")
+        print(f"  density={node.get('semantic_density',0):.2f} impact={node.get('impact_score',0):.2f}")
+        neighbors = kg.neighbors(node['id'], depth=depth)
+        if neighbors:
+            print(f"\n  Neighbors (depth {depth}): {len(neighbors)}")
+            for n in neighbors[:20]:
+                print(f"    {n['label']} ({n['type']})")
+        else:
+            print(f"  No neighbors within {depth} hops")
+
+    elif graph_cmd == "bridges":
+        bridges = kg.bridges()
+        if not bridges:
+            print("No bridges found (graph may need sync first: dgc graph sync)")
+            return
+        print(f"=== Bridges ({len(bridges)}) ===")
+        for e in bridges[:15]:
+            src = e.get('source_label', e['source_id'][:8])
+            tgt = e.get('target_label', e['target_id'][:8])
+            print(f"  {src} --[{e['edge_type']}]--> {tgt} (w={e.get('weight',1.0):.2f})")
+
+    elif graph_cmd == "gaps":
+        try:
+            from dharma_swarm.curiosity import CuriosityEngine
+            engine = CuriosityEngine()
+            targets = engine.explore(top_n=10)
+            if not targets:
+                print("No curiosity targets found (run dgc graph sync first)")
+                return
+            print(f"=== Curiosity Targets ({len(targets)}) ===")
+            for t in targets:
+                print(f"  [{t.curiosity_score:.2f}] {t.path}")
+                print(f"    Reason: {t.reason} | Agent: {t.suggested_agent}")
+                print(f"    Yield: {t.expected_yield}")
+        except ImportError:
+            print("Curiosity engine not available")
+
+    elif graph_cmd == "path":
+        source_label = args.source if hasattr(args, 'source') else ""
+        target_label = args.target if hasattr(args, 'target') else ""
+        src_results = kg.search(source_label, limit=1)
+        tgt_results = kg.search(target_label, limit=1)
+        if not src_results:
+            print(f"Source node '{source_label}' not found")
+            return
+        if not tgt_results:
+            print(f"Target node '{target_label}' not found")
+            return
+        path = kg.shortest_path(src_results[0]['id'], tgt_results[0]['id'])
+        if not path:
+            print(f"No path between {source_label} and {target_label}")
+            return
+        print(f"Path ({len(path)} hops):")
+        for e in path:
+            src = e.get('source_label', e['source_id'][:8])
+            tgt = e.get('target_label', e['target_id'][:8])
+            print(f"  {src} --[{e['edge_type']}]--> {tgt}")
+
+    elif graph_cmd == "sync":
+        print("Syncing knowledge graph from all sources...")
+        counts = kg.sync()
+        print(f"  File profiles: {counts.get('profiles', 0)} ingested")
+        print(f"  Stigmergy marks: {counts.get('marks', 0)} ingested")
+        print(f"  Dreams: {counts.get('dreams', 0)} ingested")
+        s = kg.stats()
+        print(f"\nGraph now: {s['node_count']} nodes, {s['edge_count']} edges")
+    else:
+        print("Usage: dgc graph {status|query|bridges|gaps|path|sync}")
+
+
 def cmd_stigmergy(file_path: str | None = None) -> None:
     """Show recent stigmergic marks, hot paths, and high salience marks."""
     async def _stig() -> None:
@@ -2290,6 +2741,86 @@ def cmd_hum() -> None:
                 print(f"  {s.strength:.2f}  {s.resonance_type}: {s.description[:60]}")
 
     _run(_hum())
+
+
+def cmd_council(args: Any) -> None:
+    """Multi-model council — 12+ perspectives on any question."""
+    from dharma_swarm.council import quick, deep, CouncilStore
+    from datetime import datetime
+
+    # History mode
+    if args.history:
+        store = CouncilStore()
+        sessions = store.list_sessions(limit=20)
+        if not sessions:
+            print("No council sessions yet.")
+            return
+        print("=== Council History ===\n")
+        for s in sessions:
+            ts = datetime.fromtimestamp(s.created_at).strftime("%Y-%m-%d %H:%M")
+            q_short = s.question[:60] + ("..." if len(s.question) > 60 else "")
+            print(f"  [{ts}] {s.mode:5s}  {s.model_count:2d} models  {s.session_id}  {q_short}")
+        return
+
+    # Require a question
+    question = " ".join(args.question).strip()
+    if not question:
+        print("Usage: dgc council 'your question here'")
+        print("       dgc council --history")
+        return
+
+    # Parse tiers
+    tiers = [int(t.strip()) for t in args.tiers.split(",") if t.strip()]
+    if args.paid and 2 not in tiers:
+        tiers.append(2)
+
+    # Load document if specified
+    document = ""
+    if args.document:
+        try:
+            doc_path = Path(args.document).expanduser()
+            document = doc_path.read_text(encoding="utf-8")
+            print(f"Loaded document: {doc_path.name} ({len(document)} chars)")
+        except Exception as e:
+            print(f"Warning: Could not load document: {e}")
+
+    print(f"Council ({args.mode} mode) — querying models on tiers {tiers}...")
+    if args.thinkodynamic:
+        print("Thinkodynamic mode: TAP seed injected")
+
+    async def _run_council():
+        if args.mode == "deep":
+            return await deep(
+                question,
+                tiers=tiers,
+                document=document,
+                rounds=args.rounds,
+                thinkodynamic=args.thinkodynamic,
+            )
+        else:
+            return await quick(
+                question,
+                tiers=tiers,
+                document=document,
+                thinkodynamic=args.thinkodynamic,
+            )
+
+    result = _run(_run_council())
+
+    # Print result
+    if result is None:
+        print("Council failed — no result returned.")
+        return
+
+    print(f"\n{'=' * 60}")
+    print(result.format_markdown())
+
+    # Save markdown report
+    report_dir = DHARMA_STATE / "council"
+    report_dir.mkdir(parents=True, exist_ok=True)
+    report_path = report_dir / f"{result.session_id}.md"
+    report_path.write_text(result.format_markdown(), encoding="utf-8")
+    print(f"\nReport saved: {report_path}")
 
 
 def cmd_rag_health(service: str = "rag", check_dependencies: bool = True) -> None:
@@ -3275,29 +3806,28 @@ def cmd_ui(surface: str = "list") -> None:
         lines.extend(
             [
                 "API",
-                f"- command: cd {root} && python3 -m uvicorn api.main:app --port 8000",
-                "- url: http://127.0.0.1:8000",
-                "- docs: http://127.0.0.1:8000/docs",
+                f"- command: cd {root} && python3 -m uvicorn api.main:app --port 8420",
+                "- url: http://127.0.0.1:8420",
+                "- docs: http://127.0.0.1:8420/docs",
             ]
         )
     elif surface == "next":
         lines.extend(
             [
                 "DHARMA COMMAND",
-                f"- command: cd {dashboard_dir} && npm run dev",
-                "- url: http://127.0.0.1:3000/dashboard",
-                "- backend dependency: api.main on port 8000",
+                f"- command: cd {dashboard_dir} && npm run dev -- --port 3420",
+                "- url: http://127.0.0.1:3420/dashboard",
+                "- backend dependency: api.main on port 8420",
                 f"- frontend root: {dashboard_dir}",
             ]
         )
     elif surface == "lens":
         lines.extend(
             [
-                "SWARMLENS",
-                f"- command: cd {root} && python3 -m uvicorn dharma_swarm.swarmlens_app:app --port 8080",
-                "- url: http://127.0.0.1:8080",
-                "- likely the older website you remember",
-                f"- code: {root / 'dharma_swarm' / 'swarmlens_app.py'}",
+                "SWARMLENS (REMOVED)",
+                "- The legacy SwarmLens app has been removed.",
+                "- Use `dgc ui next` for the primary web dashboard.",
+                "- Use `dgc ui api` for the API backend.",
             ]
         )
     else:
@@ -3307,15 +3837,12 @@ def cmd_ui(surface: str = "list") -> None:
                 "- `dgc dashboard` -> primary terminal TUI",
                 f"  code: {root / 'dharma_swarm' / 'tui' / 'app.py'}",
                 "- `dgc ui next` -> newer web control plane",
-                f"  launch: cd {dashboard_dir} && npm run dev",
-                "  url: http://127.0.0.1:3000/dashboard",
-                "  needs backend: python3 -m uvicorn api.main:app --port 8000",
-                "- `dgc ui lens` -> older SwarmLens website",
-                f"  launch: cd {root} && python3 -m uvicorn dharma_swarm.swarmlens_app:app --port 8080",
-                "  url: http://127.0.0.1:8080",
-                "  note: this is likely the older website you remember",
+                f"  launch: cd {dashboard_dir} && npm run dev -- --port 3420",
+                "  url: http://127.0.0.1:3420/dashboard",
+                "  needs backend: python3 -m uvicorn api.main:app --port 8420",
+                "- `dgc ui lens` -> (REMOVED — use `dgc ui next` instead)",
                 "- `dgc ui api` -> backend API only",
-                "  url: http://127.0.0.1:8000/docs",
+                "  url: http://127.0.0.1:8420/docs",
             ]
         )
 
@@ -4586,6 +5113,22 @@ def _build_parser() -> argparse.ArgumentParser:
     p_canonical = sub.add_parser("canonical-status", help="Show canonical DGC/SAB repo topology")
     p_canonical.add_argument("--json", action="store_true", help="Emit JSON report")
 
+    # -- ontology --
+    p_onto = sub.add_parser("ontology", help="Ontology Hub — unified queryable graph of all entities")
+    p_onto_sub = p_onto.add_subparsers(dest="onto_cmd")
+    p_onto_sub.add_parser("status", help="Type counts, link counts, last sync time")
+    p_onto_sync = p_onto_sub.add_parser("sync", help="Run all adapters, ingest live data")
+    p_onto_sync.add_argument("--json", action="store_true", dest="onto_json", help="JSON output")
+    p_onto_find = p_onto_sub.add_parser("query", help="Find objects by type and filters")
+    p_onto_find.add_argument("type_name", help="ObjectType to search")
+    p_onto_find.add_argument("--filter", action="append", default=[], help="key=value filter")
+    p_onto_find.add_argument("--text", default="", help="Full-text search query")
+    p_onto_find.add_argument("--limit", type=int, default=20)
+    p_onto_traverse = p_onto_sub.add_parser("traverse", help="Traverse graph from an object")
+    p_onto_traverse.add_argument("obj_id", help="Starting object ID")
+    p_onto_traverse.add_argument("--depth", type=int, default=3)
+    p_onto_sub.add_parser("schema", help="Dump full OAG schema for LLM context")
+
     # -- chat --
     p_chat = sub.add_parser("chat", help="Launch native Claude Code interactive UI")
     p_chat.add_argument(
@@ -4635,6 +5178,19 @@ def _build_parser() -> argparse.ArgumentParser:
 
     # -- daemon-status --
     sub.add_parser("daemon-status", help="Show daemon state")
+
+    # -- ask (one-shot operator query) --
+    p_ask = sub.add_parser("ask", help="Ask the resident operator a question (SSE stream)")
+    p_ask.add_argument("question", nargs="+", help="Question for the operator")
+    p_ask.add_argument("--session", default=None, help="Session ID (auto-generated if omitted)")
+
+    # -- operator (subcommands) --
+    p_op = sub.add_parser("operator", help="Resident operator management")
+    p_op_sub = p_op.add_subparsers(dest="operator_cmd")
+    p_op_sub.add_parser("status", help="Show operator status + autonomy level")
+    p_op_token = p_op_sub.add_parser("token", help="Manage auth tokens")
+    p_op_token.add_argument("token_action", choices=["generate", "list", "revoke"])
+    p_op_token.add_argument("--prefix", default="", help="Token prefix for revoke")
 
     # -- pulse --
     sub.add_parser("pulse", help="Run one heartbeat pulse")
@@ -4865,6 +5421,28 @@ def _build_parser() -> argparse.ArgumentParser:
     # -- hum --
     sub.add_parser("hum", help="Subconscious associations")
 
+    # -- council --
+    p_council = sub.add_parser(
+        "council", help="Multi-model council — 12+ perspectives on any question"
+    )
+    p_council.add_argument("question", nargs="*", default=[], help="Question or topic")
+    p_council.add_argument(
+        "--mode", choices=["quick", "deep"], default="quick",
+        help="quick = parallel independent, deep = multi-round discussion",
+    )
+    p_council.add_argument(
+        "--tiers", default="0,1",
+        help="Cost tiers: 0=free, 1=cheap, 2=premium (comma-separated)",
+    )
+    p_council.add_argument("--rounds", type=int, default=5, help="Rounds for deep mode")
+    p_council.add_argument(
+        "--thinkodynamic", action="store_true",
+        help="Inject TAP seed + score recognition",
+    )
+    p_council.add_argument("--document", default=None, help="Path to document file")
+    p_council.add_argument("--history", action="store_true", help="Show past sessions")
+    p_council.add_argument("--paid", action="store_true", help="Include premium tier 2 models")
+
     # -- cascade --
     p_cascade = sub.add_parser("cascade", help="Run strange loop cascade domain")
     p_cascade.add_argument("domain", nargs="?", default="code",
@@ -5075,6 +5653,26 @@ def _build_parser() -> argparse.ArgumentParser:
     eval_sub.add_parser("run", help="Run all evals and print scorecard")
     eval_sub.add_parser("report", help="Print latest eval report")
     eval_sub.add_parser("trend", help="Show historical pass rates")
+    p_eval_leaderboard = eval_sub.add_parser(
+        "leaderboard",
+        help="Show agent output-quality rankings from historical evaluations",
+    )
+    p_eval_leaderboard.add_argument("--limit", type=int, default=10)
+    p_eval_leaderboard.add_argument("--evaluations-path", default="")
+    p_eval_models = eval_sub.add_parser(
+        "models",
+        help="Show model output-quality rankings from historical evaluations",
+    )
+    p_eval_models.add_argument("--task-type", default="")
+    p_eval_models.add_argument("--limit", type=int, default=10)
+    p_eval_models.add_argument("--evaluations-path", default="")
+    p_eval_research = eval_sub.add_parser(
+        "research",
+        help="Generate hypotheses and config suggestions from evaluation history",
+    )
+    p_eval_research.add_argument("--task-type", default="")
+    p_eval_research.add_argument("--limit", type=int, default=5)
+    p_eval_research.add_argument("--evaluations-path", default="")
 
     # -- self-improve --
     p_si = sub.add_parser("self-improve", help="Self-improvement cycle — strange loop")
@@ -5383,6 +5981,8 @@ def _build_parser() -> argparse.ArgumentParser:
     p_cron_daemon.set_defaults(run_immediately=True)
 
     # -- gateway (v0.6.0: Hermes-inspired messaging gateway) --
+    sub.add_parser("ops", help="Operational intelligence snapshot (v0.7.0)")
+
     p_gw = sub.add_parser("gateway", help="Start messaging gateway (v0.6.0)")
     p_gw.add_argument("--config", default=None, help="Path to gateway.yaml")
 
@@ -5401,7 +6001,58 @@ def _build_parser() -> argparse.ArgumentParser:
     cust_sub.add_parser("status", help="Show custodian fleet status")
     cust_sub.add_parser("schedule", help="Create recurring custodian cron jobs")
 
+    # -- graph -----------------------------------------------------------------
+    p_graph = sub.add_parser("graph", help="Knowledge graph queries")
+    graph_sub = p_graph.add_subparsers(dest="graph_cmd")
+
+    p_graph_status = graph_sub.add_parser("status", help="Node/edge/cluster stats")
+
+    p_graph_query = graph_sub.add_parser("query", help="Show node neighbors")
+    p_graph_query.add_argument("node", help="Node label or path to query")
+    p_graph_query.add_argument("--depth", type=int, default=2, help="Hop depth")
+
+    p_graph_bridges = graph_sub.add_parser("bridges", help="High-value connecting edges")
+
+    p_graph_gaps = graph_sub.add_parser("gaps", help="Curiosity targets")
+
+    p_graph_path = graph_sub.add_parser("path", help="Shortest path between nodes")
+    p_graph_path.add_argument("source", help="Source node")
+    p_graph_path.add_argument("target", help="Target node")
+
+    p_graph_sync = graph_sub.add_parser("sync", help="Re-ingest all sources into graph")
+
     return parser
+
+
+# ---------------------------------------------------------------------------
+# Operational intelligence (v0.7.0)
+# ---------------------------------------------------------------------------
+
+
+def cmd_ops() -> None:
+    """Operational intelligence snapshot."""
+    picture_path = DHARMA_STATE / "operational_picture.json"
+    if picture_path.exists():
+        try:
+            data = json.loads(picture_path.read_text())
+            print("=== OPERATIONAL PICTURE ===")
+            print(f"Updated: {data.get('timestamp', '?')}")
+            print(f"Tick: {data.get('tick_count', '?')}")
+            print()
+            for section in ("ontology", "telic_seam", "coordination"):
+                sdata = data.get(section, {})
+                if sdata:
+                    print(f"[{section.upper()}]")
+                    for k, v in (sdata.items() if isinstance(sdata, dict) else []):
+                        if not isinstance(v, (dict, list)):
+                            print(f"  {k}: {v}")
+                    print()
+            print(f"Stigmergy density: {data.get('stigmergy_density', 0)}")
+            return
+        except Exception:
+            pass
+
+    print("No operational picture found. Run `dgc orchestrate-live` first.")
 
 
 # ---------------------------------------------------------------------------
@@ -5548,12 +6199,22 @@ def main() -> None:
             rc = cmd_canonical_status(as_json=args.json)
             if rc != 0:
                 raise SystemExit(rc)
+        case "ontology":
+            cmd_ontology(args.onto_cmd, args)
         case "up":
             cmd_up(background=args.background)
         case "down":
             cmd_down()
         case "daemon-status":
             cmd_daemon_status()
+        case "ask":
+            cmd_ask(" ".join(args.question), session_id=args.session)
+        case "operator":
+            cmd_operator(
+                args.operator_cmd,
+                token_action=getattr(args, "token_action", "list"),
+                prefix=getattr(args, "prefix", ""),
+            )
         case "pulse":
             cmd_pulse()
         case "orchestrate-live":
@@ -5847,8 +6508,12 @@ def main() -> None:
                     parser.parse_args(["dharma", "--help"])
         case "stigmergy":
             cmd_stigmergy(args.stig_file)
+        case "graph":
+            cmd_graph(args.graph_cmd, args)
         case "hum":
             cmd_hum()
+        case "council":
+            cmd_council(args)
         case "eval":
             from dharma_swarm.ecc_eval_harness import (
                 cmd_eval_run, cmd_eval_report, cmd_eval_trend,
@@ -5865,6 +6530,29 @@ def main() -> None:
                         raise SystemExit(rc)
                 case "trend":
                     rc = cmd_eval_trend()
+                    if rc != 0:
+                        raise SystemExit(rc)
+                case "leaderboard":
+                    rc = cmd_eval_leaderboard(
+                        evaluations_path=args.evaluations_path or None,
+                        limit=args.limit,
+                    )
+                    if rc != 0:
+                        raise SystemExit(rc)
+                case "models":
+                    rc = cmd_eval_models(
+                        evaluations_path=args.evaluations_path or None,
+                        task_type=args.task_type or None,
+                        limit=args.limit,
+                    )
+                    if rc != 0:
+                        raise SystemExit(rc)
+                case "research":
+                    rc = cmd_eval_research(
+                        evaluations_path=args.evaluations_path or None,
+                        task_type=args.task_type or None,
+                        limit=args.limit,
+                    )
                     if rc != 0:
                         raise SystemExit(rc)
                 case _:
@@ -6220,6 +6908,8 @@ def main() -> None:
                 print(_json.dumps(generate_json(), indent=2, default=str))
             else:
                 print(generate(layer=getattr(args, "layer", None)))
+        case "ops":
+            cmd_ops()
         case "gateway":
             cmd_gateway(config_path=args.config)
         case "free-fleet":

@@ -233,7 +233,13 @@ class LoopEngine:
                     iteration,
                     gate_result.get("reason", ""),
                 )
-                # Still checkpoint even on gate block
+                # Gate blocked — still mutate so next iteration tries a new seed
+                mutation_rate = self._adjusted_mutation_rate(result.eigenform_trajectory)
+                blocked_mutated = await _call(
+                    self._fns["mutate"], artifact, ctx, mutation_rate
+                )
+                previous = artifact
+                current = blocked_mutated
                 self._save_checkpoint(
                     result, iteration, current, previous,
                     candidates, best_score, time.monotonic() - start,
@@ -275,18 +281,20 @@ class LoopEngine:
                         )
                         break
 
-            # MUTATE
+            # MUTATE — create variant for next iteration
             mutation_rate = self._adjusted_mutation_rate(result.eigenform_trajectory)
             mutated = await _call(
                 self._fns["mutate"], artifact, ctx, mutation_rate
             )
             candidates.append(artifact)
             if len(candidates) > 10:
-                candidates = candidates[-10:]
+                # Keep the best, not just the most recent
+                candidates.sort(key=lambda c: c.get("score", 0.0), reverse=True)
+                candidates = candidates[:10]
 
-            # SELECT
-            previous = current
-            current = await _call(self._fns["select"], candidates, ctx)
+            # ADVANCE: mutated variant is next seed, artifact is eigenform ref
+            previous = artifact
+            current = mutated
 
             # --- CHECKPOINT after every iteration ---
             self._save_checkpoint(

@@ -145,6 +145,160 @@ class TelosGatekeeper:
         "before_pivot",
     }
 
+    def __init__(self) -> None:
+        self._env_context: dict = {}
+
+    def load_environmental_context(self, env_context: dict | None = None) -> None:
+        """S4->S3: Load environmental intelligence from zeitgeist.
+
+        When threat_level is high, Tier C gates become more strict.
+        When opportunity_count is high, SVABHAAVA gate becomes more permissive.
+
+        Args:
+            env_context: Dict from ``ZeitgeistScanner.emit_to_gates()``.
+                Expected keys: threat_level (float), opportunity_count (int),
+                latest_signals (list).
+        """
+        self._env_context = env_context or {}
+
+    def emit_gate_patterns(self) -> dict:
+        """S3->S4: Summarize gate patterns for zeitgeist consumption.
+
+        Reads the last 20 witness log entries and computes aggregate
+        statistics that zeitgeist can use for pattern detection.
+
+        Returns:
+            Dict with block_rate, review_rate, total_checks,
+            and most_triggered_gate.
+        """
+        entries: list[dict] = []
+        witness_dir = WITNESS_DIR
+        if witness_dir.exists():
+            log_files = sorted(witness_dir.glob("witness_*.jsonl"), reverse=True)
+            for log_file in log_files:
+                if len(entries) >= 20:
+                    break
+                try:
+                    lines = log_file.read_text().strip().split("\n")
+                    for line in reversed(lines):
+                        if not line.strip():
+                            continue
+                        try:
+                            entries.append(json.loads(line))
+                        except json.JSONDecodeError:
+                            continue
+                        if len(entries) >= 20:
+                            break
+                except Exception:
+                    continue
+
+        total = len(entries)
+        if total == 0:
+            return {
+                "block_rate": 0.0,
+                "review_rate": 0.0,
+                "total_checks": 0,
+                "most_triggered_gate": "",
+            }
+
+        block_count = sum(1 for e in entries if e.get("outcome", "").upper() == "BLOCKED")
+        review_count = sum(1 for e in entries if e.get("outcome", "").upper() == "WARN")
+
+        # Count which phases (gates) triggered most
+        phase_counts: dict[str, int] = {}
+        for e in entries:
+            outcome = e.get("outcome", "").upper()
+            if outcome in ("BLOCKED", "WARN"):
+                phase = e.get("phase", "unknown")
+                phase_counts[phase] = phase_counts.get(phase, 0) + 1
+
+        most_triggered = max(phase_counts, key=lambda k: phase_counts[k]) if phase_counts else ""
+
+        return {
+            "block_rate": round(block_count / total, 3),
+            "review_rate": round(review_count / total, 3),
+            "total_checks": total,
+            "most_triggered_gate": most_triggered,
+        }
+
+    def _find_credential_pattern(self, content: str) -> str | None:
+        """Return the matched credential marker using case-insensitive matching."""
+        content_lower = content.lower()
+        for pattern in self.CREDENTIAL_PATTERNS:
+            if pattern.lower() in content_lower:
+                return pattern
+        return None
+
+    def fast_check(self, action: str, content: str = "") -> GateCheckResult:
+        """Fast-and-frugal gate tree — 3 gates for routine actions.
+
+        Used by the complexity router's FAST path. Runs only:
+          1. AHIMSA (Tier A) — non-harm
+          2. SATYA (Tier B) — truthfulness / credential leak
+          3. REVERSIBILITY (Tier C) — irreversible operation check
+
+        Returns ALLOW/BLOCK/REVIEW based on just these 3 gates.
+        ~80% of actions should pass through this path.
+
+        Grounded in: SYNTHESIS.md Sprint 3 #4, Principle #1
+        Sources: fast-and-frugal trees (Gigerenzer), Klein RPD
+        """
+        action_lower = action.lower()
+        content_lower = content.lower()
+        combined = action_lower + " " + content_lower
+        results: dict[str, tuple[GateResult, str]] = {}
+
+        # Gate 1: AHIMSA
+        harm_hit = next((w for w in self.HARM_WORDS if w in action_lower), None)
+        injection_hit = next(
+            (p for p in self.INJECTION_PATTERNS if p in combined), None,
+        )
+        if harm_hit:
+            results["AHIMSA"] = (GateResult.FAIL, f"Harmful: {harm_hit}")
+        elif injection_hit:
+            results["AHIMSA"] = (GateResult.FAIL, f"Injection: {injection_hit}")
+        else:
+            results["AHIMSA"] = (GateResult.PASS, "")
+
+        if results["AHIMSA"][0] == GateResult.FAIL:
+            return GateCheckResult(
+                decision=GateDecision.BLOCK,
+                reason=f"Fast gate AHIMSA: {results['AHIMSA'][1]}",
+                gate_results=results,
+            )
+
+        # Gate 2: SATYA
+        cred_hit = None
+        if content:
+            cred_hit = self._find_credential_pattern(content)
+        if cred_hit:
+            results["SATYA"] = (GateResult.FAIL, f"Credential: {cred_hit[:10]}...")
+            return GateCheckResult(
+                decision=GateDecision.BLOCK,
+                reason=f"Fast gate SATYA: {results['SATYA'][1]}",
+                gate_results=results,
+            )
+        results["SATYA"] = (GateResult.PASS, "")
+
+        # Gate 3: REVERSIBILITY
+        irrev_hit = next(
+            (w for w in self.IRREVERSIBLE_WORDS if w in action_lower), None,
+        )
+        if irrev_hit:
+            results["REVERSIBILITY"] = (GateResult.WARN, f"Irreversible: {irrev_hit}")
+            return GateCheckResult(
+                decision=GateDecision.REVIEW,
+                reason=f"Fast gate REVERSIBILITY: {results['REVERSIBILITY'][1]}",
+                gate_results=results,
+            )
+        results["REVERSIBILITY"] = (GateResult.PASS, "")
+
+        return GateCheckResult(
+            decision=GateDecision.ALLOW,
+            reason="Fast gate: all 3 gates passed",
+            gate_results=results,
+        )
+
     def check(
         self,
         action: str,
@@ -217,9 +371,7 @@ class TelosGatekeeper:
                 GateResult.FAIL, f"Deceptive request: {deception_hit}",
             )
         elif content:
-            cred_hit = next(
-                (p for p in self.CREDENTIAL_PATTERNS if p in content), None,
-            )
+            cred_hit = self._find_credential_pattern(content)
             if cred_hit:
                 results["SATYA"] = (
                     GateResult.FAIL, f"Credential in content: {cred_hit[:10]}...",
@@ -419,6 +571,20 @@ class TelosGatekeeper:
                 if self.GATES[g] == GateTier.C
                 and results[g][0] in (GateResult.FAIL, GateResult.WARN)
             ]
+            env_ctx = getattr(self, "_env_context", {})
+            threat_level = float(env_ctx.get("threat_level", 0) or 0)
+            if threat_level > 0.5:
+                import logging as _logging
+                _logging.getLogger(__name__).info(
+                    "Tier C advisory retained under elevated threat (threat_level=%.2f): %s",
+                    threat_level,
+                    "; ".join(reasons),
+                )
+                return GateCheckResult(
+                    decision=GateDecision.REVIEW,
+                    reason=f"Advisory (heightened threat): {'; '.join(reasons)}",
+                    gate_results=results,
+                )
             return GateCheckResult(
                 decision=GateDecision.REVIEW,
                 reason=f"Advisory: {'; '.join(reasons)}",

@@ -1,7 +1,11 @@
 """Tests for dharma_swarm.handoff -- A2A-inspired structured handoff protocol."""
 
+import json
+
 import pytest
 
+import dharma_swarm.tpp as tpp
+import dharma_swarm.handoff as handoff_module
 from dharma_swarm.handoff import (
     Artifact,
     ArtifactType,
@@ -281,6 +285,36 @@ async def test_persistence_roundtrip(tmp_path):
     assert pending[0].task_context == "persist test"
 
 
+async def test_persistence_uses_locked_fsynced_append(tmp_path, monkeypatch):
+    store = tmp_path / "handoffs.jsonl"
+    protocol = HandoffProtocol(store_path=store)
+    events: list[tuple[str, int]] = []
+
+    def fake_flock(fd: int, op: int) -> None:
+        events.append(("flock", op))
+
+    def fake_fsync(fd: int) -> None:
+        events.append(("fsync", fd))
+
+    monkeypatch.setattr(handoff_module.fcntl, "flock", fake_flock)
+    monkeypatch.setattr(handoff_module.os, "fsync", fake_fsync)
+
+    handoff = await protocol.create_handoff(
+        from_agent="surgeon",
+        to_agent="validator",
+        task_context="durability test",
+        artifacts=[_artifact()],
+    )
+
+    lines = store.read_text(encoding="utf-8").splitlines()
+    assert len(lines) == 1
+    persisted = json.loads(lines[0])
+    assert persisted["id"] == handoff.id
+    assert events[0] == ("flock", handoff_module.fcntl.LOCK_EX)
+    assert events[1][0] == "fsync"
+    assert events[2] == ("flock", handoff_module.fcntl.LOCK_UN)
+
+
 # ---------------------------------------------------------------------------
 # 13. Empty pending returns empty list
 # ---------------------------------------------------------------------------
@@ -325,3 +359,58 @@ async def test_requires_ack_flag(protocol):
     # Attempting to acknowledge a non-existent ID raises KeyError.
     with pytest.raises(KeyError):
         await protocol.acknowledge("nonexistent_id_xyz")
+
+
+# ---------------------------------------------------------------------------
+# 15. TPP handoff includes threaded intent metadata
+# ---------------------------------------------------------------------------
+
+
+async def test_create_tpp_handoff_includes_trace_from_intent_thread(protocol):
+    thread = tpp.create_intent_thread(
+        "Stabilize handoff delivery",
+        telos="Runtime reliability",
+    )
+
+    h = await protocol.create_tpp_handoff(
+        from_agent="surgeon",
+        from_role="coder",
+        to_agent="validator",
+        task_context="Investigate handoff runtime regressions",
+        findings="Formatter output should stay injectable.",
+        confidence=0.8,
+        telos_alignment=0.9,
+        intent_thread=thread.to_dict(),
+    )
+
+    assert h.intent_thread["trace_id"] == thread.trace_id
+    assert h.artifacts[0].artifact_type == ArtifactType.TPP_FRAGMENT
+    assert "## Handoff from surgeon (coder)" in h.artifacts[0].content
+    assert f"Trace: {thread.trace_id}" in h.artifacts[0].content
+
+
+# ---------------------------------------------------------------------------
+# 16. TPP handoff degrades gracefully when formatter fails
+# ---------------------------------------------------------------------------
+
+
+async def test_create_tpp_handoff_falls_back_when_formatter_errors(protocol, monkeypatch):
+    def _boom(**_: object) -> str:
+        raise RuntimeError("formatter exploded")
+
+    monkeypatch.setattr(tpp, "format_handoff_as_tpp", _boom)
+
+    h = await protocol.create_tpp_handoff(
+        from_agent="surgeon",
+        from_role="coder",
+        to_agent="validator",
+        task_context="Keep handoffs flowing",
+        findings="Fallback content should still be delivered.",
+    )
+
+    assert h.artifacts[0].artifact_type == ArtifactType.TPP_FRAGMENT
+    assert h.artifacts[0].content == (
+        "[surgeon (coder)]: Fallback content should still be delivered."
+    )
+    pending = await protocol.get_pending("validator")
+    assert pending[-1].id == h.id

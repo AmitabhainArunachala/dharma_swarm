@@ -11,6 +11,7 @@ from dharma_swarm.models import (
     AgentConfig,
     AgentRole,
     AgentStatus,
+    LLMRequest,
     LLMResponse,
     ProviderType,
     Task,
@@ -70,6 +71,36 @@ def test_build_system_prompt_claude_without_explicit_uses_v7_and_role(monkeypatc
     assert "SHAKTI PERCEPTION" in out
 
 
+def test_build_system_prompt_tpp_activates_from_config_metadata(monkeypatch):
+    cfg = AgentConfig(
+        name="a",
+        role=AgentRole.RESEARCHER,
+        provider=ProviderType.CLAUDE_CODE,
+        metadata={"tpp": True},
+        thread="mechanistic",
+    )
+    task = Task(
+        title="Investigate router failures",
+        description="Map the failure mode and propose a fix.",
+        metadata={"operator_intent": "Stabilize provider routing", "telos": "Runtime reliability"},
+    )
+    monkeypatch.setattr(
+        "dharma_swarm.context.build_agent_context",
+        lambda **_: "CTX",
+        raising=True,
+    )
+
+    out = ar._build_system_prompt(cfg, task=task)
+
+    assert "seven non-negotiable rules" in out
+    assert "## TELOS (why you exist)" in out
+    assert "## IDENTITY (who you are)" in out
+    assert "## CONTEXT (what you need to know)" in out
+    assert "## TASK (what you need to do)" in out
+    assert "Original intent: Stabilize provider routing" in out
+    assert "CTX" in out
+
+
 def test_build_prompt_formats_title_and_description(monkeypatch):
     cfg = AgentConfig(name="a", role=AgentRole.CODER)
     task = Task(title="Title", description="Desc")
@@ -125,6 +156,102 @@ def test_build_prompt_appends_latent_gold(monkeypatch):
 
     assert "## Latent Gold" in req.messages[0]["content"]
     assert "latent branch" in req.messages[0]["content"]
+
+
+def test_build_prompt_uses_tpp_system_prompt_when_requested(monkeypatch):
+    cfg = AgentConfig(
+        name="a",
+        role=AgentRole.CODER,
+        provider=ProviderType.CLAUDE_CODE,
+        thread="mechanistic",
+    )
+    task = Task(
+        title="Patch launch handling",
+        description="Harden subprocess startup error paths.",
+        metadata={
+            "tpp": True,
+            "operator_intent": "Keep agent execution resilient",
+            "telos": "Execution reliability",
+            "cascade_depth": 2,
+        },
+    )
+    monkeypatch.setattr(
+        "dharma_swarm.context.build_agent_context",
+        lambda **_: "CTX",
+        raising=True,
+    )
+    monkeypatch.setattr(
+        "dharma_swarm.context.read_memory_context",
+        lambda **_: "",
+        raising=True,
+    )
+    monkeypatch.setattr(
+        "dharma_swarm.context.read_latent_gold_context",
+        lambda **_: "",
+        raising=True,
+    )
+
+    req = ar._build_prompt(task, cfg)
+
+    assert "## TELOS (why you exist)" in req.system
+    assert "Original intent: Keep agent execution resilient" in req.system
+    assert "cascade depth 2" in req.system
+    assert "CTX" in req.system
+
+
+def test_metadata_number_skips_non_finite_values():
+    metadata = {
+        "urgency": "nan",
+        "urgency_score": "0.7",
+    }
+
+    assert ar._metadata_number(metadata, "urgency", "urgency_score") == pytest.approx(0.7)
+
+
+def test_build_route_request_ignores_non_finite_metadata_values():
+    cfg = AgentConfig(
+        name="a",
+        role=AgentRole.RESEARCHER,
+        provider=ProviderType.OPENAI,
+    )
+    task = Task(
+        id="task-route",
+        title="Review status",
+        description="Summarize current findings.",
+        priority=TaskPriority.NORMAL,
+        metadata={
+            "urgency": "nan",
+            "risk_score": "inf",
+            "uncertainty": "-inf",
+            "novelty": "nan",
+            "expected_impact": "inf",
+            "estimated_latency_ms": "nan",
+            "estimated_tokens": "inf",
+        },
+    )
+    request = LLMRequest(
+        model="gpt-test",
+        messages=[{"role": "user", "content": "Summarize the current findings."}],
+        system="System prompt",
+    )
+
+    route_request = ar._build_route_request(
+        task,
+        cfg,
+        request,
+        available_provider_types=[ProviderType.OPENAI],
+    )
+
+    assert route_request.urgency == pytest.approx(ar._priority_score(TaskPriority.NORMAL))
+    assert route_request.risk_score == pytest.approx(0.10)
+    assert route_request.uncertainty == pytest.approx(0.30)
+    assert route_request.novelty == pytest.approx(0.12)
+    assert route_request.expected_impact == pytest.approx(0.34)
+    assert route_request.estimated_latency_ms == 800
+    assert route_request.estimated_tokens == ar._estimate_requested_tokens(
+        request,
+        requires_tooling=False,
+    )
 
 
 @pytest.mark.asyncio

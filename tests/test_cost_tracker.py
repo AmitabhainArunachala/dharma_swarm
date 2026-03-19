@@ -159,6 +159,38 @@ class TestReadCostLog:
         entries = read_cost_log(since_hours=24.0)
         assert len(entries) == 1
 
+    def test_skips_non_finite_replayed_cost_rows(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        log_file = tmp_path / "cost_log.jsonl"
+        monkeypatch.setattr("dharma_swarm.cost_tracker._COST_LOG", log_file)
+        now = time.time()
+        valid = {
+            "timestamp": now,
+            "provider": "openai",
+            "model": "gpt-4o",
+            "input_tokens": 100,
+            "output_tokens": 50,
+            "estimated_cost_usd": 0.001,
+            "task_id": "",
+            "agent_name": "",
+            "tier": "T2",
+        }
+        poisoned = {
+            **valid,
+            "estimated_cost_usd": float("nan"),
+        }
+        with open(log_file, "w") as f:
+            f.write(json.dumps(valid) + "\n")
+            f.write(json.dumps(poisoned) + "\n")
+
+        entries = read_cost_log(since_hours=24.0)
+
+        assert len(entries) == 1
+        assert entries[0].estimated_cost_usd == pytest.approx(0.001)
+
 
 # ---------------------------------------------------------------------------
 # cost_summary
@@ -215,3 +247,36 @@ class TestCostSummary:
         assert "T1" in summary
         assert "T2" in summary
         assert "T3" in summary
+
+    def test_summary_ignores_non_finite_replayed_cost_rows(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        log_file = tmp_path / "cost_log.jsonl"
+        monkeypatch.setattr("dharma_swarm.cost_tracker._COST_LOG", log_file)
+        now = time.time()
+        valid = {
+            "timestamp": now,
+            "provider": "openai",
+            "model": "gpt-4o",
+            "input_tokens": 100,
+            "output_tokens": 50,
+            "estimated_cost_usd": 0.005,
+            "task_id": "",
+            "agent_name": "",
+            "tier": "T2",
+        }
+        poisoned = {
+            **valid,
+            "estimated_cost_usd": float("inf"),
+        }
+        with open(log_file, "w") as f:
+            f.write(json.dumps(valid) + "\n")
+            f.write(json.dumps(poisoned) + "\n")
+
+        summary = cost_summary(since_hours=24.0)
+
+        assert "$0.0050" in summary
+        assert "$nan" not in summary
+        assert "$inf" not in summary

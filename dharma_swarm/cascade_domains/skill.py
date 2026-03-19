@@ -7,6 +7,8 @@ five dimensions: structure, compression, behavioral, completeness, composability
 
 from __future__ import annotations
 
+import os
+import pwd
 import re
 import zlib
 from pathlib import Path
@@ -15,7 +17,20 @@ from typing import Any
 from dharma_swarm.metrics import MetricsAnalyzer
 from dharma_swarm.models import LoopDomain
 
-_SKILLS_ROOT = Path.home() / ".claude" / "skills"
+
+def _resolve_login_home() -> Path:
+    try:
+        return Path(pwd.getpwuid(os.getuid()).pw_dir).expanduser()
+    except Exception:
+        return Path.home()
+
+
+LOGIN_HOME = _resolve_login_home()
+_REPO_ROOT = Path(__file__).resolve().parents[2]
+_SKILLS_ROOT_CANDIDATES = (
+    LOGIN_HOME / ".claude" / "skills",
+    _REPO_ROOT / ".claude" / "skills",
+)
 _ANALYZER = MetricsAnalyzer()
 
 
@@ -61,6 +76,18 @@ def _parse_frontmatter(content: str) -> dict[str, Any]:
     return fm
 
 
+def _resolve_skill_path(skill_name: str) -> Path | None:
+    seen: set[Path] = set()
+    for root in _SKILLS_ROOT_CANDIDATES:
+        if root in seen:
+            continue
+        seen.add(root)
+        path = root / skill_name / "SKILL.md"
+        if path.is_file():
+            return path
+    return None
+
+
 def generate(seed: dict[str, Any] | None, context: dict[str, Any]) -> dict[str, Any]:
     """Generate a skill artifact by reading a SKILL.md file or using provided content.
 
@@ -78,8 +105,8 @@ def generate(seed: dict[str, Any] | None, context: dict[str, Any]) -> dict[str, 
 
     # Read from disk if we have a skill name and no content provided.
     if skill_name and not content:
-        path = _SKILLS_ROOT / skill_name / "SKILL.md"
-        if path.is_file():
+        path = _resolve_skill_path(skill_name)
+        if path is not None:
             content = path.read_text(encoding="utf-8")
             skill_path = str(path)
 

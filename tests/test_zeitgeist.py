@@ -7,6 +7,7 @@ threat detection, local scanning, and persistence.
 from __future__ import annotations
 
 import json
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 import pytest
@@ -252,3 +253,67 @@ class TestLatestThreats:
         ]
         threats = scanner.latest_threats
         assert threats == []
+
+
+# -- Gate pattern ingestion tests ------------------------------------------
+
+
+class TestGatePatternIngestion:
+    @pytest.mark.asyncio
+    async def test_ingest_gate_patterns_normalizes_naive_and_zulu_timestamps(
+        self,
+        tmp_path: Path,
+    ) -> None:
+        state_dir = tmp_path / ".dharma"
+        witness_dir = state_dir / "witness"
+        witness_dir.mkdir(parents=True)
+
+        now_utc = datetime.now(timezone.utc)
+        recent_naive = now_utc.replace(tzinfo=None).isoformat()
+        recent_zulu = now_utc.isoformat().replace("+00:00", "Z")
+        stale = (now_utc - timedelta(hours=6)).isoformat()
+        (witness_dir / "witness_20260318.jsonl").write_text(
+            "\n".join(
+                [
+                    "not-json",
+                    json.dumps({"ts": recent_naive, "outcome": "BLOCKED"}),
+                    json.dumps({"ts": recent_zulu, "outcome": "WARN"}),
+                    json.dumps({"ts": stale, "outcome": "BLOCKED"}),
+                ]
+            )
+        )
+
+        scanner = ZeitgeistScanner(state_dir=state_dir)
+        signals = await scanner.ingest_gate_patterns(window_hours=1)
+
+        assert len(signals) == 1
+        assert signals[0].category == "threat"
+        assert signals[0].description == "1/2 gate checks blocked (50%) in last 1h"
+
+    @pytest.mark.asyncio
+    async def test_emit_to_gates_uses_ingested_gate_pattern_signals(
+        self,
+        tmp_path: Path,
+    ) -> None:
+        state_dir = tmp_path / ".dharma"
+        witness_dir = state_dir / "witness"
+        witness_dir.mkdir(parents=True)
+
+        now_utc = datetime.now(timezone.utc).isoformat()
+        (witness_dir / "witness_20260318.jsonl").write_text(
+            "\n".join(
+                [
+                    json.dumps({"ts": now_utc, "outcome": "BLOCKED"}),
+                    json.dumps({"ts": now_utc, "outcome": "BLOCKED"}),
+                    json.dumps({"ts": now_utc, "outcome": "WARN"}),
+                ]
+            )
+        )
+
+        scanner = ZeitgeistScanner(state_dir=state_dir)
+        await scanner.ingest_gate_patterns(window_hours=1)
+        env_context = scanner.emit_to_gates()
+
+        assert env_context["threat_level"] == 1.0
+        assert env_context["opportunity_count"] == 0
+        assert env_context["latest_signals"][0]["title"] == "High gate block rate"

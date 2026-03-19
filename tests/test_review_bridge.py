@@ -8,6 +8,7 @@ from unittest.mock import patch, MagicMock
 
 import pytest
 
+import dharma_swarm.review_bridge as review_bridge
 from dharma_swarm.review_bridge import (
     ReviewBridge,
     _classify_severity,
@@ -52,6 +53,21 @@ class TestFindingToProposal:
         assert p.metadata["severity"] == "critical"
         assert p.metadata["source"] == "review_bridge"
 
+    def test_conversion_uses_repo_root_when_login_home_differs(self):
+        finding = {
+            "code": "F401",
+            "message": "unused import",
+            "filename": "/workspace/repo/dharma_swarm/foo.py",
+            "location": {"row": 10, "column": 1},
+        }
+        with patch.object(review_bridge, "REPO_ROOT", Path("/workspace/repo")), patch.object(
+            review_bridge,
+            "_LEGACY_REPO_ROOTS",
+            (Path("/workspace/repo"), Path("/fake/home/dharma_swarm")),
+        ):
+            p = _finding_to_proposal(finding, cycle_id="c-1")
+        assert p.component == "dharma_swarm/foo.py"
+
     def test_unknown_file_path(self):
         finding = {
             "code": "E501",
@@ -74,6 +90,15 @@ class TestRunRuff:
             findings = _run_ruff()
             assert len(findings) == 1
             assert findings[0]["code"] == "F401"
+
+    def test_default_target_uses_package_dir(self):
+        mock_result = MagicMock()
+        mock_result.stdout = "[]"
+        with patch("dharma_swarm.review_bridge.subprocess.run", return_value=mock_result) as mock_run:
+            findings = _run_ruff()
+        assert findings == []
+        args = mock_run.call_args.args[0]
+        assert args[4] == str(review_bridge.PACKAGE_DIR)
 
     def test_empty_output(self):
         mock_result = MagicMock()

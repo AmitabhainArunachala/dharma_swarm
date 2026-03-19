@@ -58,6 +58,45 @@ def _isolate_dgc_env(monkeypatch):
             monkeypatch.delenv(key)
 
 
+@pytest.fixture(autouse=True)
+def _isolate_cost_ledger(request, monkeypatch):
+    """Prevent real budget state from blocking test runs.
+
+    CostLedger reads from ~/.dharma/costs/ — production data.
+    Tests that specifically test budget behavior can opt out with
+    @pytest.mark.real_budget.
+    """
+    if "real_budget" in request.keywords:
+        return
+    monkeypatch.setattr(
+        "dharma_swarm.cost_ledger.CostLedger.should_stop",
+        lambda self: False,
+    )
+
+
+@pytest.fixture(autouse=True)
+def _isolate_memory_plane(request, monkeypatch):
+    """Prevent agent_runner from reading the production memory plane DB.
+
+    The real ~/.dharma/db/memory_plane.db can be large and cause timeouts
+    in the unified_index read path. Tests that specifically test memory
+    context can opt out with @pytest.mark.real_memory.
+    """
+    if "real_memory" in request.keywords:
+        return
+    try:
+        monkeypatch.setattr(
+            "dharma_swarm.context.read_memory_context",
+            lambda *args, **kwargs: "",
+        )
+        monkeypatch.setattr(
+            "dharma_swarm.context.read_latent_gold_context",
+            lambda *args, **kwargs: "",
+        )
+    except (AttributeError, ImportError):
+        pass  # context module may not be importable in all test environments
+
+
 @pytest.fixture
 def fast_gate():
     """Mock telos gate to return ALLOW instantly.

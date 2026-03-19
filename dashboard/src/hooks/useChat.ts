@@ -33,16 +33,21 @@ export interface ChatMessage {
 
 interface ChatStore {
   messagesByProfile: Record<string, ChatMessage[]>;
-  isStreaming: boolean;
-  activeTools: string[];
-  error: string | null;
+  sessionIdByProfile: Record<string, string>;
+  isStreamingByProfile: Record<string, boolean>;
+  activeToolsByProfile: Record<string, string[]>;
+  errorByProfile: Record<string, string | null>;
   _setMessages: (
     profileId: string,
     fn: (prev: ChatMessage[]) => ChatMessage[],
   ) => void;
-  _setStreaming: (v: boolean) => void;
-  _setActiveTools: (fn: (prev: string[]) => string[]) => void;
-  _setError: (v: string | null) => void;
+  _setStreaming: (profileId: string, v: boolean) => void;
+  _setActiveTools: (
+    profileId: string,
+    fn: (prev: string[]) => string[],
+  ) => void;
+  _setSessionId: (profileId: string, sessionId: string) => void;
+  _setError: (profileId: string, v: string | null) => void;
   clearMessages: (profileId: string) => void;
 }
 
@@ -55,9 +60,10 @@ const useChatStore = create<ChatStore>()(
   persist(
     (set) => ({
       messagesByProfile: {},
-      isStreaming: false,
-      activeTools: [],
-      error: null,
+      sessionIdByProfile: {},
+      isStreamingByProfile: {},
+      activeToolsByProfile: {},
+      errorByProfile: {},
 
       _setMessages: (profileId, fn) =>
         set((s) => ({
@@ -66,9 +72,34 @@ const useChatStore = create<ChatStore>()(
             [profileId]: fn(s.messagesByProfile[profileId] ?? []),
           },
         })),
-      _setStreaming: (v) => set({ isStreaming: v }),
-      _setActiveTools: (fn) => set((s) => ({ activeTools: fn(s.activeTools) })),
-      _setError: (v) => set({ error: v }),
+      _setStreaming: (profileId, v) =>
+        set((s) => ({
+          isStreamingByProfile: {
+            ...s.isStreamingByProfile,
+            [profileId]: v,
+          },
+        })),
+      _setActiveTools: (profileId, fn) =>
+        set((s) => ({
+          activeToolsByProfile: {
+            ...s.activeToolsByProfile,
+            [profileId]: fn(s.activeToolsByProfile[profileId] ?? []),
+          },
+        })),
+      _setSessionId: (profileId, sessionId) =>
+        set((s) => ({
+          sessionIdByProfile: {
+            ...s.sessionIdByProfile,
+            [profileId]: sessionId,
+          },
+        })),
+      _setError: (profileId, v) =>
+        set((s) => ({
+          errorByProfile: {
+            ...s.errorByProfile,
+            [profileId]: v,
+          },
+        })),
 
       clearMessages: (profileId) =>
         set((s) => ({
@@ -76,9 +107,22 @@ const useChatStore = create<ChatStore>()(
             ...s.messagesByProfile,
             [profileId]: [],
           },
-          error: null,
-          activeTools: [],
-          isStreaming: false,
+          sessionIdByProfile: {
+            ...s.sessionIdByProfile,
+            [profileId]: "",
+          },
+          errorByProfile: {
+            ...s.errorByProfile,
+            [profileId]: null,
+          },
+          activeToolsByProfile: {
+            ...s.activeToolsByProfile,
+            [profileId]: [],
+          },
+          isStreamingByProfile: {
+            ...s.isStreamingByProfile,
+            [profileId]: false,
+          },
         })),
     }),
     {
@@ -95,16 +139,17 @@ const useChatStore = create<ChatStore>()(
           key: () => null,
         } satisfies Storage;
       }),
-      // Only persist messages — streaming/activeTools are ephemeral
+      // Persist messages + server session ids. Streaming/tool state is ephemeral.
       partialize: (state) => ({
         messagesByProfile: state.messagesByProfile,
+        sessionIdByProfile: state.sessionIdByProfile,
       }),
       // Reset ephemeral state on rehydrate (prevents stuck spinner)
       onRehydrateStorage: () => (state) => {
         if (state) {
-          state.isStreaming = false;
-          state.activeTools = [];
-          state.error = null;
+          state.isStreamingByProfile = {};
+          state.activeToolsByProfile = {};
+          state.errorByProfile = {};
         }
       },
     },
@@ -117,6 +162,7 @@ const useChatStore = create<ChatStore>()(
 
 interface UseChatReturn {
   messages: ChatMessage[];
+  sessionId: string;
   isStreaming: boolean;
   activeTools: string[];
   error: string | null;
@@ -132,17 +178,24 @@ const DEFAULT_HISTORY_MESSAGE_LIMIT = 120;
 export function useChat(profileId: string = DEFAULT_CHAT_PROFILE_ID): UseChatReturn {
   const {
     messagesByProfile,
-    isStreaming,
-    activeTools,
-    error,
+    sessionIdByProfile,
+    isStreamingByProfile,
+    activeToolsByProfile,
+    errorByProfile,
     _setMessages,
     _setStreaming,
     _setActiveTools,
+    _setSessionId,
     _setError,
     clearMessages,
   } = useChatStore();
   const [status, setStatus] = useState<ChatStatusOut | null>(null);
-  const messages = messagesByProfile[profileId] ?? [];
+  const activeProfileId = profileId || status?.default_profile_id || DEFAULT_CHAT_PROFILE_ID;
+  const messages = messagesByProfile[activeProfileId] ?? [];
+  const sessionId = sessionIdByProfile[activeProfileId] ?? "";
+  const isStreaming = isStreamingByProfile[activeProfileId] ?? false;
+  const activeTools = activeToolsByProfile[activeProfileId] ?? [];
+  const error = errorByProfile[activeProfileId] ?? null;
 
   const abortRef = useRef<AbortController | null>(null);
 
@@ -167,16 +220,16 @@ export function useChat(profileId: string = DEFAULT_CHAT_PROFILE_ID): UseChatRet
   const stopStreaming = useCallback(() => {
     abortRef.current?.abort();
     abortRef.current = null;
-    _setStreaming(false);
-    _setActiveTools(() => []);
-  }, [_setStreaming, _setActiveTools]);
+    _setStreaming(activeProfileId, false);
+    _setActiveTools(activeProfileId, () => []);
+  }, [_setStreaming, _setActiveTools, activeProfileId]);
 
   const sendMessage = useCallback(
     async (content: string, context?: string) => {
-      _setError(null);
-      _setActiveTools(() => []);
+      _setError(activeProfileId, null);
+      _setActiveTools(activeProfileId, () => []);
 
-      const currentProfileId = profileId || status?.default_profile_id || DEFAULT_CHAT_PROFILE_ID;
+      const currentProfileId = activeProfileId;
 
       const userMsg: ChatMessage = {
         id: nextId(),
@@ -194,15 +247,16 @@ export function useChat(profileId: string = DEFAULT_CHAT_PROFILE_ID): UseChatRet
       };
 
       _setMessages(currentProfileId, (prev) => [...prev, userMsg, assistantMsg]);
-      _setStreaming(true);
+      _setStreaming(currentProfileId, true);
 
       const controller = new AbortController();
       abortRef.current = controller;
 
       try {
         // Snapshot current messages for the API payload
-        const currentMessages =
-          useChatStore.getState().messagesByProfile[currentProfileId] ?? [];
+        const storeState = useChatStore.getState();
+        const currentMessages = storeState.messagesByProfile[currentProfileId] ?? [];
+        const currentSessionId = storeState.sessionIdByProfile[currentProfileId] ?? "";
         const historyForApi = currentMessages
           .filter((m) => m.role !== "system")
           .slice(-(status?.history_message_limit ?? DEFAULT_HISTORY_MESSAGE_LIMIT))
@@ -215,6 +269,7 @@ export function useChat(profileId: string = DEFAULT_CHAT_PROFILE_ID): UseChatRet
             messages: historyForApi,
             context: context || undefined,
             profile_id: currentProfileId,
+            session_id: currentSessionId || undefined,
           }),
           signal: controller.signal,
         });
@@ -247,13 +302,18 @@ export function useChat(profileId: string = DEFAULT_CHAT_PROFILE_ID): UseChatRet
               const parsed = JSON.parse(data);
 
               if (parsed.error) {
-                _setError(parsed.error);
+                _setError(currentProfileId, parsed.error);
                 break;
+              }
+
+              if (parsed.session?.id) {
+                _setSessionId(currentProfileId, String(parsed.session.id));
+                continue;
               }
 
               if (parsed.tool_call) {
                 const toolName = parsed.tool_call.name;
-                _setActiveTools((prev) => [...prev, toolName]);
+                _setActiveTools(currentProfileId, (prev) => [...prev, toolName]);
                 _setMessages(currentProfileId, (prev) => {
                   const updated = [...prev];
                   const last = updated[updated.length - 1];
@@ -278,7 +338,7 @@ export function useChat(profileId: string = DEFAULT_CHAT_PROFILE_ID): UseChatRet
 
               if (parsed.tool_result) {
                 const toolName = parsed.tool_result.name;
-                _setActiveTools((prev) => prev.filter((t) => t !== toolName));
+                _setActiveTools(currentProfileId, (prev) => prev.filter((t) => t !== toolName));
                 _setMessages(currentProfileId, (prev) => {
                   const updated = [...prev];
                   const last = updated[updated.length - 1];
@@ -323,26 +383,36 @@ export function useChat(profileId: string = DEFAULT_CHAT_PROFILE_ID): UseChatRet
         if (err instanceof Error && err.name === "AbortError") {
           // User cancelled
         } else {
-          _setError(err instanceof Error ? err.message : String(err));
+          _setError(currentProfileId, err instanceof Error ? err.message : String(err));
         }
       } finally {
-        _setStreaming(false);
-        _setActiveTools(() => []);
+        _setStreaming(currentProfileId, false);
+        _setActiveTools(currentProfileId, () => []);
         abortRef.current = null;
       }
     },
-    [_setMessages, _setStreaming, _setActiveTools, _setError, profileId, status],
+    [
+      _setMessages,
+      _setStreaming,
+      _setActiveTools,
+      _setSessionId,
+      _setError,
+      activeProfileId,
+      sessionId,
+      status,
+    ],
   );
 
   return {
     messages,
+    sessionId,
     isStreaming,
     activeTools,
     error,
     status,
-    profileId,
+    profileId: activeProfileId,
     sendMessage,
-    clearMessages: () => clearMessages(profileId),
+    clearMessages: () => clearMessages(activeProfileId),
     stopStreaming,
   };
 }

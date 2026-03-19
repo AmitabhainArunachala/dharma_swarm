@@ -745,6 +745,37 @@ class DGCApp(App):
             if len(self._conversation) > max_messages:
                 self._conversation = self._conversation[-max_messages:]
 
+    _SYSTEM_CONTEXT = """\
+You are Claude running inside the DGC TUI for dharma_swarm.
+The operator is Dhyana. You have full system access via bash.
+
+## What you can DO (use bash to run these):
+
+dgc status                  — system health overview
+dgc council "question"      — ask 12+ AI models (--tiers 0 = free only, --mode deep --rounds N)
+dgc council --history       — past council sessions
+dgc stigmergy              — hot paths and recent pheromone marks
+dgc hum                    — subconscious associations and dreams
+dgc pulse                  — system pulse check
+dgc orchestrate-live       — start 5-system concurrent orchestrator
+dgc evolve trend           — evolution fitness trend
+dgc health                 — anomaly detection
+dgc dharma status          — kernel integrity, corpus stats
+dgc sprint                 — sprint planning
+
+## Python API (use in bash -c "python3 -c '...'"):
+
+from dharma_swarm.council import quick, deep  # await quick("question")
+from dharma_swarm.agent_runner import AgentRunner  # .run_task(task) NOT .run()
+from dharma_swarm.models import AgentConfig, Task
+
+## Rules:
+- Run commands with bash, not by guessing Python APIs
+- Free providers first (--tiers 0) unless asked for more
+- Be concise. Show results, not process.
+- If something fails, show the error and suggest a fix.
+"""
+
     def _build_chat_prompt(self, question: str) -> str:
         with self._conversation_lock:
             history = list(self._conversation)
@@ -759,8 +790,7 @@ class DGCApp(App):
             transcript = "(no prior conversation yet)"
 
         return (
-            "You are Claude running inside the DGC TUI. "
-            "This is a persistent technical conversation. Continue naturally.\n\n"
+            f"{self._SYSTEM_CONTEXT}\n"
             "Conversation transcript (oldest to newest):\n"
             f"{transcript}\n\n"
             "New user message:\n"
@@ -1144,6 +1174,76 @@ class DGCApp(App):
     @work(thread=True)
     def _run_ask(self, question: str) -> None:
         self._out_thread("[dim]thinking...[/dim]")
+
+        # Try operator HTTP SSE first (no subprocess overhead)
+        if self._try_operator_ask(question):
+            return
+
+        # Fallback: claude -p subprocess
+        self._run_ask_claude_subprocess(question)
+
+    def _try_operator_ask(self, question: str) -> bool:
+        """Try to route through the resident operator. Returns True if successful."""
+        import json as _json
+        import urllib.request
+        import urllib.error
+
+        prompt = self._build_chat_prompt(question)
+        state_ctx = self._get_state_context()
+        if state_ctx:
+            prompt = state_ctx + "\n\n" + prompt
+
+        payload = _json.dumps({
+            "content": prompt,
+            "session_id": f"tui_{int(time.time())}",
+            "client_id": "tui_legacy",
+        }).encode()
+
+        req = urllib.request.Request(
+            "http://localhost:8420/api/operator/ask",
+            data=payload,
+            headers={"Content-Type": "application/json"},
+        )
+
+        try:
+            with urllib.request.urlopen(req, timeout=120) as resp:
+                self._out_thread(f"\n[bold cyan]operator:[/bold cyan]")
+                lines: list[str] = []
+                for line_bytes in resp:
+                    line = line_bytes.decode("utf-8").strip()
+                    if not line or not line.startswith("data: "):
+                        continue
+                    data = line[6:]
+                    if data == "[DONE]":
+                        break
+                    try:
+                        event = _json.loads(data)
+                        etype = event.get("type", "")
+                        content = event.get("content", "")
+                        if etype == "text_delta" and content:
+                            lines.append(content)
+                            # Show line-by-line for streaming feel
+                            for ln in content.split("\n"):
+                                if ln.strip():
+                                    self._out_thread(f"  {ln}")
+                        elif etype == "error":
+                            self._out_thread(f"  [red]{content}[/red]")
+                    except _json.JSONDecodeError:
+                        pass
+
+                output = "\n".join(lines)
+                if output.strip():
+                    self._append_conversation("user", question)
+                    self._append_conversation("assistant", output)
+                    self._out_thread("")
+                return True
+
+        except (urllib.error.URLError, OSError):
+            # Operator not running — fall through to claude -p
+            return False
+
+    def _run_ask_claude_subprocess(self, question: str) -> None:
+        """Fallback: use claude -p subprocess."""
         try:
             env = dict(os.environ)
             env.pop("CLAUDECODE", None)

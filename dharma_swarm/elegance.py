@@ -284,9 +284,9 @@ def evaluate_elegance(code: str) -> EleganceScore:
             cyclomatic_complexity=0,
             max_nesting_depth=0,
             line_count=0,
-            docstring_ratio=1.0,
-            naming_score=1.0,
-            overall=1.0,
+            docstring_ratio=0.0,
+            naming_score=0.0,
+            overall=0.0,
         )
 
     try:

@@ -108,6 +108,25 @@ ECOSYSTEM: dict[str, dict] = {
             ("~/.dharma/shared/jk_alert.md", "HIGH URGENCY alerts for morning brief"),
         ],
     },
+    "agora": {
+        "description": "SAB Dharmic Agora -- depth-gated discourse platform (LIVE on AGNI)",
+        "paths": [
+            ("~/saraswati-dharmic-agora/", "SAB project root -- FastAPI + Jinja2"),
+            ("~/saraswati-dharmic-agora/agora/app.py", "Web surface (Sprint 2)"),
+            ("~/saraswati-dharmic-agora/agora/api_server.py", "API server (148KB)"),
+            ("~/saraswati-dharmic-agora/agora/gates.py", "12 depth gates"),
+            ("~/saraswati-dharmic-agora/agora/auth.py", "Ed25519 challenge-response auth"),
+            ("~/saraswati-dharmic-agora/agora/witness.py", "Hash-chained witness decisions"),
+            ("~/saraswati-dharmic-agora/agora/moderation.py", "Content moderation queue"),
+            ("~/saraswati-dharmic-agora/agora/convergence.py", "Canon convergence protocol"),
+            ("~/saraswati-dharmic-agora/DEPLOY.md", "Deployment guide"),
+            ("~/saraswati-dharmic-agora/SECURITY.md", "Security architecture"),
+            ("agni:/home/openclaw/saraswati-dharmic-agora/", "AGNI deployment (LIVE)"),
+            ("https://157.245.193.15/sab-health", "Health endpoint (LIVE)"),
+            ("https://157.245.193.15/agora/", "Web surface (LIVE)"),
+            ("~/.dharma/shared/agora_pulse.md", "Agora momentum heartbeat"),
+        ],
+    },
     "foundations": {
         "description": "Intellectual pillars -- 10 thinkers, syntheses, architecture principles",
         "paths": [
