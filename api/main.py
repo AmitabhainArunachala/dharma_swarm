@@ -4,7 +4,7 @@ FastAPI app with lifespan, CORS, WebSocket, and routers.
 
 Usage:
     cd ~/dharma_swarm
-    uvicorn api.main:app --port 8000 --reload
+    uvicorn api.main:app --host 127.0.0.1 --port 8420 --reload
 """
 
 from __future__ import annotations
@@ -74,6 +74,25 @@ def get_codex_operator() -> ResidentOperator:
     return _state["codex_operator"]
 
 
+def get_claude_operator() -> ResidentOperator:
+    """Get or create the resident Claude operator for the dashboard."""
+    if "claude_operator" not in _state:
+        from api.routers.chat import COMMAND_SYSTEM_PROMPT
+
+        model = os.getenv("DASHBOARD_CHAT_MODEL", "").strip() or "claude-opus-4-6"
+        operator = ResidentOperator(
+            name="claude_resident",
+            model=model,
+            provider_type=ProviderType.CLAUDE_CODE,
+            wake_interval=300.0,
+            state_dir=Path.home() / ".dharma",
+            base_system_prompt=COMMAND_SYSTEM_PROMPT,
+        )
+        operator.set_swarm(get_swarm())
+        _state["claude_operator"] = operator
+    return _state["claude_operator"]
+
+
 # ── Lifespan ──────────────────────────────────────────────────────
 
 @asynccontextmanager
@@ -92,22 +111,31 @@ async def lifespan(app: FastAPI):
     except Exception as e:
         logger.warning("Swarm init partial: %s", e)
 
-    codex_operator = get_codex_operator()
-    try:
-        await codex_operator.start()
-    except Exception as e:
-        logger.warning("Resident Codex operator init partial: %s", e)
+    resident_operators = (
+        ("Claude", get_claude_operator()),
+        ("Codex", get_codex_operator()),
+    )
+    for label, operator in resident_operators:
+        try:
+            await operator.start()
+        except Exception as e:
+            logger.warning("Resident %s operator init partial: %s", label, e)
 
-    logger.info("DHARMA COMMAND API ready on port 8000")
+    logger.info("DHARMA COMMAND API ready")
     yield
 
     logger.info("DHARMA COMMAND API shutting down")
-    codex_operator = _state.get("codex_operator")
-    if codex_operator is not None:
+    for state_key, label in (
+        ("codex_operator", "Codex"),
+        ("claude_operator", "Claude"),
+    ):
+        operator = _state.get(state_key)
+        if operator is None:
+            continue
         try:
-            await codex_operator.stop()
+            await operator.stop()
         except Exception as e:
-            logger.warning("Resident Codex operator shutdown partial: %s", e)
+            logger.warning("Resident %s operator shutdown partial: %s", label, e)
     _state.clear()
 
 

@@ -210,13 +210,17 @@ class ResidentOperator:
             bus = MessageBus(bus_path)
             await bus.init_db()
 
-            ledger = SessionLedger()
-            state_store = RuntimeStateStore()
+            runtime_db_path = self.state_dir / "state" / "runtime.db"
+            ledger = SessionLedger(
+                base_dir=self.state_dir / "ledgers",
+                runtime_db_path=runtime_db_path,
+            )
+            state_store = RuntimeStateStore(runtime_db_path)
 
             self._bridge = OperatorBridge(
                 message_bus=bus,
-                session_ledger=ledger,
-                state_store=state_store,
+                ledger=ledger,
+                runtime_state=state_store,
             )
             await self._bridge.init_db()
             logger.info("OperatorBridge initialized")
@@ -270,6 +274,14 @@ class ResidentOperator:
 
         if self.provider_type == ProviderType.CODEX:
             async for event in self._handle_codex_message(
+                session_id=session_id,
+                msg_id=msg_id,
+                user_seq=user_seq,
+            ):
+                yield event
+            return
+        if self.provider_type == ProviderType.CLAUDE_CODE:
+            async for event in self._handle_claude_code_message(
                 session_id=session_id,
                 msg_id=msg_id,
                 user_seq=user_seq,
@@ -542,6 +554,177 @@ class ResidentOperator:
                 "ysd_score": ysd_score,
                 "autonomy_level": self._graduation.level.name,
                 "provider": "codex_resident",
+            },
+        )
+
+    async def _handle_claude_code_message(
+        self,
+        *,
+        session_id: str,
+        msg_id: str,
+        user_seq: int,
+    ) -> AsyncIterator[OperatorEvent]:
+        """Stream a message through the local Claude Code adapter."""
+        from dharma_swarm.tui.engine.adapters.base import CompletionRequest
+        from dharma_swarm.tui.engine.adapters.claude import ClaudeAdapter
+
+        system_prompt = await self._build_system_prompt(session_id)
+        session = await self._conversations.get_session(session_id)
+        session_metadata = dict(session.get("metadata", {}) or {}) if session else {}
+        provider_session_id = str(
+            session_metadata.get("provider_session_id", "") or ""
+        ).strip() or None
+        _, messages = await self._conversations.build_messages_for_api(
+            session_id, system_prompt,
+        )
+
+        yield OperatorEvent(
+            event_type="text_delta",
+            content="",
+            session_id=session_id,
+            msg_id=msg_id,
+            seq=user_seq + 1,
+        )
+
+        adapter = ClaudeAdapter(workdir=Path.home() / "dharma_swarm")
+        response_parts: list[str] = []
+        tool_calls: list[dict[str, Any]] = []
+        tool_results: list[dict[str, Any]] = []
+        error_message = ""
+
+        try:
+            request = CompletionRequest(
+                messages=messages,
+                model=self.model,
+                system_prompt=system_prompt,
+                resume_session_id=provider_session_id,
+                provider_options={
+                    "add_dirs": [str(self.state_dir)],
+                },
+            )
+
+            async for event in adapter.stream(request, session_id):
+                event_type = getattr(event, "type", "")
+
+                if event_type == "session_start":
+                    resumed_provider_session_id = str(
+                        getattr(event, "provider_session_id", "") or ""
+                    ).strip()
+                    if resumed_provider_session_id:
+                        provider_session_id = resumed_provider_session_id
+                        await self._conversations.update_session_metadata(
+                            session_id,
+                            {
+                                "provider": "claude",
+                                "model": self.model,
+                                "provider_session_id": resumed_provider_session_id,
+                            },
+                        )
+                    continue
+
+                if event_type in {"text_complete", "text_delta"}:
+                    text = str(getattr(event, "content", "") or "")
+                    if not text.strip():
+                        continue
+                    response_parts.append(text)
+                    yield OperatorEvent(
+                        event_type="text_delta",
+                        content=text,
+                        session_id=session_id,
+                        msg_id=msg_id,
+                    )
+                    continue
+
+                if event_type == "tool_call_complete":
+                    tool_name = str(getattr(event, "tool_name", "") or "")
+                    arguments_raw = str(getattr(event, "arguments", "") or "")
+                    try:
+                        parsed_args = json.loads(arguments_raw) if arguments_raw else {}
+                    except json.JSONDecodeError:
+                        parsed_args = {"raw": arguments_raw}
+                    tool_call = {
+                        "id": str(getattr(event, "tool_call_id", "") or ""),
+                        "name": tool_name,
+                        "args": parsed_args,
+                    }
+                    tool_calls.append(tool_call)
+                    yield OperatorEvent(
+                        event_type="tool_call",
+                        content=json.dumps({"name": tool_name, "args": parsed_args}),
+                        metadata={"tool": tool_name},
+                        session_id=session_id,
+                        msg_id=msg_id,
+                    )
+                    continue
+
+                if event_type == "tool_result":
+                    tool_name = str(getattr(event, "tool_name", "") or "")
+                    raw_content = str(getattr(event, "content", "") or "")
+                    summary = raw_content[:150].replace("\n", " ")
+                    tool_results.append(
+                        {
+                            "tool_call_id": str(getattr(event, "tool_call_id", "") or ""),
+                            "name": tool_name,
+                            "summary": summary,
+                            "content": raw_content,
+                            "is_error": bool(getattr(event, "is_error", False)),
+                        }
+                    )
+                    yield OperatorEvent(
+                        event_type="tool_result",
+                        content=summary,
+                        metadata={"tool": tool_name},
+                        session_id=session_id,
+                        msg_id=msg_id,
+                    )
+                    continue
+
+                if event_type == "error":
+                    error_message = str(getattr(event, "message", "") or "")
+                    yield OperatorEvent(
+                        event_type="error",
+                        content=error_message,
+                        session_id=session_id,
+                        msg_id=msg_id,
+                    )
+                    continue
+
+                if event_type == "session_end":
+                    if not bool(getattr(event, "success", True)):
+                        candidate = str(getattr(event, "error_message", "") or "")
+                        if candidate:
+                            error_message = candidate
+        finally:
+            await adapter.close()
+
+        response_text = "\n\n".join(part.strip() for part in response_parts if part.strip())
+        if not response_text and error_message:
+            response_text = f"[claude resident error] {error_message}"
+
+        _, assistant_seq = await self._conversations.add_turn(
+            session_id,
+            "assistant",
+            response_text,
+            tool_calls=tool_calls,
+            tool_results=tool_results,
+        )
+
+        ysd_score = await self._score_response(response_text)
+        await self._graduation.record_action(
+            action_type="user_message",
+            success=not bool(error_message),
+            ysd_score=ysd_score,
+        )
+
+        yield OperatorEvent(
+            event_type="done",
+            session_id=session_id,
+            msg_id=msg_id,
+            seq=assistant_seq,
+            metadata={
+                "ysd_score": ysd_score,
+                "autonomy_level": self._graduation.level.name,
+                "provider": "claude_resident",
             },
         )
 

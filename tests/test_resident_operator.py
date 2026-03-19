@@ -82,6 +82,24 @@ async def test_operator_start_and_stop(tmp_path):
 
 
 @pytest.mark.asyncio
+async def test_operator_start_initializes_bridge_in_state_dir(tmp_path):
+    state_dir = tmp_path / ".dharma"
+    op = ResidentOperator(state_dir=state_dir)
+    op._conversations = _make_mock_store(tmp_path)
+    op._graduation = _make_mock_graduation(tmp_path)
+
+    await op.start()
+
+    assert op._bridge is not None
+    assert op._bridge._initialized is True
+    assert op._bridge._ledger.base_dir == state_dir / "ledgers"
+    assert op._bridge._runtime_state is not None
+    assert op._bridge._runtime_state.db_path == state_dir / "state" / "runtime.db"
+
+    await op.stop()
+
+
+@pytest.mark.asyncio
 async def test_operator_status_dict(tmp_path):
     op = ResidentOperator(state_dir=tmp_path / ".dharma")
     op._conversations = _make_mock_store(tmp_path)

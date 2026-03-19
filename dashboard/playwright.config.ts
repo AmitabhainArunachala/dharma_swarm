@@ -6,7 +6,7 @@ export default defineConfig({
   fullyParallel: true,
   reporter: [["list"], ["html", { open: "never" }]],
   use: {
-    baseURL: "http://127.0.0.1:3000",
+    baseURL: "http://127.0.0.1:3420",
     channel: "chrome",
     headless: true,
     viewport: { width: 1680, height: 1050 },
@@ -14,8 +14,8 @@ export default defineConfig({
     trace: "retain-on-failure",
   },
   webServer: {
-    command: "npm run dev -- --hostname 127.0.0.1 --port 3000",
-    url: "http://127.0.0.1:3000",
+    command: "npm run dev -- --hostname 127.0.0.1 --port 3420",
+    url: "http://127.0.0.1:3420",
     reuseExistingServer: true,
     timeout: 120_000,
   },

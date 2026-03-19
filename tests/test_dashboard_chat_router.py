@@ -34,7 +34,7 @@ def test_chat_status_reports_runtime_settings(monkeypatch: pytest.MonkeyPatch) -
     body = resp.json()
     assert body["ready"] is True
     assert body["model"] == "claude-opus-4-6"
-    assert body["provider"] == "claude_max"
+    assert body["provider"] == "resident_claude"
     assert body["max_tool_rounds"] == 64
     assert body["max_tokens"] == 12288
     assert body["timeout_seconds"] == 420.0
@@ -77,6 +77,39 @@ def test_chat_status_reports_codex_profile_as_resident_operator(
     assert codex["model"] == "gpt-5.4"
 
 
+def test_chat_status_reports_claude_profile_as_resident_operator(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(chat_router, "_claude_max_available", lambda: True)
+
+    client = _chat_client()
+    resp = client.get("/api/chat/status")
+
+    assert resp.status_code == 200
+    body = resp.json()
+    claude = next(profile for profile in body["profiles"] if profile["id"] == "claude_opus")
+
+    assert claude["provider"] == "resident_claude"
+    assert claude["model"] == "claude-opus-4-6"
+
+
+def test_chat_status_reports_qwen_profile_as_qwen_coder_480b(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("DASHBOARD_QWEN35_MODEL", "qwen3-coder:480b-cloud")
+
+    client = _chat_client()
+    resp = client.get("/api/chat/status")
+
+    assert resp.status_code == 200
+    body = resp.json()
+    qwen = next(profile for profile in body["profiles"] if profile["id"] == "qwen35_surgeon")
+
+    assert qwen["provider"] == "ollama_cloud"
+    assert qwen["model"] == "qwen3-coder:480b-cloud"
+    assert qwen["label"] == "Qwen Coder 480B"
+
+
 def test_chat_settings_marks_resident_codex_ready_when_cli_present(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -87,6 +120,18 @@ def test_chat_settings_marks_resident_codex_ready_when_cli_present(
     assert settings.provider == "resident_codex"
     assert settings.api_key == "codex-cli"
     assert settings.api_key_env == "CODEX_CLI"
+
+
+def test_chat_settings_marks_resident_claude_ready_when_runtime_present(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(chat_router, "_claude_max_available", lambda: True)
+
+    settings = chat_router._get_chat_settings("claude_opus")
+
+    assert settings.provider == "resident_claude"
+    assert settings.api_key == "claude-cli"
+    assert settings.api_key_env == "CLAUDE_MAX_LOGIN"
 
 
 def test_resolve_api_key_falls_back_to_keychain_lookup(
@@ -307,11 +352,140 @@ async def test_call_openrouter_retries_with_affordable_token_cap(
 
 
 @pytest.mark.asyncio
-async def test_agentic_stream_uses_claude_max_for_claude_profile(
+async def test_call_ollama_cloud_retries_after_timeout(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    monkeypatch.setattr(chat_router, "_claude_max_available", lambda: True)
-    settings = chat_router._get_chat_settings("claude_opus")
+    settings = chat_router.ChatRuntimeSettings(
+        provider="ollama_cloud",
+        api_key_env="",
+        api_key="ollama-cloud",
+        model="qwen3-coder:480b-cloud",
+        max_tool_rounds=40,
+        max_tokens=chat_router.DEFAULT_MAX_TOKENS,
+        timeout_seconds=30.0,
+        tool_result_max_chars=chat_router.DEFAULT_TOOL_RESULT_MAX_CHARS,
+        history_message_limit=chat_router.DEFAULT_HISTORY_MESSAGE_LIMIT,
+        temperature=chat_router.DEFAULT_TEMPERATURE,
+    )
+    calls = {"count": 0}
+
+    class FakeTimeoutError(Exception):
+        pass
+
+    class FakeResponse:
+        status_code = 200
+        text = ""
+
+        def json(self) -> dict:
+            return {"choices": [{"message": {"content": "retried ok"}}]}
+
+    class FakeAsyncClient:
+        def __init__(self, timeout=None):
+            self.timeout = timeout
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, exc_type, exc, tb):
+            return None
+
+        async def post(self, url, *, headers=None, json=None):
+            del url, headers, json
+            calls["count"] += 1
+            if calls["count"] == 1:
+                raise FakeTimeoutError("upstream slow")
+            return FakeResponse()
+
+    fake_httpx = types.SimpleNamespace(
+        AsyncClient=FakeAsyncClient,
+        Timeout=lambda timeout: timeout,
+        HTTPError=Exception,
+        TimeoutException=FakeTimeoutError,
+    )
+    monkeypatch.setitem(sys.modules, "httpx", fake_httpx)
+    monkeypatch.setattr(
+        chat_router,
+        "resolve_ollama_base_url",
+        lambda **kwargs: "https://ollama.com",
+        raising=False,
+    )
+
+    result = await chat_router._call_ollama_cloud(
+        [{"role": "user", "content": "hello"}],
+        settings,
+    )
+
+    assert result["choices"][0]["message"]["content"] == "retried ok"
+    assert calls["count"] == 2
+
+
+@pytest.mark.asyncio
+async def test_call_ollama_cloud_surfaces_empty_exception_with_class_name(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    settings = chat_router.ChatRuntimeSettings(
+        provider="ollama_cloud",
+        api_key_env="",
+        api_key="ollama-cloud",
+        model="qwen3-coder:480b-cloud",
+        max_tool_rounds=40,
+        max_tokens=chat_router.DEFAULT_MAX_TOKENS,
+        timeout_seconds=30.0,
+        tool_result_max_chars=chat_router.DEFAULT_TOOL_RESULT_MAX_CHARS,
+        history_message_limit=chat_router.DEFAULT_HISTORY_MESSAGE_LIMIT,
+        temperature=chat_router.DEFAULT_TEMPERATURE,
+    )
+
+    class SilentTimeout(Exception):
+        def __str__(self) -> str:
+            return ""
+
+    class FakeAsyncClient:
+        def __init__(self, timeout=None):
+            self.timeout = timeout
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, exc_type, exc, tb):
+            return None
+
+        async def post(self, url, *, headers=None, json=None):
+            del url, headers, json
+            raise SilentTimeout()
+
+    fake_httpx = types.SimpleNamespace(
+        AsyncClient=FakeAsyncClient,
+        Timeout=lambda timeout: timeout,
+        HTTPError=Exception,
+        TimeoutException=SilentTimeout,
+    )
+    monkeypatch.setitem(sys.modules, "httpx", fake_httpx)
+
+    result = await chat_router._call_ollama_cloud(
+        [{"role": "user", "content": "hello"}],
+        settings,
+    )
+
+    assert "SilentTimeout" in result["_error"]
+
+
+@pytest.mark.asyncio
+async def test_call_chat_provider_uses_claude_max_when_requested(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    settings = chat_router.ChatRuntimeSettings(
+        provider="claude_max",
+        api_key_env="CLAUDE_MAX_LOGIN",
+        api_key="claude-max",
+        model="claude-opus-4-6",
+        max_tool_rounds=chat_router.DEFAULT_MAX_TOOL_ROUNDS,
+        max_tokens=chat_router.DEFAULT_MAX_TOKENS,
+        timeout_seconds=chat_router.DEFAULT_TIMEOUT_SECONDS,
+        tool_result_max_chars=chat_router.DEFAULT_TOOL_RESULT_MAX_CHARS,
+        history_message_limit=chat_router.DEFAULT_HISTORY_MESSAGE_LIMIT,
+        temperature=chat_router.DEFAULT_TEMPERATURE,
+    )
 
     async def fake_call_claude_max(messages, runtime_settings):
         del messages
@@ -330,16 +504,65 @@ async def test_agentic_stream_uses_claude_max_for_claude_profile(
 
     monkeypatch.setattr(chat_router, "_call_claude_max", fake_call_claude_max)
 
-    chunks = [
-        chunk
-        async for chunk in chat_router._agentic_stream(
-            [{"role": "user", "content": "wire it up"}],
-            settings,
-        )
-    ]
-    payload = "".join(chunks)
+    result = await chat_router._call_chat_provider(
+        [{"role": "user", "content": "wire it up"}],
+        settings,
+    )
 
-    assert "claude max online" in payload
+    assert result["choices"][0]["message"]["content"] == "claude max online"
+
+
+@pytest.mark.asyncio
+async def test_call_chat_provider_with_fallback_uses_openrouter_qwen_backup(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("OPENROUTER_API_KEY", "test-router-key")
+    settings = chat_router.ChatRuntimeSettings(
+        provider="ollama_cloud",
+        api_key_env="",
+        api_key="ollama-cloud",
+        model="qwen3-coder:480b-cloud",
+        max_tool_rounds=chat_router.DEFAULT_MAX_TOOL_ROUNDS,
+        max_tokens=chat_router.DEFAULT_MAX_TOKENS,
+        timeout_seconds=chat_router.DEFAULT_TIMEOUT_SECONDS,
+        tool_result_max_chars=chat_router.DEFAULT_TOOL_RESULT_MAX_CHARS,
+        history_message_limit=chat_router.DEFAULT_HISTORY_MESSAGE_LIMIT,
+        temperature=chat_router.DEFAULT_TEMPERATURE,
+    )
+    seen: list[tuple[str, str]] = []
+
+    async def fake_call_chat_provider(messages, runtime_settings):
+        del messages
+        seen.append((runtime_settings.provider, runtime_settings.model))
+        if runtime_settings.provider == "ollama_cloud":
+            return {"_error": "Ollama Cloud request failed: ConnectError"}
+        return {
+            "choices": [
+                {
+                    "message": {
+                        "content": "qwen fallback online",
+                    },
+                    "finish_reason": "stop",
+                }
+            ]
+        }
+
+    monkeypatch.setattr(chat_router, "_call_chat_provider", fake_call_chat_provider)
+
+    result, active_settings = await chat_router._call_chat_provider_with_fallback(
+        [{"role": "user", "content": "fix the bug"}],
+        settings,
+        profile_id="qwen35_surgeon",
+    )
+
+    assert result["choices"][0]["message"]["content"] == "qwen fallback online"
+    assert result["_fallback"]["provider"] == "openrouter"
+    assert active_settings.provider == "openrouter"
+    assert active_settings.model == "qwen/qwen3-coder:free"
+    assert seen == [
+        ("ollama_cloud", "qwen3-coder:480b-cloud"),
+        ("openrouter", "qwen/qwen3-coder:free"),
+    ]
 
 
 @pytest.mark.asyncio
@@ -466,6 +689,66 @@ async def test_stream_resident_codex_routes_dashboard_codex_profile_to_operator(
 
 
 @pytest.mark.asyncio
+async def test_stream_resident_claude_routes_dashboard_claude_profile_to_operator(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    captured: list[tuple[str, str, str]] = []
+
+    class FakeOperator:
+        _running = True
+
+        async def handle_message(self, session_id: str, content: str, client_id: str):
+            captured.append((session_id, content, client_id))
+            yield OperatorEvent(event_type="text_delta", content="resident claude online")
+            yield OperatorEvent(
+                event_type="tool_call",
+                content=json.dumps({"name": "grep_search", "args": {"pattern": "opus"}}),
+                metadata={"tool": "grep_search"},
+            )
+            yield OperatorEvent(
+                event_type="tool_result",
+                content="api/main.py: get_claude_operator",
+                metadata={"tool": "grep_search"},
+            )
+            yield OperatorEvent(
+                event_type="done",
+                metadata={"provider": "claude_resident"},
+            )
+
+    async def fake_noop(*args, **kwargs):
+        del args, kwargs
+        return None
+
+    monkeypatch.setattr(chat_router, "_claude_max_available", lambda: True)
+    monkeypatch.setattr(chat_router, "_get_resident_claude_operator", lambda: FakeOperator())
+    monkeypatch.setattr(chat_router, "_publish_residual_turn", fake_noop)
+    monkeypatch.setattr(chat_router, "_broadcast_chat_event", fake_noop)
+    monkeypatch.setattr(chat_router, "_log_conversation", lambda *args, **kwargs: None)
+    monkeypatch.setitem(
+        sys.modules,
+        "dharma_swarm.conversation_log",
+        types.SimpleNamespace(log_exchange=lambda *args, **kwargs: None),
+    )
+
+    client = _chat_client()
+    resp = client.post(
+        "/api/chat",
+        json={
+            "profile_id": "claude_opus",
+            "session_id": "sess-claude",
+            "messages": [{"role": "user", "content": "peer with codex"}],
+        },
+    )
+
+    assert resp.status_code == 200
+    assert resp.headers["x-chat-session-id"] == "sess-claude"
+    assert "resident claude online" in resp.text
+    assert '"tool_call"' in resp.text
+    assert '"tool_result"' in resp.text
+    assert captured == [("sess-claude", "peer with codex", "dashboard_claude")]
+
+
+@pytest.mark.asyncio
 async def test_agentic_stream_surfaces_openai_provider_error(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -502,8 +785,6 @@ def test_delta_messages_for_session_prefers_newest_user_when_server_has_history(
 def test_chat_stream_uses_persisted_session_history(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    monkeypatch.setattr(chat_router, "_claude_max_available", lambda: True)
-
     class FakeConversationStore:
         def __init__(self) -> None:
             self.sessions = {
@@ -545,7 +826,7 @@ def test_chat_stream_uses_persisted_session_history(
     async def fake_get_store():
         return store
 
-    async def fake_call_claude_max(messages, runtime_settings):
+    async def fake_call_ollama_cloud(messages, runtime_settings):
         del runtime_settings
         captured_messages.extend(messages)
         return {
@@ -567,7 +848,7 @@ def test_chat_stream_uses_persisted_session_history(
         return None
 
     monkeypatch.setattr(chat_router, "_get_chat_conversation_store", fake_get_store)
-    monkeypatch.setattr(chat_router, "_call_claude_max", fake_call_claude_max)
+    monkeypatch.setattr(chat_router, "_call_ollama_cloud", fake_call_ollama_cloud)
     monkeypatch.setattr(chat_router, "_gather_brief_context", fake_context)
     monkeypatch.setattr(chat_router, "_broadcast_chat_event", fake_noop)
     monkeypatch.setattr(chat_router, "_publish_residual_turn", fake_noop)
@@ -582,7 +863,7 @@ def test_chat_stream_uses_persisted_session_history(
     resp = client.post(
         "/api/chat",
         json={
-            "profile_id": "claude_opus",
+            "profile_id": "glm5_researcher",
             "session_id": "sess-1",
             "messages": [{"role": "user", "content": "what next?"}],
         },

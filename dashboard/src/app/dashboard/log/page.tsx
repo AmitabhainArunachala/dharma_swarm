@@ -35,7 +35,7 @@ interface LogStats {
   hours_covered: number;
 }
 
-const BASE = process.env.NEXT_PUBLIC_API_URL ?? "http://localhost:8420";
+const BASE = process.env.NEXT_PUBLIC_API_URL ?? "http://127.0.0.1:8420";
 
 function timeAgo(ts: string): string {
   const diff = Date.now() - new Date(ts).getTime();

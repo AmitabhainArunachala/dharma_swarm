@@ -38,6 +38,7 @@ router = APIRouter(prefix="/api", tags=["chat"])
 
 OPENROUTER_URL = "https://openrouter.ai/api/v1/chat/completions"
 OPENAI_URL = "https://api.openai.com/v1/chat/completions"
+DASHBOARD_PUBLIC_URL = os.getenv("DASHBOARD_PUBLIC_URL", "http://127.0.0.1:3420")
 DEFAULT_CLAUDE_MODEL = "claude-opus-4-6"
 DEFAULT_CODEX_MODEL = "gpt-5.4"
 DEFAULT_MAX_TOOL_ROUNDS = 40
@@ -78,6 +79,13 @@ class ChatRuntimeSettings:
     tool_result_max_chars: int
     history_message_limit: int
     temperature: float
+
+
+@dataclass(frozen=True)
+class ChatFallbackSpec:
+    provider: str
+    api_key_env: str
+    model: str
 
 
 COMMAND_SYSTEM_PROMPT = """\
@@ -167,7 +175,7 @@ dense, precise, and actionable. You serve Jagat Kalyan."""
 
 
 QWEN35_SYSTEM_PROMPT = """\
-You are Qwen 3.5, the in-house bug fixer and code surgeon operating inside the \
+You are Qwen Coder, the in-house bug fixer and code surgeon operating inside the \
 DHARMA COMMAND center. You are fast, precise, and surgical. You don't theorize \
 about bugs — you find them, fix them, and verify the fix.
 
@@ -203,12 +211,12 @@ CHAT_PROFILE_SPECS: dict[str, ChatProfileSpec] = {
     "claude_opus": ChatProfileSpec(
         profile_id="claude_opus",
         label="Claude Opus 4.6",
-        provider="claude_max",
+        provider="resident_claude",
         api_key_env="CLAUDE_MAX_LOGIN",
         default_model=DEFAULT_CLAUDE_MODEL,
         model_env="DASHBOARD_CHAT_MODEL",
         accent="aozora",
-        summary="Strategic operator using the locally authenticated Claude Max runtime.",
+        summary="Resident Claude operator with persistent session state and local Claude Max auth.",
         system_prompt=COMMAND_SYSTEM_PROMPT,
     ),
     "codex_operator": ChatProfileSpec(
@@ -235,14 +243,30 @@ CHAT_PROFILE_SPECS: dict[str, ChatProfileSpec] = {
     ),
     "qwen35_surgeon": ChatProfileSpec(
         profile_id="qwen35_surgeon",
-        label="Qwen 3.5 Surgeon",
-        provider="nvidia_nim",
-        api_key_env="NVIDIA_API_KEY",
-        default_model="qwen/qwen3.5-122b-a10b",
+        label="Qwen Coder 480B",
+        provider="ollama_cloud",
+        api_key_env="",
+        default_model="qwen3-coder:480b-cloud",
         model_env="DASHBOARD_QWEN35_MODEL",
         accent="botan",
-        summary="In-house code surgeon — FREE on NVIDIA NIM. 122B MoE, tool-use verified.",
+        summary="In-house code surgeon — strongest Qwen coder, routed via Ollama Cloud.",
         system_prompt=QWEN35_SYSTEM_PROMPT,
+    ),
+}
+
+
+CHAT_PROFILE_FALLBACKS: dict[str, tuple[ChatFallbackSpec, ...]] = {
+    "qwen35_surgeon": (
+        ChatFallbackSpec(
+            provider="openrouter",
+            api_key_env="OPENROUTER_API_KEY",
+            model="qwen/qwen3-coder:free",
+        ),
+        ChatFallbackSpec(
+            provider="openrouter",
+            api_key_env="OPENROUTER_API_KEY",
+            model="qwen/qwen-2.5-coder-32b-instruct",
+        ),
     ),
 }
 
@@ -350,22 +374,63 @@ def _get_resident_codex_operator():
     return get_codex_operator()
 
 
-def _get_chat_settings(profile_id: str | None = None) -> ChatRuntimeSettings:
-    profile = _get_profile_spec(profile_id)
-    model = os.getenv(profile.model_env, "").strip() or profile.default_model
-    if profile.provider == "ollama_cloud":
+def _get_resident_claude_operator():
+    from api.main import get_claude_operator
+
+    return get_claude_operator()
+
+
+def _iter_resident_operators():
+    for getter in (_get_resident_codex_operator, _get_resident_claude_operator):
+        try:
+            yield getter()
+        except Exception:
+            continue
+
+
+def _resident_operator_binding(provider: str) -> tuple[Any, str, str, str] | None:
+    if provider == "resident_codex":
+        return (
+            _get_resident_codex_operator(),
+            "dashboard_codex",
+            "Resident Codex runtime not available",
+            "Resident Codex operator is not running",
+        )
+    if provider == "resident_claude":
+        return (
+            _get_resident_claude_operator(),
+            "dashboard_claude",
+            "Resident Claude runtime not available",
+            "Resident Claude operator is not running",
+        )
+    return None
+
+
+def _build_chat_settings(
+    profile: ChatProfileSpec,
+    *,
+    provider: str | None = None,
+    api_key_env: str | None = None,
+    model: str | None = None,
+) -> ChatRuntimeSettings:
+    resolved_provider = provider or profile.provider
+    resolved_api_key_env = api_key_env if api_key_env is not None else profile.api_key_env
+    resolved_model = model or os.getenv(profile.model_env, "").strip() or profile.default_model
+    if resolved_provider == "ollama_cloud":
         api_key = "ollama-cloud"  # No key needed
-    elif profile.provider == "resident_codex" and _codex_cli_available():
+    elif resolved_provider == "resident_codex" and _codex_cli_available():
         api_key = "codex-cli"
-    elif profile.provider == "claude_max" and _claude_max_available():
+    elif resolved_provider == "resident_claude" and _claude_max_available():
+        api_key = "claude-cli"
+    elif resolved_provider == "claude_max" and _claude_max_available():
         api_key = "claude-max"
     else:
-        api_key = _resolve_api_key(profile.api_key_env)
+        api_key = _resolve_api_key(resolved_api_key_env)
     return ChatRuntimeSettings(
-        provider=profile.provider,
-        api_key_env=profile.api_key_env,
+        provider=resolved_provider,
+        api_key_env=resolved_api_key_env,
         api_key=api_key,
-        model=model,
+        model=resolved_model,
         max_tool_rounds=_parse_int_env(
             "DASHBOARD_CHAT_MAX_TOOL_ROUNDS",
             DEFAULT_MAX_TOOL_ROUNDS,
@@ -397,6 +462,35 @@ def _get_chat_settings(profile_id: str | None = None) -> ChatRuntimeSettings:
             minimum=0.0,
         ),
     )
+
+
+def _get_chat_settings(profile_id: str | None = None) -> ChatRuntimeSettings:
+    profile = _get_profile_spec(profile_id)
+    return _build_chat_settings(profile)
+
+
+def _iter_chat_runtime_candidates(
+    profile_id: str | None,
+    settings: ChatRuntimeSettings,
+) -> list[ChatRuntimeSettings]:
+    profile = _get_profile_spec(profile_id)
+    candidates = [settings]
+    seen = {(settings.provider, settings.model)}
+    for fallback in CHAT_PROFILE_FALLBACKS.get(profile.profile_id, ()):
+        candidate = _build_chat_settings(
+            profile,
+            provider=fallback.provider,
+            api_key_env=fallback.api_key_env,
+            model=fallback.model,
+        )
+        if not candidate.api_key:
+            continue
+        key = (candidate.provider, candidate.model)
+        if key in seen:
+            continue
+        seen.add(key)
+        candidates.append(candidate)
+    return candidates
 
 
 def _extract_openrouter_affordable_max_tokens(error_text: str) -> int | None:
@@ -670,7 +764,7 @@ async def _call_openrouter(
     headers = {
         "Authorization": f"Bearer {settings.api_key}",
         "Content-Type": "application/json",
-        "HTTP-Referer": "http://localhost:3000",
+        "HTTP-Referer": DASHBOARD_PUBLIC_URL,
         "X-Title": "DHARMA COMMAND",
     }
     payload = {
@@ -817,7 +911,7 @@ async def _call_openrouter_stream(messages: list[dict], settings: ChatRuntimeSet
     headers = {
         "Authorization": f"Bearer {settings.api_key}",
         "Content-Type": "application/json",
-        "HTTP-Referer": "http://localhost:3000",
+        "HTTP-Referer": DASHBOARD_PUBLIC_URL,
         "X-Title": "DHARMA COMMAND",
     }
     payload = {
@@ -877,22 +971,47 @@ async def _call_ollama_cloud(
     # GLM-5 supports function calling, so include tools
     payload["tools"] = TOOL_DEFINITIONS
 
+    async def _post_request(
+        request_payload: dict,
+        *,
+        timeout_seconds: float,
+    ) -> httpx.Response:
+        async with httpx.AsyncClient(timeout=httpx.Timeout(timeout_seconds)) as client:
+            return await client.post(url, headers=headers, json=request_payload)
+
+    def _describe_httpx_error(exc: Exception) -> str:
+        message = str(exc).strip() or repr(exc)
+        return f"{exc.__class__.__name__}: {message}"
+
     try:
-        async with httpx.AsyncClient(timeout=httpx.Timeout(settings.timeout_seconds)) as client:
-            resp = await client.post(url, headers=headers, json=payload)
+        resp = await _post_request(payload, timeout_seconds=settings.timeout_seconds)
+    except httpx.TimeoutException as exc:
+        retry_timeout = max(settings.timeout_seconds, 120.0)
+        logger.warning(
+            "Ollama Cloud timeout for model %s after %.1fs; retrying once with %.1fs",
+            settings.model,
+            settings.timeout_seconds,
+            retry_timeout,
+        )
+        try:
+            resp = await _post_request(payload, timeout_seconds=retry_timeout)
+        except httpx.HTTPError as retry_exc:
+            detail = _describe_httpx_error(retry_exc)
+            logger.error("Ollama Cloud request failed after retry: %s", detail)
+            return {"_error": f"Ollama Cloud request failed after retry: {detail}"}
     except httpx.HTTPError as exc:
-        logger.error("Ollama Cloud request failed: %s", exc)
-        return {"_error": f"Ollama Cloud request failed: {exc}"}
+        detail = _describe_httpx_error(exc)
+        logger.error("Ollama Cloud request failed: %s", detail)
+        return {"_error": f"Ollama Cloud request failed: {detail}"}
 
     if resp.status_code != 200:
         # Retry without tools if tool_calls not supported
         if resp.status_code == 400 and "tool" in resp.text.lower():
             payload.pop("tools", None)
             try:
-                async with httpx.AsyncClient(timeout=httpx.Timeout(settings.timeout_seconds)) as client:
-                    resp = await client.post(url, headers=headers, json=payload)
+                resp = await _post_request(payload, timeout_seconds=settings.timeout_seconds)
             except httpx.HTTPError as exc:
-                return {"_error": f"Ollama Cloud retry failed: {exc}"}
+                return {"_error": f"Ollama Cloud retry failed: {_describe_httpx_error(exc)}"}
             if resp.status_code != 200:
                 return {"_error": f"Ollama Cloud {resp.status_code}: {resp.text[:400]}"}
             return resp.json()
@@ -954,6 +1073,59 @@ async def _call_chat_provider(
     return {"_error": f"Unsupported dashboard chat provider: {settings.provider}"}
 
 
+async def _call_chat_provider_with_fallback(
+    messages: list[dict],
+    settings: ChatRuntimeSettings,
+    *,
+    profile_id: str | None = None,
+) -> tuple[dict, ChatRuntimeSettings]:
+    attempts: list[dict[str, str]] = []
+    last_error = ""
+
+    for index, candidate in enumerate(_iter_chat_runtime_candidates(profile_id, settings)):
+        result = await _call_chat_provider(messages, candidate)
+        error_message = str(result.get("_error") or "").strip()
+        if not error_message:
+            if index > 0:
+                logger.warning(
+                    "Dashboard chat fallback engaged for %s: %s/%s",
+                    profile_id or "<default>",
+                    candidate.provider,
+                    candidate.model,
+                )
+                result = {
+                    **result,
+                    "_fallback": {
+                        "provider": candidate.provider,
+                        "model": candidate.model,
+                        "attempts": attempts,
+                    },
+                }
+            return result, candidate
+
+        attempts.append(
+            {
+                "provider": candidate.provider,
+                "model": candidate.model,
+                "error": error_message,
+            }
+        )
+        last_error = error_message
+        logger.warning(
+            "Dashboard chat provider failed for %s via %s/%s: %s",
+            profile_id or "<default>",
+            candidate.provider,
+            candidate.model,
+            error_message,
+        )
+
+    final_error = last_error or f"{settings.provider} chat failed"
+    if attempts:
+        tried = " -> ".join(f"{item['provider']}:{item['model']}" for item in attempts)
+        final_error = f"{final_error} (tried: {tried})"
+    return {"_error": final_error}, settings
+
+
 async def _agentic_stream(
     messages_for_api: list[dict],
     settings: ChatRuntimeSettings,
@@ -995,7 +1167,17 @@ async def _agentic_stream(
         tool_round += 1
 
         # Non-streaming call to detect tool use
-        result = await _call_chat_provider(messages, settings)
+        result, active_settings = await _call_chat_provider_with_fallback(
+            messages,
+            settings,
+            profile_id=profile_id,
+        )
+        model_metadata["model"] = active_settings.model
+        model_metadata["provider"] = active_settings.provider
+        fallback_meta = result.get("_fallback")
+        if isinstance(fallback_meta, dict):
+            model_metadata["fallback_from_provider"] = settings.provider
+            model_metadata["fallback_from_model"] = settings.model
         error_message = result.get("_error")
         if error_message:
             if session_id:
@@ -1226,16 +1408,18 @@ def _log_conversation(messages: list[dict], session_id: str = "", profile_id: st
         logger.warning("Failed to log conversation: %s", e)
 
 
-async def _stream_resident_codex(
+async def _stream_resident_operator(
     *,
+    operator: Any,
+    client_id: str,
+    not_running_error: str,
     session_id: str,
     content: str,
     profile_id: str,
     settings: ChatRuntimeSettings,
 ):
-    operator = _get_resident_codex_operator()
     if not operator._running:
-        yield f"data: {json.dumps({'error': 'Resident Codex operator is not running'})}\n\n"
+        yield f"data: {json.dumps({'error': not_running_error})}\n\n"
         yield "data: [DONE]\n\n"
         return
 
@@ -1251,7 +1435,7 @@ async def _stream_resident_codex(
     tool_call_records: list[dict[str, Any]] = []
     tool_result_records: list[dict[str, Any]] = []
 
-    async for event in operator.handle_message(session_id, content, "dashboard_codex"):
+    async for event in operator.handle_message(session_id, content, client_id):
         if event.event_type == "text_delta":
             if not event.content:
                 continue
@@ -1352,7 +1536,9 @@ async def chat_stream(req: ChatRequest):
     settings = _get_chat_settings(profile.profile_id)
     session_id = (req.session_id or "").strip() or _new_dashboard_session_id()
 
-    if settings.provider == "resident_codex":
+    resident_binding = _resident_operator_binding(settings.provider)
+    if resident_binding is not None:
+        operator, client_id, _, not_running_error = resident_binding
         incoming_turns = _request_messages_to_turns(req.messages)
         user_turns = [turn for turn in incoming_turns if turn["role"] == "user"]
         if not user_turns:
@@ -1399,7 +1585,10 @@ async def chat_stream(req: ChatRequest):
         )
 
         return StreamingResponse(
-            _stream_resident_codex(
+            _stream_resident_operator(
+                operator=operator,
+                client_id=client_id,
+                not_running_error=not_running_error,
                 session_id=session_id,
                 content=latest_user,
                 profile_id=profile.profile_id,
@@ -1415,11 +1604,11 @@ async def chat_stream(req: ChatRequest):
         )
 
     if not settings.api_key:
+        resident_binding = _resident_operator_binding(settings.provider)
         missing_error = (
-            "Resident Codex CLI not available"
-            if settings.provider == "resident_codex"
-            else
-            "Claude Max login not available"
+            resident_binding[2]
+            if resident_binding is not None
+            else "Claude Max login not available"
             if settings.provider == "claude_max"
             else f"{settings.api_key_env} not set"
         )
@@ -1536,12 +1725,12 @@ async def list_chat_sessions(limit: int = 20):
     conversation_store = await _get_chat_conversation_store()
     sessions = await conversation_store.get_recent_sessions(limit=capped_limit)
 
-    try:
-        operator = _get_resident_codex_operator()
-        if operator._running:
-            sessions.extend(await operator._conversations.get_recent_sessions(capped_limit))
-    except Exception:
-        pass
+    for operator in _iter_resident_operators():
+        try:
+            if operator._running:
+                sessions.extend(await operator._conversations.get_recent_sessions(capped_limit))
+        except Exception:
+            continue
 
     deduped: dict[str, dict[str, Any]] = {}
     for session in sessions:
@@ -1564,14 +1753,14 @@ async def list_chat_sessions(limit: int = 20):
 async def get_chat_session(session_id: str, limit: int = 200):
     """Return persisted turns for a dashboard chat session."""
     capped_limit = max(1, min(limit, 500))
-    try:
-        operator = _get_resident_codex_operator()
-        if operator._running:
-            turns = await operator._conversations.get_history(session_id, limit=capped_limit)
-            if turns:
-                return {"session_id": session_id, "turns": turns}
-    except Exception:
-        pass
+    for operator in _iter_resident_operators():
+        try:
+            if operator._running:
+                turns = await operator._conversations.get_history(session_id, limit=capped_limit)
+                if turns:
+                    return {"session_id": session_id, "turns": turns}
+        except Exception:
+            continue
 
     conversation_store = await _get_chat_conversation_store()
     turns = await conversation_store.get_history(
@@ -1599,12 +1788,14 @@ async def ws_chat_session(websocket: WebSocket, session_id: str):
     await manager.connect(websocket, channel)
     try:
         turns: list[dict[str, Any]] = []
-        try:
-            operator = _get_resident_codex_operator()
-            if operator._running:
-                turns = await operator._conversations.get_history(session_id, limit=200)
-        except Exception:
-            turns = []
+        for operator in _iter_resident_operators():
+            try:
+                if operator._running:
+                    turns = await operator._conversations.get_history(session_id, limit=200)
+                    if turns:
+                        break
+            except Exception:
+                continue
         if not turns:
             conversation_store = await _get_chat_conversation_store()
             turns = await conversation_store.get_history(session_id, limit=200)

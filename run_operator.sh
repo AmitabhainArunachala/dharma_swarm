@@ -1,13 +1,13 @@
 #!/usr/bin/env bash
-# run_operator.sh — Start the Resident Operator (SwarmManager + FastAPI + uvicorn)
+# run_operator.sh — Start the canonical DHARMA COMMAND backend on :8420
 #
 # Usage:
 #   bash run_operator.sh              # foreground
 #   bash run_operator.sh --background # background (writes PID file)
 #
-# The operator runs:
-#   1. SwarmManager (all subsystems)
-#   2. ResidentOperator (persistent conductor agent)
+# The backend runs:
+#   1. SwarmManager
+#   2. Resident operators (Claude + Codex)
 #   3. FastAPI + uvicorn on port 8420 (localhost only)
 
 set -euo pipefail
@@ -44,53 +44,15 @@ if [[ -f "$PID_FILE" ]]; then
     fi
 fi
 
-# Python startup script (inline)
-STARTUP_SCRIPT=$(cat <<'PYEOF'
-import asyncio
-import logging
-import os
-import sys
-
-logging.basicConfig(
-    level=logging.INFO,
-    format="%(asctime)s %(name)s %(levelname)s %(message)s",
-    handlers=[logging.StreamHandler()],
-)
-
-async def main():
-    from dharma_swarm.resident_operator import ResidentOperator, OPERATOR_PORT
-    from dharma_swarm.api import create_app
-
-    port = int(os.environ.get("OPERATOR_PORT", OPERATOR_PORT))
-
-    operator = ResidentOperator()
-    app = create_app(operator=operator)
-
-    import uvicorn
-    config = uvicorn.Config(
-        app,
-        host="127.0.0.1",
-        port=port,
-        log_level="info",
-        access_log=False,
-    )
-    server = uvicorn.Server(config)
-    await server.serve()
-
-if __name__ == "__main__":
-    asyncio.run(main())
-PYEOF
-)
-
 cd "${HOME}/dharma_swarm"
 
 if [[ "${1:-}" == "--background" ]]; then
-    echo "$STARTUP_SCRIPT" | python3 - >> "$LOG_FILE" 2>&1 &
+    python3 -m uvicorn api.main:app --host 127.0.0.1 --port "$PORT" --log-level info --no-access-log >> "$LOG_FILE" 2>&1 &
     echo $! > "$PID_FILE"
     echo "Operator started in background (PID $(cat $PID_FILE), port $PORT)"
     echo "Log: $LOG_FILE"
 else
     echo "Starting operator (port $PORT)..."
     echo "Press Ctrl+C to stop."
-    echo "$STARTUP_SCRIPT" | python3 -
+    exec python3 -m uvicorn api.main:app --host 127.0.0.1 --port "$PORT" --log-level info --no-access-log
 fi

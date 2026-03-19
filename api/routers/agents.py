@@ -6,6 +6,7 @@ import asyncio
 import json
 import os
 from pathlib import Path
+from typing import Any
 
 from fastapi import APIRouter, WebSocket, WebSocketDisconnect
 from pydantic import BaseModel
@@ -24,6 +25,10 @@ router = APIRouter(prefix="/api", tags=["agents"])
 
 GINKO_AGENTS_DIR = Path(os.getenv("DHARMA_HOME", Path.home() / ".dharma")) / "ginko" / "agents"
 
+_MODEL_PROVIDER_OVERRIDES = {
+    "qwen/qwen3.5-122b-a10b": "nvidia_nim",
+}
+
 
 def _get_swarm():
     from api.main import get_swarm
@@ -41,11 +46,57 @@ def _read_ginko_identity(name: str) -> dict | None:
     return None
 
 
+def _iter_ginko_identities() -> list[dict[str, Any]]:
+    """Return every readable Ginko identity."""
+    if not GINKO_AGENTS_DIR.exists():
+        return []
+
+    identities: list[dict[str, Any]] = []
+    try:
+        identity_paths = sorted(GINKO_AGENTS_DIR.glob("*/identity.json"))
+    except Exception:
+        return []
+
+    for identity_path in identity_paths:
+        try:
+            payload = json.loads(identity_path.read_text(encoding="utf-8"))
+        except Exception:
+            continue
+        if isinstance(payload, dict):
+            identities.append(payload)
+    return identities
+
+
+def _find_ginko_identity(agent_id: str) -> dict | None:
+    """Resolve an agent from the Ginko registry by directory or declared name."""
+    direct = _read_ginko_identity(agent_id)
+    if direct:
+        return direct
+
+    for identity in _iter_ginko_identities():
+        if str(identity.get("name", "")).strip() == agent_id:
+            return identity
+    return None
+
+
 def _resolve_provider_from_model(model_id: str) -> str:
     """Extract provider from a model ID like 'anthropic/claude-opus-4' -> 'openrouter'.
 
     Also checks command fleet for authoritative provider mapping.
     """
+    if model_id in _MODEL_PROVIDER_OVERRIDES:
+        return _MODEL_PROVIDER_OVERRIDES[model_id]
+
+    try:
+        from dharma_swarm.model_pool import get_model
+
+        model = get_model(model_id)
+        if model is not None and model.routes:
+            first_route = model.routes[0]
+            return first_route.value if hasattr(first_route, "value") else str(first_route)
+    except Exception:
+        pass
+
     try:
         from dharma_swarm.command_fleet import COMMAND_FLEET
         for fc in COMMAND_FLEET:
@@ -64,6 +115,34 @@ def _resolve_provider_from_model(model_id: str) -> str:
         }
         return provider_map.get(prefix, 'openrouter')
     return ''
+
+
+def _ginko_identity_to_out(identity: dict[str, Any]) -> dict:
+    """Convert a Ginko identity into the dashboard AgentOut shape."""
+    name = str(identity.get("name", "")).strip()
+    model = str(identity.get("model", "")).strip()
+    provider = _resolve_provider_from_model(model)
+
+    def _safe_int(value: Any) -> int:
+        try:
+            return int(value)
+        except (TypeError, ValueError):
+            return 0
+
+    return AgentOut(
+        id=name,
+        name=name,
+        role=str(identity.get("role", "")).strip() or "general",
+        status=str(identity.get("status", "")).strip() or "idle",
+        current_task=identity.get("current_task"),
+        started_at=str(identity.get("created_at", "")).strip() or None,
+        last_heartbeat=str(identity.get("last_active", "")).strip() or None,
+        turns_used=_safe_int(identity.get("total_calls")),
+        tasks_completed=_safe_int(identity.get("tasks_completed")),
+        provider=provider,
+        model=model,
+        error=identity.get("error"),
+    ).model_dump()
 
 
 def _agent_to_out(agent) -> dict:
@@ -116,9 +195,124 @@ async def list_agents() -> ApiResponse:
                 # Prefer non-dead agent
                 live = [a for a in group if getattr(a, 'status', None) != 'dead' and str(getattr(a, 'status', '')).lower() != 'dead']
                 deduped.append(live[0] if live else group[-1])
-        return ApiResponse(data=[_agent_to_out(a) for a in deduped])
+        out = [_agent_to_out(a) for a in deduped]
+        live_names = {item["name"] for item in out}
+        for identity in _iter_ginko_identities():
+            name = str(identity.get("name", "")).strip()
+            if not name or name in live_names:
+                continue
+            out.append(_ginko_identity_to_out(identity))
+        return ApiResponse(data=out)
     except Exception as e:
         return ApiResponse(data=[], error=str(e))
+
+
+@router.get("/agents/observatory")
+async def get_observatory() -> ApiResponse:
+    """Fleet-wide observatory: per-agent fitness, cost, anomalies, timeline."""
+    try:
+        from dharma_swarm.agent_registry import get_registry
+        from api.main import get_monitor
+
+        reg = get_registry()
+        all_agents = reg.list_agents()
+
+        # Per-agent fitness + cost + task counts
+        agent_summaries = []
+        total_cost = 0.0
+        fitness_values = []
+
+        for identity in all_agents:
+            name = identity.get("name", "")
+            if not name:
+                continue
+
+            fitness = reg.get_agent_fitness(name)
+            budget = reg.check_budget(name)
+
+            # Read fitness history for sparkline
+            fh_path = GINKO_AGENTS_DIR / name / "fitness_history.jsonl"
+            fitness_hist = _read_jsonl_tail(fh_path, 20)
+            sparkline = [round(e.get("composite_fitness", 0.0), 3) for e in fitness_hist]
+
+            cost_usd = fitness.get("total_cost_usd", 0.0)
+            total_cost += cost_usd
+            comp_fitness = fitness.get("composite_fitness", 0.0)
+            if fitness.get("total_calls", 0) > 0:
+                fitness_values.append(comp_fitness)
+
+            # Task history for timeline
+            th_path = GINKO_AGENTS_DIR / name / "task_log.jsonl"
+            recent_tasks = _read_jsonl_tail(th_path, 5)
+
+            agent_summaries.append({
+                "name": name,
+                "model": identity.get("model", ""),
+                "role": identity.get("role", ""),
+                "status": identity.get("status", "idle"),
+                "last_active": identity.get("last_active", ""),
+                "composite_fitness": round(comp_fitness, 4),
+                "success_rate": round(fitness.get("success_rate", 0.0), 4),
+                "avg_latency": round(fitness.get("avg_latency", 0.0), 1),
+                "total_calls": fitness.get("total_calls", 0),
+                "total_tokens": fitness.get("total_tokens", 0),
+                "total_cost_usd": round(cost_usd, 6),
+                "speed_score": round(fitness.get("speed_score", 0.0), 4),
+                "daily_spent": round(budget.get("daily_spent", 0.0), 6),
+                "weekly_spent": round(budget.get("weekly_spent", 0.0), 6),
+                "budget_status": budget.get("status", "OK"),
+                "sparkline": sparkline,
+                "recent_tasks": recent_tasks,
+            })
+
+        # Sort by composite fitness descending
+        agent_summaries.sort(key=lambda a: a["composite_fitness"], reverse=True)
+
+        # Fleet-wide stats
+        fleet_fitness = round(
+            sum(fitness_values) / len(fitness_values) if fitness_values else 0.0, 4
+        )
+
+        # Anomalies from SystemMonitor
+        anomalies = []
+        try:
+            monitor = get_monitor()
+            health = await monitor.check_health()
+            for anom in getattr(health, "anomalies", []):
+                anomalies.append({
+                    "id": getattr(anom, "id", ""),
+                    "detected_at": getattr(anom, "detected_at", ""),
+                    "anomaly_type": getattr(anom, "anomaly_type", ""),
+                    "severity": getattr(anom, "severity", ""),
+                    "description": getattr(anom, "description", ""),
+                })
+        except Exception:
+            pass
+
+        # Timeline: last 30 task entries across all agents
+        all_recent = []
+        for summary in agent_summaries:
+            for task in summary.get("recent_tasks", []):
+                task["agent"] = summary["name"]
+                all_recent.append(task)
+        all_recent.sort(key=lambda t: t.get("timestamp", ""), reverse=True)
+        timeline = all_recent[:30]
+
+        return ApiResponse(data={
+            "agents": agent_summaries,
+            "fleet_fitness": fleet_fitness,
+            "total_cost_usd": round(total_cost, 6),
+            "agent_count": len(agent_summaries),
+            "anomalies": anomalies,
+            "timeline": timeline,
+            "top_performer": agent_summaries[0]["name"] if agent_summaries else "",
+            "struggling": [
+                a["name"] for a in agent_summaries
+                if a["composite_fitness"] < 0.5 and a["total_calls"] > 0
+            ],
+        })
+    except Exception as e:
+        return ApiResponse(status="error", error=str(e))
 
 
 @router.get("/agents/{agent_id}")
@@ -129,6 +323,9 @@ async def get_agent(agent_id: str) -> ApiResponse:
         for a in agents:
             if a.id == agent_id or a.name == agent_id:
                 return ApiResponse(data=_agent_to_out(a))
+        identity = _find_ginko_identity(agent_id)
+        if identity:
+            return ApiResponse(data=_ginko_identity_to_out(identity))
         return ApiResponse(status="error", error=f"Agent not found: {agent_id}")
     except Exception as e:
         return ApiResponse(status="error", error=str(e))
@@ -161,17 +358,25 @@ async def get_agent_detail(agent_id: str) -> ApiResponse:
     """Extended agent view: base data + config + traces + health + tasks + fitness + cost + files."""
     swarm = _get_swarm()
     try:
-        agents = await swarm.list_agents()
+        try:
+            agents = await swarm.list_agents()
+        except Exception:
+            agents = []
         agent = None
         for a in agents:
             if a.id == agent_id or a.name == agent_id:
                 agent = a
                 break
-        if not agent:
-            return ApiResponse(status="error", error=f"Agent not found: {agent_id}")
-
-        out = _agent_to_out(agent)
-        agent_name = agent.name
+        identity = None
+        if agent is not None:
+            out = _agent_to_out(agent)
+            agent_name = agent.name
+        else:
+            identity = _find_ginko_identity(agent_id)
+            if identity is None:
+                return ApiResponse(status="error", error=f"Agent not found: {agent_id}")
+            out = _ginko_identity_to_out(identity)
+            agent_name = out["name"]
 
         # ── Config (from fleet + Ginko) ──────────────────────────────
         config: dict = {}
@@ -193,14 +398,14 @@ async def get_agent_detail(agent_id: str) -> ApiResponse:
             pass
         # Fallback to Ginko identity
         if not config:
-            ginko = _read_ginko_identity(agent_name)
+            ginko = identity or _find_ginko_identity(agent_name)
             if ginko:
                 config = {
-                    "provider": ginko.get("model", "").split("/")[0] if "/" in ginko.get("model", "") else "",
+                    "provider": _resolve_provider_from_model(str(ginko.get("model", ""))),
                     "model": ginko.get("model", ""),
                     "role": ginko.get("role", ""),
                     "thread": "",
-                    "display_name": "",
+                    "display_name": agent_name,
                     "tier": "",
                     "strengths": [],
                 }
@@ -645,114 +850,6 @@ class DispatchRequest(BaseModel):
     description: str = ""
 
 
-@router.get("/agents/observatory")
-async def get_observatory() -> ApiResponse:
-    """Fleet-wide observatory: per-agent fitness, cost, anomalies, timeline."""
-    try:
-        from dharma_swarm.agent_registry import get_registry
-        from api.main import get_monitor
-
-        reg = get_registry()
-        all_agents = reg.list_agents()
-
-        # Per-agent fitness + cost + task counts
-        agent_summaries = []
-        total_cost = 0.0
-        fitness_values = []
-
-        for identity in all_agents:
-            name = identity.get("name", "")
-            if not name:
-                continue
-
-            fitness = reg.get_agent_fitness(name)
-            budget = reg.check_budget(name)
-
-            # Read fitness history for sparkline
-            fh_path = GINKO_AGENTS_DIR / name / "fitness_history.jsonl"
-            fitness_hist = _read_jsonl_tail(fh_path, 20)
-            sparkline = [round(e.get("composite_fitness", 0.0), 3) for e in fitness_hist]
-
-            cost_usd = fitness.get("total_cost_usd", 0.0)
-            total_cost += cost_usd
-            comp_fitness = fitness.get("composite_fitness", 0.0)
-            if fitness.get("total_calls", 0) > 0:
-                fitness_values.append(comp_fitness)
-
-            # Task history for timeline
-            th_path = GINKO_AGENTS_DIR / name / "task_log.jsonl"
-            recent_tasks = _read_jsonl_tail(th_path, 5)
-
-            agent_summaries.append({
-                "name": name,
-                "model": identity.get("model", ""),
-                "role": identity.get("role", ""),
-                "status": identity.get("status", "idle"),
-                "last_active": identity.get("last_active", ""),
-                "composite_fitness": round(comp_fitness, 4),
-                "success_rate": round(fitness.get("success_rate", 0.0), 4),
-                "avg_latency": round(fitness.get("avg_latency", 0.0), 1),
-                "total_calls": fitness.get("total_calls", 0),
-                "total_tokens": fitness.get("total_tokens", 0),
-                "total_cost_usd": round(cost_usd, 6),
-                "speed_score": round(fitness.get("speed_score", 0.0), 4),
-                "daily_spent": round(budget.get("daily_spent", 0.0), 6),
-                "weekly_spent": round(budget.get("weekly_spent", 0.0), 6),
-                "budget_status": budget.get("status", "OK"),
-                "sparkline": sparkline,
-                "recent_tasks": recent_tasks,
-            })
-
-        # Sort by composite fitness descending
-        agent_summaries.sort(key=lambda a: a["composite_fitness"], reverse=True)
-
-        # Fleet-wide stats
-        fleet_fitness = round(
-            sum(fitness_values) / len(fitness_values) if fitness_values else 0.0, 4
-        )
-
-        # Anomalies from SystemMonitor
-        anomalies = []
-        try:
-            monitor = get_monitor()
-            health = await monitor.check_health()
-            for anom in getattr(health, "anomalies", []):
-                anomalies.append({
-                    "id": getattr(anom, "id", ""),
-                    "detected_at": getattr(anom, "detected_at", ""),
-                    "anomaly_type": getattr(anom, "anomaly_type", ""),
-                    "severity": getattr(anom, "severity", ""),
-                    "description": getattr(anom, "description", ""),
-                })
-        except Exception:
-            pass
-
-        # Timeline: last 30 task entries across all agents
-        all_recent = []
-        for summary in agent_summaries:
-            for task in summary.get("recent_tasks", []):
-                task["agent"] = summary["name"]
-                all_recent.append(task)
-        all_recent.sort(key=lambda t: t.get("timestamp", ""), reverse=True)
-        timeline = all_recent[:30]
-
-        return ApiResponse(data={
-            "agents": agent_summaries,
-            "fleet_fitness": fleet_fitness,
-            "total_cost_usd": round(total_cost, 6),
-            "agent_count": len(agent_summaries),
-            "anomalies": anomalies,
-            "timeline": timeline,
-            "top_performer": agent_summaries[0]["name"] if agent_summaries else "",
-            "struggling": [
-                a["name"] for a in agent_summaries
-                if a["composite_fitness"] < 0.5 and a["total_calls"] > 0
-            ],
-        })
-    except Exception as e:
-        return ApiResponse(status="error", error=str(e))
-
-
 # ── Dispatch (Autonomous Task Execution) ──────────────────────────────────
 
 
@@ -774,6 +871,7 @@ async def dispatch_task(agent_name: str, req: DispatchRequest):
             from api.routers.chat import (
                 _call_chat_provider,
                 _get_chat_settings,
+                _resident_operator_binding,
             )
             from api.chat_tools import execute_tool
 
@@ -781,14 +879,24 @@ async def dispatch_task(agent_name: str, req: DispatchRequest):
             profile_map = {
                 "glm5-researcher": "glm5_researcher",
                 "glm5_researcher": "glm5_researcher",
+                "qwen35-surgeon": "qwen35_surgeon",
+                "qwen35_surgeon": "qwen35_surgeon",
                 "claude-opus": "claude_opus",
+                "opus-primus": "claude_opus",
                 "codex-operator": "codex_operator",
+                "codex-primus": "codex_operator",
             }
             profile_id = profile_map.get(agent_name, "glm5_researcher")
             settings = _get_chat_settings(profile_id)
+            resident_binding = _resident_operator_binding(settings.provider)
 
             if not settings.api_key:
-                yield f"data: {json.dumps({'error': f'No API key for profile {profile_id}'})}\n\n"
+                missing_error = (
+                    resident_binding[2]
+                    if resident_binding is not None
+                    else f"No API key for profile {profile_id}"
+                )
+                yield f"data: {json.dumps({'error': missing_error})}\n\n"
                 yield "data: [DONE]\n\n"
                 return
 
@@ -810,62 +918,103 @@ async def dispatch_task(agent_name: str, req: DispatchRequest):
 
             yield f"data: {json.dumps({'status': 'started', 'task': task_desc, 'agent': agent_name})}\n\n"
 
-            # Tool loop (same pattern as _agentic_stream)
-            max_rounds = settings.max_tool_rounds
-            for _round in range(max_rounds):
-                result = await _call_chat_provider(messages, settings)
+            if resident_binding is not None:
+                operator, client_id, _, not_running_error = resident_binding
+                if not operator._running:
+                    yield f"data: {json.dumps({'error': not_running_error})}\n\n"
+                    yield "data: [DONE]\n\n"
+                    return
 
-                if result.get("_error"):
-                    yield f"data: {json.dumps({'error': result['_error']})}\n\n"
-                    success = False
-                    break
+                resident_session_id = f"dispatch-{agent_name}-{int(start_time.timestamp() * 1000)}"
+                async for event in operator.handle_message(
+                    resident_session_id,
+                    task_desc,
+                    client_id,
+                ):
+                    if event.event_type == "text_delta":
+                        if event.content:
+                            yield f"data: {json.dumps({'content': event.content})}\n\n"
+                        continue
 
-                choice = result.get("choices", [{}])[0]
-                msg = choice.get("message", {})
-                tool_calls = msg.get("tool_calls")
-
-                if tool_calls:
-                    messages.append({
-                        "role": "assistant",
-                        "content": msg.get("content") or None,
-                        "tool_calls": tool_calls,
-                    })
-
-                    if msg.get("content"):
-                        yield f"data: {json.dumps({'content': msg['content']})}\n\n"
-
-                    for tc in tool_calls:
-                        fn = tc.get("function", {})
-                        tool_name = fn.get("name", "")
+                    if event.event_type == "tool_call":
                         try:
-                            tool_args = json.loads(fn.get("arguments", "{}"))
+                            parsed = json.loads(event.content or "{}")
                         except json.JSONDecodeError:
-                            tool_args = {}
-                        tool_id = tc.get("id", "")
-
+                            parsed = {"name": event.metadata.get("tool", "unknown"), "args": {}}
+                        tool_name = str(parsed.get("name", "") or event.metadata.get("tool", "unknown"))
+                        tool_args = parsed.get("args", {})
                         yield f"data: {json.dumps({'tool_call': {'name': tool_name, 'args': tool_args}})}\n\n"
+                        continue
 
-                        tool_result = await execute_tool(tool_name, tool_args)
-                        if len(tool_result) > settings.tool_result_max_chars:
-                            tool_result = tool_result[:settings.tool_result_max_chars] + "\n... (truncated)"
-
-                        summary = tool_result[:150].replace("\n", " ")
+                    if event.event_type == "tool_result":
+                        tool_name = str(event.metadata.get("tool", "") or "")
+                        summary = str(event.content or "")
                         yield f"data: {json.dumps({'tool_result': {'name': tool_name, 'summary': summary}})}\n\n"
+                        continue
 
+                    if event.event_type == "error":
+                        success = False
+                        yield f"data: {json.dumps({'error': event.content})}\n\n"
+                        continue
+                # Resident operators own their own tool loop, so dispatch is complete here.
+            else:
+
+                # Tool loop (same pattern as _agentic_stream)
+                max_rounds = settings.max_tool_rounds
+                for _round in range(max_rounds):
+                    result = await _call_chat_provider(messages, settings)
+
+                    if result.get("_error"):
+                        yield f"data: {json.dumps({'error': result['_error']})}\n\n"
+                        success = False
+                        break
+
+                    choice = result.get("choices", [{}])[0]
+                    msg = choice.get("message", {})
+                    tool_calls = msg.get("tool_calls")
+
+                    if tool_calls:
                         messages.append({
-                            "role": "tool",
-                            "tool_call_id": tool_id,
-                            "content": tool_result,
+                            "role": "assistant",
+                            "content": msg.get("content") or None,
+                            "tool_calls": tool_calls,
                         })
-                    continue
 
-                # Final text response
-                final_content = msg.get("content", "")
-                if final_content:
-                    chunk_size = 40
-                    for i in range(0, len(final_content), chunk_size):
-                        yield f"data: {json.dumps({'content': final_content[i:i+chunk_size]})}\n\n"
-                break
+                        if msg.get("content"):
+                            yield f"data: {json.dumps({'content': msg['content']})}\n\n"
+
+                        for tc in tool_calls:
+                            fn = tc.get("function", {})
+                            tool_name = fn.get("name", "")
+                            try:
+                                tool_args = json.loads(fn.get("arguments", "{}"))
+                            except json.JSONDecodeError:
+                                tool_args = {}
+                            tool_id = tc.get("id", "")
+
+                            yield f"data: {json.dumps({'tool_call': {'name': tool_name, 'args': tool_args}})}\n\n"
+
+                            tool_result = await execute_tool(tool_name, tool_args)
+                            if len(tool_result) > settings.tool_result_max_chars:
+                                tool_result = tool_result[:settings.tool_result_max_chars] + "\n... (truncated)"
+
+                            summary = tool_result[:150].replace("\n", " ")
+                            yield f"data: {json.dumps({'tool_result': {'name': tool_name, 'summary': summary}})}\n\n"
+
+                            messages.append({
+                                "role": "tool",
+                                "tool_call_id": tool_id,
+                                "content": tool_result,
+                            })
+                        continue
+
+                    # Final text response
+                    final_content = msg.get("content", "")
+                    if final_content:
+                        chunk_size = 40
+                        for i in range(0, len(final_content), chunk_size):
+                            yield f"data: {json.dumps({'content': final_content[i:i+chunk_size]})}\n\n"
+                    break
 
             # Log to Ginko
             elapsed_ms = (datetime.now(timezone.utc) - start_time).total_seconds() * 1000

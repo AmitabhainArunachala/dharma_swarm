@@ -25,11 +25,15 @@ import {
   useChatSessionFeed,
 } from "@/hooks/useChatSessionFeed";
 import { useChatWorkspace } from "@/hooks/useChatWorkspace";
-import { resolveChatProfile, shortProfileLabel } from "@/lib/chatProfiles";
+import {
+  getChatProfiles,
+  resolveChatProfile,
+  shortProfileLabel,
+} from "@/lib/chatProfiles";
 import { colors } from "@/lib/theme";
 import { timeAgo } from "@/lib/utils";
 
-const CLAUDE_PROFILE_ID = "claude_opus";
+const DEFAULT_PEER_PROFILE_ID = "qwen35_surgeon";
 const CODEX_PROFILE_ID = "codex_operator";
 const WAIT_AFTER_SEND_MS = 80;
 
@@ -151,6 +155,7 @@ export function CommandPostWorkspace({
   onClose,
 }: CommandPostWorkspaceProps) {
   const panelMode = variant === "panel";
+  const [peerProfileId, setPeerProfileId] = useState(DEFAULT_PEER_PROFILE_ID);
   const [wide, setWide] = useState(false);
   const [isBrowserFullscreen, setIsBrowserFullscreen] = useState(false);
   const [bridgeNote, setBridgeNote] = useState("");
@@ -163,10 +168,12 @@ export function CommandPostWorkspace({
     rootRef.current = element;
   };
   const { profileId, setProfile } = useChatWorkspace();
-  const claude = useChat(CLAUDE_PROFILE_ID);
+  const claude = useChat(peerProfileId);
   const codex = useChat(CODEX_PROFILE_ID);
   const status = claude.status ?? codex.status ?? null;
-  const claudeProfile = resolveChatProfile(status, CLAUDE_PROFILE_ID);
+  const availableProfiles = getChatProfiles(status);
+  const peerProfileOptions = availableProfiles.filter((profile) => profile.id !== CODEX_PROFILE_ID);
+  const claudeProfile = resolveChatProfile(status, peerProfileId);
   const codexProfile = resolveChatProfile(status, CODEX_PROFILE_ID);
   const claudeAccent = accentColorForProfile(claudeProfile.accent);
   const codexAccent = accentColorForProfile(codexProfile.accent);
@@ -180,7 +187,7 @@ export function CommandPostWorkspace({
     return intents[0] ?? "";
   }, [claude.messages, codex.messages]);
   const claudeFeed = useChatSessionFeed({
-    profileId: CLAUDE_PROFILE_ID,
+    profileId: peerProfileId,
     profileLabel: claudeProfile.label,
     sessionId: claude.sessionId,
     wsPathTemplate: status?.chat_ws_path_template,
@@ -219,6 +226,12 @@ export function CommandPostWorkspace({
     document.addEventListener("fullscreenchange", syncFullscreenState);
     return () => document.removeEventListener("fullscreenchange", syncFullscreenState);
   }, []);
+
+  useEffect(() => {
+    if (peerProfileOptions.length === 0) return;
+    if (peerProfileOptions.some((profile) => profile.id === peerProfileId)) return;
+    setPeerProfileId(peerProfileOptions[0].id);
+  }, [peerProfileId, peerProfileOptions]);
 
   const telemetry = useMemo(() => {
     return [...claudeFeed.events, ...codexFeed.events]
@@ -384,7 +397,7 @@ export function CommandPostWorkspace({
         setBridgeStatus(
           `Round ${round + 1}/${loopRounds}: ${codexProfile.label} briefing ${claudeProfile.label}.`,
         );
-        setProfile(CLAUDE_PROFILE_ID);
+        setProfile(peerProfileId);
         await claude.sendMessage(
           buildRelayPrompt({
             sourceLabel: codexProfile.label,
@@ -425,6 +438,25 @@ export function CommandPostWorkspace({
     setBridgeStatus(`Operator intervention ready on ${targetLabel}. Live exchange paused.`);
   }
 
+  function switchPeerLane(nextProfileId: string) {
+    if (!nextProfileId || nextProfileId === CODEX_PROFILE_ID || nextProfileId === peerProfileId) {
+      return;
+    }
+    loopCancelRef.current = true;
+    claude.stopStreaming();
+    setLoopActive(false);
+    setRelayBusy(null);
+    const priorProfileId = peerProfileId;
+    setPeerProfileId(nextProfileId);
+    if (profileId === priorProfileId) {
+      setProfile(nextProfileId);
+    }
+    const nextProfile = availableProfiles.find((profile) => profile.id === nextProfileId);
+    setBridgeStatus(
+      `Peer lane switched to ${nextProfile ? nextProfile.label : nextProfileId}.`,
+    );
+  }
+
   async function toggleBrowserFullscreen() {
     const root = rootRef.current;
     if (!root) return;
@@ -451,7 +483,7 @@ export function CommandPostWorkspace({
             Command Post
           </span>
           <span className="rounded-full bg-aozora/10 px-2 py-0.5 font-mono text-[10px] text-aozora">
-            Claude + Codex
+            {`${shortProfileLabel(claudeProfile)} + ${shortProfileLabel(codexProfile)}`}
           </span>
           <span className="rounded-full bg-kinpaku/10 px-2 py-0.5 font-mono text-[10px] text-kinpaku">
             resident sessions
@@ -508,17 +540,23 @@ export function CommandPostWorkspace({
         }`}
       >
         <LaneColumn
-          profileId={CLAUDE_PROFILE_ID}
+          profileId={peerProfileId}
           label={claudeProfile.label}
           provider={claudeProfile.provider}
           model={claudeProfile.model}
           accentColor={claudeAccent}
-          focused={profileId === CLAUDE_PROFILE_ID}
+          isPrimary
+          focused={profileId === peerProfileId}
           isStreaming={claude.isStreaming}
           sessionId={claude.sessionId}
           wsConnected={claudeFeed.connected}
-          onFocus={() => setProfile(CLAUDE_PROFILE_ID)}
+          onFocus={() => setProfile(peerProfileId)}
           onClear={claude.clearMessages}
+          profileOptions={peerProfileOptions.map((profile) => ({
+            id: profile.id,
+            label: profile.label,
+          }))}
+          onProfileChange={switchPeerLane}
         />
 
         <ControlRail
@@ -557,7 +595,7 @@ export function CommandPostWorkspace({
               claudeProfile.label,
               codexRelay,
               claude.sendMessage,
-              CLAUDE_PROFILE_ID,
+              peerProfileId,
               "codex-to-claude",
             )
           }
@@ -594,7 +632,7 @@ export function CommandPostWorkspace({
         claudeSessionId={claude.sessionId}
         codexSessionId={codex.sessionId}
         telemetry={telemetry}
-        onInterveneClaude={() => intervene(CLAUDE_PROFILE_ID, claudeProfile.label)}
+        onInterveneClaude={() => intervene(peerProfileId, claudeProfile.label)}
         onInterveneCodex={() => intervene(CODEX_PROFILE_ID, codexProfile.label)}
       />
     </div>
@@ -642,21 +680,24 @@ function LaneColumn(args: {
   provider: string;
   model: string;
   accentColor: string;
+  isPrimary?: boolean;
   focused: boolean;
   isStreaming: boolean;
   sessionId: string;
   wsConnected: boolean;
   onFocus: () => void;
   onClear: () => void;
+  profileOptions?: Array<{ id: string; label: string }>;
+  onProfileChange?: (profileId: string) => void;
 }) {
   return (
     <section
       className={`flex min-h-0 flex-col ${
-        args.profileId === CLAUDE_PROFILE_ID ? "border-b xl:border-b-0 xl:border-r md:border-b-0 md:border-r" : ""
+        args.isPrimary ? "border-b xl:border-b-0 xl:border-r md:border-b-0 md:border-r" : ""
       }`}
       style={{
         borderColor:
-          args.profileId === CLAUDE_PROFILE_ID ? `${colors.sumi[700]}55` : undefined,
+          args.isPrimary ? `${colors.sumi[700]}55` : undefined,
         background: args.focused
           ? `linear-gradient(180deg, color-mix(in srgb, ${args.accentColor} 6%, ${colors.sumi[900]}), ${colors.sumi[950]})`
           : `linear-gradient(180deg, ${colors.sumi[900]}, ${colors.sumi[950]})`,
@@ -689,13 +730,29 @@ function LaneColumn(args: {
             </span>
           </div>
         </button>
-        <button
-          onClick={args.onClear}
-          className="rounded p-1.5 text-sumi-600 transition-colors hover:bg-sumi-800 hover:text-torinoko"
-          title={`Clear ${args.label}`}
-        >
-          <Trash2 size={14} />
-        </button>
+        <div className="flex items-center gap-2">
+          {args.profileOptions && args.onProfileChange && args.profileOptions.length > 1 && (
+            <select
+              value={args.profileId}
+              onChange={(event) => args.onProfileChange?.(event.target.value)}
+              className="max-w-[152px] rounded-lg border border-sumi-700/40 bg-sumi-950/80 px-2 py-1 font-mono text-[10px] text-torinoko outline-none transition-colors focus:border-kinpaku/35"
+              aria-label="Choose peer lane model"
+            >
+              {args.profileOptions.map((profile) => (
+                <option key={profile.id} value={profile.id}>
+                  {profile.label}
+                </option>
+              ))}
+            </select>
+          )}
+          <button
+            onClick={args.onClear}
+            className="rounded p-1.5 text-sumi-600 transition-colors hover:bg-sumi-800 hover:text-torinoko"
+            title={`Clear ${args.label}`}
+          >
+            <Trash2 size={14} />
+          </button>
+        </div>
       </div>
 
       <div className="min-h-0 flex-1">

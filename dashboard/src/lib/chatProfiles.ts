@@ -6,10 +6,10 @@ export const DEFAULT_CHAT_PROFILES: ChatProfileOut[] = [
   {
     id: "claude_opus",
     label: "Claude Opus 4.6",
-    provider: "claude_max",
+    provider: "resident_claude",
     model: "claude-opus-4-6",
     accent: "aozora",
-    summary: "Strategic operator using the locally authenticated Claude Max runtime.",
+    summary: "Resident Claude operator with persistent session state and local Claude Max auth.",
   },
   {
     id: "codex_operator",

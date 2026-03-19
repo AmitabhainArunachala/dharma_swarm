@@ -1,7 +1,7 @@
 "use client";
 
 /**
- * DHARMA COMMAND -- Qwen 3.5 Code Surgeon
+ * DHARMA COMMAND -- Qwen Coder 480B
  * In-house bug fixer with full tool access.
  * Chat interface (SSE streaming) + agent status sidebar.
  */
@@ -655,7 +655,7 @@ export default function Qwen35Page() {
                 className="font-heading text-xl font-bold tracking-tight"
                 style={{ color: ACCENT, textShadow: glowText(ACCENT, 0.5) }}
               >
-                Qwen 3.5 Code Surgeon
+                Qwen Coder 480B
               </h1>
               <span
                 className="inline-flex items-center gap-1.5 rounded-full px-2.5 py-0.5 font-mono text-[10px] font-medium"
@@ -680,7 +680,7 @@ export default function Qwen35Page() {
                 {agentStatus.toUpperCase()}
               </span>
               <span className="rounded-full bg-sumi-800 px-2 py-0.5 font-mono text-[10px] text-sumi-600">
-                {agent?.model ?? "qwen3.5-122b"}
+                {agent?.model ?? "qwen3-coder:480b-cloud"}
               </span>
             </div>
             <p className="mt-0.5 text-xs text-sumi-600">
@@ -1328,7 +1328,7 @@ function Qwen35EmptyState({ onSuggestion }: { onSuggestion: (text: string) => vo
         className="font-heading text-lg font-bold"
         style={{ color: ACCENT, textShadow: glowText(ACCENT, 0.4) }}
       >
-        Qwen 3.5 Code Surgeon
+        Qwen Coder 480B
       </h3>
       <p className="mt-1.5 max-w-sm text-center text-xs text-sumi-600">
         In-house bug fixer with full tool access. Paste errors, describe bugs,

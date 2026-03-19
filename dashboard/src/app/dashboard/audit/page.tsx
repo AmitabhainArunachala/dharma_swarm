@@ -21,7 +21,7 @@ interface AuditReport {
   duration_seconds: number;
 }
 
-const BASE = process.env.NEXT_PUBLIC_API_URL ?? "http://localhost:8420";
+const BASE = process.env.NEXT_PUBLIC_API_URL ?? "http://127.0.0.1:8420";
 
 const CATEGORY_LABELS: Record<string, string> = {
   tool_coverage: "Tool Coverage",
