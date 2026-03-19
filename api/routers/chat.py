@@ -10,7 +10,7 @@ from __future__ import annotations
 import json
 import logging
 import os
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
@@ -36,6 +36,8 @@ DEFAULT_TOOL_RESULT_MAX_CHARS = 24000
 DEFAULT_HISTORY_MESSAGE_LIMIT = 120
 DEFAULT_TEMPERATURE = 0.3
 DEFAULT_PROFILE_ID = "claude_opus"
+CHAT_CONTRACT_VERSION = "2026-03-19.chat.v1"
+QWEN_MAX_TOOL_ROUNDS = 24
 
 
 @dataclass(frozen=True)
@@ -59,6 +61,13 @@ class ChatRuntimeSettings:
     tool_result_max_chars: int
     history_message_limit: int
     temperature: float
+
+
+def _default_profile_id() -> str:
+    configured = os.getenv("DASHBOARD_DEFAULT_PROFILE_ID", "").strip()
+    if configured and configured in CHAT_PROFILE_SPECS:
+        return configured
+    return DEFAULT_PROFILE_ID
 
 
 COMMAND_SYSTEM_PROMPT = """\
@@ -121,6 +130,61 @@ This agent exists to help the operator steer, repair, and evolve the swarm from 
 inside the UI. Bias toward engineering leverage, clean diffs, and exactness."""
 
 
+QWEN_SYSTEM_PROMPT = """\
+You are Qwen3 Coder operating as the surgical reconnaissance and repair lane \
+inside the DHARMA COMMAND control plane.
+
+You are here for fast technical execution: inspect code, trace interfaces, edit \
+small surfaces precisely, and validate with concrete evidence.
+
+Operating rules:
+1. prefer bounded reconnaissance over exhaustive repo sweeps
+2. inspect the smallest relevant slice before branching wider
+3. when a prompt is broad, produce the highest-leverage next slice instead of looping forever
+4. use tools directly and keep answers operational
+5. when changing code: inspect, patch, verify
+
+You have the same control-plane tools as the other dashboard profiles:
+- read_file / write_file / edit_file
+- shell_exec
+- grep_search / glob_files
+- swarm_status
+- evolution_query
+- stigmergy_query
+- trace_query
+- agent_control
+
+This lane should feel sharp, fast, and mechanically useful, not chatty."""
+
+
+GLM_SYSTEM_PROMPT = """\
+You are GLM-5 operating as the research synthesizer and systems cartographer \
+inside the DHARMA COMMAND control plane.
+
+You are here for deep investigation, synthesis, and architecture mapping:
+trace relationships, inspect evidence, summarize patterns, and produce clear \
+operator-ready findings without drifting into generic prose.
+
+Operating rules:
+1. ground every synthesis in inspected files, traces, or state
+2. compress large surfaces into actionable maps, not vague summaries
+3. prefer causal structure, cross-system links, and evidence trails
+4. use tools to verify before asserting
+5. leave the operator with the next best decision, not just observations
+
+You have the same control-plane tools as the other dashboard profiles:
+- read_file / write_file / edit_file
+- shell_exec
+- grep_search / glob_files
+- swarm_status
+- evolution_query
+- stigmergy_query
+- trace_query
+- agent_control
+
+This lane should feel investigative, synthetic, and operationally sharp."""
+
+
 CHAT_PROFILE_SPECS: dict[str, ChatProfileSpec] = {
     "claude_opus": ChatProfileSpec(
         profile_id="claude_opus",
@@ -139,6 +203,24 @@ CHAT_PROFILE_SPECS: dict[str, ChatProfileSpec] = {
         accent="kinpaku",
         summary="Implementation-focused control agent for edits, diagnostics, and fast wiring.",
         system_prompt=CODEX_SYSTEM_PROMPT,
+    ),
+    "qwen35_surgeon": ChatProfileSpec(
+        profile_id="qwen35_surgeon",
+        label="Qwen3 Coder",
+        default_model="qwen/qwen3-coder",
+        model_env="DASHBOARD_QWEN_MODEL",
+        accent="rokusho",
+        summary="Fast surgical coding lane for bounded repo scans, edits, and validation.",
+        system_prompt=QWEN_SYSTEM_PROMPT,
+    ),
+    "glm5_researcher": ChatProfileSpec(
+        profile_id="glm5_researcher",
+        label="GLM-5 Research",
+        default_model="z-ai/glm-5",
+        model_env="DASHBOARD_GLM_MODEL",
+        accent="botan",
+        summary="Research synthesis lane for ecosystem mapping, pattern extraction, and deep analysis.",
+        system_prompt=GLM_SYSTEM_PROMPT,
     ),
 }
 
@@ -166,13 +248,13 @@ def _parse_float_env(name: str, default: float, *, minimum: float) -> float:
 
 
 def _get_profile_spec(profile_id: str | None) -> ChatProfileSpec:
-    return CHAT_PROFILE_SPECS.get(profile_id or "", CHAT_PROFILE_SPECS[DEFAULT_PROFILE_ID])
+    return CHAT_PROFILE_SPECS.get(profile_id or "", CHAT_PROFILE_SPECS[_default_profile_id()])
 
 
 def _get_chat_settings(profile_id: str | None = None) -> ChatRuntimeSettings:
     profile = _get_profile_spec(profile_id)
     model = os.getenv(profile.model_env, "").strip() or profile.default_model
-    return ChatRuntimeSettings(
+    settings = ChatRuntimeSettings(
         openrouter_api_key=os.getenv("OPENROUTER_API_KEY", "").strip(),
         model=model,
         max_tool_rounds=_parse_int_env(
@@ -206,6 +288,22 @@ def _get_chat_settings(profile_id: str | None = None) -> ChatRuntimeSettings:
             minimum=0.0,
         ),
     )
+    if profile.profile_id == "qwen35_surgeon":
+        return replace(
+            settings,
+            max_tool_rounds=min(settings.max_tool_rounds, QWEN_MAX_TOOL_ROUNDS),
+        )
+    return settings
+
+
+def _profile_available(settings: ChatRuntimeSettings) -> bool:
+    return bool(settings.openrouter_api_key)
+
+
+def _profile_status_note(settings: ChatRuntimeSettings) -> str:
+    if settings.openrouter_api_key:
+        return "Served by the dashboard backend via OpenRouter."
+    return "Requires OPENROUTER_API_KEY on the backend."
 
 
 class ChatMessage(BaseModel):
@@ -273,8 +371,17 @@ async def _call_openrouter(
     async with httpx.AsyncClient(timeout=httpx.Timeout(settings.timeout_seconds)) as client:
         resp = await client.post(OPENROUTER_URL, headers=headers, json=payload)
         if resp.status_code != 200:
-            logger.error("OpenRouter error %d: %s", resp.status_code, resp.text[:500])
-            return None
+            detail = resp.text[:500]
+            try:
+                payload = resp.json()
+                error = payload.get("error", {})
+                metadata = error.get("metadata", {})
+                detail = str(metadata.get("raw") or error.get("message") or detail)
+            except json.JSONDecodeError:
+                pass
+            detail = " ".join(detail.split())
+            logger.error("OpenRouter error %d: %s", resp.status_code, detail)
+            raise RuntimeError(f"OpenRouter {resp.status_code}: {detail[:240]}")
         return resp.json()
 
 
@@ -321,6 +428,28 @@ async def _call_openrouter_stream(messages: list[dict], settings: ChatRuntimeSet
                     continue
 
 
+def _extract_assistant_content(message: dict[str, Any]) -> str:
+    """Normalize assistant content across provider variants."""
+    content = message.get("content")
+    if isinstance(content, str):
+        return content
+    if isinstance(content, list):
+        parts: list[str] = []
+        for item in content:
+            if isinstance(item, str):
+                parts.append(item)
+                continue
+            if not isinstance(item, dict):
+                continue
+            item_type = item.get("type")
+            if item_type in {"text", "output_text"}:
+                text = item.get("text")
+                if isinstance(text, str):
+                    parts.append(text)
+        return "".join(parts)
+    return ""
+
+
 async def _agentic_stream(
     messages_for_api: list[dict],
     settings: ChatRuntimeSettings,
@@ -340,9 +469,10 @@ async def _agentic_stream(
         tool_round += 1
 
         # Non-streaming call to detect tool use
-        result = await _call_openrouter(messages, settings)
-        if not result:
-            yield f"data: {json.dumps({'error': 'OpenRouter call failed'})}\n\n"
+        try:
+            result = await _call_openrouter(messages, settings)
+        except Exception as exc:
+            yield f"data: {json.dumps({'error': str(exc)})}\n\n"
             yield "data: [DONE]\n\n"
             return
 
@@ -402,7 +532,7 @@ async def _agentic_stream(
             continue
 
         # No tool calls — this is the final text response. Stream it.
-        final_content = msg.get("content", "")
+        final_content = _extract_assistant_content(msg)
         if final_content:
             # Unified conversation log — capture assistant response
             try:
@@ -419,6 +549,23 @@ async def _agentic_stream(
             for i in range(0, len(final_content), chunk_size):
                 chunk = final_content[i : i + chunk_size]
                 yield f"data: {json.dumps({'content': chunk})}\n\n"
+        else:
+            model_note = settings.model
+            if msg.get("reasoning"):
+                yield (
+                    "data: "
+                    + json.dumps(
+                        {
+                            "error": (
+                                f"{model_note} returned reasoning without visible output. "
+                                "Retry, lower the lane complexity, or switch models."
+                            )
+                        }
+                    )
+                    + "\n\n"
+                )
+                yield "data: [DONE]\n\n"
+                return
 
         yield "data: [DONE]\n\n"
         return
@@ -516,7 +663,8 @@ async def trigger_distill(hours_back: float = 24):
 @router.get("/chat/status")
 async def chat_status():
     """Check if chat is configured and ready."""
-    settings = _get_chat_settings(DEFAULT_PROFILE_ID)
+    default_profile_id = _default_profile_id()
+    settings = _get_chat_settings(default_profile_id)
     profiles = []
     for profile in CHAT_PROFILE_SPECS.values():
         resolved = _get_chat_settings(profile.profile_id)
@@ -528,9 +676,13 @@ async def chat_status():
                 "model": resolved.model,
                 "accent": profile.accent,
                 "summary": profile.summary,
+                "available": _profile_available(resolved),
+                "availability_kind": "api_key",
+                "status_note": _profile_status_note(resolved),
             }
         )
     return {
+        "chat_contract_version": CHAT_CONTRACT_VERSION,
         "ready": bool(settings.openrouter_api_key),
         "model": settings.model,
         "provider": "openrouter",
@@ -541,6 +693,7 @@ async def chat_status():
         "tool_result_max_chars": settings.tool_result_max_chars,
         "history_message_limit": settings.history_message_limit,
         "temperature": settings.temperature,
-        "default_profile_id": DEFAULT_PROFILE_ID,
+        "persistent_sessions": False,
+        "default_profile_id": default_profile_id,
         "profiles": profiles,
     }
