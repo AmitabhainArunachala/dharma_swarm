@@ -378,6 +378,14 @@ def cmd_status() -> None:
                             print(f"    [{act['severity']}] {act['signal']} \u2192 {act['action']}")
                 if hasattr(org, 'attractor') and org.attractor is not None:
                     print(f"  Gnani field: active")
+                try:
+                    if hasattr(org, 'strange_loop') and org.strange_loop is not None:
+                        sl = org.strange_loop.stats
+                        print(f"  Strange loop:     {sl.get('total_mutations', 0)} mutations ({sl.get('kept', 0)} kept, {sl.get('reverted', 0)} reverted, {sl.get('held_by_gnani', 0)} held)")
+                        if sl.get("pending"):
+                            print(f"    Testing mutation...")
+                except Exception:
+                    pass
             except Exception:
                 pass
         else:

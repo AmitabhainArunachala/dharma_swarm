@@ -171,6 +171,14 @@ class Organism:
             self.attractor = None
             logger.debug("DharmaAttractor init failed (non-fatal)")
 
+        # Phase 5: Strange loop — recursive self-modification
+        try:
+            from dharma_swarm.strange_loop import StrangeLoop
+            self.strange_loop = StrangeLoop(self)
+        except Exception:
+            self.strange_loop = None
+            logger.debug("StrangeLoop init failed (non-fatal)")
+
         # Wiring: algedonic callbacks
         self.vsm.algedonic.register_callback(self._on_algedonic)
 
@@ -321,6 +329,18 @@ class Organism:
                             )
             except Exception as exc:
                 logger.debug("Algedonic action wiring failed (non-fatal): %s", exc)
+
+        # Phase 5: Strange loop tick — recursive self-modification
+        strange_loop_status = ""
+        try:
+            if self.strange_loop is not None:
+                strange_loop_status = self.strange_loop.tick(
+                    self._cycle, self._pulses
+                )
+                if strange_loop_status not in ("idle", "testing", ""):
+                    logger.info("STRANGE LOOP: %s (cycle %d)", strange_loop_status, self._cycle)
+        except Exception as exc:
+            logger.debug("Strange loop tick failed (non-fatal): %s", exc)
 
         # Dynamic crew scaling check
         scaling_rec = self._check_scaling_needs(pulse)
@@ -689,6 +709,11 @@ class Organism:
                 if self.algedonic_activation
                 else 0
             )
+        except Exception:
+            pass
+        # Phase 5: strange loop stats
+        try:
+            result["strange_loop"] = self.strange_loop.stats if self.strange_loop else {}
         except Exception:
             pass
         return result
