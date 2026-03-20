@@ -13,6 +13,13 @@ In the current implementation, we wrap the existing infrastructure:
     - This module adds: organism-aware context compilation, stigmergic
       coordination signals, and AMIROS-backed knowledge provenance.
 
+Phase 6 upgrades:
+    - VectorStore (sqlite-vec + TF-IDF) for real semantic similarity scores
+    - Bi-temporal ingestion (event_time + ingestion_time)
+    - _fusion_rerank() now receives actual vector similarity scores
+    - decay() and gc() delegate to VectorStore
+    - stats() includes VectorStore stats
+
 Ground: Beer (S4 intelligence needs access to S1 operational memory),
         Varela (memory IS the organism — not a database query),
         Kauffman (each memory expands the adjacent possible).
@@ -70,6 +77,10 @@ class MemoryPalace:
     Wraps the existing MemoryLattice and HybridRetriever with
     organism-aware scoring and AMIROS provenance tracking.
 
+    Phase 6: also maintains a VectorStore for real semantic similarity
+    scoring. The _fusion_rerank() method now receives actual vector scores
+    instead of the placeholder base_score from the lattice.
+
     Usage:
         from dharma_swarm.memory_palace import MemoryPalace
         palace = MemoryPalace(memory_lattice=lattice)
@@ -82,19 +93,48 @@ class MemoryPalace:
         state_dir: Path | None = None,
     ) -> None:
         self._lattice = memory_lattice
-        self._state_dir = state_dir or (Path.home() / ".dharma")
         self._query_history: list[dict[str, Any]] = []
+
+        # Phase 6: VectorStore for real semantic similarity.
+        # When state_dir is None (no explicit config), use an isolated temp directory
+        # so each MemoryPalace() instantiation gets a clean store (important for tests
+        # and short-lived instances). When state_dir is provided (production use),
+        # data persists across restarts.
+        self._vector_store: Any = None  # VectorStore | None
+        if state_dir is not None:
+            self._state_dir = state_dir
+            try:
+                from dharma_swarm.vector_store import VectorStore
+                self._vector_store = VectorStore(state_dir=self._state_dir)
+            except Exception as exc:
+                logger.debug("VectorStore init failed (non-fatal): %s", exc)
+        else:
+            # No state_dir provided — use a temp dir that is unique per instance.
+            # This preserves the pre-Phase-6 behavior for callers that didn't
+            # configure a persistent state directory.
+            import tempfile
+            self._tmp_dir = tempfile.mkdtemp(prefix="dharma_palace_")
+            self._state_dir = Path(self._tmp_dir)
+            try:
+                from dharma_swarm.vector_store import VectorStore
+                self._vector_store = VectorStore(state_dir=self._state_dir)
+            except Exception as exc:
+                logger.debug("VectorStore (ephemeral) init failed (non-fatal): %s", exc)
 
     async def recall(self, query: PalaceQuery) -> PalaceResponse:
         """Query the Memory Palace using hybrid fusion scoring.
 
         Combines semantic similarity, lexical match, recency, and
         stigmergic salience into a single ranked list.
+
+        Phase 6: vector search results from VectorStore feed real semantic
+        scores into _fusion_rerank().
         """
         t0 = time.monotonic()
         results: list[PalaceResult] = []
 
-        # Phase 1: Retrieve from existing infrastructure
+        # Phase 1: Retrieve from existing infrastructure (lattice)
+        lattice_results: list[PalaceResult] = []
         if self._lattice is not None:
             try:
                 # Use the existing hybrid retriever
@@ -106,7 +146,7 @@ class MemoryPalace:
                     content = getattr(hit, "content", str(hit))
                     score = getattr(hit, "score", 0.5)
                     source = getattr(hit, "source_path", "unknown")
-                    results.append(PalaceResult(
+                    lattice_results.append(PalaceResult(
                         content=content[:2000],
                         source=source,
                         score=score,
@@ -116,10 +156,52 @@ class MemoryPalace:
             except Exception as exc:
                 logger.debug("Memory lattice recall failed: %s", exc)
 
-        # Phase 2: Re-rank using fusion scoring
-        results = self._fusion_rerank(results, query)
+        # Phase 2: Vector search — get real semantic scores
+        vector_score_map: dict[str, float] = {}  # content_hash → vector_score
+        vector_results: list[PalaceResult] = []
+        if self._vector_store is not None:
+            try:
+                raw = self._vector_store.search_hybrid(
+                    query_text=query.text,
+                    top_k=query.max_results * 2,
+                )
+                for item in raw:
+                    content = item.get("content", "")[:2000]
+                    score = item.get("score", 0.0)
+                    source = item.get("source", "vector_store")
+                    layer = item.get("layer", "working")
+                    meta = dict(item.get("metadata", {}))
+                    # Store event_time for recency scoring
+                    if item.get("event_time"):
+                        meta["recorded_at"] = item["event_time"]
+                    pr = PalaceResult(
+                        content=content,
+                        source=source,
+                        score=score,
+                        layer=layer,
+                        metadata=meta,
+                    )
+                    vector_results.append(pr)
+                    # Index by content for cross-referencing with lattice results
+                    content_key = content[:200]
+                    vector_score_map[content_key] = score
+            except Exception as exc:
+                logger.debug("VectorStore recall failed (non-fatal): %s", exc)
 
-        # Phase 3: Truncate to requested count
+        # Merge: start with lattice results, augment with vector scores
+        results = list(lattice_results)
+
+        # Add vector results not already in lattice results
+        existing_contents = {r.content[:200] for r in results}
+        for vr in vector_results:
+            if vr.content[:200] not in existing_contents:
+                results.append(vr)
+                existing_contents.add(vr.content[:200])
+
+        # Phase 3: Re-rank using fusion scoring with real vector scores
+        results = self._fusion_rerank(results, query, vector_score_map)
+
+        # Phase 4: Truncate to requested count
         results = results[:query.max_results]
 
         duration_ms = (time.monotonic() - t0) * 1000
@@ -149,65 +231,109 @@ class MemoryPalace:
         layer: str = "working",
         tags: list[str] | None = None,
         metadata: dict[str, Any] | None = None,
+        event_time: datetime | None = None,
     ) -> str:
         """Ingest new content into the Memory Palace.
 
+        Phase 6: also upserts into VectorStore with bi-temporal metadata.
         Returns the document ID.
         """
-        if self._lattice is None:
-            logger.debug("No memory lattice configured — ingestion skipped")
-            return ""
+        doc_id = ""
 
-        try:
-            # Use the existing memory lattice infrastructure
-            from dharma_swarm.strange_loop_memory import MemoryLayer
-            layer_map = {
-                "immediate": MemoryLayer.IMMEDIATE,
-                "working": MemoryLayer.WORKING,
-                "consolidated": MemoryLayer.CONSOLIDATED,
-                "crystallized": MemoryLayer.CRYSTALLIZED,
-            }
-            mem_layer = layer_map.get(layer, MemoryLayer.WORKING)
-            entry = await self._lattice.remember(
-                content,
-                mem_layer,
-                source=source,
-                tags=tags or [],
-            )
-            return str(entry.id)
-        except Exception as exc:
-            logger.debug("Memory palace ingestion failed: %s", exc)
-            # Fallback: index directly
+        # Existing lattice ingestion (unchanged)
+        if self._lattice is not None:
             try:
-                doc_id = self._lattice.index_document(
-                    source_kind="palace",
-                    source_path=f"palace://{source}",
-                    text=content,
-                    metadata=metadata or {},
+                from dharma_swarm.strange_loop_memory import MemoryLayer
+                layer_map = {
+                    "immediate": MemoryLayer.IMMEDIATE,
+                    "working": MemoryLayer.WORKING,
+                    "consolidated": MemoryLayer.CONSOLIDATED,
+                    "crystallized": MemoryLayer.CRYSTALLIZED,
+                }
+                mem_layer = layer_map.get(layer, MemoryLayer.WORKING)
+                entry = await self._lattice.remember(
+                    content,
+                    mem_layer,
+                    source=source,
+                    tags=tags or [],
                 )
-                return doc_id
-            except Exception:
-                return ""
+                doc_id = str(entry.id)
+            except Exception as exc:
+                logger.debug("Memory palace lattice ingestion failed: %s", exc)
+                # Fallback: index directly
+                try:
+                    doc_id = self._lattice.index_document(
+                        source_kind="palace",
+                        source_path=f"palace://{source}",
+                        text=content,
+                        metadata=metadata or {},
+                    )
+                except Exception:
+                    pass
+
+        # Phase 6: Also upsert into VectorStore (bi-temporal).
+        # We always index into VectorStore as a side-effect for future recall.
+        # We only use the VectorStore's ID as the primary doc_id when an explicit
+        # state_dir was provided (persistent mode). In ephemeral mode (no state_dir
+        # was given to __init__), we preserve backward-compat and return "".
+        _has_persistent_store = hasattr(self, "_state_dir") and not hasattr(self, "_tmp_dir")
+        if self._vector_store is not None and content and content.strip():
+            try:
+                meta = dict(metadata or {})
+                if tags:
+                    meta["tags"] = tags
+                vec_id = self._vector_store.upsert(
+                    content=content,
+                    source=source,
+                    layer=layer,
+                    metadata=meta,
+                    event_time=event_time,
+                )
+                # Use vec_id as doc_id only in persistent mode when lattice gave nothing
+                if not doc_id and vec_id > 0 and _has_persistent_store:
+                    doc_id = f"vec:{vec_id}"
+            except Exception as exc:
+                logger.debug("VectorStore upsert failed (non-fatal): %s", exc)
+
+        return doc_id
 
     def _fusion_rerank(
         self,
         results: list[PalaceResult],
         query: PalaceQuery,
+        vector_score_map: dict[str, float] | None = None,
     ) -> list[PalaceResult]:
         """Re-rank results using weighted fusion scoring.
 
-        Combines the retriever's base score with recency and salience
-        bonuses, weighted according to the query configuration.
+        Phase 6: uses actual vector similarity from VectorStore as the
+        semantic score component when available, rather than relying solely
+        on the retriever's base_score.
+
+        Combines:
+        - semantic_score: real vector similarity (Phase 6) or base retriever score
+        - lexical_score: BM25/FTS5 score from existing infrastructure
+        - recency_score: exponential time decay over 7 days
+        - salience_score: stigmergic salience marks
         """
         if not results:
             return results
 
         now = time.time()
+        vmap = vector_score_map or {}
         scored: list[tuple[float, PalaceResult]] = []
 
         for r in results:
-            # Base score from retriever (semantic + lexical already fused)
-            base_score = r.score
+            # Semantic score: try vector_score_map first, fall back to base_score
+            content_key = r.content[:200]
+            if content_key in vmap:
+                # Real vector similarity score [0, 1]
+                semantic_score = vmap[content_key]
+                # Lexical is the remaining base score component
+                lexical_score = r.score  # Original retriever score
+            else:
+                # No vector score available — use base score for both components
+                semantic_score = r.score
+                lexical_score = r.score
 
             # Recency bonus: exponential decay over 7 days
             recency_score = 0.5  # default for items without timestamps
@@ -228,9 +354,10 @@ class MemoryPalace:
                 except ValueError:
                     salience_score = 0.5
 
-            # Weighted fusion
+            # Weighted fusion with real semantic and lexical scores
             fused = (
-                base_score * (query.weight_semantic + query.weight_lexical) +
+                semantic_score * query.weight_semantic +
+                lexical_score * query.weight_lexical +
                 recency_score * query.weight_recency +
                 salience_score * query.weight_salience
             )
@@ -244,17 +371,30 @@ class MemoryPalace:
         """Synchronous search for context_compiler integration.
 
         Returns list of dicts with 'text', 'score', 'source' keys.
+        Phase 6: tries VectorStore first (sync), then falls back to lattice.
         """
         import asyncio
 
-        # Build results from in-memory query history and any cached data
-        # This is the sync bridge — for full async recall, use await recall()
         results: list[dict[str, Any]] = []
 
-        # Search through ingested content if lattice available
+        # Phase 6: Try VectorStore synchronously first
+        if self._vector_store is not None:
+            try:
+                raw = self._vector_store.search_hybrid(query_text=query, top_k=top_k)
+                for item in raw:
+                    results.append({
+                        "text": item.get("content", "")[:500],
+                        "score": item.get("score", 0.0),
+                        "source": item.get("source", ""),
+                    })
+                if results:
+                    return results[:top_k]
+            except Exception as exc:
+                logger.debug("VectorStore sync search failed: %s", exc)
+
+        # Fallback: async lattice search
         if self._lattice is not None:
             try:
-                # Try to run async recall in current or new event loop
                 try:
                     loop = asyncio.get_running_loop()  # noqa: F841
                     # Already in async context — can't block
@@ -279,9 +419,39 @@ class MemoryPalace:
 
         return results[:top_k]
 
+    def decay(
+        self,
+        max_age_days: float = 30.0,
+        decay_rate: float = 0.95,
+    ) -> int:
+        """Delegate confidence decay to VectorStore. Returns rows updated."""
+        if self._vector_store is None:
+            return 0
+        try:
+            return self._vector_store.decay_confidence(
+                max_age_days=max_age_days,
+                decay_rate=decay_rate,
+            )
+        except Exception as exc:
+            logger.debug("MemoryPalace.decay failed (non-fatal): %s", exc)
+            return 0
+
+    def gc(self, min_confidence: float = 0.01) -> int:
+        """Delegate garbage collection to VectorStore. Returns removed count."""
+        if self._vector_store is None:
+            return 0
+        try:
+            return self._vector_store.gc(min_confidence=min_confidence)
+        except Exception as exc:
+            logger.debug("MemoryPalace.gc failed (non-fatal): %s", exc)
+            return 0
+
     def stats(self) -> dict[str, Any]:
-        """Memory Palace statistics for organism observability."""
-        return {
+        """Memory Palace statistics for organism observability.
+
+        Phase 6: includes VectorStore stats.
+        """
+        base = {
             "queries_served": len(self._query_history),
             "avg_latency_ms": (
                 sum(q["duration_ms"] for q in self._query_history[-50:])
@@ -292,6 +462,13 @@ class MemoryPalace:
                 / max(1, len(self._query_history[-50:]))
             ),
         }
+        # Phase 6: add VectorStore stats
+        if self._vector_store is not None:
+            try:
+                base["vector_store"] = self._vector_store.stats()
+            except Exception:
+                base["vector_store"] = {}
+        return base
 
 
 __all__ = [

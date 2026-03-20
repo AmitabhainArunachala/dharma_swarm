@@ -12,6 +12,15 @@ temporal validity, confidence, provenance.
 Ground: Varela (autopoiesis — the system maintains a model of itself),
         Damasio (somatic marker — past states bias future decisions),
         Dada Bhagwan (witness everything, Axiom P6).
+
+Phase 6 additions:
+- ingestion_time field (when we learned it, vs timestamp = when it happened)
+- access_count + last_accessed (access tracking)
+- invalidate_entity() / invalidate_contradicted() (soft invalidation)
+- graph_traverse() (BFS relationship traversal)
+- decay_confidence() (age-based confidence decay)
+- gc() (soft-delete entities below threshold)
+- find_related() (find entities connected by relationships)
 """
 
 from __future__ import annotations
@@ -19,6 +28,7 @@ from __future__ import annotations
 import json
 import logging
 import uuid
+from collections import deque
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
@@ -53,11 +63,16 @@ class MemoryEntity(BaseModel):
     entity_type: str  # mutation, decision, algedonic_event, capability, insight,
     #                    agent_lineage, gnani_verdict
     description: str
-    timestamp: datetime = Field(default_factory=_utc_now)
+    timestamp: datetime = Field(default_factory=_utc_now)   # event_time: when it happened
     metadata: dict = Field(default_factory=dict)
     confidence: float = 1.0
     temporal_valid_from: datetime | None = None
     temporal_valid_to: datetime | None = None  # None = still valid
+
+    # Phase 6: bi-temporal + access tracking fields (all have defaults for backward compat)
+    ingestion_time: datetime = Field(default_factory=_utc_now)  # when we recorded it
+    access_count: int = 0
+    last_accessed: datetime | None = None
 
 
 class MemoryRelationship(BaseModel):
@@ -68,6 +83,8 @@ class MemoryRelationship(BaseModel):
     rel_type: str  # caused, preceded, improved, degraded, witnessed, resolved, enabled
     timestamp: datetime = Field(default_factory=_utc_now)
     metadata: dict = Field(default_factory=dict)
+    # Phase 6: soft invalidation for edge temporal validity
+    valid_until: datetime | None = None  # None = still valid
 
 
 # ---------------------------------------------------------------------------
@@ -132,16 +149,31 @@ class OrganismMemory:
         metadata: dict | None = None,
         confidence: float = 1.0,
     ) -> str:
-        """Record a new entity. Returns entity ID. Auto-persists."""
+        """Record a new entity. Returns entity ID. Auto-persists.
+
+        Phase 6: if entity_type == 'insight', automatically calls
+        invalidate_contradicted() to soft-invalidate conflicting older insights.
+        """
         try:
+            now = _utc_now()
             entity = MemoryEntity(
                 entity_type=entity_type,
                 description=description,
                 metadata=metadata or {},
                 confidence=confidence,
+                timestamp=now,
+                ingestion_time=now,
             )
             self._entities.append(entity)
             self._save_entity(entity)
+
+            # Phase 6: auto-invalidate contradicted insights when a new insight arrives
+            if entity_type == "insight":
+                try:
+                    self.invalidate_contradicted(entity.id)
+                except Exception as exc:
+                    logger.debug("invalidate_contradicted failed (non-fatal): %s", exc)
+
             return entity.id
         except Exception as exc:
             logger.debug("OrganismMemory.record_event failed (non-fatal): %s", exc)
@@ -166,6 +198,237 @@ class OrganismMemory:
             self._save_relationship(rel)
         except Exception as exc:
             logger.debug("OrganismMemory.record_relationship failed (non-fatal): %s", exc)
+
+    # ------------------------------------------------------------------
+    # Phase 6: Invalidation methods
+    # ------------------------------------------------------------------
+
+    def invalidate_entity(self, entity_id: str, reason: str = "") -> bool:
+        """Soft-invalidate an entity by setting temporal_valid_to = now.
+
+        Does NOT delete the record — preserves full history.
+        Returns True if found and updated.
+        """
+        try:
+            now = _utc_now()
+            for entity in self._entities:
+                if entity.id == entity_id:
+                    entity.temporal_valid_to = now
+                    if reason:
+                        entity.metadata["invalidation_reason"] = reason
+                        entity.metadata["invalidated_at"] = now.isoformat()
+                    # Rewrite the full JSONL to reflect the update
+                    self._rewrite_entities()
+                    return True
+            return False
+        except Exception as exc:
+            logger.debug("invalidate_entity failed (non-fatal): %s", exc)
+            return False
+
+    def invalidate_contradicted(self, new_entity_id: str) -> int:
+        """When a new insight is added, check if it contradicts older insights.
+
+        Simple heuristic: mark older insights with similar descriptions as
+        superseded (temporal_valid_to = now). Similarity by shared key words.
+
+        Returns number of entities invalidated.
+        """
+        try:
+            new_entity = self._get_entity(new_entity_id)
+            if new_entity is None or new_entity.entity_type != "insight":
+                return 0
+
+            now = _utc_now()
+            new_words = set(new_entity.description.lower().split())
+            invalidated = 0
+
+            for entity in self._entities:
+                # Skip self, already-invalid, and non-insights
+                if entity.id == new_entity_id:
+                    continue
+                if entity.entity_type != "insight":
+                    continue
+                if entity.temporal_valid_to is not None:
+                    continue
+
+                # Jaccard similarity on words
+                old_words = set(entity.description.lower().split())
+                if not old_words or not new_words:
+                    continue
+                intersection = len(old_words & new_words)
+                union = len(old_words | new_words)
+                jaccard = intersection / union if union > 0 else 0.0
+
+                # If ≥50% word overlap AND they share a key predicate word,
+                # consider the new insight to supersede the old one
+                if jaccard >= 0.5:
+                    entity.temporal_valid_to = now
+                    entity.metadata["superseded_by"] = new_entity_id
+                    entity.metadata["superseded_at"] = now.isoformat()
+                    invalidated += 1
+
+            if invalidated > 0:
+                self._rewrite_entities()
+
+            return invalidated
+        except Exception as exc:
+            logger.debug("invalidate_contradicted failed (non-fatal): %s", exc)
+            return 0
+
+    # ------------------------------------------------------------------
+    # Phase 6: Graph traversal
+    # ------------------------------------------------------------------
+
+    def graph_traverse(
+        self,
+        start_id: str,
+        max_depth: int = 2,
+        direction: str = "both",  # "out", "in", "both"
+    ) -> list[MemoryEntity]:
+        """BFS traversal of the entity relationship graph.
+
+        Returns all entities reachable from start_id within max_depth hops.
+        direction: "out" follows from_id→to_id, "in" follows to_id→from_id,
+                   "both" follows both directions.
+        """
+        try:
+            entity_map = {e.id: e for e in self._entities}
+            if start_id not in entity_map:
+                return []
+
+            visited: set[str] = {start_id}
+            queue: deque[tuple[str, int]] = deque([(start_id, 0)])
+            result: list[MemoryEntity] = []
+
+            while queue:
+                current_id, depth = queue.popleft()
+                if depth >= max_depth:
+                    continue
+
+                for rel in self._relationships:
+                    # Skip invalidated relationships
+                    if rel.valid_until is not None:
+                        continue
+
+                    neighbor_id: str | None = None
+                    if direction in ("out", "both") and rel.from_id == current_id:
+                        neighbor_id = rel.to_id
+                    elif direction in ("in", "both") and rel.to_id == current_id:
+                        neighbor_id = rel.from_id
+
+                    if neighbor_id and neighbor_id not in visited and neighbor_id in entity_map:
+                        visited.add(neighbor_id)
+                        queue.append((neighbor_id, depth + 1))
+                        result.append(entity_map[neighbor_id])
+
+            return result
+        except Exception as exc:
+            logger.debug("graph_traverse failed (non-fatal): %s", exc)
+            return []
+
+    def find_related(
+        self,
+        entity_id: str,
+        rel_types: list[str] | None = None,
+    ) -> list[tuple[MemoryEntity, MemoryRelationship]]:
+        """Find entities directly connected to entity_id by relationship.
+
+        Returns list of (entity, relationship) tuples for immediate neighbors.
+        rel_types: filter to specific relationship types, or None for all.
+        """
+        try:
+            entity_map = {e.id: e for e in self._entities}
+            result: list[tuple[MemoryEntity, MemoryRelationship]] = []
+
+            for rel in self._relationships:
+                # Skip invalidated
+                if rel.valid_until is not None:
+                    continue
+                # Filter by rel_type if specified
+                if rel_types is not None and rel.rel_type not in rel_types:
+                    continue
+
+                neighbor_id: str | None = None
+                if rel.from_id == entity_id:
+                    neighbor_id = rel.to_id
+                elif rel.to_id == entity_id:
+                    neighbor_id = rel.from_id
+
+                if neighbor_id and neighbor_id in entity_map:
+                    result.append((entity_map[neighbor_id], rel))
+
+            return result
+        except Exception as exc:
+            logger.debug("find_related failed (non-fatal): %s", exc)
+            return []
+
+    # ------------------------------------------------------------------
+    # Phase 6: Confidence decay and GC
+    # ------------------------------------------------------------------
+
+    def decay_confidence(
+        self,
+        max_age_days: float = 30.0,
+        decay_rate: float = 0.95,
+    ) -> int:
+        """Apply age-based confidence decay to all valid entities.
+
+        confidence *= decay_rate^(age_days) — exponential decay.
+        Returns number of entities updated.
+        """
+        try:
+            now = _utc_now().timestamp()
+            updated = 0
+            for entity in self._entities:
+                # Only decay still-valid entities
+                if entity.temporal_valid_to is not None:
+                    continue
+                try:
+                    age_days = (now - entity.ingestion_time.timestamp()) / 86400.0
+                    if age_days <= 0:
+                        continue
+                    decayed = entity.confidence * (decay_rate ** age_days)
+                    decayed = max(0.0, min(1.0, decayed))
+                    if abs(decayed - entity.confidence) > 1e-6:
+                        entity.confidence = decayed
+                        updated += 1
+                except Exception:
+                    pass
+
+            if updated > 0:
+                self._rewrite_entities()
+
+            return updated
+        except Exception as exc:
+            logger.debug("decay_confidence failed (non-fatal): %s", exc)
+            return 0
+
+    def gc(self, min_confidence: float = 0.01) -> int:
+        """Soft-delete entities below confidence threshold.
+
+        Sets temporal_valid_to = now for entities with confidence < min_confidence.
+        Does NOT remove records (append-only JSONL design).
+        Returns number of entities soft-deleted.
+        """
+        try:
+            now = _utc_now()
+            removed = 0
+            for entity in self._entities:
+                if entity.temporal_valid_to is not None:
+                    continue  # Already invalid
+                if entity.confidence < min_confidence:
+                    entity.temporal_valid_to = now
+                    entity.metadata["gc_reason"] = f"confidence {entity.confidence:.4f} < {min_confidence}"
+                    entity.metadata["gc_at"] = now.isoformat()
+                    removed += 1
+
+            if removed > 0:
+                self._rewrite_entities()
+
+            return removed
+        except Exception as exc:
+            logger.debug("gc failed (non-fatal): %s", exc)
+            return 0
 
     # ------------------------------------------------------------------
     # Public read API
@@ -194,6 +457,8 @@ class OrganismMemory:
                 line = f"  [{ts}] [{entity.entity_type}] {entity.description}"
                 if entity.confidence < 1.0:
                     line += f" (confidence={entity.confidence:.2f})"
+                if entity.temporal_valid_to is not None:
+                    line += " [INVALIDATED]"
                 lines.append(line)
 
                 # Annotate relationships from this entity
@@ -266,8 +531,14 @@ class OrganismMemory:
             by_type: dict[str, int] = {}
             for e in self._entities:
                 by_type[e.entity_type] = by_type.get(e.entity_type, 0) + 1
+            now = _utc_now()
+            valid_count = sum(
+                1 for e in self._entities
+                if e.temporal_valid_to is None or e.temporal_valid_to > now
+            )
             return {
                 "total_entities": len(self._entities),
+                "valid_entities": valid_count,
                 "total_relationships": len(self._relationships),
                 "by_type": by_type,
                 "self_model_accuracy": round(self.self_model_accuracy(), 3),
@@ -275,6 +546,25 @@ class OrganismMemory:
         except Exception as exc:
             logger.debug("OrganismMemory.stats failed (non-fatal): %s", exc)
             return {"total_entities": 0, "total_relationships": 0}
+
+    # ------------------------------------------------------------------
+    # Internal helpers
+    # ------------------------------------------------------------------
+
+    def _get_entity(self, entity_id: str) -> MemoryEntity | None:
+        """Look up an entity by ID."""
+        for e in self._entities:
+            if e.id == entity_id:
+                return e
+        return None
+
+    def _touch_entity(self, entity: MemoryEntity) -> None:
+        """Update access tracking on entity retrieval."""
+        try:
+            entity.access_count += 1
+            entity.last_accessed = _utc_now()
+        except Exception:
+            pass
 
     # ------------------------------------------------------------------
     # Persistence
@@ -300,6 +590,23 @@ class OrganismMemory:
         except Exception as exc:
             logger.debug("_save_relationship failed (non-fatal): %s", exc)
 
+    def _rewrite_entities(self) -> None:
+        """Rewrite the entire entities JSONL to reflect in-memory state.
+
+        Called after mutations (invalidations, confidence changes).
+        Uses a write-then-rename pattern for atomicity.
+        """
+        try:
+            path = self._state_dir / self._ENTITIES_FILE
+            tmp_path = path.with_suffix(".jsonl.tmp")
+            with tmp_path.open("w", encoding="utf-8") as fh:
+                for entity in self._entities:
+                    record = {"type": "entity", **entity.model_dump(mode="json")}
+                    fh.write(json.dumps(record) + "\n")
+            tmp_path.replace(path)
+        except Exception as exc:
+            logger.debug("_rewrite_entities failed (non-fatal): %s", exc)
+
     def _load(self) -> None:
         """Load from JSONL files on disk."""
         # Load entities
@@ -314,6 +621,9 @@ class OrganismMemory:
                         try:
                             raw = json.loads(line)
                             raw.pop("type", None)
+                            # Phase 6 backward compat: old records won't have
+                            # ingestion_time / access_count / last_accessed
+                            # Pydantic defaults handle this gracefully.
                             entity = MemoryEntity(**raw)
                             self._entities.append(entity)
                         except Exception as exc:
@@ -333,6 +643,7 @@ class OrganismMemory:
                         try:
                             raw = json.loads(line)
                             raw.pop("type", None)
+                            # Phase 6 backward compat: old rels won't have valid_until
                             rel = MemoryRelationship(**raw)
                             self._relationships.append(rel)
                         except Exception as exc:

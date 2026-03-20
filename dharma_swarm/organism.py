@@ -179,6 +179,14 @@ class Organism:
             self.strange_loop = None
             logger.debug("StrangeLoop init failed (non-fatal)")
 
+        # Phase 6: Sleep-time memory refinement agent
+        try:
+            from dharma_swarm.sleep_time_agent import SleepTimeAgent
+            self.sleep_time_agent = SleepTimeAgent(tick_interval=5)
+        except Exception:
+            self.sleep_time_agent = None
+            logger.debug("SleepTimeAgent init failed (non-fatal)")
+
         # Wiring: algedonic callbacks
         self.vsm.algedonic.register_callback(self._on_algedonic)
 
@@ -341,6 +349,19 @@ class Organism:
                     logger.info("STRANGE LOOP: %s (cycle %d)", strange_loop_status, self._cycle)
         except Exception as exc:
             logger.debug("Strange loop tick failed (non-fatal): %s", exc)
+
+        # Phase 6: Sleep-time memory refinement
+        try:
+            if self.sleep_time_agent is not None:
+                sleep_stats = self.sleep_time_agent.tick(self._cycle, self)
+                if not sleep_stats.get("skipped") and sleep_stats.get("phases"):
+                    logger.debug(
+                        "SLEEP-TIME tick %d: %s",
+                        self._cycle,
+                        sleep_stats.get("phases", {}),
+                    )
+        except Exception as exc:
+            logger.debug("SleepTimeAgent tick failed (non-fatal): %s", exc)
 
         # Dynamic crew scaling check
         scaling_rec = self._check_scaling_needs(pulse)
@@ -714,6 +735,14 @@ class Organism:
         # Phase 5: strange loop stats
         try:
             result["strange_loop"] = self.strange_loop.stats if self.strange_loop else {}
+        except Exception:
+            pass
+        # Phase 6: sleep-time agent stats
+        try:
+            result["sleep_time"] = (
+                self.sleep_time_agent.stats()
+                if self.sleep_time_agent else {}
+            )
         except Exception:
             pass
         return result
