@@ -240,6 +240,45 @@ class MemoryPalace:
         scored.sort(key=lambda x: x[0], reverse=True)
         return [r for _, r in scored]
 
+    def search(self, query: str, top_k: int = 5) -> list[dict[str, Any]]:
+        """Synchronous search for context_compiler integration.
+
+        Returns list of dicts with 'text', 'score', 'source' keys.
+        """
+        import asyncio
+
+        # Build results from in-memory query history and any cached data
+        # This is the sync bridge — for full async recall, use await recall()
+        results: list[dict[str, Any]] = []
+
+        # Search through ingested content if lattice available
+        if self._lattice is not None:
+            try:
+                # Try to run async recall in current or new event loop
+                try:
+                    loop = asyncio.get_running_loop()  # noqa: F841
+                    # Already in async context — can't block
+                    return results
+                except RuntimeError:
+                    pass
+
+                loop = asyncio.new_event_loop()
+                try:
+                    palace_query = PalaceQuery(text=query, max_results=top_k)
+                    response = loop.run_until_complete(self.recall(palace_query))
+                    for r in response.results:
+                        results.append({
+                            "text": r.content[:500],
+                            "score": r.score,
+                            "source": r.source,
+                        })
+                finally:
+                    loop.close()
+            except Exception as exc:
+                logger.debug("Palace sync search failed: %s", exc)
+
+        return results[:top_k]
+
     def stats(self) -> dict[str, Any]:
         """Memory Palace statistics for organism observability."""
         return {

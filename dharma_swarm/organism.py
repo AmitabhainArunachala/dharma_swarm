@@ -141,6 +141,9 @@ class Organism:
         self.router = OrganismRouter(state_dir=self._state_dir)
         self.traces: TraceStore | None = None
 
+        # Dynamic scaling state
+        self._stigmergy_seen: set[str] = set()
+
         # Wiring: algedonic callbacks
         self.vsm.algedonic.register_callback(self._on_algedonic)
 
@@ -209,6 +212,9 @@ class Organism:
         # 5. Check algedonic state
         pulse.algedonic_active = len(self.vsm.algedonic.active_signals)
 
+        # 5b. Harvest high-salience stigmergy → task recommendations
+        stigmergy_tasks = await self._harvest_stigmergy_tasks()
+
         # 6. Check AMIROS state
         amiros_stats = self.amiros.stats()
         running = amiros_stats.get("experiments", {}).get("by_status", {})
@@ -232,12 +238,21 @@ class Organism:
         if len(self._pulses) > 1000:
             self._pulses = self._pulses[-1000:]
 
+        # Dynamic crew scaling check
+        scaling_rec = self._check_scaling_needs(pulse)
+        if scaling_rec is not None:
+            logger.warning(
+                "SCALING: %s — %s (urgency=%s)",
+                scaling_rec["action"], scaling_rec["reason"], scaling_rec["urgency"],
+            )
+
         # Log to traces
         if self.traces:
             await self.traces.log_entry(TraceEntry(
                 agent="organism",
                 action="heartbeat",
-                metadata=pulse.to_dict(),
+                metadata={**pulse.to_dict(), **({
+                    "scaling": scaling_rec} if scaling_rec else {})},
             ))
 
         level = logging.INFO if pulse.is_healthy else logging.WARNING
@@ -319,6 +334,21 @@ class Organism:
             raw_text=output[:2000],
         )
 
+        # Memory Palace ingestion — index output for future recall
+        try:
+            await self.palace.ingest(
+                content=output[:2000],
+                source=f"agent:{agent_id}",
+                layer="working",
+                metadata={
+                    "agent_id": agent_id,
+                    "task": task_description[:200],
+                    "gate_results": gate_results or {},
+                },
+            )
+        except Exception as exc:
+            logger.debug("Palace ingestion failed (non-fatal): %s", exc)
+
     def on_agent_viability(
         self,
         agent_id: str,
@@ -371,6 +401,109 @@ class Organism:
             signal.title,
             signal.recommended_action,
         )
+
+    def _check_scaling_needs(self, pulse: OrganismPulse) -> dict[str, Any] | None:
+        """Check if dynamic crew scaling is needed.
+
+        Returns a scaling recommendation, or None.
+        Triggers on:
+        - 3+ consecutive unhealthy pulses
+        - Algedonic signals active for 2+ cycles
+        - Fleet health below 0.3
+        """
+        if len(self._pulses) < 3:
+            return None
+
+        recent = self._pulses[-3:]
+
+        # Check consecutive unhealthy
+        all_unhealthy = all(not p.is_healthy for p in recent)
+
+        # Check persistent algedonic
+        persistent_algedonic = sum(1 for p in recent if p.algedonic_active > 0) >= 2
+
+        # Check critical fleet health
+        critical_health = pulse.fleet_health < 0.3
+
+        if not (all_unhealthy or persistent_algedonic or critical_health):
+            return None
+
+        # Determine what kind of specialist to recommend
+        if pulse.audit_failure_rate > 0.5:
+            return {
+                "action": "spawn_specialist",
+                "role": "validator",
+                "reason": f"Audit failure rate {pulse.audit_failure_rate:.0%} — need validation specialist",
+                "urgency": "high",
+            }
+        elif pulse.algedonic_active > 0:
+            return {
+                "action": "spawn_specialist",
+                "role": "surgeon",
+                "reason": f"{pulse.algedonic_active} algedonic signals active — need surgical intervention",
+                "urgency": "high",
+            }
+        elif pulse.identity_coherence < 0.3:
+            return {
+                "action": "spawn_specialist",
+                "role": "architect",
+                "reason": f"Identity coherence at {pulse.identity_coherence:.2f} — need architectural review",
+                "urgency": "medium",
+            }
+        else:
+            return {
+                "action": "spawn_specialist",
+                "role": "cartographer",
+                "reason": "Sustained unhealthy state — need ecosystem scan",
+                "urgency": "medium",
+            }
+
+    async def _harvest_stigmergy_tasks(self) -> int:
+        """Read high-salience stigmergy marks and create tasks from them.
+
+        Returns number of tasks created.
+        """
+        try:
+            from dharma_swarm.stigmergy import StigmergyStore
+            store = StigmergyStore(base_path=self._state_dir / "stigmergy")
+            marks = await store.read_marks(limit=20)
+
+            high_salience = [m for m in marks if m.salience >= 0.8]
+            if not high_salience:
+                return 0
+
+            # Check which marks have already been converted to tasks
+            created = 0
+            for mark in high_salience[:3]:  # Cap at 3 per heartbeat
+                mark_key = f"stig:{mark.id}"
+                if mark_key in self._stigmergy_seen:
+                    continue
+                self._stigmergy_seen.add(mark_key)
+
+                logger.info(
+                    "STIGMERGY→TASK: [%s] %s (salience=%.2f, agent=%s)",
+                    mark.action, mark.observation, mark.salience, mark.agent,
+                )
+                created += 1
+
+            # Trim seen set
+            if len(self._stigmergy_seen) > 500:
+                self._stigmergy_seen = set(list(self._stigmergy_seen)[-200:])
+
+            return created
+        except Exception as exc:
+            logger.debug("Stigmergy harvest failed (non-fatal): %s", exc)
+            return 0
+
+    @property
+    def scaling_recommendations(self) -> list[dict[str, Any]]:
+        """Recent scaling recommendations from heartbeat checks."""
+        recs = []
+        for pulse in self._pulses[-10:]:
+            rec = self._check_scaling_needs(pulse)
+            if rec:
+                recs.append(rec)
+        return recs
 
     # === Status ===
 

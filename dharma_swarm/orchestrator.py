@@ -757,7 +757,13 @@ class Orchestrator:
         # Feature flag: ENABLE_FITNESS_ROUTING (default off until enough data)
         import os
         if os.getenv("ENABLE_FITNESS_ROUTING", "").lower() not in ("1", "true", "yes"):
-            return None  # Falls through to FIFO
+            # Also enable if organism is booted (organism presence = advanced mode)
+            try:
+                from dharma_swarm.organism import get_organism
+                if get_organism() is None:
+                    return None  # Falls through to FIFO
+            except Exception:
+                return None  # Falls through to FIFO
 
         try:
             import random
@@ -1662,6 +1668,15 @@ class Orchestrator:
             0.01,
             self._coerce_float(td.timeout_seconds, self._default_timeout_seconds),
         )
+        # Organism model routing — apply routed model if available
+        try:
+            task_meta = task.metadata if isinstance(task.metadata, dict) else {}
+            routed_model = task_meta.get("organism_routed_model")
+            if routed_model and hasattr(runner, '_config'):
+                runner._config.model = routed_model
+                logger.debug("Organism routed task %s to model %s", task.id[:8], routed_model)
+        except Exception:
+            pass  # Never-fatal
         try:
             result = await asyncio.wait_for(
                 runner.run_task(task),

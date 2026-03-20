@@ -350,6 +350,24 @@ def cmd_status() -> None:
     except Exception:
         print("\nClaude Code: not found")
 
+    # Organism status
+    try:
+        from dharma_swarm.organism import get_organism
+        org = get_organism()
+        if org is not None:
+            status = org.status()
+            pulse = status.get("last_pulse")
+            if pulse:
+                print(f"\nOrganism: cycle {pulse['cycle']}, health={pulse['fleet_health']:.2f}, coherence={pulse['identity_coherence']:.2f}")
+                if pulse.get("algedonic_active", 0) > 0:
+                    print(f"  \u26a0 Algedonic signals active: {pulse['algedonic_active']}")
+            else:
+                print("\nOrganism: booted, no heartbeat yet")
+        else:
+            print("\nOrganism: not booted")
+    except Exception:
+        print("\nOrganism: unavailable")
+
     print("\nMission spine: run `dgc mission-status` for full readiness lanes")
     print("Canonical topology: run `dgc canonical-status`")
 
