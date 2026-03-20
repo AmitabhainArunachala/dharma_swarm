@@ -144,6 +144,9 @@ class Organism:
         # Dynamic scaling state
         self._stigmergy_seen: set[str] = set()
 
+        # Phase 5: Gnani verdict — last verdict from on_evolution_cycle
+        self._last_gnani_verdict: bool | None = None
+
         # Phase 4: Organism developmental memory
         try:
             from dharma_swarm.organism_memory import OrganismMemory
@@ -274,9 +277,72 @@ class Organism:
         except Exception as exc:
             logger.debug("Algedonic activation failed (non-fatal): %s", exc)
 
-        # Phase 4: Record pulse to organism developmental memory
+        # C3 fix: Act on algedonic signals — wire action strings to real behavioral changes
+        if pulse_extra.get("algedonic_actions"):
+            try:
+                if self.algedonic_activation is not None:
+                    all_actions = self.algedonic_activation.evaluate(pulse)
+                    for act in all_actions:
+                        try:
+                            if act.action == "recalibrate_routing" and self.router is not None:
+                                # Increase routing conservatism: bias toward higher tiers
+                                self.router._routing_bias = min(
+                                    getattr(self.router, '_routing_bias', 0.0) + 0.1, 0.5
+                                )
+                                logger.info(
+                                    "ALGEDONIC→ROUTING: bias increased to %.2f",
+                                    self.router._routing_bias,
+                                )
+                            elif act.action == "gnani_checkpoint" and self.attractor is not None:
+                                # Telos drift detected — run full Gnani evaluation
+                                verdict = self.attractor.gnani_checkpoint(
+                                    f"Algedonic telos drift: {act.description}",
+                                    {"pulse_cycle": pulse.cycle_number},
+                                )
+                                if self.memory is not None:
+                                    self.memory.record_event(
+                                        entity_type="gnani_verdict",
+                                        description=(
+                                            f"{'PROCEED' if verdict.proceed else 'HOLD'} "
+                                            "on telos drift alarm"
+                                        ),
+                                        metadata={
+                                            "trigger": "algedonic_telos_drift",
+                                            "proceed": verdict.proceed,
+                                        },
+                                    )
+                                logger.info(
+                                    "ALGEDONIC→GNANI: %s",
+                                    "PROCEED" if verdict.proceed else "HOLD",
+                                )
+                        except Exception as exc:
+                            logger.debug(
+                                "Algedonic action %s failed (non-fatal): %s", act.action, exc
+                            )
+            except Exception as exc:
+                logger.debug("Algedonic action wiring failed (non-fatal): %s", exc)
+
+        # Dynamic crew scaling check
+        scaling_rec = self._check_scaling_needs(pulse)
+
+        # S1 fix: Only record to memory on state changes, not routine pulses
         try:
-            if self.memory is not None:
+            should_record = False
+            if len(self._pulses) >= 2:
+                prev = self._pulses[-2]
+                # Record on health state transitions
+                if prev.is_healthy != pulse.is_healthy:
+                    should_record = True
+                # Record on algedonic activation
+                if pulse_extra.get("algedonic_actions"):
+                    should_record = True
+                # Record on scaling recommendation
+                if scaling_rec is not None:
+                    should_record = True
+            else:
+                should_record = True  # Always record first pulse
+
+            if should_record and self.memory is not None:
                 self.memory.record_event(
                     entity_type="decision",
                     description=(
@@ -288,9 +354,6 @@ class Organism:
                 )
         except Exception as exc:
             logger.debug("Organism memory record failed (non-fatal): %s", exc)
-
-        # Dynamic crew scaling check
-        scaling_rec = self._check_scaling_needs(pulse)
         if scaling_rec is not None:
             logger.warning(
                 "SCALING: %s — %s (urgency=%s)",
@@ -432,11 +495,15 @@ class Organism:
             cycles_without_improvement, best_fitness,
         )
 
-        # Check cost spike
+        # Check cost spike against recent evolution costs (S5 fix: pulse.to_dict() has no "cost" field)
         if cost > 0:
-            avg_costs = [p.to_dict().get("cost", 0) for p in self._pulses[-20:]]
-            if avg_costs:
-                avg = sum(avg_costs) / len(avg_costs)
+            if not hasattr(self, '_evolution_costs'):
+                self._evolution_costs: list[float] = []
+            self._evolution_costs.append(cost)
+            if len(self._evolution_costs) > 20:
+                self._evolution_costs = self._evolution_costs[-20:]
+            if len(self._evolution_costs) >= 3:
+                avg = sum(self._evolution_costs[:-1]) / len(self._evolution_costs[:-1])
                 if avg > 0:
                     await self.vsm.algedonic.check_cost_spike(cost, avg)
 
@@ -451,6 +518,8 @@ class Organism:
                     proposal,
                     {"fitness": best_fitness, "stagnation": cycles_without_improvement},
                 )
+                # C2 fix: store verdict so evolution.py callers can read it
+                self._last_gnani_verdict = verdict.proceed
                 if self.memory is not None:
                     self.memory.record_event(
                         entity_type="gnani_verdict",
@@ -466,6 +535,11 @@ class Organism:
         except Exception as exc:
             logger.debug("Gnani checkpoint failed (non-fatal): %s", exc)
 
+    @property
+    def last_gnani_verdict(self) -> bool | None:
+        """Most recent Gnani checkpoint verdict (True=PROCEED, False=HOLD, None=not run)."""
+        return self._last_gnani_verdict
+
     def _on_algedonic(self, signal: Any) -> None:
         """Callback when an algedonic signal fires.
 
@@ -478,6 +552,16 @@ class Organism:
             signal.title,
             signal.recommended_action,
         )
+        # M1 fix: Record to organism developmental memory
+        try:
+            if self.memory is not None:
+                self.memory.record_event(
+                    entity_type="algedonic_event",
+                    description=f"[{signal.severity}] {signal.title}: {signal.recommended_action}",
+                    metadata={"severity": signal.severity, "title": signal.title},
+                )
+        except Exception:
+            pass
 
     def _check_scaling_needs(self, pulse: OrganismPulse) -> dict[str, Any] | None:
         """Check if dynamic crew scaling is needed.

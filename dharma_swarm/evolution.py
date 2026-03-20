@@ -1597,6 +1597,9 @@ class DarwinEngine:
                     best_fitness=result.best_fitness,
                     cycles_without_improvement=_stagnation,
                 )
+                # C2 fix: Check Gnani verdict — if HOLD, log awareness hook
+                if hasattr(_org, '_last_gnani_verdict') and _org._last_gnani_verdict is False:
+                    logger.warning("Gnani checkpoint: HOLD — evolution stagnation detected")
         except Exception:
             pass  # Organism wiring is never fatal
 
@@ -1900,6 +1903,9 @@ class DarwinEngine:
                     best_fitness=result.best_fitness,
                     cycles_without_improvement=_stagnation,
                 )
+                # C2 fix: Check Gnani verdict — if HOLD, log awareness hook
+                if hasattr(_org, '_last_gnani_verdict') and _org._last_gnani_verdict is False:
+                    logger.warning("Gnani checkpoint: HOLD — evolution stagnation detected")
         except Exception:
             pass  # Organism wiring is never fatal
 

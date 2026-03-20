@@ -220,11 +220,13 @@ class OrganismRouter:
         return decision
 
     # Tier → model/provider mapping for convenience route() method
+    # Model strings must match AgentConfig.model field format (direct API names,
+    # not OpenRouter prefix format like "anthropic/claude-sonnet-4").
     _TIER_MODELS: dict[str, tuple[str, str]] = {
-        "T0": ("meta-llama/llama-3.1-8b-instruct", "openrouter"),
-        "T1": ("meta-llama/llama-3.3-70b-instruct", "openrouter"),
-        "T2": ("anthropic/claude-3-5-haiku", "openrouter"),
-        "T3": ("anthropic/claude-sonnet-4", "openrouter"),
+        "T0": ("llama-3.1-8b-instruct", "openrouter"),
+        "T1": ("llama-3.3-70b-instruct", "openrouter"),
+        "T2": ("claude-3-5-haiku-20241022", "anthropic"),
+        "T3": ("claude-sonnet-4-20250514", "anthropic"),
     }
 
     def route(self, task_text: str, agent_id: str = "") -> "RouteResult":
@@ -233,7 +235,7 @@ class OrganismRouter:
         Wraps classify_and_route() for simple task-to-model mapping.
         """
         decision = self.classify_and_route(task_text, agent_id=agent_id)
-        model, provider = self._TIER_MODELS.get(decision.recommended_tier, ("anthropic/claude-sonnet-4", "openrouter"))
+        model, provider = self._TIER_MODELS.get(decision.recommended_tier, ("claude-sonnet-4-20250514", "anthropic"))
         complexity = decision.signal.complexity.value if (decision.signal and decision.signal.complexity) else ""
         return RouteResult(model=model, provider=provider, complexity=complexity, tier=decision.recommended_tier)
 
