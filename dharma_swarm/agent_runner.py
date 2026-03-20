@@ -592,6 +592,21 @@ def _build_system_prompt(config: AgentConfig) -> str:
             parts.append(ctx)
         parts.append(SHAKTI_HOOK)
 
+    # AMIROS feedback loop — inject experiment/claim briefing into prompt
+    try:
+        from dharma_swarm.organism import get_organism
+        org = get_organism()
+        if org is not None:
+            briefing = org.amiros.briefing_for_agent(
+                agent_id=getattr(config, 'name', ''),
+                role=config.role.value,
+                task_description=getattr(config, 'current_task', ''),
+            )
+            if briefing:
+                parts.append(briefing)
+    except Exception:
+        pass  # Never-fatal
+
     return "\n\n".join(parts)
 
 

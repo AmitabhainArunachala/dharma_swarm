@@ -66,6 +66,15 @@ class RoutingDecision:
     signal: RoutingSignal | None = None
 
 
+@dataclass
+class RouteResult:
+    """Simple routing result with model/provider/complexity fields."""
+    model: str
+    provider: str
+    complexity: str
+    tier: str = ""
+
+
 class OrganismRouter:
     """Organism-level model routing intelligence.
 
@@ -210,6 +219,24 @@ class OrganismRouter:
 
         return decision
 
+    # Tier → model/provider mapping for convenience route() method
+    _TIER_MODELS: dict[str, tuple[str, str]] = {
+        "T0": ("meta-llama/llama-3.1-8b-instruct", "openrouter"),
+        "T1": ("meta-llama/llama-3.3-70b-instruct", "openrouter"),
+        "T2": ("anthropic/claude-3-5-haiku", "openrouter"),
+        "T3": ("anthropic/claude-sonnet-4", "openrouter"),
+    }
+
+    def route(self, task_text: str, agent_id: str = "") -> "RouteResult":
+        """Convenience route method — returns a RouteResult with model/provider/complexity.
+
+        Wraps classify_and_route() for simple task-to-model mapping.
+        """
+        decision = self.classify_and_route(task_text, agent_id=agent_id)
+        model, provider = self._TIER_MODELS.get(decision.recommended_tier, ("anthropic/claude-sonnet-4", "openrouter"))
+        complexity = decision.signal.complexity.value if (decision.signal and decision.signal.complexity) else ""
+        return RouteResult(model=model, provider=provider, complexity=complexity, tier=decision.recommended_tier)
+
     def record_cost(self, cost_usd: float) -> None:
         """Record an LLM call cost for budget tracking."""
         self._cost_window.append((time.time(), cost_usd))
@@ -253,6 +280,7 @@ __all__ = [
     "ComplexityTier",
     "LanguageHint",
     "OrganismRouter",
+    "RouteResult",
     "RoutingDecision",
     "RoutingSignal",
 ]

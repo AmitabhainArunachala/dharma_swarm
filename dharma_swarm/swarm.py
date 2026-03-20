@@ -161,6 +161,9 @@ class SwarmManager:
         self._director_interval_ticks: int = _sm.director_interval_ticks
         self._living_interval_ticks: int = _sm.living_interval_ticks
 
+        # v0.6.1: Organism
+        self._organism: Any = None
+
         # v0.6.0: Hermes-inspired integration (OPTIONAL)
         self._tool_registry: Any = None    # ToolRegistry
         self._cron_scheduler: Any = None   # module ref
@@ -390,6 +393,20 @@ class SwarmManager:
         except Exception as e:
             logger.warning("ThinkodynamicDirector init failed (non-fatal): %s", e)
 
+        # v0.6.1: Organism — autopoietic integration layer
+        try:
+            from dharma_swarm.organism import Organism, set_organism
+            self._organism = Organism(state_dir=self.state_dir)
+            await self._organism.boot()
+            set_organism(self._organism)
+            # Share trace store with organism
+            if self._trace_store is not None:
+                self._organism.traces = self._trace_store
+            logger.info("Organism booted — heartbeat ready")
+        except Exception as e:
+            self._organism = None
+            logger.warning("Organism boot failed (non-fatal): %s", e)
+
         # Track which subsystems successfully initialized
         for name, attr in [
             ("task_board", self._task_board),
@@ -406,6 +423,7 @@ class SwarmManager:
             ("stigmergy", self._stigmergy),
             ("skill_registry", self._skill_registry),
             ("director", self._director),
+            ("organism", self._organism),
         ]:
             if attr is not None:
                 self._initialized.add(name)
@@ -638,12 +656,29 @@ class SwarmManager:
             gate_result = self._gatekeeper.check(action=title, content=description)
             if gate_result.decision.value == "block":
                 raise ValueError(f"Telos gate blocked: {gate_result.reason}")
-            return await self._task_board.create(
+            task = await self._task_board.create(
                 title=title,
                 description=description,
                 priority=priority,
                 metadata=incoming,
             )
+            # Intent routing — set preferred_roles if not already specified
+            try:
+                if self._intent_router is not None:
+                    meta = task.metadata if isinstance(task.metadata, dict) else {}
+                    if not meta.get("preferred_roles"):
+                        route_result = self._intent_router.route(
+                            task.description or task.title or ""
+                        )
+                        if hasattr(route_result, 'skills') and route_result.skills:
+                            # Map top skill to role hints
+                            roles = [s.name for s in route_result.skills[:3]]
+                            meta["preferred_roles"] = roles
+                            meta["intent_complexity"] = getattr(route_result, 'complexity', None)
+                            await self._task_board.update_task(task.id, metadata=meta)
+            except Exception as exc:
+                logger.debug("Intent routing failed (non-fatal): %s", exc)
+            return task
 
     async def create_task_batch(
         self,
@@ -1278,6 +1313,12 @@ class SwarmManager:
                 if activity.get("circuit_broken"):
                     await asyncio.sleep(min(tick_interval, 300))
                     continue
+                # v0.6.1: Organism heartbeat after each tick
+                if self._organism is not None:
+                    try:
+                        await self._organism.heartbeat()
+                    except Exception as _hb_exc:
+                        logger.debug("Organism heartbeat failed (non-fatal): %s", _hb_exc)
             except Exception as exc:
                 logger.exception("Tick failed: %s", exc)
                 tripped = self._daemon.circuit_breaker.record_failure()

@@ -174,6 +174,12 @@ class AMIROSRegistry:
         self._base = (state_dir or Path.home() / ".dharma") / "amiros"
         self._base.mkdir(parents=True, exist_ok=True)
 
+        # v0.6.1: explicit persist path (alias to _base for API compatibility)
+        if state_dir is not None:
+            self._persist_path: Path = state_dir / "amiros"
+        else:
+            self._persist_path = self._base
+
         self._experiments_path = self._base / "experiments.jsonl"
         self._claims_path = self._base / "claims.jsonl"
         self._artifacts_path = self._base / "artifacts.jsonl"
@@ -212,6 +218,7 @@ class AMIROSRegistry:
         )
         self._experiments[exp.id] = exp
         self._append(self._experiments_path, exp)
+        self._save()
         logger.info("AMIROS: Registered experiment %s: %s", exp.id[:8], name)
         return exp
 
@@ -239,6 +246,7 @@ class AMIROSRegistry:
             if exp_id in self._experiments:
                 self._experiments[exp_id].claim_ids.append(claim.id)
 
+        self._save()
         logger.info("AMIROS: Registered claim %s: %s", claim.id[:8], statement[:60])
         return claim
 
@@ -309,6 +317,7 @@ class AMIROSRegistry:
         )
         self._harvests.append(entry)
         self._append(self._harvests_path, entry)
+        self._save()
         return entry
 
     # ── Lifecycle updates ─────────────────────────────────────────
@@ -462,6 +471,105 @@ class AMIROSRegistry:
         except Exception as exc:
             logger.warning("Failed to load %s: %s", path.name, exc)
         return result
+
+    def _save(self) -> None:
+        """Write a JSON summary snapshot for quick persistence (v0.6.1)."""
+        try:
+            summary = {
+                "total_experiments": len(self._experiments),
+                "total_claims": len(self._claims),
+                "total_artifacts": len(self._artifacts),
+                "total_configs": len(self._configs),
+                "total_harvested": len(self._harvests),
+            }
+            summary_path = self._base / "summary.json"
+            summary_path.write_text(json.dumps(summary, indent=2))
+        except Exception as exc:
+            logger.debug("AMIROS _save failed (non-fatal): %s", exc)
+
+    def _load(self) -> None:
+        """Reload registries from JSONL files (v0.6.1)."""
+        try:
+            self._load_all()
+        except Exception as exc:
+            logger.debug("AMIROS _load failed (non-fatal): %s", exc)
+
+    # ── Agent Feedback Loop ────────────────────────────────────
+
+    def briefing_for_agent(
+        self,
+        agent_id: str = "",
+        role: str = "",
+        task_description: str = "",
+        max_items: int = 5,
+    ) -> str:
+        """Generate a context briefing for an agent from AMIROS registries.
+
+        Closes the feedback loop: agents read their own (and others')
+        experiment results, claim statuses, and harvest patterns.
+        This gets injected into agent prompts via the organism.
+
+        Returns a formatted markdown string, or "" if nothing relevant.
+        """
+        lines: list[str] = []
+
+        # 1. Recent experiments relevant to this agent or task
+        relevant_exps: list[Experiment] = []
+        for exp in sorted(
+            self._experiments.values(),
+            key=lambda e: e.created_at,
+            reverse=True,
+        )[:20]:
+            # Agent's own experiments
+            if agent_id and exp.agent_id == agent_id:
+                relevant_exps.append(exp)
+            # Task keyword match
+            elif task_description:
+                task_lower = task_description.lower()
+                if (exp.name.lower() in task_lower
+                        or any(t in task_lower for t in exp.tags)):
+                    relevant_exps.append(exp)
+            if len(relevant_exps) >= max_items:
+                break
+
+        if relevant_exps:
+            lines.append("### Recent Experiments")
+            for exp in relevant_exps[:max_items]:
+                duration = f" ({exp.duration_seconds:.0f}s)" if exp.duration_seconds else ""
+                lines.append(
+                    f"- [{exp.status}] {exp.name}{duration}"
+                    + (f" — {exp.result_summary[:100]}" if exp.result_summary else "")
+                )
+
+        # 2. Active claims in the system
+        active = self.active_claims()
+        if active:
+            lines.append("### Active Claims")
+            for claim in sorted(active, key=lambda c: c.confidence, reverse=True)[:max_items]:
+                challenges = f" ({len(claim.challenges)} challenges)" if claim.challenges else ""
+                lines.append(
+                    f"- [{claim.status}] conf={claim.confidence:.2f}{challenges} "
+                    f"{claim.statement[:100]}"
+                )
+
+        # 3. Unprocessed harvest patterns (what's been noticed but not acted on)
+        unprocessed = self.unprocessed_harvests()
+        if unprocessed:
+            pattern_counts: dict[str, int] = {}
+            for h in unprocessed:
+                for p in h.extracted_patterns:
+                    pattern_counts[p] = pattern_counts.get(p, 0) + 1
+            if pattern_counts:
+                lines.append("### Unprocessed Patterns")
+                for pattern, count in sorted(
+                    pattern_counts.items(), key=lambda x: x[1], reverse=True
+                )[:max_items]:
+                    lines.append(f"- ({count}x) {pattern}")
+
+        if not lines:
+            return ""
+
+        return "## AMIROS Briefing\n" + "\n".join(lines)
 
     def save_snapshot(self) -> Path:
         """Write a full JSON snapshot for debugging/backup."""

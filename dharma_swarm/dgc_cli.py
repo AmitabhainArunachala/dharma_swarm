@@ -1377,6 +1377,44 @@ def cmd_daemon_status() -> None:
         print("  pulse_log: no entries")
 
 
+def cmd_organism_status() -> None:
+    """Show organism status."""
+    async def _status():
+        from dharma_swarm.organism import get_organism
+        org = get_organism()
+        if org is None:
+            # Try booting a fresh one for status check
+            from dharma_swarm.organism import Organism
+            org = Organism()
+            await org.boot()
+        status = org.status()
+        import json
+        print(json.dumps(status, indent=2, default=str))
+
+    _run(_status())
+
+
+def cmd_organism_pulse() -> None:
+    """Run a single organism heartbeat and display results."""
+    async def _pulse():
+        from dharma_swarm.organism import get_organism, Organism
+        org = get_organism()
+        if org is None:
+            org = Organism()
+            await org.boot()
+        pulse = await org.heartbeat()
+        print(f"Cycle:      {pulse.cycle_number}")
+        print(f"Health:     {pulse.fleet_health:.2f}")
+        print(f"Coherence:  {pulse.identity_coherence:.2f}")
+        print(f"Algedonic:  {pulse.algedonic_active}")
+        print(f"Zeitgeist:  {pulse.zeitgeist_signals}")
+        print(f"AMIROS:     {pulse.amiros_experiments_running} experiments")
+        print(f"Duration:   {pulse.duration_ms:.1f}ms")
+        print(f"Healthy:    {'YES' if pulse.is_healthy else 'NO'}")
+
+    _run(_pulse())
+
+
 def cmd_agni(command: str) -> None:
     """Run command on AGNI VPS."""
     from dharma_swarm.telos_gates import check_with_reflective_reroute
@@ -4639,6 +4677,12 @@ def _build_parser() -> argparse.ArgumentParser:
     # -- pulse --
     sub.add_parser("pulse", help="Run one heartbeat pulse")
 
+    # -- organism --
+    p_organism = sub.add_parser("organism", help="Organism subsystem (autopoietic integration layer)")
+    organism_sub = p_organism.add_subparsers(dest="organism_cmd")
+    organism_sub.add_parser("status", help="Show organism status")
+    organism_sub.add_parser("pulse", help="Run a single organism heartbeat")
+
     # -- orchestrate-live --
     p_orch_live = sub.add_parser(
         "orchestrate-live",
@@ -5556,6 +5600,14 @@ def main() -> None:
             cmd_daemon_status()
         case "pulse":
             cmd_pulse()
+        case "organism":
+            match args.organism_cmd:
+                case "status":
+                    cmd_organism_status()
+                case "pulse":
+                    cmd_organism_pulse()
+                case _:
+                    parser.parse_args(["organism", "--help"])
         case "orchestrate-live":
             cmd_orchestrate_live(background=args.background)
         case "swarm":

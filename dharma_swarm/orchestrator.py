@@ -213,6 +213,22 @@ class Orchestrator:
                         )
                     continue  # skip this task, try next
 
+            # Organism model routing — suggest optimal provider/model
+            try:
+                from dharma_swarm.organism import get_organism
+                org = get_organism()
+                if org is not None and hasattr(task, 'description'):
+                    route = org.router.route(task.description or task.title or "")
+                    if route and hasattr(route, 'model'):
+                        if task.metadata is None:
+                            task.metadata = {}
+                        if isinstance(task.metadata, dict):
+                            task.metadata["organism_routed_model"] = route.model
+                            task.metadata["organism_routed_provider"] = getattr(route, 'provider', '')
+                            task.metadata["organism_complexity"] = getattr(route, 'complexity', '')
+            except Exception:
+                pass  # Never-fatal
+
             td = TaskDispatch(
                 task_id=task.id,
                 agent_id=agent.id,
