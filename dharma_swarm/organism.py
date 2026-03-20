@@ -144,6 +144,30 @@ class Organism:
         # Dynamic scaling state
         self._stigmergy_seen: set[str] = set()
 
+        # Phase 4: Organism developmental memory
+        try:
+            from dharma_swarm.organism_memory import OrganismMemory
+            self.memory = OrganismMemory(state_dir=self._state_dir)
+        except Exception:
+            self.memory = None
+            logger.debug("OrganismMemory init failed (non-fatal)")
+
+        # Phase 4: Algedonic activation (pain → behavioral change)
+        try:
+            from dharma_swarm.algedonic_activation import AlgedonicActivation
+            self.algedonic_activation = AlgedonicActivation(self)
+        except Exception:
+            self.algedonic_activation = None
+            logger.debug("AlgedonicActivation init failed (non-fatal)")
+
+        # Phase 4: Gnani field
+        try:
+            from dharma_swarm.dharma_attractor import DharmaAttractor
+            self.attractor = DharmaAttractor(state_dir=self._state_dir)
+        except Exception:
+            self.attractor = None
+            logger.debug("DharmaAttractor init failed (non-fatal)")
+
         # Wiring: algedonic callbacks
         self.vsm.algedonic.register_callback(self._on_algedonic)
 
@@ -237,6 +261,33 @@ class Organism:
         # Keep last 1000 pulses in memory
         if len(self._pulses) > 1000:
             self._pulses = self._pulses[-1000:]
+
+        # Phase 4: Algedonic activation — pain causes behavioral change
+        pulse_extra: dict[str, Any] = {}
+        try:
+            if self.algedonic_activation is not None:
+                actions = self.algedonic_activation.evaluate(pulse)
+                for act in actions:
+                    self.algedonic_activation.apply(act)
+                if actions:
+                    pulse_extra["algedonic_actions"] = [a.signal_type for a in actions]
+        except Exception as exc:
+            logger.debug("Algedonic activation failed (non-fatal): %s", exc)
+
+        # Phase 4: Record pulse to organism developmental memory
+        try:
+            if self.memory is not None:
+                self.memory.record_event(
+                    entity_type="decision",
+                    description=(
+                        f"Heartbeat cycle {pulse.cycle_number}: "
+                        f"health={pulse.fleet_health:.2f}, "
+                        f"coherence={pulse.identity_coherence:.2f}"
+                    ),
+                    metadata=pulse.to_dict(),
+                )
+        except Exception as exc:
+            logger.debug("Organism memory record failed (non-fatal): %s", exc)
 
         # Dynamic crew scaling check
         scaling_rec = self._check_scaling_needs(pulse)
@@ -389,6 +440,32 @@ class Organism:
                 if avg > 0:
                     await self.vsm.algedonic.check_cost_spike(cost, avg)
 
+        # Phase 4: Gnani checkpoint on evolution events
+        try:
+            if self.attractor is not None and cycles_without_improvement > 5:
+                proposal = (
+                    f"Evolution cycle {cycle_number}: best_fitness={best_fitness}, "
+                    f"stagnant for {cycles_without_improvement} cycles"
+                )
+                verdict = self.attractor.gnani_checkpoint(
+                    proposal,
+                    {"fitness": best_fitness, "stagnation": cycles_without_improvement},
+                )
+                if self.memory is not None:
+                    self.memory.record_event(
+                        entity_type="gnani_verdict",
+                        description=(
+                            f"{'PROCEED' if verdict.proceed else 'HOLD'} on evolution cycle "
+                            f"{cycle_number}"
+                        ),
+                        metadata={
+                            "proposal": proposal,
+                            "proceed": verdict.proceed,
+                        },
+                    )
+        except Exception as exc:
+            logger.debug("Gnani checkpoint failed (non-fatal): %s", exc)
+
     def _on_algedonic(self, signal: Any) -> None:
         """Callback when an algedonic signal fires.
 
@@ -510,7 +587,7 @@ class Organism:
     def status(self) -> dict[str, Any]:
         """Full organism status."""
         last_pulse = self._pulses[-1] if self._pulses else None
-        return {
+        result: dict[str, Any] = {
             "alive": self._running,
             "cycle": self._cycle,
             "last_pulse": last_pulse.to_dict() if last_pulse else None,
@@ -519,6 +596,18 @@ class Organism:
             "palace": self.palace.stats(),
             "router": self.router.stats(),
         }
+        # Phase 4: memory, attractor, algedonic stats
+        try:
+            result["memory"] = self.memory.stats() if self.memory else {}
+            result["attractor"] = "active" if self.attractor else "inactive"
+            result["algedonic_activations"] = (
+                len(self.algedonic_activation.recent_activations)
+                if self.algedonic_activation
+                else 0
+            )
+        except Exception:
+            pass
+        return result
 
     @property
     def latest_pulse(self) -> OrganismPulse | None:

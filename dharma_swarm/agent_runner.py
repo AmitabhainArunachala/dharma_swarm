@@ -607,6 +607,17 @@ def _build_system_prompt(config: AgentConfig) -> str:
     except Exception:
         pass  # Never-fatal
 
+    # Phase 4: Gnani field — ambient alignment seed
+    try:
+        from dharma_swarm.organism import get_organism
+        org = get_organism()
+        if org is not None and hasattr(org, 'attractor') and org.attractor is not None:
+            seed = org.attractor.ambient_seed()
+            if seed:
+                parts.append(seed)
+    except Exception:
+        pass  # Never-fatal
+
     return "\n\n".join(parts)
 
 

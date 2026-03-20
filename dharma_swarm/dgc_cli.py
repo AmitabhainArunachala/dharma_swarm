@@ -363,6 +363,23 @@ def cmd_status() -> None:
                     print(f"  \u26a0 Algedonic signals active: {pulse['algedonic_active']}")
             else:
                 print("\nOrganism: booted, no heartbeat yet")
+            # Phase 4: Organism memory and algedonic activations
+            try:
+                if hasattr(org, 'memory') and org.memory is not None:
+                    mem_stats = org.memory.stats()
+                    print(f"  Memory entities:  {mem_stats.get('total_entities', 0)}")
+                    print(f"  Relationships:    {mem_stats.get('total_relationships', 0)}")
+                    print(f"  Self-model accuracy: {mem_stats.get('self_model_accuracy', 'N/A')}")
+                if hasattr(org, 'algedonic_activation') and org.algedonic_activation is not None:
+                    recent = org.algedonic_activation.recent_activations
+                    if recent:
+                        print(f"  Algedonic activations (recent): {len(recent)}")
+                        for act in recent[-3:]:
+                            print(f"    [{act['severity']}] {act['signal']} \u2192 {act['action']}")
+                if hasattr(org, 'attractor') and org.attractor is not None:
+                    print(f"  Gnani field: active")
+            except Exception:
+                pass
         else:
             print("\nOrganism: not booted")
     except Exception:
