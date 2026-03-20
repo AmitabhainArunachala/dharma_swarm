@@ -454,6 +454,35 @@ async def feedback_ascent(result: LoopResult) -> None:
     except Exception as e:
         logger.debug("Stigmergy mark failed: %s", e)
 
+    # 4. Feed into organism nervous system (ontology → evolution → cascade closure)
+    try:
+        from dharma_swarm.organism import get_organism
+        _org = get_organism()
+        if _org is not None:
+            # Cascade completing → feed into AMIROS as experiment outcome
+            _org.amiros.register_experiment(
+                name=f"cascade_{result.domain}",
+                hypothesis=f"Domain {result.domain} can converge via strange loop",
+                lane="cascade",
+                config_snapshot={"domain": result.domain, "iterations": result.iterations_completed},
+            )
+            # If eigenform reached → register as validated claim
+            if result.eigenform_reached:
+                _org.amiros.register_claim(
+                    domain=result.domain,
+                    claim=f"Eigenform reached: fitness={result.best_fitness:.3f}",
+                    evidence_type="empirical",
+                    evidence_ref=f"cascade_history:{result.domain}",
+                    confidence=min(1.0, result.best_fitness),
+                )
+            # Health check: stagnant cascade → algedonic
+            if not result.converged and result.best_fitness < 0.3:
+                await _org.vsm.algedonic.check_health(
+                    f"cascade_{result.domain}", result.best_fitness,
+                )
+    except Exception as e:
+        logger.debug("Organism cascade wiring failed: %s", e)
+
 
 async def run_domain(
     domain_name: str,

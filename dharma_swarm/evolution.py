@@ -1586,6 +1586,20 @@ class DarwinEngine:
         await self._maybe_run_meta_evolution(result)
         await self._emit_coalgebra_observation(result, proposals, new_entries)
 
+        # ── Organism: feed cycle metrics into nervous system ──
+        try:
+            from dharma_swarm.organism import get_organism
+            _org = get_organism()
+            if _org is not None:
+                _stagnation = getattr(self, '_cycles_without_improvement', 0)
+                await _org.on_evolution_cycle(
+                    cycle_number=result.proposals_submitted,
+                    best_fitness=result.best_fitness,
+                    cycles_without_improvement=_stagnation,
+                )
+        except Exception:
+            pass  # Organism wiring is never fatal
+
         return result
 
     # -- sandbox execution ---------------------------------------------------
@@ -1874,6 +1888,20 @@ class DarwinEngine:
         await self.reflect_on_cycle(result, proposals)
         await self._maybe_run_meta_evolution(result)
         await self._emit_coalgebra_observation(result, proposals, new_entries)
+
+        # ── Organism: feed sandbox cycle metrics into nervous system ──
+        try:
+            from dharma_swarm.organism import get_organism
+            _org = get_organism()
+            if _org is not None:
+                _stagnation = getattr(self, '_cycles_without_improvement', 0)
+                await _org.on_evolution_cycle(
+                    cycle_number=result.proposals_submitted,
+                    best_fitness=result.best_fitness,
+                    cycles_without_improvement=_stagnation,
+                )
+        except Exception:
+            pass  # Organism wiring is never fatal
 
         return result
 

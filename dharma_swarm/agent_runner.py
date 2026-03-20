@@ -842,6 +842,20 @@ class AgentRunner:
                 spec_ref=spec_ref,
                 requirement_refs=req_refs,
             )
+            # ── Organism VSM: feed gate result into nervous system ──
+            try:
+                from dharma_swarm.organism import get_organism
+                _org = get_organism()
+                if _org is not None:
+                    _gate_str = "PASS" if gate.result.decision != GateDecision.BLOCK else "FAIL"
+                    _org.on_gate_check(
+                        gate_name="telos_reflective",
+                        result=_gate_str,
+                        action_description=task.title[:200],
+                        agent_id=telic_agent_id,
+                    )
+            except Exception:
+                pass  # Organism wiring is never fatal
             if gate.result.decision == GateDecision.BLOCK:
                 raise RuntimeError(f"Telos block: {gate.result.reason}")
 
@@ -977,6 +991,28 @@ class AgentRunner:
 
             # Strange loop: score agent output and emit fitness signal
             self._emit_fitness_signal(task, result)
+
+            # ── Organism: harvest output + viability update ──
+            try:
+                from dharma_swarm.organism import get_organism
+                _org = get_organism()
+                if _org is not None:
+                    await _org.on_agent_output(
+                        agent_id=telic_agent_id,
+                        task_description=task.title[:200],
+                        output=result[:2000],
+                    )
+                    # Viability update: compute from task success metrics
+                    _org.on_agent_viability(
+                        agent_id=telic_agent_id,
+                        s1=1.0,  # completed successfully
+                        s2=min(1.0, 1.0 / max(1, gate.attempts)),  # coordination cost
+                        s3=1.0 if gate.result.decision != GateDecision.BLOCK else 0.3,
+                        s4=min(1.0, len(result) / 500),  # output substantiveness
+                        s5=1.0,  # identity maintained
+                    )
+            except Exception:
+                pass  # Organism wiring is never fatal
 
             # ── Telic Seam: record Outcome + ValueEvent + Contribution ──
             try:

@@ -90,7 +90,7 @@ class AdaptiveAutonomy:
     ):
         self._base = base_level
         self._history: deque[bool] = deque(maxlen=history_size)
-        self._quiet_hours = quiet_hours or {2, 3, 4}
+        self._quiet_hours = quiet_hours if quiet_hours is not None else {2, 3, 4}
         self._consecutive_failures: int = 0
         self._total_decisions: int = 0
 
