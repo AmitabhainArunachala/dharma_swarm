@@ -48,6 +48,8 @@ class EdgeType(str, Enum):
     IMPORTS = "imports"
     REFERENCES = "references"
     GROUNDS = "grounds"  # philosophical concept grounded in engineering
+    IS_A = "is_a"
+    ENABLES = "enables"
 
 
 class HardeningAngle(str, Enum):

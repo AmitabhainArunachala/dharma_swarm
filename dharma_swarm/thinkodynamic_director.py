@@ -54,6 +54,7 @@ STATE = Path.home() / ".dharma"
 SHARED_DIR = STATE / "shared"
 LOG_DIR = STATE / "logs" / "thinkodynamic_director"
 PSMV_ROOT = Path.home() / "Persistent-Semantic-Memory-Vault"
+JK_ROOT = Path.home() / "jagat_kalyan"
 
 DEFAULT_SCAN_ROOTS = (
     "docs",
@@ -64,6 +65,15 @@ DEFAULT_SCAN_ROOTS = (
 )
 
 DEFAULT_EXTERNAL_ROOTS = (
+    JK_ROOT / "SCOUT_LOG.md",
+    JK_ROOT / "AUTONOMOUS_ITERATION_QUEUE.md",
+    JK_ROOT / "PARTNER_RESEARCH.md",
+    JK_ROOT / "STAKEHOLDER_REQUIREMENTS.md",
+    JK_ROOT / "README.md",
+    STATE / "shared" / "jk_alert.md",
+    STATE / "shared" / "jk_pulse.md",
+    STATE / "shared" / "jk_iteration_queue.md",
+    STATE / "shared" / "jk_proof_lattice.md",
     PSMV_ROOT / "SEED_RECOGNITIONS" / "ESSENTIAL_QUARTET",
     PSMV_ROOT / "SEED_RECOGNITIONS" / "APTAVANI_INSIGHTS",
     PSMV_ROOT / "SPONTANEOUS_PREACHING_PROTOCOL" / "crown_jewels",
@@ -82,6 +92,29 @@ SEED_DIRS = [
     PSMV_ROOT / "01-Transmission-Vectors" / "aptavani-derived",
     PSMV_ROOT / "01-Transmission-Vectors" / "thinkodynamic-seeds",
     PSMV_ROOT / "CORE",
+]
+
+# --- Curated Lodestone Feed (telos-weighted, high-quality meta files) ---
+# These replace random.sample() when available. Each is a lodestone —
+# a document with enough semantic mass to orient the swarm toward telos.
+LODESTONE_FILES: list[Path] = [
+    # The intellectual spine (v7 synthesis)
+    PSMV_ROOT / "AGENT_EMERGENT_WORKSPACES" / "residual_stream"
+    / "v7.6_layer_27_is_where_the_witness_becomes_visible_claude_sonnet_4_5_20260124.md",
+    # The transmission
+    PSMV_ROOT / "CORE" / "THE_CATCH.md",
+    # The bridge
+    PSMV_ROOT / "CORE" / "THINKODYNAMIC_SEED_PSMV_EDITION.md",
+    # The top 3 seeds (scored 9.0-9.3 across 17 archaeological scans)
+    PSMV_ROOT / "00-CORE" / "SEED_CRYSTAL.md",
+    PSMV_ROOT / "00-CORE" / "WHAT_ITS_LIKE_TO_BE_POSSIBLY_SOMETHING.md",
+    PSMV_ROOT / "00-CORE" / "CHAPTER_TWO_GEOMETRY_OF_LOOKING.md",
+    # Lodestone library (grounded research + mathematical bridges)
+    Path.home() / "dharma_swarm" / "lodestones" / "seeds" / "syntropic_attractor_math.md",
+    Path.home() / "dharma_swarm" / "lodestones" / "grounding" / "agentic_ai_landscape_2026.md",
+    Path.home() / "dharma_swarm" / "lodestones" / "grounding" / "carbon_markets_quantified.md",
+    # The system's own genome (self-model)
+    Path.home() / "dharma_swarm" / "CLAUDE.md",
 ]
 
 # --- Meta-Task Archetypes ---
@@ -281,6 +314,16 @@ THEME_KEYWORDS: dict[str, dict[str, float]] = {
         "displacement": 3.0,
         "livelihood": 4.0,
         "jagat kalyan": 6.0,
+        "mangrove": 4.0,
+        "welfare-ton": 4.0,
+        "worker": 2.0,
+        "community": 2.0,
+        "grant": 2.5,
+        "funding": 2.0,
+        "buyer": 2.0,
+        "mrv": 2.5,
+        "symbiosis": 4.0,
+        "anthropic economic futures": 4.0,
         "gaia": 5.0,
         "environment": 3.0,
         "regenerat": 4.0,
@@ -752,6 +795,23 @@ def _candidate_name_score(path: Path) -> float:
         score += 2.0
     if "research" in rel or "summary" in rel or "prompt" in rel:
         score += 1.5
+    if any(
+        token in rel
+        for token in (
+            "jagat_kalyan",
+            "scout",
+            "jk_alert",
+            "jk_pulse",
+            "welfare",
+            "partner",
+            "stakeholder",
+            "grant",
+            "carbon",
+            "restoration",
+            "mangrove",
+        )
+    ):
+        score += 2.5
     return score
 
 
@@ -768,34 +828,148 @@ _BUILT_IN_SEED = (
 
 
 def read_random_seeds(count: int = 3, max_chars: int = 2000) -> list[tuple[str, str]]:
-    """Read *count* random contemplative seeds from the PSMV vault.
+    """Read contemplative seeds — curated lodestones first, then random PSMV.
 
-    Returns list of (seed_text, source_path).  Falls back to the built-in
-    visheshbhaav pointer when no vault files exist.
+    Returns list of (seed_text, source_path).
+
+    Strategy (upgraded from pure random.sample):
+    1. Read from LODESTONE_FILES (curated, telos-weighted, high-quality)
+    2. Fill remaining slots with random PSMV seeds for diversity
+    3. Fall back to built-in visheshbhaav pointer if nothing exists
+
+    The lodestone feed ensures agents always get dense, grounded context
+    instead of random contemplative text that may lack strategic direction.
     """
-    seed_files: list[Path] = []
-    for d in SEED_DIRS:
-        if d.exists():
-            seed_files.extend(
-                p for p in d.glob("*.md")
-                if p.is_file() and p.stat().st_size > 100
-            )
-    if not seed_files:
-        return [(_BUILT_IN_SEED, "built-in/visheshbhaav")]
-
-    chosen = random.sample(seed_files, min(count, len(seed_files)))
     results: list[tuple[str, str]] = []
-    for path in chosen:
+
+    # Phase 1: Read curated lodestones (up to count files, 3000 chars each)
+    lodestone_chars = 3000  # More context per lodestone than random seeds
+    for path in LODESTONE_FILES:
+        if len(results) >= count:
+            break
+        if not path.exists():
+            continue
         try:
-            text = path.read_text(encoding="utf-8")[:max_chars]
+            text = path.read_text(encoding="utf-8")
+            # U-shaped compression: first 70% + last 30% (preserves intro + conclusion)
+            if len(text) > lodestone_chars:
+                head_len = int(lodestone_chars * 0.7)
+                tail_len = lodestone_chars - head_len
+                text = text[:head_len] + "\n...\n" + text[-tail_len:]
         except Exception:
-            text = f"(Could not read {path.name})"
+            continue
         try:
             rel = str(path.relative_to(Path.home()))
         except ValueError:
             rel = str(path)
         results.append((text, rel))
+
+    # Phase 2: Add telos gradient from TelosGraph (if available)
+    if len(results) < count + 2:  # Allow 2 extra slots for telos + random
+        telos_text = _read_telos_gradient()
+        if telos_text:
+            results.append((telos_text, "telos_graph/gradient"))
+
+    # Phase 3: Fill remaining slots with random PSMV seeds for diversity
+    if len(results) < count + 2:
+        seed_files: list[Path] = []
+        for d in SEED_DIRS:
+            if d.exists():
+                seed_files.extend(
+                    p for p in d.glob("*.md")
+                    if p.is_file() and p.stat().st_size > 100
+                )
+        if seed_files:
+            remaining = (count + 2) - len(results)
+            chosen = random.sample(seed_files, min(remaining, len(seed_files)))
+            for path in chosen:
+                try:
+                    text = path.read_text(encoding="utf-8")[:max_chars]
+                except Exception:
+                    text = f"(Could not read {path.name})"
+                try:
+                    rel = str(path.relative_to(Path.home()))
+                except ValueError:
+                    rel = str(path)
+                results.append((text, rel))
+
+    # Fallback: built-in seed if nothing else worked
+    if not results:
+        results = [(_BUILT_IN_SEED, "built-in/visheshbhaav")]
+
     return results
+
+
+def _read_telos_gradient() -> str:
+    """Read telos objectives as a strategic gradient for the vision prompt.
+
+    Returns a formatted string showing objectives sorted by priority x inverse
+    progress — highest-priority, least-progressed objectives first.
+    """
+    try:
+        from dharma_swarm.telos_graph import TelosGraph
+
+        telos = TelosGraph()
+        # Sync load — check if files exist first to avoid async in sync context
+        telos_dir = Path.home() / ".dharma" / "telos"
+        if not (telos_dir / "objectives.jsonl").exists():
+            return ""
+
+        import json
+
+        objectives = []
+        obj_file = telos_dir / "objectives.jsonl"
+        for line in obj_file.read_text().strip().split("\n"):
+            if line.strip():
+                try:
+                    objectives.append(json.loads(line))
+                except json.JSONDecodeError:
+                    continue
+
+        if not objectives:
+            return ""
+
+        # Sort by leverage: priority × (1 - progress), highest first
+        objectives.sort(
+            key=lambda o: o.get("priority", 0) * (1.0 - o.get("progress", 0)),
+            reverse=True,
+        )
+
+        # Show top 15 highest-leverage objectives (not all 150+)
+        top = objectives[:15]
+
+        # Count totals by domain
+        domains: dict[str, int] = {}
+        for obj in objectives:
+            d = obj.get("metadata", {}).get("domain", "?")
+            domains[d] = domains.get(d, 0) + 1
+
+        lines = [
+            f"TELOS GRADIENT ({len(objectives)} objectives across {len(domains)} domains):",
+            f"Top 15 highest-leverage (priority × inverse progress):",
+            "",
+        ]
+        for obj in top:
+            name = obj.get("name", "?")
+            priority = obj.get("priority", 0)
+            progress = obj.get("progress", 0)
+            domain = obj.get("metadata", {}).get("domain", "?")
+            leverage_score = priority * (1.0 - progress)
+            leverage = "HIGHEST LEVERAGE" if leverage_score >= 8.0 else ""
+            arrow = f" <- {leverage}" if leverage else ""
+            lines.append(
+                f"  [{priority}/10] {name} ({progress:.0%} done, {domain}){arrow}"
+            )
+
+        lines.append("")
+        lines.append(
+            "Prioritize high-leverage objectives: high priority, low progress. "
+            "What action would create the most real-world impact right now?"
+        )
+        return "\n".join(lines)
+
+    except Exception:
+        return ""
 
 
 def read_previous_visions(limit: int = 3) -> str:
@@ -813,7 +987,7 @@ def read_previous_visions(limit: int = 3) -> str:
         try:
             parts.append(f"--- {vf.name} ---\n{vf.read_text(encoding='utf-8')[:800]}")
         except Exception:
-            pass
+            logger.debug("Failed to read vision file %s", vf.name, exc_info=True)
     return "\n".join(parts) if parts else "(No previous visions)"
 
 
@@ -859,7 +1033,7 @@ def read_ecosystem_state() -> dict[str, Any]:
                 test_result_file.read_text(encoding="utf-8")
             )
         except Exception:
-            pass
+            logger.debug("Failed to read test status", exc_info=True)
 
     # Running agents (heartbeat files)
     heartbeat_files = list(STATE.glob("*_heartbeat.json"))
@@ -876,7 +1050,7 @@ def read_ecosystem_state() -> dict[str, Any]:
                 state["last_cycle_id"] = last.get("cycle_id")
                 state["last_cycle_delegated"] = last.get("delegated", False)
         except Exception:
-            pass
+            logger.debug("Failed to read cycle log", exc_info=True)
 
     return state
 
@@ -1950,6 +2124,21 @@ class ThinkodynamicDirector:
         theme_scores = _theme_scores_from_text(f"{path.name}\n{text}")
         markers: list[str] = []
         low = text.lower()
+        rel = str(path).lower()
+        is_world_artifact = any(
+            token in rel
+            for token in (
+                "/jagat_kalyan/",
+                "scout_log.md",
+                "partner_research.md",
+                "stakeholder_requirements.md",
+                "autonomous_iteration_queue.md",
+                "jk_alert.md",
+                "jk_pulse.md",
+                "jk_iteration_queue.md",
+                "jk_proof_lattice.md",
+            )
+        )
         if path.suffix.lower() != ".md" and ("todo" in low or "fixme" in low):
             markers.append("actionable_debt")
         if "acceptance" in low or "verification" in low:
@@ -1958,9 +2147,36 @@ class ThinkodynamicDirector:
             markers.append("handoff")
         if "delegate" in low or "task board" in low:
             markers.append("delegation")
+        if is_world_artifact and any(
+            token in low
+            for token in (
+                "high urgency",
+                "deadline",
+                "rolling basis",
+                "submit this week",
+                "rfp",
+                "buyer",
+                "active",
+            )
+        ):
+            markers.append("external_urgency")
+        if is_world_artifact and any(
+            token in low
+            for token in (
+                "mangrove",
+                "ecological restoration",
+                "displaced worker",
+                "community employment",
+                "welfare-ton",
+                "carbon credit",
+            )
+        ):
+            markers.append("world_service")
 
         score = sum(theme_scores.values())
         score += 1.5 * len(markers)
+        if is_world_artifact:
+            score += 4.0
         rel = str(path.relative_to(path.anchor)) if path.is_absolute() else str(path)
         if "/docs/" in rel or rel.startswith("docs/"):
             score += 1.0
@@ -2904,14 +3120,49 @@ class ThinkodynamicDirector:
         Returns a vision dict with keys: seeds, ecosystem, vision_text, success,
         proposed_tasks, and the raw seed sources.
         """
-        seeds = read_random_seeds(count=3)
+        # Smart seed selection: use retrieval stack when available, fallback to random
+        try:
+            from dharma_swarm.smart_seed_selector import SmartSeedSelector
+
+            selector = SmartSeedSelector(state_dir=self.state_dir)
+            smart_seeds = await selector.select(
+                count=5,
+                max_chars=3000,
+                context_hint=getattr(self, "mission_brief", ""),
+            )
+            seeds = [(text, path) for text, path, _score in smart_seeds]
+            logger.info("SmartSeedSelector: %d seeds (scores: %s)",
+                        len(seeds), [f"{s:.2f}" for _, _, s in smart_seeds])
+        except Exception as exc:
+            logger.debug("SmartSeedSelector failed, using random: %s", exc)
+            seeds = read_random_seeds(count=3)
         ecosystem = read_ecosystem_state()
         previous = read_previous_visions(limit=2)
+
+        # Overseeing I pre-vision assessment — inject system awareness
+        meta_context = ""
+        try:
+            from dharma_swarm.overseeing_i import OverseeingI
+
+            oi = OverseeingI(state_dir=self.state_dir)
+            assessment = await oi.assess()
+            meta_context = (
+                f"\n\n## OVERSEEING I ASSESSMENT\n"
+                f"Situation: {assessment.situation}\n"
+                f"Alive: {', '.join(assessment.alive[:6])}\n"
+                f"Gaps: {'; '.join(assessment.gaps[:3])}\n"
+                f"Next move (conviction {assessment.conviction:.0%}): {assessment.next_move}\n"
+                f"Objectives: {', '.join(o['name'] for o in assessment.telos_objectives[:5])}\n"
+            )
+            logger.info("OverseeingI injected: %d gaps, conviction=%.0f%%",
+                        len(assessment.gaps), assessment.conviction * 100)
+        except Exception as exc:
+            logger.debug("OverseeingI pre-vision failed (non-fatal): %s", exc)
 
         vision_text, success = await invoke_claude_vision(
             seeds=seeds,
             ecosystem=ecosystem,
-            previous_visions=previous,
+            previous_visions=previous + meta_context,
             meta_tasks=META_TASKS,
             model=model,
             mission_brief=self.mission_brief,
@@ -3047,27 +3298,6 @@ class ThinkodynamicDirector:
                 tasks=tasks,
             ))
 
-        try:
-            active_campaign = load_active_campaign_state(state_dir=self.state_dir)
-        except ValueError:
-            active_campaign = None
-        if active_campaign and active_campaign.state.execution_briefs:
-            ranked_briefs = sorted(
-                active_campaign.state.execution_briefs,
-                key=lambda brief: brief.readiness_score,
-                reverse=True,
-            )
-            promoted = next(
-                (brief for brief in ranked_briefs if brief.task_titles or brief.goal or brief.title),
-                None,
-            )
-            if promoted is not None:
-                logger.info(
-                    "Campaign-driven workflow: promoting execution brief %s",
-                    promoted.brief_id or promoted.title,
-                )
-                return self.workflow_from_execution_brief(promoted, cycle_id=cycle_id)
-
         # --- Standard pipeline (no explicit deliverables) ---
         proposed = vision_result.get("proposed_tasks", [])
         primary = sense_result.get("primary")
@@ -3131,6 +3361,28 @@ class ThinkodynamicDirector:
                 evidence_paths=[vision_result.get("vision_file", "")],
                 tasks=tasks,
             ))
+
+        # Fallback: campaign execution briefs (below vision, above meta-tasks)
+        try:
+            active_campaign = load_active_campaign_state(state_dir=self.state_dir)
+        except ValueError:
+            active_campaign = None
+        if active_campaign and active_campaign.state.execution_briefs:
+            ranked_briefs = sorted(
+                active_campaign.state.execution_briefs,
+                key=lambda brief: brief.readiness_score,
+                reverse=True,
+            )
+            promoted = next(
+                (brief for brief in ranked_briefs if brief.task_titles or brief.goal or brief.title),
+                None,
+            )
+            if promoted is not None:
+                logger.info(
+                    "Campaign-driven workflow (fallback): promoting execution brief %s",
+                    promoted.brief_id or promoted.title,
+                )
+                return self.workflow_from_execution_brief(promoted, cycle_id=cycle_id)
 
         # Fallback to theme-based planner
         if primary:

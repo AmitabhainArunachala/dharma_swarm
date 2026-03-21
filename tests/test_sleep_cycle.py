@@ -92,7 +92,7 @@ def _seed_agent_memory(mem_dir: Path, agent_name: str) -> None:
 @pytest.mark.timeout(30)
 async def test_run_full_cycle_completes_all_phases(cycle: SleepCycle) -> None:
     report = await cycle.run_full_cycle()
-    assert report.phases_completed == ["light", "deep", "rem", "semantic", "wake"]
+    assert report.phases_completed == ["light", "deep", "rem", "semantic", "bridge", "wake"]
     assert report.ended_at is not None
     assert report.started_at <= report.ended_at
 
@@ -257,7 +257,7 @@ async def test_graceful_degradation(tmp_path: Path) -> None:
 
     report = await cycle.run_full_cycle()
     # All phases should complete, just with zero-count metrics
-    assert report.phases_completed == ["light", "deep", "rem", "semantic", "wake"]
+    assert report.phases_completed == ["light", "deep", "rem", "semantic", "bridge", "wake"]
     assert report.marks_decayed == 0
     assert report.dreams_generated == 0
     assert report.errors == []

@@ -38,6 +38,7 @@ class SleepPhase(str, Enum):
     DEEP = "deep"        # Heavy lifting: consolidate all agent memories
     REM = "rem"          # Creative: subconscious dreaming + association
     SEMANTIC = "semantic" # Semantic evolution: digest→research→synthesize→harden→gravitize
+    BRIDGE = "bridge"    # Cross-graph bridge discovery: connect semantic↔temporal↔telos
     WAKE = "wake"        # Prepare for morning: generate sleep report
 
 
@@ -106,7 +107,7 @@ class SleepCycle:
         except Exception:
             pass
 
-        for phase in (SleepPhase.LIGHT, SleepPhase.DEEP, SleepPhase.REM, SleepPhase.SEMANTIC):
+        for phase in (SleepPhase.LIGHT, SleepPhase.DEEP, SleepPhase.REM, SleepPhase.SEMANTIC, SleepPhase.BRIDGE):
             try:
                 result = await self.run_phase(phase)
                 report.phases_completed.append(phase.value)
@@ -145,6 +146,7 @@ class SleepCycle:
             SleepPhase.DEEP: self._deep_sleep,
             SleepPhase.REM: self._rem_sleep,
             SleepPhase.SEMANTIC: self._semantic_sleep,
+            SleepPhase.BRIDGE: self._bridge_sleep,
         }
         handler = dispatch.get(phase)
         if handler is None:
@@ -264,8 +266,35 @@ class SleepCycle:
 
         return result
 
+    async def _bridge_sleep(self) -> dict[str, Any]:
+        """Phase 5: Cross-graph bridge discovery.
+
+        Runs the BridgeCoordinator to discover edges connecting the
+        semantic, temporal, telos, and catalytic graphs.  These bridge
+        edges enable cross-graph queries like conceptual blast radius.
+        """
+        result: dict[str, Any] = {"bridges_discovered": 0, "errors": []}
+        try:
+            from dharma_swarm.bridge_coordinator import BridgeCoordinator
+
+            coordinator = BridgeCoordinator(state_dir=self._memory_dir.parent)
+            discovery = await coordinator.discover_all()
+            result["bridges_discovered"] = discovery.discovered
+            result["duration_seconds"] = discovery.duration_seconds
+            if discovery.errors:
+                result["errors"] = discovery.errors
+            logger.info(
+                "Bridge sleep: discovered %d edges in %.1fs",
+                discovery.discovered,
+                discovery.duration_seconds,
+            )
+        except Exception as exc:
+            logger.warning("Bridge sleep failed: %s", exc)
+            result["errors"].append(str(exc))
+        return result
+
     async def _wake(self, report: SleepReport) -> dict[str, Any]:
-        """Phase 5: Generate morning summary + update bootstrap manifest.
+        """Phase 6: Generate morning summary + update bootstrap manifest.
 
         Writes the sleep report as JSON to
         ``~/.dharma/sleep_reports/YYYY-MM-DD.json``.
@@ -330,6 +359,12 @@ class SleepCycle:
             if concepts:
                 report.high_salience_observations.append(
                     f"semantic: {concepts} concepts digested, {clusters} clusters"
+                )
+        elif phase == SleepPhase.BRIDGE:
+            bridges = result.get("bridges_discovered", 0)
+            if bridges:
+                report.high_salience_observations.append(
+                    f"bridge: {bridges} cross-graph edges discovered"
                 )
 
     @staticmethod
