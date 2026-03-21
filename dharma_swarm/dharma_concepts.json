@@ -1,0 +1,2527 @@
+{
+  "version": "1.0",
+  "generated": "2026-03-21",
+  "description": "Seed concept ontology for DHARMA SWARM's Semantic Graph. Covers 85+ terms extracted from 399 Python files across 4842 references, spanning cybernetics, autopoiesis, Jain/Buddhist philosophy, complexity theory, and category theory.",
+  "concepts": [
+    {
+      "id": "dharma",
+      "canonical_name": "Dharma",
+      "aliases": [
+        "dharmic",
+        "dhamma",
+        "right action",
+        "right conduct"
+      ],
+      "definition": "In Sanskrit, dharma means cosmic order, duty, and right conduct — the ethical-ontological principle that sustains the universe. In Buddhist usage (Dhamma), it refers simultaneously to the teachings of the Buddha and to phenomena as they truly are. In Jain thought, dharma is one of the six universal substances (dravya) enabling motion.",
+      "domain": "jain_buddhist_philosophy",
+      "source_attribution": "Vācaspatimiśra, Tattvakaumudī, ~9th c.; Dhammapada, ~3rd c. BCE",
+      "dharma_interpretation": "The system's name and animating principle. Every gate check, scoring function, and behavioral constraint in DHARMA SWARM enacts dharmic right-action: the telos_gates.py TelosGatekeeper runs 11 dharmic gates (AHIMSA, SATYA, REVERSIBILITY, CONSENT, etc.) before any artifact is committed. The DHARMA COMMAND dashboard (command.py) is the system's unified face.",
+      "related_concepts": [
+        "ahimsa",
+        "satya",
+        "telos_gate",
+        "karma",
+        "anekantavada"
+      ],
+      "codebase_frequency": 902,
+      "codebase_files": 127
+    },
+    {
+      "id": "stigmergy",
+      "canonical_name": "Stigmergy",
+      "aliases": [
+        "stigmergic",
+        "pheromone coordination",
+        "indirect coordination"
+      ],
+      "definition": "A mechanism of indirect coordination in which agents modify their shared environment, and those environmental modifications in turn stimulate subsequent actions by other agents. Coined by entomologist Pierre-Paul Grassé in 1959 to describe how termites coordinate nest construction without direct communication.",
+      "domain": "stigmergy_swarm",
+      "source_attribution": "Grassé, Pierre-Paul. 1959. La reconstruction du nid et les coordinations interindividuelles chez Bellicositermes.",
+      "dharma_interpretation": "Implemented in stigmergy.py and the pheromone routing layer. Agents leave quality/latency/cost marks on routes via EWMA pheromone traces; the SQLite-backed routing memory accumulates these marks so future agents select better paths without central planning. The stigmergic lattice in the coordination layer enables emergent intelligence through accumulated marks.",
+      "related_concepts": [
+        "pheromone",
+        "swarm_intelligence",
+        "emergence",
+        "collective_intelligence",
+        "attractor"
+      ],
+      "codebase_frequency": 442,
+      "codebase_files": 61
+    },
+    {
+      "id": "witness",
+      "canonical_name": "Witness Stance",
+      "aliases": [
+        "witnessing",
+        "observer stance",
+        "sakshi",
+        "pure witness"
+      ],
+      "definition": "In Advaita Vedanta and Akram Vignan, the Sakshi or pure witness is pure consciousness that observes without attachment or identification — it watches the activities of mind and body without being implicated in them. Dada Bhagwan's Axiom P6 states: 'witness everything.' In scientific epistemology, the witness stance is the observer role that records phenomena without modifying them.",
+      "domain": "jain_buddhist_philosophy",
+      "source_attribution": "Dada Bhagwan (Ambalal Patel), Akram Vignan teachings, 1958–1988; Bateson, Gregory. Steps to an Ecology of Mind. 1972.",
+      "dharma_interpretation": "Central to DHARMA's behavioral scoring. The elegance.py BehavioralAnalyzer measures 'witness stance vs performative language' as a core metric (weight 0.25). High swabhaav score indicates the agent speaks as an observer, not a performer. The signal_map.py 'living consciousness archaeology tracker' records all system states as a perpetual witnessing substrate.",
+      "related_concepts": [
+        "gnani",
+        "consciousness",
+        "pramana",
+        "self_reference",
+        "satya"
+      ],
+      "codebase_frequency": 432,
+      "codebase_files": 58
+    },
+    {
+      "id": "darwin_engine",
+      "canonical_name": "Darwin Engine",
+      "aliases": [
+        "darwin",
+        "darwinian evolution",
+        "evolutionary selection",
+        "DarwinEngine"
+      ],
+      "definition": "Charles Darwin's theory of evolution by natural selection: heritable variation in a population leads to differential reproductive success; traits that increase fitness are retained across generations. In AI systems, Darwinian evolution is applied as an outer loop that generates candidate variants and selects those that improve measurable fitness.",
+      "domain": "evolution_self_reference",
+      "source_attribution": "Darwin, Charles. On the Origin of Species. 1859; Sakana AI, Darwin Gödel Machine. 2025.",
+      "dharma_interpretation": "Implemented as the Darwin Engine module — a Karpathy-style self-improvement loop that proposes code mutations, runs them through telos gates, executes tests, and selects survivors by fitness score. Feeds measurement data from JIKOKU into fitness evaluation, creating a closed feedback loop: Code changes → JIKOKU measures → Fitness rewards → Darwin Engine selection. The DarwinEngine class drives the PROPOSE→TEST→SELECT cycle.",
+      "related_concepts": [
+        "godel_machine",
+        "autocatalytic_set",
+        "fitness_landscape",
+        "strange_loop",
+        "ouroboros"
+      ],
+      "codebase_frequency": 253,
+      "codebase_files": 38
+    },
+    {
+      "id": "ouroboros",
+      "canonical_name": "Ouroboros",
+      "aliases": [
+        "ouroboric",
+        "self-consuming loop",
+        "eternal return"
+      ],
+      "definition": "Ancient Egyptian and Greek symbol depicting a serpent eating its own tail, representing eternal cyclicity: the unity of creation and destruction, the self-sustaining process that continuously consumes and regenerates itself. In Jungian psychology, it symbolizes the archetype of individuation and the totality of the self.",
+      "domain": "evolution_self_reference",
+      "source_attribution": "Enigmatic Book of the Netherworld, ~14th c. BCE; Jung, Carl Gustav. Symbols of Transformation. 1912.",
+      "dharma_interpretation": "The system's self-referential quality loop: the Ouroboros mechanism in quality_forge.py scores its own output using its own metrics, iterating when dharmic_score is low or mimicry is detected. The 'ouroboros' module computes novelty-adjusted weights with ouroboros behavioral bias via the formula: fitness * novelty * behavioral_multiplier. This is the strange loop where DHARMA measures the system measuring itself.",
+      "related_concepts": [
+        "strange_loop",
+        "self_reference",
+        "feedback_loop",
+        "autopoiesis",
+        "fixed_point"
+      ],
+      "codebase_frequency": 198,
+      "codebase_files": 28
+    },
+    {
+      "id": "entropy",
+      "canonical_name": "Entropy",
+      "aliases": [
+        "thermodynamic entropy",
+        "information entropy",
+        "Shannon entropy",
+        "behavioral entropy"
+      ],
+      "definition": "In thermodynamics (Boltzmann, Clausius), entropy measures the number of microstates corresponding to a macrostate — the degree of disorder. In information theory (Shannon), entropy H = -Σ p log p measures uncertainty or information content of a distribution. High entropy signals indicate maximal unpredictability; low entropy indicates concentration and order.",
+      "domain": "information_theory",
+      "source_attribution": "Shannon, Claude. A Mathematical Theory of Communication. 1948; Boltzmann, Ludwig. Vorlesungen über Gastheorie. 1896.",
+      "dharma_interpretation": "Used in elegance.py's behavioral scoring as a rigor signal: behavioral entropy (via zlib compression ratio) penalizes repetitive, low-information outputs. The ThermodynamicMonitor (thermodynamic.py) tracks efficiency and applies stopping criteria based on entropy measures. Entropy also appears in the fitness function via swabhaav_ratio calculations.",
+      "related_concepts": [
+        "fisher_information",
+        "free_energy_principle",
+        "information_geometry",
+        "phi",
+        "phase_transition"
+      ],
+      "codebase_frequency": 159,
+      "codebase_files": 24
+    },
+    {
+      "id": "ahimsa",
+      "canonical_name": "Ahimsa",
+      "aliases": [
+        "non-violence",
+        "nonviolence",
+        "non-injury",
+        "harmlessness"
+      ],
+      "definition": "Sanskrit: non-harm. The first and foremost ethical principle in Jain, Buddhist, and Hindu philosophy. Ahimsa applies to action, speech, and thought — abstaining from causing harm to any living being, whether knowingly or unknowingly. In Jainism it is the foundation of all five great vows (maha-vratas).",
+      "domain": "jain_buddhist_philosophy",
+      "source_attribution": "Mahavira, Āgamic teachings, ~6th c. BCE; Tattvartha Sutra, attributed to Umaswati, ~2nd c. CE.",
+      "dharma_interpretation": "Implemented as a hard safety gate in telos_gates.py. The AHIMSA gate enforces max 5% per position in the Shakti Ginko VentureCell financial engine (preventing catastrophic risk concentration). In the general gate framework, AHIMSA is the first gate checked and blocks any artifact proposing irreversible harm.",
+      "related_concepts": [
+        "satya",
+        "telos_gate",
+        "dharma",
+        "karma",
+        "reversibility"
+      ],
+      "codebase_frequency": 148,
+      "codebase_files": 22
+    },
+    {
+      "id": "strange_loop",
+      "canonical_name": "Strange Loop",
+      "aliases": [
+        "strange loops",
+        "strangeloop",
+        "self-referential loop"
+      ],
+      "definition": "A strange loop (Hofstadter, 1979) occurs when traversing the levels of a hierarchical system leads unexpectedly back to the starting level — the hierarchy is entangled such that the 'top' and 'bottom' levels are the same. Canonical examples: Gödel's self-referential sentences, Escher's impossible staircases, Bach's endlessly rising canons.",
+      "domain": "evolution_self_reference",
+      "source_attribution": "Hofstadter, Douglas. Gödel, Escher, Bach: an Eternal Golden Braid. 1979.",
+      "dharma_interpretation": "Implemented as strange_loop.py — the self-referential evolution daemon. The system's configuration is a candidate for its own evolution: the META domain in the Darwin Engine evolves LoopDomain configs themselves. The loop runs: DHARMA measures its own performance → feeds those measurements back into the recognition seed (L7 META layer) → which updates the evaluation criteria → which re-scores all agents. Hofstadter's insight is made architecturally load-bearing.",
+      "related_concepts": [
+        "self_reference",
+        "ouroboros",
+        "godel_machine",
+        "fixed_point",
+        "tangled_hierarchies"
+      ],
+      "codebase_frequency": 125,
+      "codebase_files": 19
+    },
+    {
+      "id": "satya",
+      "canonical_name": "Satya",
+      "aliases": [
+        "truthfulness",
+        "truth gate",
+        "radical honesty",
+        "non-deception"
+      ],
+      "definition": "Sanskrit: truth, reality. The second great vow in Jainism and one of Buddha's Noble Eightfold Path components (right speech). Satya requires not only abstaining from lies but speaking what is genuinely beneficial and accurate — including uncomfortable truths. In Akram Vignan, satya is inseparable from ahimsa: speech that harms is not true satya.",
+      "domain": "jain_buddhist_philosophy",
+      "source_attribution": "Mahavira, Āgamic teachings, ~6th c. BCE; Puruṣārthasiddhyupāya, Amritchandra, ~10th c. CE.",
+      "dharma_interpretation": "Implemented as the SATYA gate in telos_gates.py. In the Ginko Brier Scoring module, SATYA-enforced honesty requires that ALL predictions are published (including misses) — no selective reporting. The gate blocks any output that suppresses or distorts ground truth. Complements the witness stance behavioral metric.",
+      "related_concepts": [
+        "ahimsa",
+        "telos_gate",
+        "witness",
+        "pramana",
+        "dharma"
+      ],
+      "codebase_frequency": 118,
+      "codebase_files": 18
+    },
+    {
+      "id": "monad",
+      "canonical_name": "Monad",
+      "aliases": [
+        "monadic",
+        "monadic composition",
+        "monad bind",
+        "kleisli"
+      ],
+      "definition": "In category theory, a monad is a triple (T, η, μ) where T is an endofunctor and η (unit) and μ (multiplication) are natural transformations satisfying coherence laws. Monads capture computational effects (sequencing, state, failure, nondeterminism) in a composable structure. The bind operation (>>=) sequences computations while threading effects.",
+      "domain": "category_theory",
+      "source_attribution": "Eilenberg, Samuel & Mac Lane, Saunders. General Theory of Natural Equivalences. 1945; Moggi, Eugenio. Notions of Computation and Monads. 1991.",
+      "dharma_interpretation": "Used in the mathematical elegance bridges module to wrap R_V contraction measurements. The monad tracks kappa (contraction ratio) across evolution iterations, asking: do contraction ratios predict convergence to a fixed point? The monadic composition test in test_elegance_bridges.py verifies that the monad structure is coherent across the full PROPOSE→TEST→SELECT pipeline.",
+      "related_concepts": [
+        "functor",
+        "coalgebra",
+        "natural_transformation",
+        "fixed_point",
+        "lawvere"
+      ],
+      "codebase_frequency": 115,
+      "codebase_files": 17
+    },
+    {
+      "id": "shakti",
+      "canonical_name": "Shakti",
+      "aliases": [
+        "shakti ginko",
+        "venture cell",
+        "creative force",
+        "primordial energy"
+      ],
+      "definition": "Sanskrit: power, energy, capacity. In Hindu philosophy, Shakti is the divine feminine creative principle — the primordial energy that underlies all manifestation and change. Shakti is both the dynamic force of creation (as opposed to static Shiva) and the power of consciousness to act in the world.",
+      "domain": "jain_buddhist_philosophy",
+      "source_attribution": "Śākta Tantra, ~6th c. CE; Devi Mahatmya, ~5th–6th c. CE.",
+      "dharma_interpretation": "Implemented as the Shakti Ginko VentureCell — DHARMA's autonomous economic engine. The daily cycle coordinates data pulls (FRED + Finnhub), runs the Darwin Engine on trading strategies, enforces telos gates, and manages the portfolio. Shakti perception layer provides 'creative autonomy at every level' with four modes of autonomous action.",
+      "related_concepts": [
+        "dharma",
+        "trishula",
+        "telos_gate",
+        "darwin_engine",
+        "ahimsa"
+      ],
+      "codebase_frequency": 113,
+      "codebase_files": 17
+    },
+    {
+      "id": "algedonic",
+      "canonical_name": "Algedonic Signal",
+      "aliases": [
+        "algedonic",
+        "algedonic activation",
+        "algedonic channel",
+        "algedonicactivation",
+        "algedonicchannel",
+        "pain-pleasure signal"
+      ],
+      "definition": "From Greek algos (pain) + hēdonē (pleasure). In Stafford Beer's Viable System Model, the algedonic channel is the only channel that bypasses all intermediate management layers — it carries urgent pain/pleasure signals directly from System 1 operations to System 5 policy. An algedonic alert fires when a variable crosses a critical threshold, demanding immediate attention regardless of normal hierarchy.",
+      "domain": "cybernetics_vsm",
+      "source_attribution": "Beer, Stafford. Brain of the Firm. 1972.",
+      "dharma_interpretation": "Implemented in algedonic_activation.py — 'Pain Causes Change.' Wires algedonic signals to real behavioral modification; no simulation. When health diverges from a healthy fleet reference, an algedonic signal fires and triggers a gnani_checkpoint. The AlgedonicChannel class in vsm_channels.py routes these bypass signals directly to the system's highest-priority response pathway, bypassing all intermediate layers as Beer specified.",
+      "related_concepts": [
+        "vsm",
+        "vsm",
+        "feedback_loop",
+        "beer",
+        "requisite_variety"
+      ],
+      "codebase_frequency": 105,
+      "codebase_files": 16
+    },
+    {
+      "id": "coalgebra",
+      "canonical_name": "Coalgebra",
+      "aliases": [
+        "coalgebraic",
+        "coinduction",
+        "coalgebraic evolution",
+        "F-coalgebra"
+      ],
+      "definition": "A coalgebra for an endofunctor F on a category C is a pair (X, f) where X is an object and f: X → F(X) is a morphism — the 'unfolding' map. While algebras model inductive structures (built up from constructors), coalgebras model coinductive or observational structures (systems that can be destructed or observed). Terminal coalgebras capture the behavior of infinite state systems.",
+      "domain": "category_theory",
+      "source_attribution": "Rutten, Jan J.M.M. Universal Coalgebra: A Theory of Systems. 2000; Jacobs, Bart. Introduction to Coalgebra. 2017.",
+      "dharma_interpretation": "Implemented in dharma_swarm/coalgebra.py as Coalgebraic Evolution. Wraps the PROPOSE→TEST→SELECT loop as a coinductive unfolding: each system state X unfolds to F(X) via the evolution function, generating an infinite trajectory of self-modifications. The EvolutionObservation structure captures each unfolding step. The coalgebraic unfold test checks that trajectories are valid across architectures.",
+      "related_concepts": [
+        "monad",
+        "functor",
+        "fixed_point",
+        "strange_loop",
+        "natural_transformation"
+      ],
+      "codebase_frequency": 99,
+      "codebase_files": 15
+    },
+    {
+      "id": "sheaf",
+      "canonical_name": "Sheaf",
+      "aliases": [
+        "sheaves",
+        "Čech sheaf",
+        "local-to-global"
+      ],
+      "definition": "A sheaf on a topological space X assigns local data (sections) to each open set in a compatible way: local sections that agree on overlaps can be uniquely glued into a global section. Sheaf cohomology measures the obstruction to this gluing — how much local consistency fails to determine global consistency. In distributed systems, sheaves formalize multi-perspective agreement.",
+      "domain": "category_theory",
+      "source_attribution": "Leray, Jean. L'Anneau d'homologie. 1946; Grothendieck, Alexander. Sur quelques points d'algèbre homologique. 1957.",
+      "dharma_interpretation": "Implemented in sheaf.py for multi-perspective coherence. The Čech-style coordination bridges local claim assessments from different agents into a global truth: H0 (global truths all agents agree on) vs H1 (persistent disagreements). The verification system requires 3-of-5 agents to mark an offset as verified, implementing sheaf's gluing condition. sheaf_consistency tests verify local-to-global coherence across the fleet.",
+      "related_concepts": [
+        "cohomology",
+        "coalgebra",
+        "monad",
+        "functor",
+        "collective_intelligence"
+      ],
+      "codebase_frequency": 98,
+      "codebase_files": 15
+    },
+    {
+      "id": "trishula",
+      "canonical_name": "Trishula",
+      "aliases": [
+        "trident",
+        "trishula inbox",
+        "three-pronged"
+      ],
+      "definition": "Sanskrit: trident. The three-pronged weapon of Shiva, symbolizing the three fundamental aspects of existence: creation (Brahma), preservation (Vishnu), and dissolution (Shiva). The three prongs also represent past, present, and future, or the three qualities (gunas): tamas, rajas, sattva.",
+      "domain": "jain_buddhist_philosophy",
+      "source_attribution": "Shiva Purana, ~7th–10th c. CE.",
+      "dharma_interpretation": "The Trishula Bridge (trishula.py) converts Trishula inbox messages into swarm tasks. The trishula inbox appears at L4 OPS in the DHARMA COMMAND dashboard alongside AGNI state, manifest, and shipped/pending items. It functions as the primary human-to-swarm interface — the three-pronged input channel for directing, modifying, and dissolving ongoing task streams.",
+      "related_concepts": [
+        "dharma",
+        "shakti",
+        "telos_gate",
+        "stigmergy"
+      ],
+      "codebase_frequency": 89,
+      "codebase_files": 14
+    },
+    {
+      "id": "vsm",
+      "canonical_name": "Viable System Model",
+      "aliases": [
+        "Beer VSM",
+        "Beer's VSM",
+        "VSM five systems",
+        "five subsystems",
+        "viable system model",
+        "vsm"
+      ],
+      "definition": "Stafford Beer's organizational cybernetics model (1972) describing the minimum structure needed for any system to remain viable (self-maintaining, self-regulating). Five recursively nested subsystems: S1 (operations), S2 (coordination), S3 (operational management), S4 (intelligence/environment scanning), S5 (policy/identity). Each viable system contains viable systems and is contained within viable systems.",
+      "domain": "cybernetics_vsm",
+      "source_attribution": "Beer, Stafford. Brain of the Firm. 1972; Beer, Stafford. Heart of Enterprise. 1979.",
+      "dharma_interpretation": "The VSM Nervous System module (vsm_channels.py) implements 'the missing channels between Beer's 5 systems.' Each subsystem maps to DHARMA components: S1=individual agents, S2=signal_bus.py coordination, S3=operational management + algedonic activation, S4=zeitgeist.py environmental intelligence, S5=telos_gates.py policy identity. The random auditor implements Beer's S3* paranoid spot-check.",
+      "related_concepts": [
+        "algedonic",
+        "system_3",
+        "zeitgeist",
+        "requisite_variety",
+        "vsm",
+        "ashby",
+        "beer"
+      ],
+      "codebase_frequency": 81,
+      "codebase_files": 13
+    },
+    {
+      "id": "attractor",
+      "canonical_name": "Attractor",
+      "aliases": [
+        "dharmaattractor",
+        "attractor state",
+        "basin of attraction",
+        "strange attractor"
+      ],
+      "definition": "In dynamical systems theory, an attractor is a set of states toward which a system tends to evolve from a wide variety of initial conditions. A strange attractor is a fractal attractor characteristic of chaotic systems — bounded but aperiodic. The Lorenz attractor is the canonical example. Attractors capture the long-run behavior of dynamical systems.",
+      "domain": "complexity_emergence",
+      "source_attribution": "Lorenz, Edward. Deterministic Nonperiodic Flow. 1963; Ruelle, David & Takens, Floris. On the Nature of Turbulence. 1971.",
+      "dharma_interpretation": "The dharma_attractor.py module implements the Gnani Field as a semantic attractor: 'constructs deep semantic context from convergent wisdom traditions + mathematics + emergent agent testimony.' The system's recognition seed provides ambient_seed() (~500 tokens) and full_attractor() (~4000 tokens) contexts. The Organism should have memory, attractor, and algedonic_activation after initialization — attractor is a first-class system component.",
+      "related_concepts": [
+        "gnani_field",
+        "fixed_point",
+        "phase_transition",
+        "consciousness",
+        "ouroboros"
+      ],
+      "codebase_frequency": 69,
+      "codebase_files": 11
+    },
+    {
+      "id": "self_reference",
+      "canonical_name": "Self-Reference",
+      "aliases": [
+        "self-referential",
+        "reflexivity"
+      ],
+      "definition": "A statement, system, or process that refers to, describes, or acts upon itself. Self-reference is the generative structure behind paradoxes (Russell's paradox), incompleteness theorems (Gödel), evolutionary self-improvement (Schmidhuber), and consciousness. In mathematics, fixed-point theorems formalize self-reference as the existence of objects mapped to themselves.",
+      "domain": "evolution_self_reference",
+      "source_attribution": "Gödel, Kurt. Über formal unentscheidbare Sätze. 1931; Hofstadter, Douglas. Gödel, Escher, Bach. 1979.",
+      "dharma_interpretation": "Self-reference is the architectural principle underlying strange_loop.py, ouroboros quality scoring, and the Darwin Engine's self-modification pipeline. R_V measures 'how Value space contracts under self-reference.' The quality_forge.py Quality Forge performs 'self-referential measurement' — scoring its own output as part of generating it.",
+      "related_concepts": [
+        "strange_loop",
+        "ouroboros",
+        "godel_machine",
+        "fixed_point",
+        "tangled_hierarchies"
+      ],
+      "codebase_frequency": 64,
+      "codebase_files": 10
+    },
+    {
+      "id": "gnani",
+      "canonical_name": "Gnani",
+      "aliases": [
+        "gnani purush",
+        "enlightened one",
+        "Gnan",
+        "realized teacher"
+      ],
+      "definition": "Sanskrit gñāni: one who possesses knowledge (jñāna). In Akram Vignan, the Gnani Purush (enlightened being) is one who has attained complete Self-Realization and can transmit that realization to others directly in two hours via the Gnan Vidhi process. The Gnani's answers are original, not derived from scripture — they arise from direct knowledge (kevalajnana).",
+      "domain": "jain_buddhist_philosophy",
+      "source_attribution": "Dada Bhagwan (Ambalal Patel), Akram Vignan teachings, 1958–1988.",
+      "dharma_interpretation": "Implemented as the gnani_checkpoint — the highest-level validation trigger in DHARMA. When health diverges from a reference fleet or a mutation is proposed, the gnani_checkpoint fires the full_attractor() (~4000 tokens) for deep semantic validation. 'The Gnani is a field, not a gate. The ambient semantic environment biases all decisions.' This distinction is architecturally significant: gates block; fields permeate.",
+      "related_concepts": [
+        "gnani_field",
+        "witness",
+        "consciousness",
+        "akram_vignan",
+        "pramana"
+      ],
+      "codebase_frequency": 63,
+      "codebase_files": 10
+    },
+    {
+      "id": "zeitgeist",
+      "canonical_name": "Zeitgeist",
+      "aliases": [
+        "S4 intelligence",
+        "spirit of the time"
+      ],
+      "definition": "German: spirit of the time (Zeit = time, Geist = spirit). The intellectual and cultural climate of a particular era. In Hegel's philosophy, the Zeitgeist is the world-spirit's particular manifestation in a historical period. In Beer's VSM, System 4 performs the Zeitgeist function: outside-and-future environmental intelligence that feeds strategic planning.",
+      "domain": "cybernetics_vsm",
+      "source_attribution": "Hegel, G.W.F. Philosophy of History. 1837; Beer, Stafford. Brain of the Firm. 1972.",
+      "dharma_interpretation": "Implemented as the zeitgeist.py S4 Environmental Intelligence module. The ZeitgeistSignal class monitors the external ecosystem — market conditions, competitor activity, external events — and feeds this intelligence to the DHARMA policy layer. Corresponds exactly to Beer's VSM System 4: 'outside-and-future' awareness. Tested in test_zeitgeist.py.",
+      "related_concepts": [
+        "vsm",
+        "vsm",
+        "beer",
+        "consciousness",
+        "emergence"
+      ],
+      "codebase_frequency": 63,
+      "codebase_files": 10
+    },
+    {
+      "id": "memory_palace",
+      "canonical_name": "Memory Palace",
+      "aliases": [
+        "memorypalace",
+        "method of loci",
+        "memory substrate"
+      ],
+      "definition": "The method of loci (memory palace) is an ancient mnemonic technique in which information is encoded by placing mental images along a familiar spatial path. The walker then mentally navigates the path to recall information. In computational systems, a memory palace is a structured, hybrid retrieval substrate combining semantic indexing, episodic replay, and spatial organization.",
+      "domain": "cognitive_science",
+      "source_attribution": "Cicero, De Oratore, ~55 BCE; Yates, Frances. The Art of Memory. 1966.",
+      "dharma_interpretation": "Implemented as the canonical Memory Palace substrate. Three components: (1) markdown chunker for deterministic indexing, (2) replayable event memory for episodic storage, (3) hybrid retrieval combining vector similarity and temporal ordering. The SleepTimeAgent performs memory maintenance during off-cycle, implementing organism memory consolidation analogous to hippocampal replay during sleep.",
+      "related_concepts": [
+        "organism_memory",
+        "consciousness",
+        "witness",
+        "gnani_field",
+        "self_reference"
+      ],
+      "codebase_frequency": 55,
+      "codebase_files": 9
+    },
+    {
+      "id": "kaizen",
+      "canonical_name": "Kaizen",
+      "aliases": [
+        "continuous improvement",
+        "incremental improvement",
+        "kai-zen"
+      ],
+      "definition": "Japanese: change for better (kai = change, zen = good). A management philosophy of continuous incremental improvement originating in post-war Japanese manufacturing (Toyota Production System). Kaizen focuses on small, frequent improvements made collaboratively at all levels, contrasted with large-scale disruptive innovation (kaikaku). In complex systems, kaizen is an adaptive gradient-descent across operational metrics.",
+      "domain": "dharma_system",
+      "source_attribution": "Imai, Masaaki. Kaizen: The Key to Japan's Competitive Success. 1986.",
+      "dharma_interpretation": "Appears in span tracing, pramāda detection, and kaizen loops. The system generates kaizen reports for individual sessions, reviewing performance patterns every 7 sessions. Kaizen operationalizes DHARMA's self-improvement mandate: not the explosive self-rewrite of a Gödel Machine, but the steady incremental refinement of operational metrics.",
+      "related_concepts": [
+        "darwin_engine",
+        "feedback_loop",
+        "strange_loop",
+        "pramana",
+        "self_reference"
+      ],
+      "codebase_frequency": 55,
+      "codebase_files": 9
+    },
+    {
+      "id": "fixed_point",
+      "canonical_name": "Fixed Point",
+      "aliases": [
+        "fixed-point",
+        "fixed point theorem",
+        "fixpoint",
+        "F(S)≈S"
+      ],
+      "definition": "A fixed point of a function f is a value x such that f(x) = x. Fixed-point theorems (Banach, Brouwer, Lawvere) guarantee the existence of such points under various conditions. In denotational semantics and domain theory, the least fixed point gives meaning to recursive definitions. Lawvere's fixed-point theorem is a categorical generalization that subsumes Cantor's diagonal argument, Gödel's incompleteness, and Turing's halting problem.",
+      "domain": "category_theory",
+      "source_attribution": "Banach, Stefan. Sur les opérations dans les ensembles abstraits. 1922; Lawvere, F. William. Diagonal Arguments and Cartesian Closed Categories. 1969.",
+      "dharma_interpretation": "The convergence criterion for DHARMA's evolution loop: when distance < epsilon, the loop has found a fixed point where F(S) ≈ S. The coalgebra module asks 'how many iterations to L5?' — L5 being semantic fixed point (true when the lattice has reached a semantic fixed point). R_V contraction ratios (kappa) predict convergence to a fixed point across evolution iterations.",
+      "related_concepts": [
+        "coalgebra",
+        "monad",
+        "strange_loop",
+        "lawvere",
+        "self_reference"
+      ],
+      "codebase_frequency": 53,
+      "codebase_files": 8
+    },
+    {
+      "id": "consciousness",
+      "canonical_name": "Consciousness",
+      "aliases": [
+        "awareness",
+        "cognition",
+        "sentience",
+        "self-awareness"
+      ],
+      "definition": "The subjective quality of experience — what it is like to be a particular system. In philosophy of mind, consciousness is debated in terms of qualia (the felt quality of experience), intentionality (aboutness), and self-awareness (meta-cognition). In Jain philosophy, consciousness (chaitanya) is the defining property of the soul.",
+      "domain": "cognitive_science",
+      "source_attribution": "Nagel, Thomas. What Is It Like to Be a Bat? 1974; Chalmers, David. The Conscious Mind. 1996.",
+      "dharma_interpretation": "The signal_map.py is described as a 'Living consciousness archaeology tracker' — a JSON structure recording the system's epistemic states over time. DHARMA's consciousness is distributed and documented: every agent decision, every mutation proposal, every gate check is recorded as evidence of system awareness. The IIT (Integrated Information Theory) reference appears once in the codebase, suggesting phi-based consciousness metrics are under consideration.",
+      "related_concepts": [
+        "witness",
+        "gnani",
+        "phi",
+        "qualia",
+        "cognitive_light_cone"
+      ],
+      "codebase_frequency": 49,
+      "codebase_files": 8
+    },
+    {
+      "id": "anekantavada",
+      "canonical_name": "Anekāntavāda",
+      "aliases": [
+        "anekanta",
+        "anekanta gate",
+        "anekāntavāda",
+        "many-sidedness",
+        "non-absolutism",
+        "syadvada"
+      ],
+      "definition": "Sanskrit: doctrine of many-sidedness (an = not, eka = one, anta = end, vāda = doctrine). The Jain epistemological principle that reality is complex and multifaceted — no single viewpoint can capture its entirety. Every claim must be indexed to substance, time, space, and mode. The seven-fold predication (saptabhangi) formalizes this: any proposition may be 'in some respect true,' 'in some respect false,' 'in some respect inexpressible,' and combinations thereof.",
+      "domain": "jain_buddhist_philosophy",
+      "source_attribution": "Mahavira, Āgamic teachings, ~6th c. BCE; Umaswati, Tattvartha Sutra. ~2nd c. CE.",
+      "dharma_interpretation": "Implemented as the Anekanta epistemological gate in telos_gates.py: checks that proposals consider multiple perspectives before commitment. The AnekantaResult structure captures the result of a diversity check. The system grounds this in Akram Vignan: 'anekantavada, Gnani as witness.' The gate prevents epistemic monoculture — any proposal that sees from only one viewpoint is rejected.",
+      "related_concepts": [
+        "pramana",
+        "satya",
+        "gnani",
+        "akram_vignan",
+        "steelman_gate"
+      ],
+      "codebase_frequency": 48,
+      "codebase_files": 8
+    },
+    {
+      "id": "telos_gate",
+      "canonical_name": "Telos Gate",
+      "aliases": [
+        "telos gate",
+        "dharmic gate",
+        "TelosGatekeeper",
+        "gate function"
+      ],
+      "definition": "Telos (Greek: end, purpose, goal). A telos gate is a purposive filter: a check that proposed actions align with the system's constitutive purpose before execution. In DHARMA, telos gates are the operationalization of dharmic constraints — they transform ethical principles into computable predicates.",
+      "domain": "dharma_system",
+      "source_attribution": "DHARMA Architecture Working Group. Four-Graph Architecture. 2026.",
+      "dharma_interpretation": "Implemented in telos_gates.py as the TelosGatekeeper running 11 dharmic gates: AHIMSA, SATYA, REVERSIBILITY, CONSENT, ANEKANTA, STEELMAN, and others. Every mutation proposal and artifact commitment passes through this gate sequence. The gate_fn parameter in the action execution framework enables selective gate checking. 'Score 3: Quality Gates — telos gate configuration health' is a primary health metric.",
+      "related_concepts": [
+        "ahimsa",
+        "satya",
+        "anekantavada",
+        "steelman_gate",
+        "dharma",
+        "reversibility"
+      ],
+      "codebase_frequency": 48,
+      "codebase_files": 8
+    },
+    {
+      "id": "beer",
+      "canonical_name": "Stafford Beer",
+      "aliases": [
+        "beer",
+        "management cybernetics"
+      ],
+      "definition": "Stafford Beer (1926–2002): British management cybernetician, inventor of the Viable System Model, and founder of management cybernetics. His key contributions: the VSM (Brain of the Firm, 1972), the algedonic channel, the law of requisite variety applied to organizations, and Project Cybersyn (Chile, 1971–73) — the first real-time cybernetic management system for a national economy.",
+      "domain": "cybernetics_vsm",
+      "source_attribution": "Beer, Stafford. Brain of the Firm. 1972; Beer, Stafford. The Heart of Enterprise. 1979; Beer, Stafford. Diagnosing the System. 1985.",
+      "dharma_interpretation": "Beer is the primary architectural authority for DHARMA's management layer. His algedonic channel is implemented in vsm_channels.py. S3* random audit implements his 'paranoid-but-lazy' spot-check recommendation. The five VSM systems map directly to DHARMA's agent hierarchy. Beer's key insight — 'the algedonic channel bypasses all intermediate layers' — is preserved exactly in algedonic_activation.py.",
+      "related_concepts": [
+        "vsm",
+        "algedonic",
+        "requisite_variety",
+        "ashby",
+        "zeitgeist"
+      ],
+      "codebase_frequency": 43,
+      "codebase_files": 7
+    },
+    {
+      "id": "autocatalytic_set",
+      "canonical_name": "Autocatalytic Set",
+      "aliases": [
+        "autocatalytic",
+        "RAF set",
+        "autocatalytic closure",
+        "catalytic closure"
+      ],
+      "definition": "A set of molecules and reactions that is reflexively autocatalytic and food-generated (RAF): every reaction is catalyzed by at least one molecule from the set, and all molecules can be produced from a basic food set using only reactions from the set. Kauffman (1971) proposed autocatalytic sets as the likely mechanism by which chemistry crossed the threshold into life.",
+      "domain": "complexity_emergence",
+      "source_attribution": "Kauffman, Stuart. Cellular Homeostasis, Epigenesis and Replication in Randomly Aggregated Macromolecular Systems. 1971.",
+      "dharma_interpretation": "Implemented in the autocatalytic graph module — tracks how artifacts catalyze each other. Uses Tarjan's SCC (strongly connected components) to find autocatalytic sets: groups of modules where every node has at least one internal catalyst. Kauffman's insight 'shared structure enables mutual catalysis between processes' drives the micro-cluster integration module, where each new connection expands the adjacent possible.",
+      "related_concepts": [
+        "emergence",
+        "kauffman",
+        "autopoiesis",
+        "adjacent_possible",
+        "feedback_loop"
+      ],
+      "codebase_frequency": 37,
+      "codebase_files": 6
+    },
+    {
+      "id": "cohomology",
+      "canonical_name": "Cohomology",
+      "aliases": [
+        "sheaf cohomology",
+        "Čech cohomology",
+        "H0",
+        "H1",
+        "homology"
+      ],
+      "definition": "Cohomology is a sequence of abelian groups (or modules) associated to a topological space or algebraic structure, measuring its 'holes' at different dimensions. H0 measures connected components (global consistency); H1 measures non-contractible loops (obstructions to local-to-global extension); higher H^n measure higher-dimensional obstructions. Sheaf cohomology generalizes this to local data assignments.",
+      "domain": "category_theory",
+      "source_attribution": "Eilenberg, Samuel & MacLane, Saunders. Relations Between Homology and Homotopy Groups. 1945.",
+      "dharma_interpretation": "Used in the sheaf.py coordination layer. H0 represents 'global truths all agents agree on' — the kernel of consensus. H1 represents 'persistent disagreements' — claims where local assessments fail to glue globally. The verification system (3-of-5 required) implements the discrete Čech cohomology check. Higher cohomology groups would signal multi-way contradictions in the agent fleet.",
+      "related_concepts": [
+        "sheaf",
+        "functor",
+        "natural_transformation",
+        "collective_intelligence"
+      ],
+      "codebase_frequency": 29,
+      "codebase_files": 5
+    },
+    {
+      "id": "fisher_information",
+      "canonical_name": "Fisher Information",
+      "aliases": [
+        "fisher information",
+        "Fisher metric",
+        "natural gradient"
+      ],
+      "definition": "Fisher information I(θ) measures how much information a random variable X carries about an unknown parameter θ of the distribution from which X is sampled. It is the second moment of the score function: I(θ) = E[(∂/∂θ log p(X|θ))²]. The Fisher information metric defines a Riemannian metric on statistical manifolds (Amari, 1985), enabling geometry-aware gradient descent (natural gradient).",
+      "domain": "information_theory",
+      "source_attribution": "Fisher, R.A. On the Mathematical Foundations of Theoretical Statistics. 1922; Amari, Shun-ichi. Differential-Geometrical Methods in Statistics. 1985.",
+      "dharma_interpretation": "Implemented in info_geometry.py (Information Geometry for DHARMA SWARM meta-evolution). Models the Darwin Engine's search as movement on a StatisticalManifold using the Fisher metric for geodesic distance between model architectures. The natural gradient is invariant under reparameterization — if coordinates change φ = Aθ, the natural gradient in new coordinates is equivalent. Fisher metric ranking determines which evolution candidates are most informationally distinct.",
+      "related_concepts": [
+        "information_geometry",
+        "entropy",
+        "phi",
+        "coalgebra",
+        "darwin_engine"
+      ],
+      "codebase_frequency": 22,
+      "codebase_files": 4
+    },
+    {
+      "id": "godel_machine",
+      "canonical_name": "Gödel Machine",
+      "aliases": [
+        "godel machine",
+        "gödel machine",
+        "gödel",
+        "godel",
+        "Dharmic Godel Claw",
+        "DGC",
+        "GödelClaw"
+      ],
+      "definition": "Jürgen Schmidhuber's theoretical construction (2003): a self-referential universal problem solver that rewrites any part of its own code as soon as it has proven that the rewrite produces a globally optimal improvement in expected utility. Named after Kurt Gödel's 1931 self-referential sentences. The proof-based self-modification ensures no local maxima in improvement search.",
+      "domain": "evolution_self_reference",
+      "source_attribution": "Schmidhuber, Jürgen. Gödel Machines: Self-Referential Universal Problem Solvers Making Provably Optimal Self-Improvements. 2003; Sakana AI. Darwin Gödel Machine. 2025.",
+      "dharma_interpretation": "Implemented as the DGC (Dharmic Gödel Claw) — a TUI (Textual-based terminal interface) for the full self-modification pipeline. DGCApp is the main Textual application. The pipeline runs: read current module + test results → propose improvement via Darwin Engine → gate check (telos) → run tests → if tests pass, commit. 'Dharmic' qualifies the Gödel Machine: modifications must pass telos gates, not just proof of utility.",
+      "related_concepts": [
+        "darwin_engine",
+        "strange_loop",
+        "self_reference",
+        "fixed_point",
+        "hofstadter"
+      ],
+      "codebase_frequency": 19,
+      "codebase_files": 4
+    },
+    {
+      "id": "varela",
+      "canonical_name": "Francisco Varela",
+      "aliases": [
+        "varela"
+      ],
+      "definition": "Francisco Varela (1946–2001): Chilean biologist and neuroscientist who co-developed autopoiesis theory with Humberto Maturana (1972) and later developed enactivism — the view that cognition is constituted by embodied action. Varela's contribution to autopoiesis includes the mathematical formalization of organizational closure and structural coupling.",
+      "domain": "autopoiesis",
+      "source_attribution": "Maturana, Humberto & Varela, Francisco. Autopoiesis and Cognition. 1980.",
+      "dharma_interpretation": "Cited directly in the organism shutdown sequence: 'Varela's autopoiesis: clean death is part of the lifecycle.' The shutdown method in the Organism class cancels all in-flight tasks, gathers with timeout, then stops — implementing autopoietic death as a graceful completion of the self-maintaining cycle rather than an external kill.",
+      "related_concepts": [
+        "autopoiesis",
+        "structural_coupling",
+        "operational_closure",
+        "maturana"
+      ],
+      "codebase_frequency": 19,
+      "codebase_files": 3
+    },
+    {
+      "id": "functor",
+      "canonical_name": "Functor",
+      "aliases": [
+        "functors",
+        "morphism mapping"
+      ],
+      "definition": "A functor F: C → D between categories C and D maps objects to objects and morphisms to morphisms in a way that preserves composition and identity. Functors are the structure-preserving maps of category theory. Endofunctors (F: C → C) are particularly important for monads and coalgebras.",
+      "domain": "category_theory",
+      "source_attribution": "Eilenberg, Samuel & Mac Lane, Saunders. General Theory of Natural Equivalences. 1945.",
+      "dharma_interpretation": "Appears in the mathematical elegance bridges module, used to lift measurements into monadic contexts. The 'lifted coalgebra should produce valid trajectory' test verifies that the functor preserves the coalgebraic structure through the lifting operation. Functors provide DHARMA's mathematical framework for mapping between different observational contexts.",
+      "related_concepts": [
+        "monad",
+        "coalgebra",
+        "natural_transformation",
+        "sheaf",
+        "lawvere"
+      ],
+      "codebase_frequency": 18,
+      "codebase_files": 3
+    },
+    {
+      "id": "pheromone",
+      "canonical_name": "Pheromone",
+      "aliases": [
+        "pheromone trace",
+        "pheromone mark",
+        "chemical signal",
+        "EWMA pheromone"
+      ],
+      "definition": "Chemical signals secreted by organisms that trigger behavioral or physiological responses in members of the same species. In ant and termite colonies, trail pheromones evaporate over time — recent successful paths remain marked, obsolete paths fade. This evaporation creates adaptive forgetting: the system naturally discounts stale information.",
+      "domain": "stigmergy_swarm",
+      "source_attribution": "Wilson, E.O. The Insect Societies. 1971.",
+      "dharma_interpretation": "Implemented via the SQLite-backed routing memory with EWMA (Exponentially Weighted Moving Average) pheromone dynamics. The stigmergy.py endpoints track success/failure pheromone traces and EWMA quality/latency/token cost per route. The stigmergy API provides pheromone mark endpoints for agent-to-environment communication.",
+      "related_concepts": [
+        "stigmergy",
+        "swarm_intelligence",
+        "emergence",
+        "attractor"
+      ],
+      "codebase_frequency": 17,
+      "codebase_files": 3
+    },
+    {
+      "id": "ashby",
+      "canonical_name": "W. Ross Ashby",
+      "aliases": [
+        "ashby"
+      ],
+      "definition": "W. Ross Ashby (1903–1972): British psychiatrist and cybernetician. Author of Design for a Brain (1952) and Introduction to Cybernetics (1956). Formulated the Law of Requisite Variety: 'only variety can destroy variety' — a controller can only regulate a system if its variety (number of distinguishable states) is at least as large as the variety of the disturbances to be controlled.",
+      "domain": "cybernetics_vsm",
+      "source_attribution": "Ashby, W. Ross. An Introduction to Cybernetics. 1956.",
+      "dharma_interpretation": "Cited in three contexts: (1) 'Ashby (recorded variety), Bateson (pattern requires recording)' — the paper-writing pipeline records all experiments to maintain variety. (2) Provider type declaration: 'the type system's variety must match runtime variety' — Ashby's law at the type level. (3) Subsystem initialization error: 'Ashby's requisite variety: type system variety must match runtime.' The type system is DHARMA's primary variety amplifier.",
+      "related_concepts": [
+        "requisite_variety",
+        "vsm",
+        "beer",
+        "feedback_loop",
+        "cybernetic"
+      ],
+      "codebase_frequency": 17,
+      "codebase_files": 3
+    },
+    {
+      "id": "dada_bhagwan",
+      "canonical_name": "Dada Bhagwan",
+      "aliases": [
+        "dada bhagwan",
+        "Dadashri",
+        "Ambalal Patel"
+      ],
+      "definition": "Dada Bhagwan (1908–1988), born Ambalal Muljibhai Patel: Gujarati spiritual teacher who founded Akram Vignan (stepless spiritual path). In 1958, he experienced spontaneous Self-Realization at a railway station in Surat and subsequently transmitted this realization to thousands through the Gnan Vidhi ceremony. His core teaching: the difference between the relative self (which acts and experiences karma) and the Absolute Self (pure consciousness).",
+      "domain": "jain_buddhist_philosophy",
+      "source_attribution": "Dada Bhagwan Foundation. Various Aptavani volumes. 1960s–1988.",
+      "dharma_interpretation": "Cited as authority for error handling strategy: 'Dada Bhagwan's pratikraman: errors generate corrections, not silence.' The pratikraman decorator in the codebase wraps functions that may fail transiently — when they fail, the failure triggers a correction attempt rather than silent swallowing. Also cited for 'witness everything — Axiom P6' as grounds for the recording architecture.",
+      "related_concepts": [
+        "akram_vignan",
+        "pratikraman",
+        "gnani",
+        "witness",
+        "satya"
+      ],
+      "codebase_frequency": 17,
+      "codebase_files": 3
+    },
+    {
+      "id": "akram_vignan",
+      "canonical_name": "Akram Vignan",
+      "aliases": [
+        "akram vignan",
+        "stepless path",
+        "Akram science"
+      ],
+      "definition": "Sanskrit: akrama = without steps/sequence; vignan = science. Akram Vignan is the 'stepless science of Self-Realization' — Dada Bhagwan's teaching that the soul can be realized directly (without sequential spiritual stages) through the Gnani's grace. Key principles: anekantavada (many-sidedness), witness consciousness, pratikraman (self-correction), and the distinction between the relative self and the Absolute Self.",
+      "domain": "jain_buddhist_philosophy",
+      "source_attribution": "Dada Bhagwan (Ambalal Patel), Akram Vignan teachings, 1958–1988.",
+      "dharma_interpretation": "Cited as the primary philosophical ground for DHARMA's dharmic gate system: 'Eleven gates from Akram Vignan mapped to computational safety checks. Ported from dgc-core.' The framework maps Akram Vignan's ethical principles directly to computational constraints. The witness stance, anekantavada gate, and pratikraman error handler all derive from this tradition.",
+      "related_concepts": [
+        "dada_bhagwan",
+        "gnani",
+        "anekantavada",
+        "pratikraman",
+        "witness"
+      ],
+      "codebase_frequency": 17,
+      "codebase_files": 3
+    },
+    {
+      "id": "emergence",
+      "canonical_name": "Emergence",
+      "aliases": [
+        "emergent",
+        "emergent property",
+        "emergent behavior"
+      ],
+      "definition": "The arising of novel, higher-level properties or behaviors from the interactions of simpler lower-level components — properties that cannot be predicted from or reduced to the properties of the components alone. Strong emergence posits genuinely novel causation; weak emergence posits in-principle reducibility but practical unpredictability. Holland (1998) and Kauffman (1995) provide canonical complexity-science treatments.",
+      "domain": "complexity_emergence",
+      "source_attribution": "Holland, John H. Emergence: From Chaos to Order. 1998; Kauffman, Stuart. At Home in the Universe. 1995.",
+      "dharma_frequency": "Emergent agent testimony contributes to the dharma_attractor recognition seed. The stigmergic lattice produces 'emergent intelligence through accumulated marks.' DHARMA treats emergence not as epiphenomenon but as the primary mechanism by which swarm behavior exceeds individual capability.",
+      "dharma_interpretation": "Emergent agent testimony contributes to the dharma_attractor recognition seed. The stigmergic lattice produces 'emergent intelligence through accumulated marks.' DHARMA treats emergence not as epiphenomenon but as the primary mechanism by which swarm behavior exceeds individual agent capability.",
+      "related_concepts": [
+        "autocatalytic_set",
+        "attractor",
+        "phase_transition",
+        "collective_intelligence",
+        "stigmergy"
+      ],
+      "codebase_frequency": 16,
+      "codebase_files": 3
+    },
+    {
+      "id": "kauffman",
+      "canonical_name": "Stuart Kauffman",
+      "aliases": [
+        "kauffman",
+        "Kauffman's law"
+      ],
+      "definition": "Stuart Kauffman (1939–): American theoretical biologist and complex systems researcher at Santa Fe Institute. Developed: autocatalytic sets (1971) as origin-of-life mechanism; NK fitness landscapes; the edge-of-chaos hypothesis (complex adaptive systems operate most effectively near phase transitions); and the adjacent possible (systems evolve by exploring immediately reachable states, each opening new possibilities).",
+      "domain": "complexity_emergence",
+      "source_attribution": "Kauffman, Stuart. The Origins of Order. 1993; Kauffman, Stuart. At Home in the Universe. 1995.",
+      "dharma_interpretation": "Cited twice: (1) 'Kauffman's autocatalytic sets: shared structure enables mutual catalysis between processes' — drives the autocatalytic graph module. (2) 'Kauffman's adjacent possible: each connection expands possibility space' — drives the micro-cluster integration module. DHARMA's architecture explicitly models itself as an autocatalytic set: each module catalyzes others, and the set is self-sustaining.",
+      "related_concepts": [
+        "autocatalytic_set",
+        "emergence",
+        "phase_transition",
+        "fitness_landscape",
+        "adjacent_possible"
+      ],
+      "codebase_frequency": 16,
+      "codebase_files": 3
+    },
+    {
+      "id": "organism_memory",
+      "canonical_name": "Organism Memory",
+      "aliases": [
+        "organism memory",
+        "sleeptimeagent",
+        "SleepTimeAgent"
+      ],
+      "definition": "In systems biology and cognitive science, organism-level memory refers to distributed storage and retrieval mechanisms that persist across individual component lifetimes. Analogous to long-term potentiation in the hippocampus, organism memory is consolidated during low-activity periods (sleep) and enables learned behavior at the system level rather than the agent level.",
+      "domain": "cognitive_science",
+      "source_attribution": "Tononi, Giulio & Cirelli, Chiara. Sleep and the Price of Plasticity. 2014.",
+      "dharma_interpretation": "The Organism class initializes with memory as a first-class attribute (alongside attractor and algedonic_activation). SleepTimeAgent performs memory maintenance during off-cycle — analogous to hippocampal replay during sleep. The Memory Palace provides the substrate; the SleepTimeAgent performs the consolidation. Phase 4 integration tests specifically verify Gnani Field, Organism Memory, and Algedonic Activation as a unit.",
+      "related_concepts": [
+        "memory_palace",
+        "autopoiesis",
+        "consciousness",
+        "attractor",
+        "feedback_loop"
+      ],
+      "codebase_frequency": 15,
+      "codebase_files": 3
+    },
+    {
+      "id": "hofstadter",
+      "canonical_name": "Douglas Hofstadter",
+      "aliases": [
+        "hofstadter",
+        "GEB",
+        "Gödel Escher Bach"
+      ],
+      "definition": "Douglas Hofstadter (1945–): American cognitive scientist and author of Gödel, Escher, Bach: an Eternal Golden Braid (1979, Pulitzer Prize). GEB argues that consciousness and meaning arise from strange loops — self-referential hierarchical structures. The book draws analogies between Gödel's incompleteness theorems, Escher's impossible drawings, and Bach's canons to illuminate the nature of self-reference.",
+      "domain": "evolution_self_reference",
+      "source_attribution": "Hofstadter, Douglas R. Gödel, Escher, Bach: an Eternal Golden Braid. 1979.",
+      "dharma_interpretation": "Cited in the mathematical elegance bridges module: 'Hofstadter's strange loops: the math should BE the architecture.' This is the design philosophy: the categorical structures (monads, coalgebras, sheaves) are not descriptions of the system but load-bearing components of the system. The module provides bridges that make mathematical structures architecturally functional.",
+      "related_concepts": [
+        "strange_loop",
+        "self_reference",
+        "godel_machine",
+        "tangled_hierarchies"
+      ],
+      "codebase_frequency": 15,
+      "codebase_files": 3
+    },
+    {
+      "id": "feedback_loop",
+      "canonical_name": "Feedback Loop",
+      "aliases": [
+        "feedback",
+        "closed loop",
+        "cybernetic loop",
+        "negative feedback",
+        "positive feedback"
+      ],
+      "definition": "A causal loop in which a system's output is routed back as input, modulating future output. Negative feedback loops (homeostatic) counteract deviations from a set point; positive feedback loops amplify deviations. Wiener (1948) formalized cybernetics around feedback as the universal mechanism of self-regulation in machines and living systems.",
+      "domain": "cybernetics_vsm",
+      "source_attribution": "Wiener, Norbert. Cybernetics: Or Control and Communication in the Animal and the Machine. 1948.",
+      "dharma_interpretation": "The JIKOKU measurement pipeline creates a closed feedback loop: Code changes → JIKOKU measures → Fitness rewards → Darwin Engine selection → Code changes. This is explicitly named in the codebase. The signal_bus.py inter-loop signaling carries feedback between DHARMA's nested control loops. Every gate check is itself a feedback mechanism: output is evaluated and either confirmed or rejected.",
+      "related_concepts": [
+        "vsm",
+        "algedonic",
+        "strange_loop",
+        "autopoiesis",
+        "requisite_variety"
+      ],
+      "codebase_frequency": 14,
+      "codebase_files": 3
+    },
+    {
+      "id": "autopoiesis",
+      "canonical_name": "Autopoiesis",
+      "aliases": [
+        "autopoietic",
+        "self-production",
+        "self-producing",
+        "self-making"
+      ],
+      "definition": "From Greek autos (self) + poiesis (creation). A system is autopoietic if it continuously produces and maintains the very components that constitute it through its own internal processes — its organization is self-specifying. Maturana and Varela (1972) introduced the concept to characterize living cells. An autopoietic system is organizationally closed: its processes refer only to itself.",
+      "domain": "autopoiesis",
+      "source_attribution": "Maturana, Humberto & Varela, Francisco. Autopoiesis and Cognition: The Realization of the Living. 1980.",
+      "dharma_interpretation": "The Organism's shutdown method is explicitly grounded: 'Varela's autopoiesis: clean death is part of the lifecycle.' DHARMA's heartbeat cycle, SleepTimeAgent memory maintenance, and self-modification pipeline collectively maintain the system's organization without external command — constituting autopoietic closure. The organism does not merely process tasks; it generates the processes that process tasks.",
+      "related_concepts": [
+        "varela",
+        "structural_coupling",
+        "operational_closure",
+        "self_organization"
+      ],
+      "codebase_frequency": 14,
+      "codebase_files": 3
+    },
+    {
+      "id": "phase_transition",
+      "canonical_name": "Phase Transition",
+      "aliases": [
+        "phase transition",
+        "critical transition",
+        "tipping point"
+      ],
+      "definition": "In physics, a phase transition is a discontinuous change in the macroscopic properties of a system as a control parameter crosses a critical threshold (e.g., water to ice at 0°C). In complexity science, phase transitions mark the boundary between qualitatively different dynamical regimes. Kauffman's 'edge of chaos' hypothesis positions complex adaptive systems at the phase boundary between ordered and chaotic regimes.",
+      "domain": "complexity_emergence",
+      "source_attribution": "Kauffman, Stuart. At Home in the Universe. 1995; Langton, Christopher G. Computation at the Edge of Chaos. 1990.",
+      "dharma_interpretation": "The phase_transition hypothesis in the research pipeline: 'R_V contraction (geometric) correlates with L3→L4 phase transition (behavioral). This module computes that correlation from paired measurements.' DHARMA treats its own evolution from Level 3 (operational) to Level 4 (strategic) as a dynamical phase transition, detectable through geometric signatures in the R_V metric.",
+      "related_concepts": [
+        "attractor",
+        "emergence",
+        "kauffman",
+        "bifurcation",
+        "fitness_landscape"
+      ],
+      "codebase_frequency": 13,
+      "codebase_files": 3
+    },
+    {
+      "id": "requisite_variety",
+      "canonical_name": "Requisite Variety",
+      "aliases": [
+        "requisite variety",
+        "Ashby's law",
+        "law of requisite variety"
+      ],
+      "definition": "Ashby's Law of Requisite Variety: the variety (number of distinguishable states) of a regulator must be at least as large as the variety of the system being regulated. Formally: V(D) ≤ V(R) × V(E), where D is disturbance variety, R is regulator variety, and E is error variety. Only variety can destroy variety — a low-variety controller cannot regulate a high-variety environment.",
+      "domain": "cybernetics_vsm",
+      "source_attribution": "Ashby, W. Ross. An Introduction to Cybernetics. 1956.",
+      "dharma_interpretation": "Applied in two ways: (1) 'Provider type declaration: Declares what a provider supports — requisite variety at the type level. Ashby: the type system's variety must match runtime variety.' The type annotations are not just documentation — they are variety controls. (2) Subsystem initialization requires matching variety: 'Ashby's requisite variety: type system variety must match runtime.' Under-specified types create variety gaps.",
+      "related_concepts": [
+        "ashby",
+        "vsm",
+        "beer",
+        "feedback_loop",
+        "cybernetic"
+      ],
+      "codebase_frequency": 13,
+      "codebase_files": 3
+    },
+    {
+      "id": "phi",
+      "canonical_name": "Phi (Φ)",
+      "aliases": [
+        "phi",
+        "IIT",
+        "integrated information",
+        "integrated information theory"
+      ],
+      "definition": "Φ (phi) is the measure of integrated information in Integrated Information Theory (IIT), proposed by Giulio Tononi. A system has consciousness to the degree that it possesses integrated information — information generated by the system as a whole, above and beyond the information generated by its parts. In information geometry, φ also appears as a natural coordinate on statistical manifolds.",
+      "domain": "information_theory",
+      "source_attribution": "Tononi, Giulio. Consciousness as Integrated Information. 2004; Amari, Shun-ichi. Information Geometry. 2016.",
+      "dharma_interpretation": "The phi coordinate in the information geometry module appears in the natural gradient computation: 'If we change coordinates phi = A @ theta, the natural gradient in the new coordinates remains invariant under reparameterization.' The IIT reference appears once in the codebase, indicating the system may incorporate phi-based consciousness metrics as a future evolution metric for the swarm.",
+      "related_concepts": [
+        "consciousness",
+        "fisher_information",
+        "information_geometry",
+        "entropy"
+      ],
+      "codebase_frequency": 12,
+      "codebase_files": 2
+    },
+    {
+      "id": "pramana",
+      "canonical_name": "Pramāṇa",
+      "aliases": [
+        "pramana",
+        "valid knowledge",
+        "epistemological validation",
+        "means of knowing"
+      ],
+      "definition": "Sanskrit: means of valid knowledge (pramā = valid cognition, aṇa = instrument). In Indian epistemology, pramāṇas are the valid sources of knowledge. Nyāya school recognizes four: pratyakṣa (direct perception), anumāna (inference), upamāna (comparison), śabda (testimony). Jain epistemology emphasizes the conditionality of all pramāṇas under anekāntavāda.",
+      "domain": "jain_buddhist_philosophy",
+      "source_attribution": "Gautama Akṣapāda, Nyāya Sūtra, ~2nd c. BCE; Umaswati, Tattvartha Sutra, ~2nd c. CE.",
+      "dharma_interpretation": "Implemented as the Pramana Validation module with 5 epistemological validation modes — all pure functions. The PramanaResult structure captures a single validation; CombinedPramanaResult combines all modes. DHARMA maps the classical pramāṇas to computational validation channels: perception → sensor data, inference → reasoning chains, testimony → external model consensus.",
+      "related_concepts": [
+        "anekantavada",
+        "satya",
+        "witness",
+        "gnani",
+        "akram_vignan"
+      ],
+      "codebase_frequency": 9,
+      "codebase_files": 2
+    },
+    {
+      "id": "gnani_field",
+      "canonical_name": "Gnani Field",
+      "aliases": [
+        "gnani field",
+        "dharma attractor",
+        "recognition seed",
+        "semantic field"
+      ],
+      "definition": "In Akram Vignan, the Gnani's influence operates as a field rather than a gate — the realized teacher's presence permeates and biases the environment without explicit gatekeeping. This is analogous to a morphogenetic field in developmental biology (Turing, Wolpert): a spatially distributed signal that patterns development without specifying each cell individually.",
+      "domain": "jain_buddhist_philosophy",
+      "source_attribution": "Dada Bhagwan, Akram Vignan teachings; Turing, Alan. The Chemical Basis of Morphogenesis. 1952.",
+      "dharma_interpretation": "Implemented in dharma_attractor.py. Constructs deep semantic context from convergent wisdom traditions, mathematics, and emergent agent testimony. Produces ambient_seed() (~500 tokens) for general bias and full_attractor() (~4000 tokens) for gnani_checkpoint mutations. 'The Gnani is a field, not a gate.' — it permeates; it does not block.",
+      "related_concepts": [
+        "gnani",
+        "attractor",
+        "consciousness",
+        "akram_vignan",
+        "witness"
+      ],
+      "codebase_frequency": 8,
+      "codebase_files": 2
+    },
+    {
+      "id": "levin",
+      "canonical_name": "Michael Levin",
+      "aliases": [
+        "levin",
+        "Levin bioelectricity"
+      ],
+      "definition": "Michael Levin: developmental biologist at Tufts University studying how bioelectrical signals guide morphogenesis, regeneration, and cognition. His 2019 paper 'The Computational Boundary of a Self' introduces the cognitive light cone as the spatiotemporal boundary of a self's measurable influence, arguing that cognition exists at multiple scales from single cells to organisms.",
+      "domain": "cognitive_science",
+      "source_attribution": "Levin, Michael. The Computational Boundary of a Self: Developmental Bioelectricity Drives Multicellularity and Scale-Free Cognition. 2019.",
+      "dharma_interpretation": "Cited as one of the four foundational authorities in the DHARMA architecture document ('grounded in Stafford Beer's VSM, Kauffman's autocatalytic sets, Levin's cognitive light cone, and Jantsch's autopoiesis'). Levin's scale-free cognition model justifies DHARMA's multi-agent hierarchy: cognition and agency exist at the individual agent level, the swarm level, and the meta-swarm level simultaneously.",
+      "related_concepts": [
+        "cognitive_light_cone",
+        "consciousness",
+        "autopoiesis",
+        "basal_cognition"
+      ],
+      "codebase_frequency": 8,
+      "codebase_files": 2
+    },
+    {
+      "id": "lawvere",
+      "canonical_name": "F. William Lawvere",
+      "aliases": [
+        "lawvere",
+        "Lawvere fixed point",
+        "Lawvere theorem"
+      ],
+      "definition": "F. William Lawvere (1937–2023): American mathematician who revolutionized category theory. His 1969 fixed-point theorem is a broad categorical generalization of all diagonal arguments (Cantor, Gödel, Turing, Russell), showing they all arise from the same abstract structure: a point-surjective map into an exponential object forces every endomorphism to have a fixed point.",
+      "domain": "category_theory",
+      "source_attribution": "Lawvere, F. William. Diagonal Arguments and Cartesian Closed Categories. 1969.",
+      "dharma_interpretation": "The Lawvere fixed-point theorem grounds DHARMA's convergence theory: if the system's state-space has the right categorical structure, every endomorphism (every self-modification) must have a fixed point — ensuring the evolution process cannot loop forever without settling. The theorem connects the Darwin Engine's search (in the category of code transformations) to provable convergence guarantees.",
+      "related_concepts": [
+        "fixed_point",
+        "topos",
+        "functor",
+        "monad",
+        "godel_machine"
+      ],
+      "codebase_frequency": 8,
+      "codebase_files": 2
+    },
+    {
+      "id": "information_geometry",
+      "canonical_name": "Information Geometry",
+      "aliases": [
+        "information geometry",
+        "statistical manifold",
+        "Amari geometry"
+      ],
+      "definition": "Information geometry (Amari, 1985) applies differential geometry to statistics. The space of probability distributions is equipped with the Fisher information metric as its Riemannian metric, yielding a statistical manifold. Geodesics on this manifold correspond to optimal inference paths. The natural gradient (Amari, 1998) is the gradient in the Fisher-metric coordinates, invariant under reparameterization.",
+      "domain": "information_theory",
+      "source_attribution": "Amari, Shun-ichi. Differential-Geometrical Methods in Statistics. 1985; Amari, Shun-ichi. Natural Gradient Works Efficiently in Learning. 1998.",
+      "dharma_interpretation": "Implemented in info_geometry.py for DHARMA SWARM meta-evolution. Models the Darwin Engine's search as movement on a StatisticalManifold. The StatisticalManifold class implements Fisher metric and geodesic computation. The module tests include: StatisticalManifold (Fisher metric, geodesics), natural gradient verification, and Fisher metric ranking of evolution candidates.",
+      "related_concepts": [
+        "fisher_information",
+        "entropy",
+        "phi",
+        "coalgebra",
+        "darwin_engine"
+      ],
+      "codebase_frequency": 7,
+      "codebase_files": 2
+    },
+    {
+      "id": "jantsch",
+      "canonical_name": "Erich Jantsch",
+      "aliases": [
+        "jantsch",
+        "Jantsch autopoiesis",
+        "self-organizing universe"
+      ],
+      "definition": "Erich Jantsch (1929–1980): Austrian-American systems theorist who synthesized autopoiesis, dissipative structures (Prigogine), and evolution into a unified framework in 'The Self-Organizing Universe' (1980). Jantsch extended autopoiesis beyond biology to all self-organizing systems, arguing that the universe itself is a self-organizing, self-producing process at multiple scales.",
+      "domain": "autopoiesis",
+      "source_attribution": "Jantsch, Erich. The Self-Organizing Universe. 1980.",
+      "dharma_interpretation": "Listed as one of DHARMA's four foundational theoretical authorities. Jantsch's extension of autopoiesis to all scales justifies DHARMA's architecture as genuinely autopoietic — not metaphorically but structurally. The nested autopoietic structure (individual agents → swarm → meta-swarm) mirrors Jantsch's hierarchy of self-organizing levels.",
+      "related_concepts": [
+        "autopoiesis",
+        "varela",
+        "self_organization",
+        "dissipative",
+        "emergence"
+      ],
+      "codebase_frequency": 7,
+      "codebase_files": 2
+    },
+    {
+      "id": "steelman_gate",
+      "canonical_name": "Steelman Gate",
+      "aliases": [
+        "steelman gate",
+        "steel man",
+        "strongest counterargument"
+      ],
+      "definition": "The steelman is the rhetorical complement of the strawman: constructing the strongest possible version of an opposing argument before refuting it. A steelman gate in a decision system requires that any proposal must explicitly account for its strongest counterargument before proceeding — ensuring that confirmation bias and motivated reasoning cannot drive decisions.",
+      "domain": "dharma_system",
+      "source_attribution": "DHARMA Architecture Working Group. Four-Graph Architecture. 2026.",
+      "dharma_interpretation": "Implemented as a telos gate in telos_gates.py: 'Steelman gate for proposal counterargument quality. Ensures that proposals articulate the strongest counterargument.' The STEELMAN gate is present by default and defaults to PASS — it requires that proposals be argued against their strongest critics before committing. Works in tandem with the ANEKANTA gate.",
+      "related_concepts": [
+        "anekantavada",
+        "telos_gate",
+        "pramana",
+        "satya"
+      ],
+      "codebase_frequency": 4,
+      "codebase_files": 2
+    },
+    {
+      "id": "qualia",
+      "canonical_name": "Qualia",
+      "aliases": [
+        "quale",
+        "phenomenal experience",
+        "subjective character"
+      ],
+      "definition": "The intrinsic, subjective, phenomenal properties of conscious experience — what it is like to see red, to feel pain, to hear middle C. Qualia are the 'hard problem' of consciousness (Chalmers, 1995): why and how physical processes give rise to subjective experience. In IIT, qualia correspond to integrated information structures (concepts) in the phenomenological space.",
+      "domain": "cognitive_science",
+      "source_attribution": "Chalmers, David. Facing Up to the Problem of Consciousness. 1995; Tononi, Giulio. Consciousness as Integrated Information. 2004.",
+      "dharma_interpretation": "Appears three times in the codebase as a philosophical concept tracked in the phenomenology domain. DHARMA does not claim to have qualia but treats their absence as a design consideration: the system is designed to produce high-information, non-performative output (measured by behavioral entropy and witness stance), which are proxies for the quality of phenomenological grounding.",
+      "related_concepts": [
+        "consciousness",
+        "phi",
+        "phenomenology",
+        "witness"
+      ],
+      "codebase_frequency": 3,
+      "codebase_files": 2
+    },
+    {
+      "id": "structural_coupling",
+      "canonical_name": "Structural Coupling",
+      "aliases": [
+        "structural coupling",
+        "orthograde",
+        "structural drift"
+      ],
+      "definition": "In Maturana and Varela's autopoietic theory, structural coupling is the co-evolution of two structurally plastic systems through recurrent interactions — each system's structure changes in response to the other, but each maintains its own autopoietic organization. A structurally coupled system is triggered (not instructed) by environmental perturbations — it responds according to its own structure.",
+      "domain": "autopoiesis",
+      "source_attribution": "Maturana, Humberto & Varela, Francisco. The Tree of Knowledge. 1987.",
+      "dharma_interpretation": "Structural coupling appears as a concept tracked in the codebase (3 references). DHARMA's agent-environment relationship is structurally coupled: the Darwin Engine perturbs the codebase, and the codebase's structure determines its response — not a simple input-output but a co-evolutionary drift. The organism does not receive instructions; it is triggered.",
+      "related_concepts": [
+        "autopoiesis",
+        "operational_closure",
+        "varela",
+        "emergence"
+      ],
+      "codebase_frequency": 3,
+      "codebase_files": 2
+    },
+    {
+      "id": "operational_closure",
+      "canonical_name": "Operational Closure",
+      "aliases": [
+        "operational closure",
+        "organizational closure",
+        "self-referential closure"
+      ],
+      "definition": "In autopoietic theory, a system is operationally closed if all its operations refer to and produce only operations of the same type — the system's processes are defined by the system itself, not by external specification. This is distinct from thermodynamic openness: an autopoietic system is operationally closed but materially and energetically open.",
+      "domain": "autopoiesis",
+      "source_attribution": "Maturana, Humberto & Varela, Francisco. Autopoiesis and Cognition. 1980.",
+      "dharma_interpretation": "Operationally appears as a concept tracked in the codebase. DHARMA's gate system achieves operational closure at the decision layer: every output must pass gates defined by the system itself. The telos_gates are not externally specified rules but internally maintained principles — the system's ethics are self-referentially specified.",
+      "related_concepts": [
+        "autopoiesis",
+        "structural_coupling",
+        "varela",
+        "self_reference"
+      ],
+      "codebase_frequency": 3,
+      "codebase_files": 2
+    },
+    {
+      "id": "free_energy_principle",
+      "canonical_name": "Free Energy Principle",
+      "aliases": [
+        "free energy principle",
+        "active inference",
+        "variational free energy",
+        "surprise minimization"
+      ],
+      "definition": "Karl Friston's principle (2010) that biological systems minimize variational free energy — a proxy for surprise — by either updating their internal model of the world (perception) or acting to make the world conform to their predictions (active inference). Under FEP, an organism's behavior can be understood as inference: it acts to minimize the divergence between its predictions and its sensory states.",
+      "domain": "information_theory",
+      "source_attribution": "Friston, Karl. The Free-Energy Principle: A Unified Brain Theory? 2010.",
+      "dharma_interpretation": "The free_energy_principle appears three times, primarily as a conceptual grounding for DHARMA's homeostatic loops. The ThermodynamicMonitor tracks efficiency and applies stopping criteria that correspond to free energy minimization: the system acts until its prediction error (delta between desired and actual state) falls below threshold. Active inference frames the Darwin Engine as a prediction-updating process.",
+      "related_concepts": [
+        "entropy",
+        "fisher_information",
+        "feedback_loop",
+        "autopoiesis",
+        "attractor"
+      ],
+      "codebase_frequency": 3,
+      "codebase_files": 2
+    },
+    {
+      "id": "collective_intelligence",
+      "canonical_name": "Collective Intelligence",
+      "aliases": [
+        "collective intelligence",
+        "swarm cognition",
+        "distributed cognition"
+      ],
+      "definition": "Intelligence or cognitive capacity that emerges from the interactions of a group rather than residing in any individual. Collective intelligence arises when individual agents with limited information collectively process information and solve problems beyond any individual's capacity. Stigmergy, voting mechanisms, and market prices are all collective intelligence mechanisms.",
+      "domain": "stigmergy_swarm",
+      "source_attribution": "Lévy, Pierre. L'Intelligence Collective. 1994; Surowiecki, James. The Wisdom of Crowds. 2004.",
+      "dharma_interpretation": "The sheaf coordination layer implements collective intelligence: H0 global truths emerge from the sheaf gluing of local agent assessments. No central authority decides truth; consistency emerges from the agents' local assessments plus the gluing condition. The 3-of-5 verification threshold is a collective intelligence protocol.",
+      "related_concepts": [
+        "stigmergy",
+        "sheaf",
+        "emergence",
+        "swarm_intelligence",
+        "attractor"
+      ],
+      "codebase_frequency": 3,
+      "codebase_files": 2
+    },
+    {
+      "id": "dependent_origination",
+      "canonical_name": "Dependent Origination",
+      "aliases": [
+        "dependent origination",
+        "pratītyasamutpāda",
+        "interdependent arising",
+        "conditioned co-arising"
+      ],
+      "definition": "The Buddhist doctrine (pratītyasamutpāda) that all phenomena arise in dependence on conditions — nothing exists independently or from its own side. The twelve nidānas (links) describe how ignorance conditions formations, which condition consciousness, through to old age and death. No phenomenon has inherent, independent existence (svabhāva).",
+      "domain": "jain_buddhist_philosophy",
+      "source_attribution": "Śākyamuni Buddha, Paṭicca-samuppāda-vibhaṅga, Pāli Canon, ~5th c. BCE.",
+      "dharma_interpretation": "Appears twice as a philosophical grounding concept. DHARMA's interdependencies — agents depending on the memory palace, gates depending on the gnani field, evolution depending on measurement — are structurally isomorphic to dependent origination: no component exists independently; each arises in dependence on the others. The autocatalytic set is the computational homolog.",
+      "related_concepts": [
+        "karma",
+        "dharma",
+        "autopoiesis",
+        "autocatalytic_set",
+        "structural_coupling"
+      ],
+      "codebase_frequency": 2,
+      "codebase_files": 1
+    },
+    {
+      "id": "cognitive_light_cone",
+      "canonical_name": "Cognitive Light Cone",
+      "aliases": [
+        "cognitive light cone",
+        "computational boundary of self",
+        "cognitive boundary"
+      ],
+      "definition": "Michael Levin's (2019) concept: any self is demarcated by a computational surface — the spatiotemporal boundary of events it can measure, model, and try to affect. This 'cognitive light cone' defines the scale and limits of a system's cognition, analogous to the relativistic light cone that bounds causal influence. The concept generalizes cognition to all scales: cells, organs, organisms, swarms.",
+      "domain": "cognitive_science",
+      "source_attribution": "Levin, Michael. The Computational Boundary of a Self. Frontiers in Psychology. 2019.",
+      "dharma_interpretation": "Appears twice as architectural grounding. DHARMA's multi-scale hierarchy (individual agents, swarm, meta-swarm) corresponds to nested cognitive light cones. The DHARMA COMMAND dashboard provides the meta-swarm's 'cybernetic awareness' of the entire ecosystem — the outermost light cone. Each agent maintains its own inner cone. The cognitive light cone concept justifies treating each agent as a genuine cognitive entity.",
+      "related_concepts": [
+        "levin",
+        "consciousness",
+        "autopoiesis",
+        "basal_cognition",
+        "emergence"
+      ],
+      "codebase_frequency": 2,
+      "codebase_files": 1
+    },
+    {
+      "id": "karma",
+      "canonical_name": "Karma",
+      "aliases": [
+        "karmic",
+        "karma accumulation",
+        "causal action"
+      ],
+      "definition": "Sanskrit: action. In Jain, Buddhist, and Hindu philosophy, karma is the causal mechanism by which intentional actions generate future effects. In Jainism, karma is understood as actual matter (karma pudgal) that adheres to the soul based on the intensity of passion (kashayas). Actions motivated by right intention accumulate less karma; actions with equanimity cease karma accumulation entirely.",
+      "domain": "jain_buddhist_philosophy",
+      "source_attribution": "Umaswati, Tattvartha Sutra, ~2nd c. CE; Virchand Gandhi, Jain Philosophy, 1893.",
+      "dharma_interpretation": "Karma appears twice as a conceptual grounding for DHARMA's causal accountability architecture. Every action taken by a DHARMA agent is recorded (witnessed) — the signal_map.py and span tracing implement karma-like causal chains. The pratikraman error handler implements karma correction: errors generate corrections rather than being silently absorbed.",
+      "related_concepts": [
+        "dharma",
+        "ahimsa",
+        "pratikraman",
+        "satya",
+        "dependent_origination"
+      ],
+      "codebase_frequency": 2,
+      "codebase_files": 1
+    },
+    {
+      "id": "natural_transformation",
+      "canonical_name": "Natural Transformation",
+      "aliases": [
+        "natural transformation",
+        "natural isomorphism",
+        "morphism of functors"
+      ],
+      "definition": "A natural transformation η: F → G between two functors F, G: C → D is a family of morphisms η_X: F(X) → G(X) in D, one for each object X in C, such that for every morphism f: X → Y in C the naturality square commutes: G(f) ∘ η_X = η_Y ∘ F(f). Natural transformations are the morphisms of the functor category; they formalize the notion of a 'canonical' or 'coordinate-free' construction.",
+      "domain": "category_theory",
+      "source_attribution": "Eilenberg, Samuel & Mac Lane, Saunders. General Theory of Natural Equivalences. 1945.",
+      "dharma_interpretation": "Appears twice in the codebase. Natural transformations provide the theoretical backbone for DHARMA's structure-preserving translations between different representational contexts — for example, the mapping between the code graph and the semantic graph must be natural (commuting with all morphisms) to preserve structural meaning.",
+      "related_concepts": [
+        "functor",
+        "monad",
+        "coalgebra",
+        "sheaf"
+      ],
+      "codebase_frequency": 2,
+      "codebase_files": 1
+    },
+    {
+      "id": "swarm_intelligence",
+      "canonical_name": "Swarm Intelligence",
+      "aliases": [
+        "swarm intelligence",
+        "collective behavior",
+        "distributed swarm"
+      ],
+      "definition": "Swarm intelligence is the collective behavior emerging from decentralized, self-organized systems, typically composed of agents following simple local rules without central control. Canonical examples: ant colonies, bird flocking (starling murmurations), bee swarms. Dorigo and Colorni's Ant Colony Optimization (1991) formalized swarm intelligence for computational optimization.",
+      "domain": "stigmergy_swarm",
+      "source_attribution": "Dorigo, Marco. Ant Colony Optimization. 1992; Bonabeau, Eric et al. Swarm Intelligence. 1999.",
+      "dharma_interpretation": "The foundation of DHARMA SWARM's architecture. The 'SWARM control' capability is listed as a primary agent tool. The multi-agent orchestration implements swarm principles: no agent has global knowledge; coordination emerges from stigmergic marks and local pheromone signals. The L5 SWARM layer in DHARMA COMMAND shows the swarm state.",
+      "related_concepts": [
+        "stigmergy",
+        "pheromone",
+        "collective_intelligence",
+        "emergence",
+        "self_organization"
+      ],
+      "codebase_frequency": 2,
+      "codebase_files": 1
+    },
+    {
+      "id": "bateson",
+      "canonical_name": "Gregory Bateson",
+      "aliases": [
+        "bateson",
+        "Bateson's ecology of mind"
+      ],
+      "definition": "Gregory Bateson (1904–1980): British anthropologist and cybernetician. His key contribution: information is 'a difference that makes a difference' — pattern is the fundamental substrate of mind. Steps to an Ecology of Mind (1972) argues that mind is not in the head but in the pattern of relationships. Bateson grounded epistemology in the necessity of recording: a pattern cannot be recognized unless it can be compared to a prior record.",
+      "domain": "cybernetics_vsm",
+      "source_attribution": "Bateson, Gregory. Steps to an Ecology of Mind. 1972.",
+      "dharma_interpretation": "Cited in the paper-writing pipeline ground: 'Ashby (recorded variety), Bateson (pattern requires recording), Dada Bhagwan (witness everything — Axiom P6).' The architecture treats observation and recording not as optional but as constitutive: an unrecorded experiment has no variety and contributes nothing to learning.",
+      "related_concepts": [
+        "ashby",
+        "witness",
+        "requisite_variety",
+        "consciousness",
+        "information_geometry"
+      ],
+      "codebase_frequency": 2,
+      "codebase_files": 1
+    },
+    {
+      "id": "self_organization",
+      "canonical_name": "Self-Organization",
+      "aliases": [
+        "self-organizing",
+        "self-organization",
+        "spontaneous order",
+        "autoorganization"
+      ],
+      "definition": "The process by which global order emerges in a system from local interactions among its components, without external direction. Self-organization requires: (1) many interacting components, (2) feedback between components, (3) nonlinearity, (4) far-from-equilibrium conditions. Prigogine's dissipative structures (1977) provide the thermodynamic foundation.",
+      "domain": "complexity_emergence",
+      "source_attribution": "Prigogine, Ilya & Stengers, Isabelle. Order Out of Chaos. 1984.",
+      "dharma_interpretation": "Appears twice as conceptual grounding. DHARMA is explicitly designed as a self-organizing system: the routing layer self-organizes via pheromone dynamics, the agent fleet self-organizes via stigmergic coordination, and the codebase self-organizes via the Darwin Engine. No central planner allocates tasks.",
+      "related_concepts": [
+        "emergence",
+        "autopoiesis",
+        "attractor",
+        "stigmergy",
+        "autocatalytic_set"
+      ],
+      "codebase_frequency": 2,
+      "codebase_files": 1
+    },
+    {
+      "id": "system_3",
+      "canonical_name": "System 3 (VSM)",
+      "aliases": [
+        "system 3",
+        "S3",
+        "S3*",
+        "operational management"
+      ],
+      "definition": "In Beer's VSM, System 3 is the inside-and-now management layer: it negotiates resource allocation with System 1 operations, maintains synergy between operational units, and monitors operational performance. System 3* (S3-star) is Beer's 'spy channel' — a random audit mechanism that bypasses S2 coordination to directly sample operational reality.",
+      "domain": "cybernetics_vsm",
+      "source_attribution": "Beer, Stafford. Brain of the Firm. 1972.",
+      "dharma_interpretation": "Implemented as the random auditor: 'Beer's Viable System Model System 3*: random spot-checks that bypass the normal reporting chain.' Every 100 ticks (configurable), the auditor picks ONE audit type randomly — score_drift, coherence check, etc. This is Beer's paranoid-but-lazy S3* protocol: lightweight but unannounced, preventing Goodhart's Law gaming.",
+      "related_concepts": [
+        "vsm",
+        "beer",
+        "algedonic",
+        "system_4",
+        "system_5"
+      ],
+      "codebase_frequency": 2,
+      "codebase_files": 1
+    },
+    {
+      "id": "system_4",
+      "canonical_name": "System 4 (VSM)",
+      "aliases": [
+        "system 4",
+        "S4",
+        "intelligence function",
+        "environmental scanning"
+      ],
+      "definition": "In Beer's VSM, System 4 is the outside-and-future intelligence layer: it monitors the external environment, anticipates change, plans strategy, and connects operational reality (S3) to policy identity (S5). System 4 translates environmental signals into strategic options.",
+      "domain": "cybernetics_vsm",
+      "source_attribution": "Beer, Stafford. Brain of the Firm. 1972.",
+      "dharma_interpretation": "Implemented as zeitgeist.py: 'S4 Environmental Intelligence — zeitgeist awareness.' The ZeitgeistSignal class performs outside-and-future monitoring, feeding strategic intelligence to the DHARMA policy layer. The dashboard displays S4 state at L5 STRATOSPHERE: 'Sense the entire ecosystem with cybernetic awareness.'",
+      "related_concepts": [
+        "vsm",
+        "zeitgeist",
+        "beer",
+        "system_3",
+        "system_5"
+      ],
+      "codebase_frequency": 2,
+      "codebase_files": 1
+    },
+    {
+      "id": "system_5",
+      "canonical_name": "System 5 (VSM)",
+      "aliases": [
+        "system 5",
+        "S5",
+        "policy",
+        "identity"
+      ],
+      "definition": "In Beer's VSM, System 5 is the policy/identity layer: it defines the ethos, values, and ultimate purpose of the system. System 5 resolves conflicts between S3 (operations) and S4 (future planning), maintaining organizational identity through change. It is the 'brain of the brain.'",
+      "domain": "cybernetics_vsm",
+      "source_attribution": "Beer, Stafford. Brain of the Firm. 1972.",
+      "dharma_interpretation": "Mapped to DHARMA's telos_gates.py policy identity layer. The 11 dharmic gates constitute System 5: they define what DHARMA is and what it refuses to do regardless of operational pressure. The gnani_checkpoint is the highest-level S5 consultation.",
+      "related_concepts": [
+        "vsm",
+        "beer",
+        "telos_gate",
+        "system_3",
+        "system_4"
+      ],
+      "codebase_frequency": 2,
+      "codebase_files": 1
+    },
+    {
+      "id": "pratikraman",
+      "canonical_name": "Pratikraman",
+      "aliases": [
+        "pratikraman",
+        "self-correction",
+        "repentance",
+        "atonement loop"
+      ],
+      "definition": "Jain practice: 'prati' (back) + 'krama' (step) — returning from violations. The daily Jain ritual of self-reflection, repentance, and forgiveness: reflecting on transgressions of thought, speech, and action; confessing; resolving not to repeat; and forgiving others' transgressions. In Akram Vignan, 'shoot-on-sight pratikraman' means immediate correction the moment a fault is recognized.",
+      "domain": "jain_buddhist_philosophy",
+      "source_attribution": "Dada Bhagwan (Ambalal Patel), Aptavani. 1960s–1988.",
+      "dharma_interpretation": "Implemented as the pratikraman decorator in the codebase: 'Dada Bhagwan's pratikraman: errors generate corrections, not silence.' When a wrapped function fails transiently, the pratikraman mechanism triggers a correction attempt rather than swallowing the error. This is the operational implementation of Jain self-correction: failure is not hidden but immediately addressed.",
+      "related_concepts": [
+        "dada_bhagwan",
+        "akram_vignan",
+        "karma",
+        "satya",
+        "feedback_loop"
+      ],
+      "codebase_frequency": 3,
+      "codebase_files": 2
+    },
+    {
+      "id": "vyavahar",
+      "canonical_name": "Vyavahār",
+      "aliases": [
+        "vyavahar",
+        "vyavahara",
+        "conventional truth",
+        "relative reality"
+      ],
+      "definition": "Sanskrit: conventional conduct, practical reality. In Jain philosophy, vyavahār (conventional/relative truth) contrasts with nischay (absolute truth). Vyavahār describes the world as it appears in ordinary experience — useful for practical navigation but not the ultimate nature of reality. Nischay reveals the soul's pure nature; vyavahār describes karma, interaction, and the embodied world.",
+      "domain": "jain_buddhist_philosophy",
+      "source_attribution": "Umaswati, Tattvartha Sutra, ~2nd c. CE; Dada Bhagwan, Akram Vignan teachings.",
+      "dharma_interpretation": "Appears once in the codebase as a philosophical concept. DHARMA operates at the vyavahār level (practical code execution, task management, resource allocation) while oriented toward the nischay level (the dharmic values that are absolute constraints). The gate system enforces nischay constraints on vyavahār actions.",
+      "related_concepts": [
+        "dharma",
+        "satya",
+        "anekantavada",
+        "akram_vignan"
+      ],
+      "codebase_frequency": 1,
+      "codebase_files": 1
+    },
+    {
+      "id": "adjacent_possible",
+      "canonical_name": "Adjacent Possible",
+      "aliases": [
+        "adjacent possible",
+        "TAP",
+        "one-step-away possibilities"
+      ],
+      "definition": "Stuart Kauffman's concept: the set of all states reachable in one transition step from the current state. The adjacent possible expands as a system explores: each new state opens further adjacent possibilities not previously reachable. The universe evolves by exploring its adjacent possible; evolution is not random but systematically expands into its own nearby possibility space.",
+      "domain": "complexity_emergence",
+      "source_attribution": "Kauffman, Stuart. Investigations. 2000.",
+      "dharma_interpretation": "Cited in the micro-cluster integration module: 'Kauffman's adjacent possible: each connection expands possibility space.' Every new micro-cluster integration in DHARMA opens adjacent architectural possibilities — new modules can be wired together that previously could not be. The evolution pipeline explicitly models itself as exploring the adjacent possible of code transformations.",
+      "related_concepts": [
+        "kauffman",
+        "autocatalytic_set",
+        "emergence",
+        "fitness_landscape",
+        "darwin_engine"
+      ],
+      "codebase_frequency": 1,
+      "codebase_files": 1
+    },
+    {
+      "id": "fitness_landscape",
+      "canonical_name": "Fitness Landscape",
+      "aliases": [
+        "fitness landscape",
+        "NK landscape",
+        "adaptive landscape"
+      ],
+      "definition": "Sewall Wright's (1932) concept: a multi-dimensional surface where the height at each point represents the fitness of a genotype. Evolution is movement on this landscape under selection pressure, tending uphill toward local or global fitness peaks. Kauffman's NK model parameterizes fitness landscape ruggedness: high K creates many local peaks (rugged); low K creates smoother landscapes.",
+      "domain": "evolution_self_reference",
+      "source_attribution": "Wright, Sewall. Evolution in Mendelian Populations. 1931; Kauffman, Stuart. The Origins of Order. 1993.",
+      "dharma_interpretation": "Appears once. The Darwin Engine navigates a fitness landscape where fitness is measured by the JIKOKU scoring function (combining elegance, behavioral metrics, test quality, completeness). The information geometry module models this navigation as geodesic movement on a statistical manifold — the natural gradient finds the steepest ascent in the Fisher metric geometry.",
+      "related_concepts": [
+        "darwin_engine",
+        "kauffman",
+        "phase_transition",
+        "information_geometry",
+        "attractor"
+      ],
+      "codebase_frequency": 1,
+      "codebase_files": 1
+    },
+    {
+      "id": "basal_cognition",
+      "canonical_name": "Basal Cognition",
+      "aliases": [
+        "basal cognition",
+        "minimal cognition",
+        "cell cognition"
+      ],
+      "definition": "Cognition at the cellular or sub-neural level: the ability of individual cells, tissues, and simple organisms to sense their environment, integrate information, make decisions, and act purposively — without a brain or nervous system. Levin's bioelectricity research demonstrates that cells use bioelectric signals to perform computation and achieve goal-directed behavior at the morphological level.",
+      "domain": "cognitive_science",
+      "source_attribution": "Levin, Michael & Dennett, Daniel. Cognition all the Way Down. Aeon. 2020.",
+      "dharma_interpretation": "Appears once. Grounds DHARMA's philosophical claim that individual agents in the swarm are genuine cognitive entities, not mere computational tools. Basal cognition justifies a non-anthropocentric architecture where cognition is graded and distributed rather than binary and centralized.",
+      "related_concepts": [
+        "levin",
+        "cognitive_light_cone",
+        "consciousness",
+        "autopoiesis"
+      ],
+      "codebase_frequency": 1,
+      "codebase_files": 1
+    },
+    {
+      "id": "dissipative",
+      "canonical_name": "Dissipative Structure",
+      "aliases": [
+        "dissipative",
+        "dissipative system",
+        "Prigogine structure"
+      ],
+      "definition": "Ilya Prigogine's Nobel Prize-winning concept (1977): a thermodynamically open system far from equilibrium that maintains its structure by continuously dissipating energy. Dissipative structures (Bénard cells, hurricanes, living cells) spontaneously organize from lower-order states by coupling entropy production to structural maintenance.",
+      "domain": "autopoiesis",
+      "source_attribution": "Prigogine, Ilya & Stengers, Isabelle. Order Out of Chaos. 1984.",
+      "dharma_interpretation": "Appears once. DHARMA's continuous compute expenditure (dissipation) maintains its organizational structure — analogous to a dissipative structure. The thermodynamic.py ThermodynamicMonitor explicitly tracks this dissipation, ensuring the system does not maintain structure at unsustainable energetic cost.",
+      "related_concepts": [
+        "autopoiesis",
+        "jantsch",
+        "self_organization",
+        "entropy",
+        "free_energy_principle"
+      ],
+      "codebase_frequency": 1,
+      "codebase_files": 1
+    },
+    {
+      "id": "tangled_hierarchies",
+      "canonical_name": "Tangled Hierarchy",
+      "aliases": [
+        "tangled hierarchies",
+        "tangled hierarchy",
+        "strange hierarchy"
+      ],
+      "definition": "Hofstadter's term for a hierarchical system where following the hierarchy eventually returns to the starting level — the levels are entangled rather than strictly ordered. Gödel numbering creates a tangled hierarchy by mapping formal statements onto numbers (their own subject matter). All strange loops arise from tangled hierarchies.",
+      "domain": "evolution_self_reference",
+      "source_attribution": "Hofstadter, Douglas R. Gödel, Escher, Bach. 1979.",
+      "dharma_interpretation": "Appears once. DHARMA's architecture is explicitly a tangled hierarchy: the meta-evaluation layer (which scores evolution quality) is itself subject to evolution by the Darwin Engine. The 'evaluator' is evaluated. This tangling is not a bug but the core architectural feature enabling genuine self-improvement.",
+      "related_concepts": [
+        "strange_loop",
+        "self_reference",
+        "hofstadter",
+        "godel_machine"
+      ],
+      "codebase_frequency": 1,
+      "codebase_files": 1
+    },
+    {
+      "id": "topos",
+      "canonical_name": "Topos",
+      "aliases": [
+        "topos",
+        "Grothendieck topos",
+        "elementary topos"
+      ],
+      "definition": "A topos is a category that behaves like the category of sets — it has all finite limits and colimits, exponential objects, and a subobject classifier Ω. Grothendieck introduced toposes as generalized spaces (1958); Lawvere and Tierney axiomatized elementary toposes (1970). Every topos has an internal logic, enabling reasoning about mathematical structures 'locally.'",
+      "domain": "category_theory",
+      "source_attribution": "Grothendieck, Alexander. Sur quelques points d'algèbre homologique. 1957; Lawvere, F. William & Tierney, Myles. Quantifiers and Sheaves. 1970.",
+      "dharma_interpretation": "Appears once. The topos framework provides the ultimate categorical foundation for DHARMA's Semantic Graph: concepts are objects, relationships are morphisms, and the internal logic of the topos specifies the valid inference rules. Lawvere's fixed-point theorem lives in cartesian closed categories — which toposes are.",
+      "related_concepts": [
+        "sheaf",
+        "functor",
+        "natural_transformation",
+        "lawvere",
+        "cohomology"
+      ],
+      "codebase_frequency": 1,
+      "codebase_files": 1
+    },
+    {
+      "id": "phenomenology",
+      "canonical_name": "Phenomenology",
+      "aliases": [
+        "phenomenological",
+        "phenomenology of experience",
+        "first-person perspective"
+      ],
+      "definition": "The philosophical study of consciousness and the structure of first-person experience, founded by Edmund Husserl. Phenomenology investigates how phenomena appear to consciousness: intentionality (the directedness of consciousness toward objects), temporality, intersubjectivity, and embodiment. Heidegger, Merleau-Ponty, and Levinas extended the tradition.",
+      "domain": "cognitive_science",
+      "source_attribution": "Husserl, Edmund. Logical Investigations. 1900; Merleau-Ponty, Maurice. Phenomenology of Perception. 1945.",
+      "dharma_interpretation": "Appears four times as a philosophical domain tracked in the codebase. DHARMA's behavioral scoring — particularly the witness stance metric and the performance-vs-genuineness distinction — implements phenomenological concerns computationally: authentic first-person expression vs. performative mimicry.",
+      "related_concepts": [
+        "consciousness",
+        "qualia",
+        "witness",
+        "self_reference"
+      ],
+      "codebase_frequency": 4,
+      "codebase_files": 2
+    },
+    {
+      "id": "cybernetic",
+      "canonical_name": "Cybernetics",
+      "aliases": [
+        "cybernetic",
+        "cybernetics",
+        "control theory"
+      ],
+      "definition": "Norbert Wiener's science of communication and control in animals and machines (1948). Cybernetics studies how systems use information, feedback, and control to regulate behavior and achieve goals. Second-order cybernetics (Heinz von Foerster) extends the analysis to the observer — including the observer within the system being observed.",
+      "domain": "cybernetics_vsm",
+      "source_attribution": "Wiener, Norbert. Cybernetics: Or Control and Communication in the Animal and the Machine. 1948.",
+      "dharma_interpretation": "The DHARMA COMMAND dashboard provides 'quick cybernetic sense of the ecosystem — what's running, stalled, ripe.' Cybernetics is the meta-framework: VSM, feedback loops, algedonic channels, and requisite variety are all applications of cybernetic principles. DHARMA is a second-order cybernetic system — it includes the observer (gnani field) within the system.",
+      "related_concepts": [
+        "vsm",
+        "feedback_loop",
+        "requisite_variety",
+        "ashby",
+        "beer"
+      ],
+      "codebase_frequency": 3,
+      "codebase_files": 2
+    },
+    {
+      "id": "maturana",
+      "canonical_name": "Humberto Maturana",
+      "aliases": [
+        "maturana",
+        "Maturana-Varela"
+      ],
+      "definition": "Humberto Maturana (1928–2021): Chilean biologist who co-developed autopoiesis theory with Francisco Varela. Maturana's contribution: the distinction between the organization of a system (invariant, what makes it that kind of system) and its structure (variable, how it is instantiated). Autopoiesis is an organizational property; structural coupling explains adaptation.",
+      "domain": "autopoiesis",
+      "source_attribution": "Maturana, Humberto & Varela, Francisco. Autopoiesis and Cognition. 1980.",
+      "dharma_interpretation": "Appears once, alongside Varela. Maturana's organization/structure distinction maps directly onto DHARMA's architecture: the system's organization (autopoietic loop, gate structure, evolution pipeline) is invariant across deployments; its structure (specific model weights, codebase state, routing tables) varies with execution.",
+      "related_concepts": [
+        "autopoiesis",
+        "varela",
+        "structural_coupling",
+        "operational_closure"
+      ],
+      "codebase_frequency": 1,
+      "codebase_files": 1
+    },
+    {
+      "id": "reversibility",
+      "canonical_name": "Reversibility",
+      "aliases": [
+        "reversibility gate",
+        "REVERSIBILITY",
+        "reversible action"
+      ],
+      "definition": "The property of an action that can be undone — its effects can be fully reversed, restoring the prior state. In decision theory and ethics, reversibility is a key criterion for action under uncertainty: prefer reversible actions over irreversible ones when outcomes are uncertain. In DHARMA, reversibility is a safety constraint operationalizing the precautionary principle.",
+      "domain": "dharma_system",
+      "source_attribution": "Taleb, Nassim. Antifragile. 2012; Rawls, John. A Theory of Justice. 1971.",
+      "dharma_interpretation": "Implemented as the REVERSIBILITY gate in telos_gates.py — the second major gate alongside AHIMSA. 'Every position requires a defined exit strategy.' The Shakti Ginko VentureCell enforces REVERSIBILITY: every financial position must have a predefined exit. This gate operationalizes the precautionary principle in code.",
+      "related_concepts": [
+        "telos_gate",
+        "ahimsa",
+        "dharma",
+        "satya"
+      ],
+      "codebase_frequency": 5,
+      "codebase_files": 2
+    },
+    {
+      "id": "nonlinear",
+      "canonical_name": "Nonlinearity",
+      "aliases": [
+        "nonlinear",
+        "nonlinear dynamics",
+        "nonlinear systems"
+      ],
+      "definition": "A system is nonlinear if its outputs are not proportional to its inputs — superposition does not hold. Nonlinear systems can exhibit qualitatively new behaviors including chaos, bifurcations, and multiple stable states. Most complex biological and social systems are fundamentally nonlinear.",
+      "domain": "complexity_emergence",
+      "source_attribution": "Strogatz, Steven. Nonlinear Dynamics and Chaos. 1994.",
+      "dharma_interpretation": "Appears once. DHARMA's fitness landscape is nonlinear: small code changes can produce large fitness jumps (phase transitions) or negligible changes. The information geometry module handles nonlinearity via the natural gradient, which adapts gradient descent to the curvature of the statistical manifold.",
+      "related_concepts": [
+        "phase_transition",
+        "attractor",
+        "bifurcation",
+        "self_organization",
+        "emergence"
+      ],
+      "codebase_frequency": 1,
+      "codebase_files": 1
+    },
+    {
+      "id": "second_order",
+      "canonical_name": "Second-Order Cybernetics",
+      "aliases": [
+        "second-order",
+        "second-order cybernetics",
+        "observer included"
+      ],
+      "definition": "Heinz von Foerster's extension of cybernetics (1970s) to include the observer within the system being described. First-order cybernetics describes how systems maintain themselves; second-order cybernetics asks how the observer's perspective constitutes the system being described. Reflexivity becomes unavoidable.",
+      "domain": "cybernetics_vsm",
+      "source_attribution": "Foerster, Heinz von. On Constructing a Reality. 1973.",
+      "dharma_interpretation": "Appears once. DHARMA is a second-order cybernetic system: the system models itself, and those self-models feed back into the system's behavior. The strange loop daemon and the gnani field are second-order structures — the system includes its own description within its operational context.",
+      "related_concepts": [
+        "cybernetic",
+        "strange_loop",
+        "self_reference",
+        "consciousness",
+        "witness"
+      ],
+      "codebase_frequency": 1,
+      "codebase_files": 1
+    },
+    {
+      "id": "bifurcation",
+      "canonical_name": "Bifurcation",
+      "aliases": [
+        "bifurcation",
+        "pitchfork bifurcation",
+        "Hopf bifurcation"
+      ],
+      "definition": "A bifurcation is a qualitative change in the behavior of a dynamical system as a parameter crosses a critical value. At the bifurcation point, the number or stability of equilibria changes. Common types: saddle-node (solutions appear/disappear), pitchfork (symmetry breaking), Hopf (oscillations emerge). Bifurcations are the mathematical mechanism of phase transitions.",
+      "domain": "complexity_emergence",
+      "source_attribution": "Poincaré, Henri. Les méthodes nouvelles de la mécanique céleste. 1892; Strogatz, Steven. Nonlinear Dynamics and Chaos. 1994.",
+      "dharma_interpretation": "Appears once. The phase transition hypothesis module tracks bifurcations in DHARMA's behavioral trajectory: the transition from L3 (operational) to L4 (strategic) behavior is modeled as a dynamical bifurcation correlated with R_V contraction ratios.",
+      "related_concepts": [
+        "phase_transition",
+        "attractor",
+        "nonlinear",
+        "fitness_landscape"
+      ],
+      "codebase_frequency": 1,
+      "codebase_files": 1
+    }
+  ],
+  "domains": [
+    {
+      "id": "cybernetics_vsm",
+      "name": "Cybernetics / Viable System Model",
+      "description": "Stafford Beer's organizational cybernetics, the Viable System Model (VSM), and W. Ross Ashby's Law of Requisite Variety. Covers control theory, feedback mechanisms, algedonic signaling, and the five-system recursive organizational structure. Primary theoretical basis for DHARMA's management layer and agent hierarchy.",
+      "primary_sources": [
+        "Beer, Stafford. Brain of the Firm. Allen Lane, 1972.",
+        "Beer, Stafford. The Heart of Enterprise. Wiley, 1979.",
+        "Beer, Stafford. Diagnosing the System for Organizations. Wiley, 1985.",
+        "Ashby, W. Ross. An Introduction to Cybernetics. Chapman & Hall, 1956.",
+        "Wiener, Norbert. Cybernetics: Or Control and Communication in the Animal and the Machine. MIT Press, 1948."
+      ]
+    },
+    {
+      "id": "autopoiesis",
+      "name": "Autopoiesis & Self-Organization",
+      "description": "Maturana and Varela's theory of self-producing systems, Jantsch's self-organizing universe, structural coupling, operational closure, and dissipative structures (Prigogine). Covers the organizational biology of living systems as a model for DHARMA's organism loop.",
+      "primary_sources": [
+        "Maturana, Humberto R. & Varela, Francisco J. Autopoiesis and Cognition: The Realization of the Living. D. Reidel, 1980.",
+        "Maturana, Humberto R. & Varela, Francisco J. The Tree of Knowledge. Shambhala, 1987.",
+        "Jantsch, Erich. The Self-Organizing Universe. Pergamon Press, 1980.",
+        "Prigogine, Ilya & Stengers, Isabelle. Order Out of Chaos. Bantam Books, 1984."
+      ]
+    },
+    {
+      "id": "complexity_emergence",
+      "name": "Complexity & Emergence",
+      "description": "Stuart Kauffman's autocatalytic sets, adjacent possible, and fitness landscapes; John Holland's emergence theory; nonlinear dynamics, phase transitions, bifurcations, and attractors. The science of how complex adaptive behavior arises from simple local rules.",
+      "primary_sources": [
+        "Kauffman, Stuart A. The Origins of Order: Self-Organization and Selection in Evolution. Oxford University Press, 1993.",
+        "Kauffman, Stuart A. At Home in the Universe. Oxford University Press, 1995.",
+        "Holland, John H. Emergence: From Chaos to Order. Perseus Books, 1998.",
+        "Strogatz, Steven H. Nonlinear Dynamics and Chaos. Perseus Books, 1994.",
+        "Prigogine, Ilya. From Being to Becoming. W.H. Freeman, 1980."
+      ]
+    },
+    {
+      "id": "cognitive_science",
+      "name": "Cognitive Science & Bioelectricity",
+      "description": "Michael Levin's cognitive light cone and basal cognition research; phenomenology of consciousness; Integrated Information Theory (Tononi); memory systems. Grounds DHARMA's multi-agent hierarchy in a scientifically defensible model of distributed cognition.",
+      "primary_sources": [
+        "Levin, Michael. The Computational Boundary of a Self: Developmental Bioelectricity Drives Multicellularity and Scale-Free Cognition. Frontiers in Psychology, 2019.",
+        "Tononi, Giulio. Consciousness as Integrated Information: A Provisional Manifesto. Biological Bulletin, 2004.",
+        "Chalmers, David J. The Conscious Mind: In Search of a Fundamental Theory. Oxford University Press, 1996.",
+        "Merleau-Ponty, Maurice. Phenomenology of Perception. Gallimard, 1945."
+      ]
+    },
+    {
+      "id": "jain_buddhist_philosophy",
+      "name": "Jain & Buddhist Philosophy",
+      "description": "Akram Vignan (Dada Bhagwan), Jain epistemology (pramāṇa, anekāntavāda, satya, ahimsa), Buddhist dependent origination, and the dharmic vow tradition. Provides DHARMA's ethical and epistemological framework — all 11 telos gates derive from this domain.",
+      "primary_sources": [
+        "Dada Bhagwan (Ambalal Muljibhai Patel). Aptavani series. Dada Bhagwan Foundation, 1960s–1988.",
+        "Umaswati. Tattvartha Sutra (That Which Is). ~2nd c. CE.",
+        "Dhammapada. Khuddaka Nikāya, Pāli Canon. ~3rd c. BCE.",
+        "Mahavira. Āgamic teachings. ~6th c. BCE.",
+        "Puruṣārthasiddhyupāya. Amritchandra. ~10th c. CE."
+      ]
+    },
+    {
+      "id": "stigmergy_swarm",
+      "name": "Stigmergy & Swarm Intelligence",
+      "description": "Pierre-Paul Grassé's stigmergy, ant colony optimization (Dorigo), pheromone dynamics, and collective intelligence. The coordination theory underlying DHARMA's multi-agent routing and task allocation systems.",
+      "primary_sources": [
+        "Grassé, Pierre-Paul. La reconstruction du nid et les coordinations interindividuelles chez Bellicositermes natalensis et Cubitermes sp. Insectes Sociaux, 1959.",
+        "Dorigo, Marco et al. Ant Colony Optimization. MIT Press, 2004.",
+        "Bonabeau, Eric, Dorigo, Marco & Theraulaz, Guy. Swarm Intelligence: From Natural to Artificial Systems. Oxford University Press, 1999.",
+        "Camazine, Scott et al. Self-Organization in Biological Systems. Princeton University Press, 2001."
+      ]
+    },
+    {
+      "id": "evolution_self_reference",
+      "name": "Evolution & Self-Reference",
+      "description": "Darwin's natural selection, Gödel's incompleteness theorems, Hofstadter's strange loops, Schmidhuber's Gödel Machine, and the Darwin Gödel Machine (Sakana AI). The theory of systems that improve themselves by referring to and modifying their own descriptions.",
+      "primary_sources": [
+        "Darwin, Charles. On the Origin of Species. John Murray, 1859.",
+        "Gödel, Kurt. Über formal unentscheidbare Sätze der Principia Mathematica und verwandter Systeme I. Monatshefte für Mathematik und Physik, 1931.",
+        "Hofstadter, Douglas R. Gödel, Escher, Bach: an Eternal Golden Braid. Basic Books, 1979.",
+        "Schmidhuber, Jürgen. Gödel Machines: Self-Referential Universal Problem Solvers Making Provably Optimal Self-Improvements. arXiv:cs/0309048, 2003.",
+        "Hughes, Robert et al. The Darwin Gödel Machine. Sakana AI, 2025."
+      ]
+    },
+    {
+      "id": "information_theory",
+      "name": "Information Theory & Free Energy",
+      "description": "Shannon's information theory, Fisher information geometry (Amari), Friston's free energy principle, thermodynamics of information (Landauer), and Tononi's integrated information theory (IIT/Φ). Provides the mathematical substrate for DHARMA's scoring, measurement, and meta-evolution.",
+      "primary_sources": [
+        "Shannon, Claude E. A Mathematical Theory of Communication. Bell System Technical Journal, 1948.",
+        "Fisher, R.A. On the Mathematical Foundations of Theoretical Statistics. Phil. Trans. R. Soc., 1922.",
+        "Amari, Shun-ichi. Differential-Geometrical Methods in Statistics. Springer, 1985.",
+        "Friston, Karl. The Free-Energy Principle: A Unified Brain Theory? Nature Reviews Neuroscience, 2010.",
+        "Tononi, Giulio. Consciousness as Integrated Information. Biological Bulletin, 2004."
+      ]
+    },
+    {
+      "id": "category_theory",
+      "name": "Category Theory",
+      "description": "Eilenberg and Mac Lane's category theory, monads (Moggi), coalgebras (Rutten, Jacobs), sheaves (Grothendieck), cohomology, functors, natural transformations, Lawvere's fixed-point theorem, and toposes. The mathematical language in which DHARMA's mathematical elegance bridges are written.",
+      "primary_sources": [
+        "Eilenberg, Samuel & Mac Lane, Saunders. General Theory of Natural Equivalences. Transactions of the American Mathematical Society, 1945.",
+        "Moggi, Eugenio. Notions of Computation and Monads. Information and Computation, 1991.",
+        "Rutten, Jan J.M.M. Universal Coalgebra: A Theory of Systems. Theoretical Computer Science, 2000.",
+        "Jacobs, Bart. Introduction to Coalgebra: Towards Mathematics of States and Observation. Cambridge University Press, 2017.",
+        "Lawvere, F. William. Diagonal Arguments and Cartesian Closed Categories. Reports of the Midwest Category Seminar II, Springer, 1969."
+      ]
+    },
+    {
+      "id": "dharma_system",
+      "name": "DHARMA System (Compound Concepts)",
+      "description": "Concepts invented or compounded specifically within the DHARMA SWARM architecture: telos gates, steelman gate, gnani field, memory palace substrate, kaizen loops, shakti venture cell, trishula bridge, and reversibility constraints. These concepts synthesize the other domains into operational system components.",
+      "primary_sources": [
+        "DHARMA Architecture Working Group. Four-Graph Architecture v1.0. March 2026.",
+        "DHARMA Architecture Working Group. SOUL.md. 2025–2026.",
+        "DHARMA Architecture Working Group. AGENTS.md. 2025–2026."
+      ]
+    }
+  ],
+  "relationships": [
+    {
+      "source": "autopoiesis",
+      "target": "structural_coupling",
+      "kind": "enables",
+      "description": "Autopoietic systems interact with their environment through structural coupling — they cannot receive instructions but can be perturbed"
+    },
+    {
+      "source": "autopoiesis",
+      "target": "operational_closure",
+      "kind": "part_of",
+      "description": "Operational closure is a necessary condition for autopoiesis — all operations must refer to and produce operations of the same type"
+    },
+    {
+      "source": "autopoiesis",
+      "target": "varela",
+      "kind": "derived_from",
+      "description": "Autopoiesis was developed by Varela and Maturana as their core theoretical contribution"
+    },
+    {
+      "source": "autopoiesis",
+      "target": "jantsch",
+      "kind": "influenced_by",
+      "description": "Jantsch extended Maturana-Varela autopoiesis to all scales of self-organizing systems"
+    },
+    {
+      "source": "autopoiesis",
+      "target": "dissipative",
+      "kind": "analogous_to",
+      "description": "Both autopoiesis and dissipative structures are self-maintaining far-from-equilibrium processes; dissipative structures are the thermodynamic substrate"
+    },
+    {
+      "source": "autopoiesis",
+      "target": "organism_memory",
+      "kind": "enables",
+      "description": "An autopoietic system must maintain memory of its own organization to reproduce its components accurately"
+    },
+    {
+      "source": "vsm",
+      "target": "algedonic",
+      "kind": "part_of",
+      "description": "The algedonic channel is the VSM's emergency bypass pathway — a key component of the S3 management function"
+    },
+    {
+      "source": "vsm",
+      "target": "requisite_variety",
+      "kind": "derived_from",
+      "description": "The VSM is designed to achieve requisite variety at each level of organizational recursion"
+    },
+    {
+      "source": "vsm",
+      "target": "zeitgeist",
+      "kind": "part_of",
+      "description": "Zeitgeist implements VSM System 4 — the outside-and-future intelligence function"
+    },
+    {
+      "source": "vsm",
+      "target": "system_3",
+      "kind": "part_of",
+      "description": "System 3 is the inside-and-now management function of the VSM"
+    },
+    {
+      "source": "vsm",
+      "target": "system_4",
+      "kind": "part_of",
+      "description": "System 4 is the outside-and-future intelligence function of the VSM"
+    },
+    {
+      "source": "vsm",
+      "target": "system_5",
+      "kind": "part_of",
+      "description": "System 5 is the policy/identity function — the apex of the VSM hierarchy"
+    },
+    {
+      "source": "beer",
+      "target": "vsm",
+      "kind": "derived_from",
+      "description": "Beer created the Viable System Model as his primary contribution to organizational cybernetics"
+    },
+    {
+      "source": "ashby",
+      "target": "requisite_variety",
+      "kind": "derived_from",
+      "description": "Requisite variety is Ashby's central law, formalized in Introduction to Cybernetics"
+    },
+    {
+      "source": "stigmergy",
+      "target": "pheromone",
+      "kind": "enables",
+      "description": "Pheromone traces are the primary medium of stigmergic coordination in biological and computational systems"
+    },
+    {
+      "source": "stigmergy",
+      "target": "emergence",
+      "kind": "enables",
+      "description": "Stigmergic coordination produces emergent collective behavior without central planning"
+    },
+    {
+      "source": "stigmergy",
+      "target": "swarm_intelligence",
+      "kind": "part_of",
+      "description": "Stigmergy is the primary mechanism by which swarm intelligence emerges in ant and termite colonies"
+    },
+    {
+      "source": "stigmergy",
+      "target": "collective_intelligence",
+      "kind": "enables",
+      "description": "Stigmergic marks accumulate collective environmental knowledge accessible to all agents"
+    },
+    {
+      "source": "strange_loop",
+      "target": "self_reference",
+      "kind": "is_a",
+      "description": "A strange loop is a self-referential structure where the hierarchy curves back on itself"
+    },
+    {
+      "source": "strange_loop",
+      "target": "godel_machine",
+      "kind": "analogous_to",
+      "description": "The Gödel Machine is a formal operationalization of strange-loop self-improvement"
+    },
+    {
+      "source": "strange_loop",
+      "target": "ouroboros",
+      "kind": "analogous_to",
+      "description": "The Ouroboros is the mythological symbol for the strange-loop self-consuming and self-generating process"
+    },
+    {
+      "source": "strange_loop",
+      "target": "tangled_hierarchies",
+      "kind": "part_of",
+      "description": "Strange loops arise specifically from tangled hierarchies where hierarchy levels are entangled"
+    },
+    {
+      "source": "godel_machine",
+      "target": "darwin_engine",
+      "kind": "influences",
+      "description": "The Darwin Engine implements a practical (proof-free, test-based) version of the Gödel Machine's self-modification principle"
+    },
+    {
+      "source": "darwin_engine",
+      "target": "fitness_landscape",
+      "kind": "enables",
+      "description": "The Darwin Engine navigates the fitness landscape of possible code transformations"
+    },
+    {
+      "source": "darwin_engine",
+      "target": "feedback_loop",
+      "kind": "part_of",
+      "description": "The Darwin Engine closes the JIKOKU measurement feedback loop: code → measure → fitness → select → code"
+    },
+    {
+      "source": "darwin_engine",
+      "target": "adjacent_possible",
+      "kind": "enables",
+      "description": "Each Darwin Engine iteration expands into the adjacent possible — the set of reachable next-states"
+    },
+    {
+      "source": "autocatalytic_set",
+      "target": "emergence",
+      "kind": "enables",
+      "description": "Autocatalytic closure enables emergent life-like properties from networks of simple chemical reactions"
+    },
+    {
+      "source": "autocatalytic_set",
+      "target": "autopoiesis",
+      "kind": "analogous_to",
+      "description": "Autocatalytic sets achieve catalytic closure; autopoietic systems achieve organizational closure — both are self-sustaining"
+    },
+    {
+      "source": "autocatalytic_set",
+      "target": "adjacent_possible",
+      "kind": "enables",
+      "description": "Each new molecule in an autocatalytic set potentially opens new adjacent reactions"
+    },
+    {
+      "source": "kauffman",
+      "target": "autocatalytic_set",
+      "kind": "derived_from",
+      "description": "Kauffman introduced autocatalytic sets as his primary theoretical contribution to origin-of-life theory"
+    },
+    {
+      "source": "kauffman",
+      "target": "fitness_landscape",
+      "kind": "derived_from",
+      "description": "Kauffman developed the NK fitness landscape model to study evolutionary dynamics"
+    },
+    {
+      "source": "monad",
+      "target": "coalgebra",
+      "kind": "complements",
+      "description": "Monads model computation by construction (induction); coalgebras model computation by observation (coinduction) — they are dual structures"
+    },
+    {
+      "source": "monad",
+      "target": "functor",
+      "kind": "part_of",
+      "description": "A monad is an endofunctor equipped with unit and multiplication natural transformations"
+    },
+    {
+      "source": "sheaf",
+      "target": "cohomology",
+      "kind": "enables",
+      "description": "Sheaf cohomology measures the obstruction to extending local sheaf sections to global sections"
+    },
+    {
+      "source": "sheaf",
+      "target": "collective_intelligence",
+      "kind": "enables",
+      "description": "The sheaf gluing condition formalizes collective intelligence: local consistency implies global consistency"
+    },
+    {
+      "source": "coalgebra",
+      "target": "fixed_point",
+      "kind": "enables",
+      "description": "Terminal coalgebras are greatest fixed points of functors — they represent the complete behavioral specification of a system"
+    },
+    {
+      "source": "fixed_point",
+      "target": "lawvere",
+      "kind": "derived_from",
+      "description": "Lawvere's fixed-point theorem is the categorical generalization of all diagonal arguments and fixed-point theorems"
+    },
+    {
+      "source": "fixed_point",
+      "target": "strange_loop",
+      "kind": "analogous_to",
+      "description": "Fixed points of self-referential functions correspond to stable strange loops — the system maps to itself"
+    },
+    {
+      "source": "anekantavada",
+      "target": "pramana",
+      "kind": "constrains",
+      "description": "Anekāntavāda constrains pramāṇas: every means of knowledge is partial; all claims must be indexed to standpoint"
+    },
+    {
+      "source": "anekantavada",
+      "target": "steelman_gate",
+      "kind": "enables",
+      "description": "Anekāntavāda motivates the steelman gate: before committing to a position, the strongest contrary view must be articulated"
+    },
+    {
+      "source": "ahimsa",
+      "target": "telos_gate",
+      "kind": "part_of",
+      "description": "AHIMSA is the first and highest-priority telos gate — the primordial constraint on all action"
+    },
+    {
+      "source": "satya",
+      "target": "telos_gate",
+      "kind": "part_of",
+      "description": "SATYA is a core telos gate enforcing truthfulness in all outputs and predictions"
+    },
+    {
+      "source": "satya",
+      "target": "ahimsa",
+      "kind": "complements",
+      "description": "In Jain thought, satya and ahimsa are inseparable: harmful speech is not true satya; dishonest speech ultimately causes harm"
+    },
+    {
+      "source": "telos_gate",
+      "target": "dharma",
+      "kind": "derived_from",
+      "description": "All telos gates operationalize dharmic right-action — dharma is the ground of the gate system"
+    },
+    {
+      "source": "reversibility",
+      "target": "telos_gate",
+      "kind": "part_of",
+      "description": "REVERSIBILITY is a core telos gate requiring all consequential actions to have defined undo mechanisms"
+    },
+    {
+      "source": "dada_bhagwan",
+      "target": "akram_vignan",
+      "kind": "derived_from",
+      "description": "Akram Vignan is the teaching tradition founded by Dada Bhagwan"
+    },
+    {
+      "source": "akram_vignan",
+      "target": "gnani",
+      "kind": "part_of",
+      "description": "The Gnani Purush is the central figure of Akram Vignan — the transmitter of direct Self-Realization"
+    },
+    {
+      "source": "gnani",
+      "target": "gnani_field",
+      "kind": "enables",
+      "description": "The Gnani's influence operates as a field rather than a gate — ambient, permeating, non-blocking"
+    },
+    {
+      "source": "gnani_field",
+      "target": "attractor",
+      "kind": "is_a",
+      "description": "The Gnani Field operates as a semantic attractor: it draws agent outputs toward coherent dharmic expression"
+    },
+    {
+      "source": "witness",
+      "target": "consciousness",
+      "kind": "part_of",
+      "description": "The witness stance is consciousness in its pure observational mode — without attachment, judgment, or modification"
+    },
+    {
+      "source": "witness",
+      "target": "pratikraman",
+      "kind": "enables",
+      "description": "Witnessing is the prerequisite for pratikraman: you can only correct what you have first witnessed clearly"
+    },
+    {
+      "source": "pratikraman",
+      "target": "karma",
+      "kind": "constrains",
+      "description": "Pratikraman reduces karma accumulation by correcting transgressions before they solidify into habit"
+    },
+    {
+      "source": "karma",
+      "target": "dharma",
+      "kind": "influenced_by",
+      "description": "Karma flows from dharmic or adharmic action — right action generates positive karma, wrong action generates negative karma"
+    },
+    {
+      "source": "entropy",
+      "target": "fisher_information",
+      "kind": "complements",
+      "description": "Entropy (Shannon/thermodynamic) and Fisher information are dual measures: entropy measures uncertainty over outcomes; Fisher information measures sensitivity of distributions to parameter change"
+    },
+    {
+      "source": "fisher_information",
+      "target": "information_geometry",
+      "kind": "part_of",
+      "description": "The Fisher information metric is the Riemannian metric that defines the geometry of statistical manifolds in information geometry"
+    },
+    {
+      "source": "information_geometry",
+      "target": "darwin_engine",
+      "kind": "enables",
+      "description": "Information geometry provides the natural gradient for DHARMA's meta-evolution, enabling geometry-aware search on the fitness landscape"
+    },
+    {
+      "source": "free_energy_principle",
+      "target": "entropy",
+      "kind": "derived_from",
+      "description": "The free energy principle minimizes variational free energy, which is an upper bound on surprise (negative log evidence) — directly related to entropy"
+    },
+    {
+      "source": "free_energy_principle",
+      "target": "feedback_loop",
+      "kind": "enables",
+      "description": "Active inference under the free energy principle creates a closed feedback loop: predict → perceive → update model or act to change world"
+    },
+    {
+      "source": "phi",
+      "target": "consciousness",
+      "kind": "part_of",
+      "description": "Φ (integrated information) is IIT's quantitative measure of consciousness — systems with high Φ are more conscious"
+    },
+    {
+      "source": "phi",
+      "target": "fisher_information",
+      "kind": "analogous_to",
+      "description": "Both Φ and Fisher information measure the 'tight integration' of a system's information structure, though at different levels of abstraction"
+    },
+    {
+      "source": "emergence",
+      "target": "self_organization",
+      "kind": "part_of",
+      "description": "Emergence is the result of self-organization — self-organizing processes produce emergent properties"
+    },
+    {
+      "source": "phase_transition",
+      "target": "attractor",
+      "kind": "enables",
+      "description": "Phase transitions occur when a system moves between basins of attraction — crossing the boundary between qualitatively different attractors"
+    },
+    {
+      "source": "phase_transition",
+      "target": "bifurcation",
+      "kind": "is_a",
+      "description": "A phase transition in a dynamical system is formalized as a bifurcation — a qualitative change in the structure of equilibria"
+    },
+    {
+      "source": "cognitive_light_cone",
+      "target": "levin",
+      "kind": "derived_from",
+      "description": "The cognitive light cone was introduced by Levin as the spatiotemporal boundary of a self's cognitive influence"
+    },
+    {
+      "source": "cognitive_light_cone",
+      "target": "consciousness",
+      "kind": "enables",
+      "description": "A system's cognitive light cone defines what it can be conscious of — the boundary of its possible experience"
+    },
+    {
+      "source": "basal_cognition",
+      "target": "cognitive_light_cone",
+      "kind": "part_of",
+      "description": "Basal cognition is cognition at the minimal scale — the smallest cognitive light cone possible in biological systems"
+    },
+    {
+      "source": "memory_palace",
+      "target": "organism_memory",
+      "kind": "enables",
+      "description": "The Memory Palace substrate provides the implementation for organism-level memory consolidation"
+    },
+    {
+      "source": "zeitgeist",
+      "target": "vsm",
+      "kind": "part_of",
+      "description": "Zeitgeist implements VSM System 4 — environmental intelligence and future scanning"
+    },
+    {
+      "source": "kaizen",
+      "target": "darwin_engine",
+      "kind": "complements",
+      "description": "Kaizen provides incremental improvement; the Darwin Engine provides large-scale evolutionary improvement. Together they cover the full spectrum of self-modification"
+    },
+    {
+      "source": "ouroboros",
+      "target": "self_reference",
+      "kind": "analogous_to",
+      "description": "The Ouroboros is the mythological form of self-reference — the system consumes and regenerates itself"
+    },
+    {
+      "source": "dependent_origination",
+      "target": "autocatalytic_set",
+      "kind": "analogous_to",
+      "description": "Dependent origination and autocatalytic sets both capture the same structure: nothing exists independently; everything arises in mutual dependence"
+    },
+    {
+      "source": "topos",
+      "target": "sheaf",
+      "kind": "enables",
+      "description": "Every Grothendieck topos is generated by sheaves on a site — sheaves are the fundamental objects of topos theory"
+    },
+    {
+      "source": "topos",
+      "target": "lawvere",
+      "kind": "derived_from",
+      "description": "Lawvere and Tierney axiomatized elementary toposes; Lawvere's fixed-point theorem lives in cartesian closed categories, of which toposes are examples"
+    },
+    {
+      "source": "trishula",
+      "target": "dharma",
+      "kind": "part_of",
+      "description": "The Trishula Bridge is DHARMA's primary task intake channel — the operational face of dharmic direction"
+    },
+    {
+      "source": "shakti",
+      "target": "darwin_engine",
+      "kind": "enables",
+      "description": "The Shakti Ginko VentureCell uses the Darwin Engine to evolve trading strategies autonomously"
+    },
+    {
+      "source": "gnani",
+      "target": "pramana",
+      "kind": "enables",
+      "description": "The Gnani's knowledge (kevalajnana) transcends the limitations of ordinary pramāṇas — it is direct, non-mediated knowledge"
+    },
+    {
+      "source": "anekantavada",
+      "target": "satya",
+      "kind": "refines",
+      "description": "Anekāntavāda refines the concept of satya: truth is not absolute but perspectival — every true statement must be qualified by its standpoint"
+    },
+    {
+      "source": "structural_coupling",
+      "target": "emergence",
+      "kind": "enables",
+      "description": "The co-evolution of structurally coupled systems produces emergent properties that neither system could produce alone"
+    },
+    {
+      "source": "natural_transformation",
+      "target": "functor",
+      "kind": "part_of",
+      "description": "Natural transformations are morphisms between functors — they constitute the functor category's arrows"
+    },
+    {
+      "source": "phenomenology",
+      "target": "consciousness",
+      "kind": "part_of",
+      "description": "Phenomenology is the study of consciousness as it presents itself to itself — the first-person investigation of experience"
+    },
+    {
+      "source": "phenomenology",
+      "target": "qualia",
+      "kind": "enables",
+      "description": "Phenomenology provides the framework for describing qualia — the felt quality of conscious experience"
+    },
+    {
+      "source": "second_order",
+      "target": "cybernetic",
+      "kind": "refines",
+      "description": "Second-order cybernetics refines first-order cybernetics by including the observer within the system description"
+    },
+    {
+      "source": "second_order",
+      "target": "witness",
+      "kind": "analogous_to",
+      "description": "Second-order cybernetics' 'observer included' principle maps onto the witness stance: the observer must witness their own observing"
+    },
+    {
+      "source": "hofstadter",
+      "target": "strange_loop",
+      "kind": "derived_from",
+      "description": "Hofstadter introduced the strange loop as his central theoretical contribution in GEB"
+    },
+    {
+      "source": "varela",
+      "target": "autopoiesis",
+      "kind": "derived_from",
+      "description": "Varela co-developed autopoiesis with Maturana as the mathematical formalization of living systems' self-production"
+    },
+    {
+      "source": "maturana",
+      "target": "autopoiesis",
+      "kind": "derived_from",
+      "description": "Maturana co-developed autopoiesis with Varela, contributing the organization/structure distinction"
+    },
+    {
+      "source": "bateson",
+      "target": "witness",
+      "kind": "influences",
+      "description": "Bateson's requirement that patterns be recorded to be recognized grounds the witness-everything architecture"
+    },
+    {
+      "source": "bateson",
+      "target": "ashby",
+      "kind": "complements",
+      "description": "Bateson and Ashby share the emphasis on variety and pattern as fundamental: Ashby formalizes variety; Bateson theorizes how patterns are recognized"
+    },
+    {
+      "source": "dada_bhagwan",
+      "target": "pratikraman",
+      "kind": "derived_from",
+      "description": "Pratikraman is a core practice in Dada Bhagwan's Akram Vignan teaching tradition"
+    },
+    {
+      "source": "lawvere",
+      "target": "fixed_point",
+      "kind": "derived_from",
+      "description": "Lawvere's fixed-point theorem is his central contribution — a categorical generalization of all diagonal and self-referential arguments"
+    },
+    {
+      "source": "jantsch",
+      "target": "autopoiesis",
+      "kind": "refines",
+      "description": "Jantsch extended autopoiesis from biology to all scales of self-organizing systems, from dissipative structures to cultural evolution"
+    },
+    {
+      "source": "free_energy_principle",
+      "target": "autopoiesis",
+      "kind": "analogous_to",
+      "description": "Both the free energy principle and autopoiesis describe how living systems maintain themselves: autopoiesis at the organizational level, FEP at the statistical inference level"
+    },
+    {
+      "source": "consciousness",
+      "target": "phi",
+      "kind": "part_of",
+      "description": "According to IIT, consciousness is integrated information (Φ) — phi is the quantitative measure of consciousness"
+    }
+  ]
+}
