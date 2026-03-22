@@ -1279,7 +1279,7 @@ class DarwinEngine:
                     _, modifiers = score_behavioral_fitness(proposal_text)
                     fitness = apply_behavioral_modifiers(fitness, modifiers)
             except Exception:
-                pass  # Ouroboros is always non-fatal
+                logger.debug("Ouroboros behavioral modifiers failed", exc_info=True)
 
             # L4 compression: measure behavioral compression ability (non-fatal).
             # Only applied when the description alone has substantial text
@@ -1305,7 +1305,7 @@ class DarwinEngine:
                         "paradox_tolerance": sig.paradox_tolerance,
                     }
             except Exception:
-                pass  # L4 correlation is always non-fatal
+                logger.debug("L4 behavioral correlation failed", exc_info=True)
 
             proposal.actual_fitness = fitness
             proposal.status = EvolutionStatus.EVALUATED
@@ -1417,7 +1417,7 @@ class DarwinEngine:
                     if drift["is_drifting"]:
                         entry.test_results["gaia_warning"] = drift["diagnosis"]
             except Exception:
-                pass  # GAIA fitness is always non-fatal
+                logger.debug("GAIA fitness evaluation failed", exc_info=True)
 
             entry_id = await self.archive.add_entry(entry)
             proposal.status = EvolutionStatus.ARCHIVED

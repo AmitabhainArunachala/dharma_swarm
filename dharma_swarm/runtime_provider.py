@@ -6,13 +6,14 @@ ModelRouter policy and provider implementations unchanged.
 
 from __future__ import annotations
 
+import asyncio
 import os
 import shutil
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Mapping
 
-from dharma_swarm.models import ProviderType
+from dharma_swarm.models import LLMRequest, LLMResponse, ProviderType
 from dharma_swarm.ollama_config import (
     build_ollama_headers,
     ollama_transport_mode,
@@ -28,15 +29,33 @@ DEFAULT_OPENROUTER_MODEL = "anthropic/claude-opus-4-6"
 DEFAULT_NIM_MODEL = "meta/llama-3.3-70b-instruct"
 DEFAULT_PROVIDER_TIMEOUT_SECONDS = 300
 
+# FREE FIRST — Ollama Cloud, NVIDIA NIM, OpenRouter Free before paid providers.
 DEFAULT_RUNTIME_PROVIDERS: tuple[ProviderType, ...] = (
-    ProviderType.ANTHROPIC,
-    ProviderType.OPENAI,
-    ProviderType.OPENROUTER,
+    ProviderType.OLLAMA,
     ProviderType.NVIDIA_NIM,
+    ProviderType.OPENROUTER_FREE,
+    ProviderType.OPENROUTER,
+    ProviderType.OPENAI,
+    ProviderType.ANTHROPIC,
     ProviderType.CLAUDE_CODE,
     ProviderType.CODEX,
-    ProviderType.OPENROUTER_FREE,
+)
+
+# Hardcoded low-cost preference for autonomous/runtime call sites that would
+# otherwise talk to OpenRouter directly. Keep local/NIM ahead of OpenRouter.
+PREFERRED_LOW_COST_RUNTIME_PROVIDERS: tuple[ProviderType, ...] = (
     ProviderType.OLLAMA,
+    ProviderType.NVIDIA_NIM,
+    ProviderType.OPENROUTER_FREE,
+    ProviderType.OPENROUTER,
+)
+
+PREFERRED_LOW_COST_WITH_ANTHROPIC_RUNTIME_PROVIDERS: tuple[ProviderType, ...] = (
+    ProviderType.OLLAMA,
+    ProviderType.NVIDIA_NIM,
+    ProviderType.OPENROUTER_FREE,
+    ProviderType.OPENROUTER,
+    ProviderType.ANTHROPIC,
 )
 
 
@@ -161,7 +180,13 @@ def resolve_runtime_provider_config(
         )
 
     if provider == ProviderType.CLAUDE_CODE:
-        binary = shutil.which("claude")
+        binary = shutil.which("claude") or str(next(
+            (p for p in [
+                Path.home() / ".npm-global" / "bin" / "claude",
+                Path("/usr/local/bin/claude"),
+            ] if p.exists()),
+            None,
+        ))
         return RuntimeProviderConfig(
             provider=provider,
             default_model=model or DEFAULT_CLAUDE_MODEL,
@@ -272,6 +297,102 @@ def create_default_provider_map(
     return providers
 
 
+def preferred_runtime_provider_configs(
+    *,
+    model: str | None = None,
+    provider_order: tuple[ProviderType, ...] | None = None,
+    model_overrides: Mapping[ProviderType, str | None] | None = None,
+    working_dir: str | None = None,
+    timeout_seconds: int | None = None,
+    env: Mapping[str, str] | None = None,
+) -> list[RuntimeProviderConfig]:
+    """Resolve the preferred cheap/runtime provider chain in fixed order.
+
+    This is the canonical helper for direct-call sites that should prefer
+    Ollama and NVIDIA NIM before any OpenRouter lane.
+    """
+
+    order = provider_order or PREFERRED_LOW_COST_RUNTIME_PROVIDERS
+    overrides = model_overrides or {}
+    configs: list[RuntimeProviderConfig] = []
+    for provider in order:
+        cfg = resolve_runtime_provider_config(
+            provider,
+            model=overrides.get(provider, model),
+            working_dir=working_dir,
+            timeout_seconds=timeout_seconds,
+            env=env,
+        )
+        if cfg.available:
+            configs.append(cfg)
+    return configs
+
+
+async def complete_via_preferred_runtime_providers(
+    *,
+    messages: list[dict[str, str]],
+    system: str = "",
+    openrouter_model: str | None = None,
+    anthropic_model: str | None = None,
+    max_tokens: int = 4096,
+    temperature: float = 0.7,
+    provider_order: tuple[ProviderType, ...] | None = None,
+    working_dir: str | None = None,
+    timeout_seconds: float | None = None,
+    env: Mapping[str, str] | None = None,
+) -> tuple[LLMResponse, RuntimeProviderConfig]:
+    """Complete an LLM request via the canonical cheap-first runtime stack."""
+
+    overrides: dict[ProviderType, str | None] = {
+        ProviderType.OPENROUTER_FREE: openrouter_model,
+        ProviderType.OPENROUTER: openrouter_model,
+    }
+    if anthropic_model is not None:
+        overrides[ProviderType.ANTHROPIC] = anthropic_model
+
+    configs = preferred_runtime_provider_configs(
+        provider_order=provider_order or PREFERRED_LOW_COST_RUNTIME_PROVIDERS,
+        model_overrides=overrides,
+        working_dir=working_dir,
+        timeout_seconds=int(timeout_seconds) if timeout_seconds is not None else None,
+        env=env,
+    )
+    if not configs:
+        raise RuntimeError(
+            "No preferred providers available; configure Ollama, NVIDIA NIM, OpenRouter, or Anthropic"
+        )
+
+    last_exc: Exception | None = None
+    for config in configs:
+        provider = create_runtime_provider(config)
+        try:
+            request = LLMRequest(
+                model=config.default_model or anthropic_model or openrouter_model or DEFAULT_NIM_MODEL,
+                messages=messages,
+                system=system,
+                max_tokens=max_tokens,
+                temperature=temperature,
+            )
+            if timeout_seconds is not None:
+                response = await asyncio.wait_for(
+                    provider.complete(request),
+                    timeout=timeout_seconds,
+                )
+            else:
+                response = await provider.complete(request)
+            return response, config
+        except Exception as exc:
+            last_exc = exc
+        finally:
+            close = getattr(provider, "close", None)
+            if callable(close):
+                await close()
+
+    if last_exc is not None:
+        raise last_exc
+    raise RuntimeError("Preferred provider chain exhausted without an explicit error")
+
+
 __all__ = [
     "DEFAULT_CLAUDE_MODEL",
     "DEFAULT_NIM_MODEL",
@@ -281,8 +402,12 @@ __all__ = [
     "DEFAULT_RUNTIME_PROVIDERS",
     "NVIDIA_NIM_BASE_URL",
     "OPENROUTER_BASE_URL",
+    "PREFERRED_LOW_COST_RUNTIME_PROVIDERS",
+    "PREFERRED_LOW_COST_WITH_ANTHROPIC_RUNTIME_PROVIDERS",
     "RuntimeProviderConfig",
+    "complete_via_preferred_runtime_providers",
     "create_default_provider_map",
     "create_runtime_provider",
+    "preferred_runtime_provider_configs",
     "resolve_runtime_provider_config",
 ]

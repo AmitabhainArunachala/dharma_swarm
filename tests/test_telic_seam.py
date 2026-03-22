@@ -24,6 +24,7 @@ from dharma_swarm.models import (
     TaskPriority,
 )
 from dharma_swarm.ontology import OntologyRegistry
+from dharma_swarm.ontology_runtime import get_shared_registry, reset_shared_registry
 from dharma_swarm.telic_seam import TelicSeam, get_seam, reset_seam
 
 
@@ -211,6 +212,31 @@ class TestRecordDispatch:
         ids = [seam.record_dispatch(t, f"agent_{i}") for i, t in enumerate(tasks)]
         assert all(pid is not None for pid in ids)
         assert len(set(ids)) == 5  # All unique
+
+    def test_default_seam_uses_shared_registry(
+        self,
+        tmp_path,
+        monkeypatch,
+        sample_task,
+    ):
+        monkeypatch.setenv("DHARMA_ONTOLOGY_PATH", str(tmp_path / "ontology.json"))
+        reset_shared_registry()
+        reset_seam()
+
+        seam = get_seam()
+        proposal_id = seam.record_dispatch(sample_task, "agent_alpha")
+
+        assert seam.registry is get_shared_registry()
+        assert proposal_id is not None
+
+        reset_shared_registry()
+        reloaded = get_shared_registry()
+        proposal = reloaded.get_object(proposal_id)
+        assert proposal is not None
+        assert proposal.properties["agent_id"] == "agent_alpha"
+
+        reset_seam()
+        reset_shared_registry()
 
 
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━

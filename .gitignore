@@ -52,7 +52,10 @@ reports/psmv_hyperfiles_20260313/graphs/*.json
 # Generated outputs (not source)
 results.tsv
 run.log
+synthesizer_memory.json
 dashboard/playwright-report/
 dashboard/playwright/
+dashboard/test-results/
+desktop-shell/src-tauri/target/
 spec-forge/
 .superpowers/

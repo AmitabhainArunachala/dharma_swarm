@@ -28,7 +28,7 @@ import random
 import re
 import subprocess
 import time
-from collections import defaultdict
+from collections import defaultdict, deque
 from dataclasses import asdict, dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
@@ -989,6 +989,54 @@ def read_previous_visions(limit: int = 3) -> str:
         except Exception:
             logger.debug("Failed to read vision file %s", vf.name, exc_info=True)
     return "\n".join(parts) if parts else "(No previous visions)"
+
+
+def _read_proposals_and_signals(state_dir: Path) -> str:
+    """Read high-signal proposals and diagnostic signals for TD summit injection.
+
+    Scans ~/.dharma/proposals/ and ~/.dharma/signals/ for recent, high-strength
+    signals and returns a formatted context block for the vision prompt.
+    """
+    sections: list[str] = []
+    max_chars_per_signal = 500
+
+    for subdir, label in [
+        (state_dir / "proposals", "PROPOSALS"),
+        (state_dir / "signals" / "diagnostic", "DIAGNOSTICS"),
+        (state_dir / "signals" / "pattern", "PATTERNS"),
+        (state_dir / "signals" / "wiring", "WIRING TICKETS"),
+    ]:
+        if not subdir.exists():
+            continue
+        files = sorted(subdir.glob("*.md"), key=lambda p: p.stat().st_mtime, reverse=True)[:3]
+        if not files:
+            continue
+        items: list[str] = []
+        for f in files:
+            try:
+                text = f.read_text(encoding="utf-8")
+                # Extract title and first section
+                lines = text.split("\n")
+                title = ""
+                body_lines: list[str] = []
+                for line in lines:
+                    if line.startswith("# ") and not title:
+                        title = line.lstrip("# ").strip()
+                    elif line.startswith("## What"):
+                        continue
+                    elif title and not line.startswith("---"):
+                        body_lines.append(line)
+                body = " ".join(body_lines).strip()[:max_chars_per_signal]
+                if title:
+                    items.append(f"- **{title}**: {body}")
+            except Exception:
+                continue
+        if items:
+            sections.append(f"\n### {label}\n" + "\n".join(items))
+
+    if not sections:
+        return ""
+    return "\n\n## SIGNAL ROUTER FEED" + "".join(sections) + "\n"
 
 
 def read_ecosystem_state() -> dict[str, Any]:
@@ -3159,6 +3207,14 @@ class ThinkodynamicDirector:
         except Exception as exc:
             logger.debug("OverseeingI pre-vision failed (non-fatal): %s", exc)
 
+        # Inject high-signal proposals and signals (from signal-router)
+        try:
+            signals_context = _read_proposals_and_signals(self.state_dir)
+            if signals_context:
+                meta_context += signals_context
+        except Exception as exc:
+            logger.debug("Proposals/signals read failed (non-fatal): %s", exc)
+
         vision_text, success = await invoke_claude_vision(
             seeds=seeds,
             ecosystem=ecosystem,
@@ -4677,7 +4733,7 @@ class ThinkodynamicDirector:
         highest level until work takes real time.
         """
         end_at = time.time() + (hours * 3600.0) if hours > 0 else None
-        snapshots: list[dict[str, Any]] = []
+        snapshots: deque[dict[str, Any]] = deque(maxlen=200)
         while True:
             snapshot = await self.run_cycle(delegate=delegate, model=model)
             snapshots.append(snapshot)
@@ -4762,7 +4818,7 @@ class ThinkodynamicDirector:
                 continue  # no sleep, straight back to vision
 
             await asyncio.sleep(max(1, poll_seconds))
-        return snapshots
+        return list(snapshots)
 
 
 def _parse_roots(raw: str) -> list[str]:

@@ -7,6 +7,8 @@ Each entry is hashed with the previous entry's hash, creating an immutable chain
 Any tampering breaks the chain and is immediately detectable.
 """
 
+from __future__ import annotations
+
 import hashlib
 import json
 from pathlib import Path

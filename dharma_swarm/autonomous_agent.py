@@ -30,6 +30,10 @@ from typing import Any
 
 from dharma_swarm.agent_memory import AgentMemoryBank
 from dharma_swarm.models import Message, MessagePriority
+from dharma_swarm.runtime_provider import (
+    create_runtime_provider,
+    preferred_runtime_provider_configs,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -425,71 +429,101 @@ class AutonomousAgent:
     async def _call_openrouter(
         self, system: str, messages: list[dict], tools: list[dict],
     ) -> dict[str, Any]:
-        if self._openai_client is None:
-            from openai import AsyncOpenAI
-            self._openai_client = AsyncOpenAI(
-                api_key=os.environ.get("OPENROUTER_API_KEY"),
-                base_url="https://openrouter.ai/api/v1",
+        from dharma_swarm.models import LLMRequest, ProviderType
+
+        # Prefer Ollama and NVIDIA NIM before any OpenRouter lane to avoid
+        # unnecessary paid routing. OpenRouter model hint only applies to the
+        # OpenRouter providers; local/NIM lanes use their configured defaults.
+        configs = preferred_runtime_provider_configs(
+            model_overrides={
+                ProviderType.OPENROUTER_FREE: self.identity.model,
+                ProviderType.OPENROUTER: self.identity.model,
+            }
+        )
+        if not configs:
+            raise RuntimeError(
+                "No preferred providers available; configure Ollama, NVIDIA NIM, or OpenRouter"
             )
 
-        # Convert to OpenAI message format
-        oai_messages = [{"role": "system", "content": system}]
-        for msg in messages:
-            oai_messages.append(self._to_openai_message(msg))
+        last_exc: Exception | None = None
+        for config in configs:
+            provider = create_runtime_provider(config)
+            try:
+                request_kwargs: dict[str, Any] = {
+                    "model": config.default_model or self.identity.model,
+                    "system": system,
+                    "messages": messages,
+                    "max_tokens": 4096,
+                    "temperature": 0.0,
+                }
+                if tools:
+                    request_kwargs["tools"] = [
+                        {
+                            "type": "function",
+                            "function": {
+                                "name": t["name"],
+                                "description": t["description"],
+                                "parameters": t["input_schema"],
+                            },
+                        }
+                        for t in tools
+                    ]
 
-        # Convert Anthropic tool schema to OpenAI format
-        oai_tools = [
-            {
-                "type": "function",
-                "function": {
-                    "name": t["name"],
-                    "description": t["description"],
-                    "parameters": t["input_schema"],
-                },
-            }
-            for t in tools
-        ] if tools else None
+                response = await provider.complete(
+                    LLMRequest(**request_kwargs)
+                )
 
-        kwargs: dict[str, Any] = {
-            "model": self.identity.model,
-            "messages": oai_messages,
-            "max_tokens": 4096,
-        }
-        if oai_tools:
-            kwargs["tools"] = oai_tools
+                text_parts = [response.content] if response.content else []
+                tool_uses: list[dict[str, Any]] = []
+                for tc in response.tool_calls or []:
+                    parsed_input = tc.get("input")
+                    if parsed_input is None and "arguments" in tc:
+                        try:
+                            parsed_input = json.loads(tc["arguments"])
+                        except Exception:
+                            parsed_input = tc.get("arguments")
+                    tool_uses.append({
+                        "id": tc.get("id"),
+                        "name": tc.get("name"),
+                        "input": parsed_input,
+                    })
 
-        resp = await self._openai_client.chat.completions.create(**kwargs)
-        choice = resp.choices[0]
-        msg = choice.message
+                raw_content: list[dict[str, Any]] = []
+                if response.content:
+                    raw_content.append({"type": "text", "text": response.content})
+                for tu in tool_uses:
+                    raw_content.append({
+                        "type": "tool_use",
+                        "id": tu["id"],
+                        "name": tu["name"],
+                        "input": tu["input"],
+                    })
 
-        text_parts = [msg.content] if msg.content else []
-        tool_uses: list[dict] = []
-        if msg.tool_calls:
-            for tc in msg.tool_calls:
-                tool_uses.append({
-                    "id": tc.id,
-                    "name": tc.function.name,
-                    "input": json.loads(tc.function.arguments),
-                })
+                usage = response.usage or {}
+                return {
+                    "text": text_parts,
+                    "tool_uses": tool_uses,
+                    "raw_content": raw_content or (response.content or ""),
+                    "stop_reason": response.stop_reason,
+                    "tokens_in": int(usage.get("prompt_tokens", usage.get("input_tokens", 0)) or 0),
+                    "tokens_out": int(usage.get("completion_tokens", usage.get("output_tokens", 0)) or 0),
+                }
+            except Exception as exc:
+                last_exc = exc
+                logger.warning(
+                    "[%s] provider %s failed for runtime-open stack: %s",
+                    self.identity.name,
+                    config.provider.value,
+                    exc,
+                )
+            finally:
+                close = getattr(provider, "close", None)
+                if callable(close):
+                    await close()
 
-        # Build raw_content in Anthropic-compatible format for conversation
-        raw_content: list[dict[str, Any]] = []
-        if msg.content:
-            raw_content.append({"type": "text", "text": msg.content})
-        for tu in tool_uses:
-            raw_content.append({
-                "type": "tool_use", "id": tu["id"],
-                "name": tu["name"], "input": tu["input"],
-            })
-
-        return {
-            "text": text_parts,
-            "tool_uses": tool_uses,
-            "raw_content": raw_content or (msg.content or ""),
-            "stop_reason": choice.finish_reason,
-            "tokens_in": resp.usage.prompt_tokens if resp.usage else 0,
-            "tokens_out": resp.usage.completion_tokens if resp.usage else 0,
-        }
+        if last_exc is not None:
+            raise last_exc
+        raise RuntimeError("Preferred provider chain exhausted without an explicit error")
 
     @staticmethod
     def _to_openai_message(msg: dict) -> dict:
@@ -781,7 +815,7 @@ class AutonomousAgent:
                     for m in messages
                 ]
         except Exception:
-            pass
+            logger.debug("Message bus read failed", exc_info=True)
         return []
 
     async def _get_message_bus(self) -> Any:
@@ -792,7 +826,7 @@ class AutonomousAgent:
                 self._message_bus = MessageBus(db_path)
                 await self._message_bus.init_db()
             except Exception:
-                pass
+                logger.debug("Message bus init failed", exc_info=True)
         return self._message_bus
 
     async def _get_stigmergy(self) -> Any:
@@ -801,7 +835,7 @@ class AutonomousAgent:
                 from dharma_swarm.stigmergy import StigmergyStore
                 self._stigmergy = StigmergyStore()
             except Exception:
-                pass
+                logger.debug("Stigmergy store init failed", exc_info=True)
         return self._stigmergy
 
     async def _save_run_report(self, task: str, result: AgentResult) -> None:

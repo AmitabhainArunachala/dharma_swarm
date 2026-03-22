@@ -3,8 +3,8 @@
 Bridges the DarwinEngine's evolutionary selection logic to the Ginko agent
 fleet's prompt system.  Every 30 days (configurable), a tournament ranks all
 agents by composite fitness derived from their task_log.jsonl histories, keeps
-the winners' prompts unchanged, and mutates the losers' prompts via an LLM
-call through OpenRouter.
+the winners' prompts unchanged, and mutates the losers' prompts via the
+preferred runtime provider stack.
 
 Full prompt lineage is preserved:
     ~/.dharma/ginko/agents/{name}/prompt_variants/
@@ -17,7 +17,7 @@ Full prompt lineage is preserved:
 Tournament results are appended to:
     ~/.dharma/ginko/tournament_history.jsonl
 
-Standalone module -- depends only on stdlib + httpx.  Integrates with
+Standalone module -- integrates with
 ginko_agents.py and agent_registry.py without modifying them.
 
 Usage:
@@ -37,7 +37,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
-import httpx
+from dharma_swarm.runtime_provider import complete_via_preferred_runtime_providers
 
 logger = logging.getLogger(__name__)
 
@@ -45,7 +45,6 @@ GINKO_DIR = Path(os.getenv("DHARMA_HOME", Path.home() / ".dharma")) / "ginko"
 AGENTS_DIR = GINKO_DIR / "agents"
 TOURNAMENT_HISTORY_PATH = GINKO_DIR / "tournament_history.jsonl"
 
-OPENROUTER_URL = "https://openrouter.ai/api/v1/chat/completions"
 MUTATION_MODEL = "deepseek/deepseek-chat-v3-0324"
 
 # Fleet agent names (canonical order)
@@ -275,7 +274,7 @@ class PromptTournament:
             try:
                 return active.read_text(encoding="utf-8")
             except Exception:
-                pass
+                logger.debug("Active prompt read failed for %s", name, exc_info=True)
         # Fallback to identity.json
         identity = _read_json(self._identity_path(name))
         if identity:
@@ -296,7 +295,7 @@ class PromptTournament:
         current_prompt: str,
         fitness_scores: dict[str, Any],
     ) -> str:
-        """Generate an improved prompt variant via OpenRouter LLM call.
+        """Generate an improved prompt variant via the preferred runtime stack.
 
         Uses DeepSeek Chat v3 ($0.26/Mtok) for cost efficiency.
 
@@ -309,11 +308,6 @@ class PromptTournament:
             The mutated prompt text.  On error, returns the original
             prompt unchanged (safe fallback).
         """
-        api_key = os.getenv("OPENROUTER_API_KEY", "")
-        if not api_key:
-            logger.warning("OPENROUTER_API_KEY not set -- skipping mutation")
-            return current_prompt
-
         fitness_summary = (
             f"success_rate={fitness_scores.get('success_rate', 'N/A')}, "
             f"avg_quality={fitness_scores.get('avg_quality', 'N/A')}, "
@@ -339,62 +333,41 @@ class PromptTournament:
             "No preamble, no explanation, no markdown wrapping."
         )
 
-        headers = {
-            "Authorization": f"Bearer {api_key}",
-            "Content-Type": "application/json",
-            "HTTP-Referer": "https://github.com/shakti-saraswati/dharma_swarm",
-            "X-Title": "Ginko Prompt Evolution",
-        }
-
-        payload = {
-            "model": MUTATION_MODEL,
-            "messages": [
-                {"role": "user", "content": mutation_prompt},
-            ],
-            "temperature": 0.8,
-            "max_tokens": 1024,
-        }
-
         t0 = time.monotonic()
         try:
-            async with httpx.AsyncClient() as client:
-                resp = await client.post(
-                    OPENROUTER_URL,
-                    json=payload,
-                    headers=headers,
-                    timeout=60.0,
-                )
-
+            response, config = await complete_via_preferred_runtime_providers(
+                messages=[{"role": "user", "content": mutation_prompt}],
+                openrouter_model=MUTATION_MODEL,
+                max_tokens=1024,
+                temperature=0.8,
+                timeout_seconds=60.0,
+            )
             latency_ms = (time.monotonic() - t0) * 1000.0
-
-            if resp.status_code != 200:
-                logger.warning(
-                    "Mutation LLM call returned HTTP %d (%.0fms): %s",
-                    resp.status_code, latency_ms, resp.text[:300],
-                )
-                return current_prompt
-
-            data = resp.json()
-            choices = data.get("choices", [])
-            if choices:
-                content = choices[0].get("message", {}).get("content", "")
-                if content and len(content) > 50:
-                    logger.info(
-                        "Mutation succeeded (%.0fms, %d tokens): %d -> %d chars",
-                        latency_ms,
-                        data.get("usage", {}).get("total_tokens", 0),
-                        len(current_prompt),
-                        len(content),
+            content = response.content
+            if content and len(content) > 12:
+                usage = response.usage or {}
+                total_tokens = int(
+                    usage.get(
+                        "total_tokens",
+                        (usage.get("prompt_tokens", 0) or 0)
+                        + (usage.get("completion_tokens", 0) or 0),
                     )
-                    return content.strip()
+                    or 0
+                )
+                logger.info(
+                    "Mutation succeeded via %s/%s (%.0fms, %d tokens): %d -> %d chars",
+                    config.provider.value,
+                    response.model,
+                    latency_ms,
+                    total_tokens,
+                    len(current_prompt),
+                    len(content),
+                )
+                return content.strip()
 
             logger.warning("Mutation LLM returned empty/short content")
             return current_prompt
 
-        except httpx.TimeoutException:
-            logger.warning("Mutation LLM call timed out after %.0fms",
-                           (time.monotonic() - t0) * 1000.0)
-            return current_prompt
         except Exception as exc:
             logger.error("Mutation LLM call failed: %s", exc)
             return current_prompt
@@ -526,7 +499,7 @@ class PromptTournament:
                 try:
                     is_active = active_path.read_text(encoding="utf-8") == text
                 except Exception:
-                    pass
+                    logger.debug("Active prompt comparison failed for %s", agent_name, exc_info=True)
 
             variant = PromptVariant(
                 text=text,

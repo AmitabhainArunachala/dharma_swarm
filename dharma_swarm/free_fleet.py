@@ -29,44 +29,147 @@ free-fleet model selection instead of the paid OpenRouter fleet.  The
 
 from __future__ import annotations
 
+import logging
 import os
 from dataclasses import dataclass, field
 from typing import Literal
 
+import httpx
+
+logger = logging.getLogger(__name__)
+
 
 # ---------------------------------------------------------------------------
-# Tier definitions
+# Live discovery from OpenRouter (the ONLY source of truth)
 # ---------------------------------------------------------------------------
 
-#: Tier 1 — heavy reasoning; preferred for analysis, research, complex code
-TIER1_MODELS: list[str] = [
-    "deepseek/deepseek-r1:free",
-    "meta-llama/llama-3.3-70b-instruct:free",
+_MIN_CTX = 32_000  # Minimum context to be useful
+
+# Tier assignment rules: prefix → tier
+_TIER_RULES: list[tuple[str, int]] = [
+    # Tier 1: heavy reasoning
+    ("nvidia/nemotron-3-super", 1),
+    ("nousresearch/hermes-3-llama-3.1-405b", 1),
+    ("openai/gpt-oss-120b", 1),
+    ("meta-llama/llama-3.3-70b", 1),
+    # Tier 2: general purpose
+    ("qwen/", 2),
+    ("nvidia/nemotron-3-nano", 2),
+    ("minimax/", 2),
+    ("google/gemma-3-27b", 2),
+    ("arcee-ai/trinity", 2),
+    ("openai/gpt-oss-20b", 2),
+    ("z-ai/", 2),
+    ("stepfun/", 2),
+    # Tier 3: fast/lightweight (everything else with >= _MIN_CTX)
 ]
 
-#: Tier 2 — general purpose; good quality for most swarm tasks
-TIER2_MODELS: list[str] = [
-    "qwen/qwen-2.5-72b-instruct:free",
-    "google/gemini-2.0-flash-exp:free",
-    "nousresearch/hermes-3-llama-3.1-405b:free",
-]
 
-#: Tier 3 — fast / lightweight; best for simple formatting, status checks
-TIER3_MODELS: list[str] = [
-    "microsoft/phi-4:free",
-    "mistralai/mistral-small-3.1-24b-instruct:free",
-]
+def _assign_tier(model_id: str) -> int:
+    """Assign a tier to a model based on prefix rules. Default: tier 3."""
+    for prefix, tier in _TIER_RULES:
+        if model_id.startswith(prefix):
+            return tier
+    return 3
 
+
+def discover_free_models_sync() -> dict[int, list[str]]:
+    """Query OpenRouter /api/v1/models and return tiered free model dict.
+
+    Returns {1: [...], 2: [...], 3: [...]} with live model IDs.
+    Falls back to a minimal known-good set on network failure.
+    """
+    try:
+        with httpx.Client(timeout=15.0) as client:
+            resp = client.get("https://openrouter.ai/api/v1/models")
+            resp.raise_for_status()
+            data = resp.json()
+
+        tiers: dict[int, list[tuple[str, int]]] = {1: [], 2: [], 3: []}
+        for m in data.get("data", []):
+            mid = m.get("id", "")
+            pricing = m.get("pricing", {})
+            prompt_cost = float(pricing.get("prompt", "1") or "1")
+            completion_cost = float(pricing.get("completion", "1") or "1")
+            if prompt_cost == 0 and completion_cost == 0:
+                ctx = int(m.get("context_length", 0))
+                if ctx >= _MIN_CTX and mid.endswith(":free"):
+                    tier = _assign_tier(mid)
+                    tiers[tier].append((mid, ctx))
+
+        # Sort each tier by context length descending
+        result: dict[int, list[str]] = {}
+        for t in (1, 2, 3):
+            tiers[t].sort(key=lambda x: -x[1])
+            result[t] = [mid for mid, _ in tiers[t]]
+
+        # Ensure every tier has at least something
+        if not result[1] and result[2]:
+            result[1] = [result[2][0]]
+        if not result[2] and result[3]:
+            result[2] = [result[3][0]]
+
+        return result
+    except Exception:
+        return {
+            1: ["meta-llama/llama-3.3-70b-instruct:free"],
+            2: ["google/gemma-3-27b-it:free"],
+            3: ["mistralai/mistral-small-3.1-24b-instruct:free"],
+        }
+
+
+# ---------------------------------------------------------------------------
+# Module-level state — populated lazily or eagerly
+# ---------------------------------------------------------------------------
+
+_cached_tiers: dict[int, list[str]] | None = None
+
+
+def _get_tiers() -> dict[int, list[str]]:
+    global _cached_tiers
+    if _cached_tiers is None:
+        _cached_tiers = discover_free_models_sync()
+    return _cached_tiers
+
+
+def refresh_fleet() -> dict[int, list[str]]:
+    """Force re-discovery from OpenRouter. Returns the new tiers."""
+    global _cached_tiers
+    _cached_tiers = discover_free_models_sync()
+    return _cached_tiers
+
+
+# Backwards-compatible module-level names (now dynamic properties via functions)
 TierNumber = Literal[1, 2, 3]
 
-TIER_MODELS: dict[TierNumber, list[str]] = {
-    1: TIER1_MODELS,
-    2: TIER2_MODELS,
-    3: TIER3_MODELS,
-}
 
-#: Flat list across all tiers, priority-ordered (Tier 1 first)
-ALL_FREE_MODELS: list[str] = TIER1_MODELS + TIER2_MODELS + TIER3_MODELS
+# Module-level constants — eagerly populated for backwards compat
+# These are snapshots; use _get_tiers() or refresh_fleet() for live data
+TIER1_MODELS: list[str] = []
+TIER2_MODELS: list[str] = []
+TIER3_MODELS: list[str] = []
+TIER_MODELS: dict[TierNumber, list[str]] = {1: [], 2: [], 3: []}  # type: ignore[dict-item]
+ALL_FREE_MODELS: list[str] = []
+
+
+def _populate_module_level() -> None:
+    """Populate backwards-compatible module-level lists from live discovery."""
+    global TIER1_MODELS, TIER2_MODELS, TIER3_MODELS, TIER_MODELS, ALL_FREE_MODELS
+    tiers = _get_tiers()
+    TIER1_MODELS[:] = tiers.get(1, [])
+    TIER2_MODELS[:] = tiers.get(2, [])
+    TIER3_MODELS[:] = tiers.get(3, [])
+    TIER_MODELS[1] = TIER1_MODELS
+    TIER_MODELS[2] = TIER2_MODELS
+    TIER_MODELS[3] = TIER3_MODELS
+    ALL_FREE_MODELS[:] = TIER1_MODELS + TIER2_MODELS + TIER3_MODELS
+
+
+# Populate on import
+try:
+    _populate_module_level()
+except Exception:
+    logger.debug("Free fleet populate failed", exc_info=True)
 
 #: Human-readable descriptions for each tier
 TIER_DESCRIPTIONS: dict[TierNumber, str] = {
@@ -297,7 +400,9 @@ __all__ = [
     "TIER_MODELS",
     "TierNumber",
     "build_free_fleet_crew",
+    "discover_free_models_sync",
     "free_fleet_summary",
     "get_tier_model",
     "is_free_fleet_enabled",
+    "refresh_fleet",
 ]

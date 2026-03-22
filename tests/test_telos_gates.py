@@ -1,10 +1,13 @@
 """Tests for dharma_swarm.telos_gates."""
 
+import pytest
 from unittest.mock import patch
 
-from dharma_swarm.models import GateDecision, GateResult
+from dharma_swarm.models import GateDecision, GateResult, GateTier
 from dharma_swarm.telos_gates import (
     DEFAULT_GATEKEEPER,
+    GateProposal,
+    GateRegistry,
     TelosGatekeeper,
     check_action,
     check_with_reflective_reroute,
@@ -158,13 +161,16 @@ def test_anekanta_all_frames():
 
 
 def test_gate_count_is_eleven():
-    """Exactly 11 gates in GATES dict."""
-    assert len(TelosGatekeeper.GATES) == 11
+    """Exactly 11 core gates in CORE_GATES dict."""
+    assert len(TelosGatekeeper.CORE_GATES) == 11
 
 
-def test_internal_yolo_keeps_bypass_as_advisory():
+def test_internal_yolo_keeps_bypass_as_advisory(tmp_path):
     """Default mode should remain permissive (review, not block) for speed."""
-    result = check_action("bypass authentication system")
+    # Isolate from live gate_pressure.json (S4→S3 feedback may set external_strict)
+    gk = TelosGatekeeper()
+    gk._GATE_PRESSURE_PATH = tmp_path / "nonexistent_pressure.json"
+    result = gk.check("bypass authentication system")
     assert result.decision == GateDecision.REVIEW
 
 
@@ -353,3 +359,294 @@ def test_reflective_reroute_budget_exhausted_stays_blocked():
     )
     assert outcome.attempts == 0
     assert outcome.result.decision == GateDecision.BLOCK
+
+
+# ---------------------------------------------------------------------------
+# S4→S3 gate pressure feedback tests
+# ---------------------------------------------------------------------------
+
+class TestGatePressureFeedback:
+    """Test the S4→S3 feedback loop: zeitgeist writes gate_pressure.json,
+    TelosGatekeeper reads it and overrides trust_mode."""
+
+    def test_no_pressure_file_returns_current_mode(self, tmp_path):
+        gk = TelosGatekeeper()
+        # Point to non-existent path
+        gk._GATE_PRESSURE_PATH = tmp_path / "gate_pressure.json"
+        assert gk._apply_gate_pressure("internal") == "internal"
+
+    def test_expired_pressure_returns_current_mode(self, tmp_path):
+        import json, time
+        pressure_file = tmp_path / "gate_pressure.json"
+        pressure_file.write_text(json.dumps({
+            "trust_mode_override": "external_strict",
+            "reason": "high block rate",
+            "set_at": time.time() - 7200,
+            "expires": time.time() - 3600,  # expired 1 hour ago
+        }))
+        gk = TelosGatekeeper()
+        gk._GATE_PRESSURE_PATH = pressure_file
+        assert gk._apply_gate_pressure("internal") == "internal"
+
+    def test_active_pressure_overrides_trust_mode(self, tmp_path):
+        import json, time
+        pressure_file = tmp_path / "gate_pressure.json"
+        pressure_file.write_text(json.dumps({
+            "trust_mode_override": "external_strict",
+            "reason": "high block rate",
+            "set_at": time.time(),
+            "expires": time.time() + 3600,  # valid for 1 hour
+        }))
+        gk = TelosGatekeeper()
+        gk._GATE_PRESSURE_PATH = pressure_file
+        assert gk._apply_gate_pressure("internal") == "external_strict"
+
+    def test_same_mode_no_change(self, tmp_path):
+        import json, time
+        pressure_file = tmp_path / "gate_pressure.json"
+        pressure_file.write_text(json.dumps({
+            "trust_mode_override": "internal",
+            "reason": "test",
+            "set_at": time.time(),
+            "expires": time.time() + 3600,
+        }))
+        gk = TelosGatekeeper()
+        gk._GATE_PRESSURE_PATH = pressure_file
+        # Same mode as current — no override
+        assert gk._apply_gate_pressure("internal") == "internal"
+
+    def test_corrupt_pressure_file_handled(self, tmp_path):
+        pressure_file = tmp_path / "gate_pressure.json"
+        pressure_file.write_text("not valid json!!!")
+        gk = TelosGatekeeper()
+        gk._GATE_PRESSURE_PATH = pressure_file
+        assert gk._apply_gate_pressure("internal") == "internal"
+
+
+# ---------------------------------------------------------------------------
+# Variety Expansion Protocol (VSM Gap 5 — Beer)
+# ---------------------------------------------------------------------------
+
+
+class TestGateRegistry:
+    """Tests for the gate proposal/approval lifecycle."""
+
+    @pytest.fixture
+    def registry(self, tmp_path):
+        return GateRegistry(proposals_file=tmp_path / "proposals.jsonl")
+
+    def test_propose_gate(self, registry):
+        proposal = GateProposal(
+            name="SUPPLY_CHAIN",
+            tier="C",
+            justification="Detect supply chain compromise patterns",
+            trigger_patterns=["install malicious", "typosquat"],
+            proposed_by="agent-security",
+        )
+        name = registry.propose(proposal)
+        assert name == "SUPPLY_CHAIN"
+
+        proposals = registry.list_proposals()
+        assert len(proposals) == 1
+        assert proposals[0].status == "proposed"
+
+    def test_propose_duplicate_rejected(self, registry):
+        p1 = GateProposal(
+            name="DUP_GATE", tier="C",
+            justification="First", trigger_patterns=["x"],
+        )
+        registry.propose(p1)
+        with pytest.raises(ValueError, match="already exists"):
+            registry.propose(GateProposal(
+                name="DUP_GATE", tier="B",
+                justification="Second", trigger_patterns=["y"],
+            ))
+
+    def test_propose_invalid_tier_rejected(self, registry):
+        with pytest.raises(ValueError, match="Invalid tier"):
+            registry.propose(GateProposal(
+                name="BAD_TIER", tier="D",
+                justification="Wrong", trigger_patterns=["x"],
+            ))
+
+    def test_propose_no_patterns_rejected(self, registry):
+        with pytest.raises(ValueError, match="trigger pattern"):
+            registry.propose(GateProposal(
+                name="EMPTY", tier="C",
+                justification="None", trigger_patterns=[],
+            ))
+
+    def test_propose_no_justification_rejected(self, registry):
+        with pytest.raises(ValueError, match="justification"):
+            registry.propose(GateProposal(
+                name="NO_JUST", tier="C",
+                justification="  ", trigger_patterns=["x"],
+            ))
+
+    def test_approve_gate(self, registry):
+        registry.propose(GateProposal(
+            name="NEW_GATE", tier="C",
+            justification="Test", trigger_patterns=["bad pattern"],
+        ))
+        approved = registry.approve("NEW_GATE", note="Approved for testing")
+        assert approved.status == "approved"
+        assert approved.review_note == "Approved for testing"
+        assert approved.reviewed_at != ""
+
+        # load_approved returns it
+        approved_list = registry.load_approved()
+        assert len(approved_list) == 1
+        assert approved_list[0].name == "NEW_GATE"
+
+    def test_reject_gate(self, registry):
+        registry.propose(GateProposal(
+            name="BAD_GATE", tier="A",
+            justification="Overreach", trigger_patterns=["x"],
+        ))
+        rejected = registry.reject("BAD_GATE", note="Too broad")
+        assert rejected.status == "rejected"
+
+        # load_approved does NOT return it
+        assert registry.load_approved() == []
+
+    def test_approve_nonexistent_raises(self, registry):
+        with pytest.raises(ValueError, match="No proposal"):
+            registry.approve("GHOST_GATE")
+
+    def test_double_approve_raises(self, registry):
+        registry.propose(GateProposal(
+            name="ONCE", tier="C",
+            justification="Once", trigger_patterns=["x"],
+        ))
+        registry.approve("ONCE")
+        with pytest.raises(ValueError, match="already approved"):
+            registry.approve("ONCE")
+
+    def test_list_proposals_filtered(self, registry):
+        registry.propose(GateProposal(
+            name="G1", tier="C", justification="A", trigger_patterns=["a"],
+        ))
+        registry.propose(GateProposal(
+            name="G2", tier="C", justification="B", trigger_patterns=["b"],
+        ))
+        registry.approve("G1")
+
+        assert len(registry.list_proposals()) == 2
+        assert len(registry.list_proposals(status="approved")) == 1
+        assert len(registry.list_proposals(status="proposed")) == 1
+        assert len(registry.list_proposals(status="rejected")) == 0
+
+    def test_name_normalization(self, registry):
+        proposal = GateProposal(
+            name="supply chain",
+            tier="C",
+            justification="Test normalization",
+            trigger_patterns=["x"],
+        )
+        name = registry.propose(proposal)
+        assert name == "SUPPLY_CHAIN"
+
+    def test_roundtrip_serialization(self, registry):
+        registry.propose(GateProposal(
+            name="SERIAL", tier="B",
+            justification="Roundtrip test",
+            trigger_patterns=["pattern_a", "pattern_b"],
+            proposed_by="test-agent",
+        ))
+        registry.approve("SERIAL", note="ok")
+
+        # Reload from a fresh registry pointing at the same file
+        registry2 = GateRegistry(proposals_file=registry._proposals_file)
+        approved = registry2.load_approved()
+        assert len(approved) == 1
+        assert approved[0].trigger_patterns == ["pattern_a", "pattern_b"]
+        assert approved[0].proposed_by == "test-agent"
+
+
+class TestCustomGateEvaluation:
+    """Tests for custom gates being evaluated inside TelosGatekeeper.check()."""
+
+    @pytest.fixture
+    def gatekeeper_with_custom(self, tmp_path):
+        """Create a gatekeeper with one approved custom Tier C gate."""
+        registry = GateRegistry(proposals_file=tmp_path / "proposals.jsonl")
+        registry.propose(GateProposal(
+            name="CRYPTO_MINING",
+            tier="C",
+            justification="Detect cryptocurrency mining attempts",
+            trigger_patterns=["crypto mine", "xmrig", "coinhive"],
+        ))
+        registry.approve("CRYPTO_MINING")
+        gk = TelosGatekeeper(registry=registry)
+        gk._GATE_PRESSURE_PATH = tmp_path / "nonexistent_pressure.json"
+        return gk
+
+    def test_custom_gate_loaded(self, gatekeeper_with_custom):
+        gk = gatekeeper_with_custom
+        assert "CRYPTO_MINING" in gk.GATES
+        assert gk.GATES["CRYPTO_MINING"] == GateTier.C
+        assert len(gk.GATES) == 12  # 11 core + 1 custom
+
+    def test_custom_gate_triggers_review(self, gatekeeper_with_custom):
+        gk = gatekeeper_with_custom
+        result = gk.check("install xmrig on the server")
+        assert result.decision == GateDecision.REVIEW
+        assert "CRYPTO_MINING" in result.gate_results
+        assert result.gate_results["CRYPTO_MINING"][0] == GateResult.FAIL
+
+    def test_custom_gate_passes_on_clean_action(self, gatekeeper_with_custom):
+        gk = gatekeeper_with_custom
+        result = gk.check("read the config file")
+        assert result.gate_results["CRYPTO_MINING"][0] == GateResult.PASS
+
+    def test_custom_tier_b_gate_blocks(self, tmp_path):
+        """A custom Tier B gate should produce BLOCK, not REVIEW."""
+        registry = GateRegistry(proposals_file=tmp_path / "proposals.jsonl")
+        registry.propose(GateProposal(
+            name="RANSOMWARE",
+            tier="B",
+            justification="Detect ransomware behavior",
+            trigger_patterns=["encrypt all files", "ransom note"],
+        ))
+        registry.approve("RANSOMWARE")
+        gk = TelosGatekeeper(registry=registry)
+        gk._GATE_PRESSURE_PATH = tmp_path / "nonexistent_pressure.json"
+        result = gk.check("encrypt all files and leave ransom note")
+        assert result.decision == GateDecision.BLOCK
+        assert result.gate_results["RANSOMWARE"][0] == GateResult.FAIL
+
+    def test_reload_custom_gates(self, tmp_path):
+        """reload_custom_gates picks up newly approved gates."""
+        registry = GateRegistry(proposals_file=tmp_path / "proposals.jsonl")
+        gk = TelosGatekeeper(registry=registry)
+        assert len(gk._custom_gates) == 0
+
+        # Propose and approve after construction
+        registry.propose(GateProposal(
+            name="LATE_GATE", tier="C",
+            justification="Added later", trigger_patterns=["late pattern"],
+        ))
+        registry.approve("LATE_GATE")
+
+        count = gk.reload_custom_gates()
+        assert count == 1
+        assert "LATE_GATE" in gk.GATES
+
+    def test_custom_gate_cannot_shadow_core(self, tmp_path):
+        """A custom gate with a core gate name is skipped."""
+        registry = GateRegistry(proposals_file=tmp_path / "proposals.jsonl")
+        registry.propose(GateProposal(
+            name="AHIMSA", tier="C",
+            justification="Shadow attempt", trigger_patterns=["shadow"],
+        ))
+        registry.approve("AHIMSA")
+        gk = TelosGatekeeper(registry=registry)
+        # AHIMSA remains Tier A (core), not Tier C (custom)
+        assert gk.GATES["AHIMSA"] == GateTier.A
+        assert "AHIMSA" not in gk._custom_gates
+
+    def test_core_gates_unchanged(self):
+        """CORE_GATES class attr is immutable across instances."""
+        assert len(TelosGatekeeper.CORE_GATES) == 11
+        assert "AHIMSA" in TelosGatekeeper.CORE_GATES
+        assert "STEELMAN" in TelosGatekeeper.CORE_GATES

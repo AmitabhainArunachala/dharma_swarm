@@ -7,12 +7,15 @@ Each AgentRunner manages a single agent; AgentPool manages the fleet.
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
 import os
 import time
 from datetime import datetime, timedelta, timezone
+from pathlib import Path
 from typing import Any, Protocol, runtime_checkable
 
+from dharma_swarm.contracts.intelligence_agents import communication_topics
 from dharma_swarm.models import (
     AgentConfig,
     AgentRole,
@@ -556,7 +559,63 @@ def _state_from_config(config: AgentConfig) -> AgentState:
         name=config.name,
         role=config.role,
         status=AgentStatus.STARTING,
+        provider=config.provider.value,
+        model=config.model,
     )
+
+
+def _build_self_state_block(agent_name: str) -> str:
+    """Build a self-awareness context block for the agent.
+
+    Reads identity snapshot, organism state (samvara), and recognition seed.
+    Returns a compact text block (~500 chars) or empty string if unavailable.
+    """
+    state_dir = Path.home() / ".dharma"
+    lines: list[str] = ["## Self-State"]
+
+    # Agent identity
+    identity_path = state_dir / "ginko" / "agents" / agent_name / "identity.json"
+    if identity_path.exists():
+        try:
+            data = json.loads(identity_path.read_text())
+            completed = data.get("tasks_completed", 0)
+            failed = data.get("tasks_failed", 0)
+            quality = data.get("avg_quality", 0.0)
+            lines.append(
+                f"Identity: {agent_name} | completed={completed} failed={failed} avg_quality={quality:.1f}"
+            )
+        except Exception:
+            logger.debug("Agent identity read failed for %s", agent_name, exc_info=True)
+
+    # Organism state (samvara — is the system in HOLD?)
+    samvara_path = state_dir / "meta" / "samvara_state.json"
+    if samvara_path.exists():
+        try:
+            data = json.loads(samvara_path.read_text())
+            if data.get("active"):
+                power = data.get("current_power", "unknown")
+                holds = data.get("consecutive_holds", 0)
+                lines.append(f"Organism: HOLD active (power={power}, holds={holds})")
+            else:
+                lines.append("Organism: flowing (no HOLD)")
+        except Exception:
+            logger.debug("Samvara state read failed", exc_info=True)
+
+    # System coherence from recognition seed (one line)
+    seed_path = state_dir / "meta" / "recognition_seed.md"
+    if seed_path.exists():
+        try:
+            text = seed_path.read_text()
+            for line in text.split("\n"):
+                if "TCS=" in line:
+                    lines.append(f"System: {line.strip().lstrip('#').strip()}")
+                    break
+        except Exception:
+            logger.debug("Recognition seed read failed", exc_info=True)
+
+    if len(lines) <= 1:
+        return ""
+    return "\n".join(lines)
 
 
 def _build_system_prompt(config: AgentConfig) -> str:
@@ -580,6 +639,23 @@ def _build_system_prompt(config: AgentConfig) -> str:
         else:
             parts.append(f"You are a {config.role.value} agent in the DHARMA SWARM.")
 
+    # Inject agent self-state: identity, organism state, recent memory
+    try:
+        self_state = _build_self_state_block(config.name)
+        if self_state:
+            parts.append(self_state)
+    except Exception:
+        logger.debug("Self-state injection failed for %s", config.name, exc_info=True)
+
+    # Inject neural consolidation corrections (behavioral backprop weights)
+    try:
+        from dharma_swarm.neural_consolidator import load_behavioral_corrections
+        corrections = load_behavioral_corrections(config.name)
+        if corrections:
+            parts.append(corrections)
+    except Exception:
+        logger.debug("Correction injection failed for %s", config.name, exc_info=True)
+
     # Inject multi-layer context for real Claude Code agents
     if config.provider == ProviderType.CLAUDE_CODE:
         from dharma_swarm.context import build_agent_context
@@ -593,6 +669,26 @@ def _build_system_prompt(config: AgentConfig) -> str:
         parts.append(SHAKTI_HOOK)
 
     return "\n\n".join(parts)
+
+
+def _resolve_prompt_state_dir(task: Task, config: AgentConfig) -> Path | None:
+    """Prefer explicit or repo-local state before falling back to HOME/.dharma."""
+    metadata = task.metadata if isinstance(task.metadata, dict) else {}
+    for candidate in (
+        metadata.get("memory_state_dir"),
+        metadata.get("state_dir"),
+        config.metadata.get("memory_state_dir"),
+        config.metadata.get("state_dir"),
+    ):
+        if isinstance(candidate, str) and candidate.strip():
+            return Path(candidate).expanduser()
+        if isinstance(candidate, Path):
+            return candidate
+
+    local_state_dir = Path.cwd() / ".dharma"
+    if local_state_dir.exists():
+        return local_state_dir
+    return None
 
 
 def _build_prompt(
@@ -611,25 +707,31 @@ def _build_prompt(
     user_parts = [f"## Task: {task.title}\n\n{task.description}"]
     metadata = task.metadata if isinstance(task.metadata, dict) else {}
     metadata.pop("_memory_recall_consumer", None)
+    prompt_state_dir = _resolve_prompt_state_dir(task, config)
     memory_query = "\n".join(
         part.strip()
         for part in (task.title, task.description)
         if isinstance(part, str) and part.strip()
     )
     if memory_query:
-        memory_mode = os.getenv("DGC_AGENT_PROMPT_MEMORY_MODE", "recent_only").strip().lower()
+        memory_mode = os.getenv("DGC_AGENT_PROMPT_MEMORY_MODE", "active").strip().lower()
         try:
             from dharma_swarm.context import read_memory_context
             from dharma_swarm.context import read_latent_gold_context
 
             memory_context = read_memory_context(
+                state_dir=prompt_state_dir,
                 query=memory_query,
                 limit=3,
                 consumer="agent_runner.prompt",
                 task_id=task.id,
                 allow_semantic_search=memory_mode not in {"recent", "recent_only", "off"},
             )
-            latent_gold = read_latent_gold_context(query=memory_query, limit=3)
+            latent_gold = read_latent_gold_context(
+                state_dir=prompt_state_dir,
+                query=memory_query,
+                limit=3,
+            )
         except Exception:
             memory_context = ""
             latent_gold = ""
@@ -645,6 +747,32 @@ def _build_prompt(
             metadata["_memory_recall_consumer"] = "agent_runner.prompt"
         if latent_gold:
             user_parts.append(f"\n\n## Latent Gold\n{latent_gold}")
+    # Inject fitness feedback (closes the strange loop)
+    try:
+        from dharma_swarm.signal_bus import SignalBus
+
+        fitness_events = SignalBus.get().get_agent_fitness(config.name, n=5)
+        if fitness_events:
+            fitness_lines = ["## Recent Fitness Feedback"]
+            for evt in fitness_events:
+                etype = evt.get("type", "")
+                if etype == "AGENT_FITNESS":
+                    fitness_lines.append(
+                        f"- Task {evt.get('task_id', '?')}: "
+                        f"swabhaav={evt.get('swabhaav_ratio', '?'):.2f}, "
+                        f"entropy={evt.get('entropy', '?'):.2f}, "
+                        f"recognition={evt.get('recognition_type', '?')}"
+                    )
+                elif etype == "WORKER_FITNESS":
+                    fitness_lines.append(
+                        f"- Worker {evt.get('worker_type', '?')}: "
+                        f"status={evt.get('status', '?')}, "
+                        f"duration={evt.get('duration_seconds', '?')}s"
+                    )
+            user_parts.append("\n".join(fitness_lines))
+    except Exception:
+        logger.debug("Fitness injection failed", exc_info=True)
+
     if plan_context:
         user_parts.append(f"\n\n{plan_context}")
     return LLMRequest(
@@ -709,7 +837,7 @@ async def _leave_task_mark(
     Best-effort only: never fail task execution because marking failed.
     """
     try:
-        from dharma_swarm.stigmergy import StigmergicMark, StigmergyStore
+        from dharma_swarm.stigmergy import StigmergicMark, _get_default_store
 
         salience = _PRIORITY_SALIENCE.get(task.priority, 0.5)
         if not success:
@@ -728,8 +856,7 @@ async def _leave_task_mark(
             salience=salience,
             connections=[task.id, task.priority.value, "success" if success else "failure"],
         )
-        store = StigmergyStore()
-        await store.leave_mark(mark)
+        await _get_default_store().leave_mark(mark)
     except Exception as exc:
         logger.debug("Failed to leave task mark for %s: %s", agent_name, exc)
 
@@ -755,14 +882,17 @@ class AgentRunner:
         sandbox: CodeSandbox | None = None,
         memory: AgentMemoryBank | None = None,
         message_bus: Any | None = None,
+        worker_spawner: Any | None = None,
     ) -> None:
         self._config = config
         self._provider = provider
         self._sandbox = sandbox
         self._memory = memory
         self._message_bus = message_bus
+        self._worker_spawner = worker_spawner
         self._state = _state_from_config(config)
         self._lock = asyncio.Lock()
+        self._background_tasks: set[asyncio.Task[Any]] = set()
 
     # -- properties ---------------------------------------------------------
 
@@ -783,6 +913,8 @@ class AgentRunner:
             self._state.started_at = _utc_now()
             self._state.last_heartbeat = _utc_now()
             logger.info("Agent %s (%s) started", self._config.name, self.agent_id)
+        await self._publish_bus_presence()
+        await self._ensure_bus_subscriptions()
 
     async def run_task(self, task: Task) -> str:
         """Execute a task and return the result string.
@@ -799,6 +931,38 @@ class AgentRunner:
         async with self._lock:
             self._state.status = AgentStatus.BUSY
             self._state.current_task = task.id
+
+        # ── Lifecycle event: task started ──
+        try:
+            from dharma_swarm.signal_bus import SignalBus
+            SignalBus.get().emit({
+                "type": "LIFECYCLE_TASK_STARTED",
+                "agent": self._config.name,
+                "task_id": task.id,
+                "task_title": task.title[:100],
+                "timestamp": _utc_now().isoformat(),
+            })
+        except Exception:
+            logger.debug("Lifecycle start signal failed", exc_info=True)
+
+        # ── Trajectory collection: start ──
+        _trajectory_id: str | None = None
+        try:
+            from dharma_swarm.trajectory_collector import get_collector
+            _traj_collector = get_collector()
+            _traj = _traj_collector.start_trajectory(
+                agent_id=self._config.name,
+                task_id=task.id,
+                task_title=task.title[:200],
+                config_snapshot={
+                    "model": getattr(self._config, "model", ""),
+                    "provider": getattr(self._config, "provider", ""),
+                    "autonomy_level": getattr(self._config, "autonomy_level", ""),
+                },
+            )
+            _trajectory_id = _traj.trajectory_id
+        except Exception:
+            logger.debug("Trajectory start failed", exc_info=True)
 
         request: LLMRequest | None = None
         route_request: Any | None = None
@@ -871,7 +1035,7 @@ class AgentRunner:
                     content=request.messages[0]["content"][:5000],
                 )
             except Exception:
-                pass
+                logger.debug("Conversation turn logging failed", exc_info=True)
 
             # Inject agent self-editing memory into system prompt
             if self._memory is not None:
@@ -918,7 +1082,7 @@ class AgentRunner:
                             success=response is not None and not _looks_like_provider_failure(response.content) if response else False,
                         )
                     except Exception:
-                        pass  # Tracing must never break the caller
+                        logger.debug("Trace recording failed", exc_info=True)
             else:
                 result = (
                     f"[mock] Agent {self._config.name} completed: {task.title}"
@@ -929,6 +1093,27 @@ class AgentRunner:
                 content=result,
                 turn_index=2,
             )
+
+            # ── Trajectory collection: add chunk ──
+            if _trajectory_id:
+                try:
+                    from dharma_swarm.trajectory_collector import (
+                        TrajectoryChunk, get_collector,
+                    )
+                    get_collector().add_chunk(_trajectory_id, TrajectoryChunk(
+                        agent_id=self._config.name,
+                        task_id=task.id,
+                        prompt=(request.messages[0]["content"][:3000]
+                                if request and request.messages else ""),
+                        response=result[:3000] if result else "",
+                        model=getattr(response, "model", "") if response else "",
+                        provider=getattr(response, "provider", "") if response else "",
+                        tokens_used=_response_total_tokens(response),
+                        latency_ms=completion_latency_ms,
+                    ))
+                except Exception:
+                    logger.debug("Trajectory chunk recording failed", exc_info=True)
+
             # Unified conversation log
             try:
                 from dharma_swarm.conversation_log import log_agent_turn
@@ -941,7 +1126,7 @@ class AgentRunner:
                     provider=getattr(response, "provider", ""),
                 )
             except Exception:
-                pass
+                logger.debug("Conversation turn logging failed", exc_info=True)
             self._record_router_feedback(
                 task=task,
                 request=request,
@@ -952,6 +1137,29 @@ class AgentRunner:
                 success=True,
                 result_text=result,
             )
+
+            # ── Output guardrails: check agent output before accepting ──
+            try:
+                from dharma_swarm.guardrails import (
+                    GuardrailContext,
+                    create_default_runner,
+                )
+                _gr = create_default_runner(include_telos=False)
+                _gr_ctx = GuardrailContext(
+                    action="task_completion",
+                    content=result[:2000] if result else "",
+                    agent=self._config.name,
+                    task_id=task.id,
+                )
+                _gr_summary = await _gr.check_outputs(_gr_ctx)
+                if not _gr_summary.passed:
+                    logger.warning(
+                        "Output guardrail flagged %s/%s: %s",
+                        self._config.name, task.id,
+                        "; ".join(r.reason for r in _gr_summary.results if r.reason),
+                    )
+            except Exception:
+                logger.debug("Guardrail check failed", exc_info=True)
 
             async with self._lock:
                 self._state.turns_used += 1
@@ -967,6 +1175,38 @@ class AgentRunner:
                 success=True,
             )
 
+            # ── Lifecycle event: emit to SignalBus for cross-system awareness ──
+            try:
+                from dharma_swarm.signal_bus import SignalBus
+                SignalBus.get().emit({
+                    "type": "LIFECYCLE_TASK_COMPLETED",
+                    "agent": self._config.name,
+                    "task_id": task.id,
+                    "task_title": task.title[:100],
+                    "timestamp": _utc_now().isoformat(),
+                })
+            except Exception:
+                logger.debug("Lifecycle signal failed", exc_info=True)
+
+            # ── Lineage: record provenance edge (task consumed prompt, produced result) ──
+            try:
+                from dharma_swarm.lineage import LineageGraph, LineageEdge
+                _lineage = LineageGraph()
+                _lineage.record(LineageEdge(
+                    task_id=task.id,
+                    input_artifacts=[f"prompt:{task.id}"],
+                    output_artifacts=[f"result:{task.id}"],
+                    agent=self._config.name,
+                    operation=task.title[:100],
+                    metadata={
+                        "task_type": meta.get("task_type", "general"),
+                        "cell_id": meta.get("cell_id", ""),
+                        "result_length": len(result) if result else 0,
+                    },
+                ))
+            except Exception:
+                logger.debug("Lineage recording failed", exc_info=True)
+
             # Record task result in agent memory
             await self._record_task_memory(task, result)
             self._record_idea_uptake(task, result)
@@ -977,6 +1217,21 @@ class AgentRunner:
 
             # Strange loop: score agent output and emit fitness signal
             self._emit_fitness_signal(task, result)
+
+            # ── AgentRegistry: log task for fitness + budget tracking ──
+            try:
+                from dharma_swarm.agent_registry import get_registry
+                _reg = get_registry()
+                _reg.log_task(
+                    name=self._config.name,
+                    task=task.title[:200],
+                    success=True,
+                    tokens=_response_total_tokens(response),
+                    latency_ms=completion_latency_ms,
+                    response_preview=result[:500] if result else "",
+                )
+            except Exception:
+                logger.debug("AgentRegistry task log failed", exc_info=True)
 
             # ── Telic Seam: record Outcome + ValueEvent + Contribution ──
             try:
@@ -1007,16 +1262,32 @@ class AgentRunner:
                             task_type=telic_task_type,
                         )
             except Exception:
-                pass  # Seam recording is never fatal
+                logger.debug("Telic seam recording failed", exc_info=True)
 
             logger.info(
                 "Agent %s finished task %s", self._config.name, task.id
             )
+            # ── Trajectory collection: complete (success) ──
+            if _trajectory_id:
+                try:
+                    from dharma_swarm.trajectory_collector import (
+                        TrajectoryOutcome, get_collector,
+                    )
+                    get_collector().complete_trajectory(
+                        _trajectory_id,
+                        TrajectoryOutcome(
+                            success=True,
+                            result_preview=result[:500] if result else "",
+                        ),
+                    )
+                except Exception:
+                    logger.debug("Trajectory completion failed", exc_info=True)
+
             # Close outer task span (success)
             try:
                 _task_tracer.end(_task_span, success=True, latency_ms=completion_latency_ms)
             except Exception:
-                pass
+                logger.debug("Tracer span close failed", exc_info=True)
             return result
 
         except Exception as exc:
@@ -1049,6 +1320,21 @@ class AgentRunner:
             self._mark_idea_outcome(task, outcome="failure")
             self._record_retrieval_outcome(task, outcome="failure")
 
+            # ── AgentRegistry: log failure for fitness + budget tracking ──
+            try:
+                from dharma_swarm.agent_registry import get_registry
+                _reg = get_registry()
+                _reg.log_task(
+                    name=self._config.name,
+                    task=task.title[:200],
+                    success=False,
+                    tokens=_response_total_tokens(response),
+                    latency_ms=completion_latency_ms,
+                    response_preview=str(exc)[:500],
+                )
+            except Exception:
+                logger.debug("AgentRegistry failure log failed", exc_info=True)
+
             # ── Telic Seam: record failure Outcome + ValueEvent + Contribution ──
             try:
                 from dharma_swarm.telic_seam import get_seam
@@ -1078,21 +1364,72 @@ class AgentRunner:
                             task_type=telic_task_type,
                         )
             except Exception:
-                pass  # Seam recording is never fatal
+                logger.debug("Telic seam recording failed", exc_info=True)
 
             async with self._lock:
                 self._state.status = AgentStatus.IDLE
                 self._state.current_task = None
                 self._state.error = str(exc)
+            # ── Trajectory collection: complete (failure) ──
+            if _trajectory_id:
+                try:
+                    from dharma_swarm.trajectory_collector import (
+                        TrajectoryOutcome, get_collector,
+                    )
+                    get_collector().complete_trajectory(
+                        _trajectory_id,
+                        TrajectoryOutcome(
+                            success=False,
+                            error=str(exc)[:500],
+                        ),
+                    )
+                except Exception:
+                    logger.debug("Trajectory failure completion failed", exc_info=True)
+
             # Close outer task span (failure)
             try:
                 _task_tracer.end(_task_span, success=False, error=str(exc)[:200])
             except Exception:
-                pass
+                logger.debug("Tracer span close failed", exc_info=True)
             logger.exception(
                 "Agent %s failed task %s", self._config.name, task.id
             )
             raise
+
+    # -- worker delegation --------------------------------------------------
+
+    async def spawn_worker(
+        self,
+        worker_type: str,
+        task_title: str,
+        task_description: str,
+        **kwargs: Any,
+    ) -> Any:
+        """Spawn an ephemeral worker via the attached WorkerSpawner.
+
+        Delegates to :class:`dharma_swarm.worker_spawn.WorkerSpawner`
+        using this agent's LLM provider for execution.
+
+        Returns:
+            ``WorkerResult`` on success, or *None* if no spawner is attached.
+        """
+        if self._worker_spawner is None:
+            logger.debug(
+                "Agent %s has no worker_spawner — skipping spawn(%s)",
+                self._config.name, worker_type,
+            )
+            return None
+
+        from dharma_swarm.worker_spawn import WorkerSpec
+
+        spec = WorkerSpec(
+            worker_type=worker_type,
+            task_title=task_title,
+            task_description=task_description,
+            parent_agent=self._config.name,
+            **kwargs,
+        )
+        return await self._worker_spawner.spawn(spec, provider=self._provider)
 
     def _record_router_feedback(
         self,
@@ -1209,7 +1546,7 @@ class AgentRunner:
                 import asyncio
                 try:
                     loop = asyncio.get_running_loop()
-                    loop.create_task(
+                    t = loop.create_task(
                         self._message_bus.emit_event(
                             "AGENT_FITNESS",
                             task_id=task.id,
@@ -1217,6 +1554,8 @@ class AgentRunner:
                             payload=payload,
                         )
                     )
+                    self._background_tasks.add(t)
+                    t.add_done_callback(self._background_tasks.discard)
                 except RuntimeError:
                     pass  # No running loop — skip durable emit
         except Exception as exc:
@@ -1392,15 +1731,53 @@ class AgentRunner:
         """Update the last_heartbeat timestamp."""
         async with self._lock:
             self._state.last_heartbeat = _utc_now()
+        await self._publish_bus_presence()
 
     async def stop(self) -> None:
         """Gracefully shut down the agent."""
         async with self._lock:
             self._state.status = AgentStatus.STOPPING
+        await self._publish_bus_presence()
+
+        # P4: Mark agent retiring in ontology (Hofstadter)
+        try:
+            from dharma_swarm.ontology_agents import mark_agent_retiring
+            mark_agent_retiring(self.agent_id, name=self._config.name)
+        except Exception:
+            logger.debug("Ontology agent retirement skipped", exc_info=True)
+
         logger.info("Agent %s stopping", self._config.name)
         async with self._lock:
             self._state.status = AgentStatus.DEAD
         logger.info("Agent %s stopped", self._config.name)
+
+    async def _publish_bus_presence(self) -> None:
+        bus = self._message_bus
+        if bus is None or not hasattr(bus, "heartbeat"):
+            return
+        metadata = {
+            "runtime_agent_id": self.agent_id,
+            "provider": self._state.provider,
+            "model": self._state.model,
+            "role": self._state.role.value if hasattr(self._state.role, "value") else str(self._state.role),
+            "status": self._state.status.value if hasattr(self._state.status, "value") else str(self._state.status),
+            "current_task": self._state.current_task,
+            "communication_topics": list(communication_topics()),
+        }
+        try:
+            await bus.heartbeat(self._config.name, metadata=metadata)
+        except Exception as exc:
+            logger.debug("Bus heartbeat failed for %s: %s", self._config.name, exc)
+
+    async def _ensure_bus_subscriptions(self) -> None:
+        bus = self._message_bus
+        if bus is None or not hasattr(bus, "subscribe"):
+            return
+        try:
+            for topic in communication_topics():
+                await bus.subscribe(self._config.name, topic)
+        except Exception as exc:
+            logger.debug("Bus subscription failed for %s: %s", self._config.name, exc)
 
     async def health_check(self) -> bool:
         """Return True if the agent is alive and its heartbeat is fresh."""
@@ -1433,6 +1810,7 @@ class AgentPool:
         sandbox: CodeSandbox | None = None,
         memory: AgentMemoryBank | None = None,
         message_bus: Any | None = None,
+        worker_spawner: Any | None = None,
     ) -> AgentRunner:
         """Create, start, and register an agent.
 
@@ -1442,14 +1820,46 @@ class AgentPool:
             sandbox: Optional code sandbox.
             memory: Optional self-editing memory bank.
             message_bus: Optional persistent MessageBus for durable fitness events.
+            worker_spawner: Optional WorkerSpawner for ephemeral worker delegation.
 
         Returns:
             The started AgentRunner.
         """
-        runner = AgentRunner(config, provider=provider, sandbox=sandbox, memory=memory, message_bus=message_bus)
+        # Enrich config from constitutional roster if a matching spec exists
+        try:
+            from dharma_swarm.agent_constitution import get_agent_spec
+            spec = get_agent_spec(config.name)
+            if spec is not None and not config.system_prompt and spec.system_prompt:
+                config = config.model_copy(update={"system_prompt": spec.system_prompt})
+                logger.info("Constitution enriched %s with system_prompt", config.name)
+        except Exception:
+            logger.debug("Constitutional enrichment skipped", exc_info=True)
+
+        runner = AgentRunner(config, provider=provider, sandbox=sandbox, memory=memory, message_bus=message_bus, worker_spawner=worker_spawner)
         await runner.start()
         async with self._lock:
             self._agents[config.id] = runner
+
+        # P4: Agents are objects in the ontology they operate on (Hofstadter)
+        try:
+            from dharma_swarm.ontology_agents import upsert_agent_identity
+            upsert_agent_identity(runner.state)
+        except Exception:
+            logger.debug("Ontology agent projection skipped", exc_info=True)
+
+        # AgentRegistry: ensure agent has an identity record for fitness + budget
+        try:
+            from dharma_swarm.agent_registry import get_registry
+            _reg = get_registry()
+            _reg.register_agent(
+                name=config.name,
+                role=config.role.value if hasattr(config.role, "value") else str(config.role),
+                model=config.model or "",
+                system_prompt=config.system_prompt or "",
+            )
+        except Exception:
+            logger.debug("AgentRegistry registration skipped", exc_info=True)
+
         logger.info("Pool spawned agent %s (%s)", config.name, config.id)
         return runner
 
@@ -1500,12 +1910,21 @@ class AgentPool:
         """
         return None
 
-    async def shutdown_all(self) -> None:
-        """Stop every agent in the pool."""
+    async def shutdown_all(self, timeout: float = 10.0) -> None:
+        """Stop every agent in the pool with a per-agent timeout."""
         async with self._lock:
             runners = list(self._agents.values())
-        await asyncio.gather(*(r.stop() for r in runners))
-        logger.info("Pool shut down %d agents", len(runners))
+        results = await asyncio.gather(
+            *(
+                asyncio.wait_for(r.stop(), timeout=timeout)
+                for r in runners
+            ),
+            return_exceptions=True,
+        )
+        hung = sum(1 for r in results if isinstance(r, asyncio.TimeoutError))
+        if hung:
+            logger.warning("Pool shutdown: %d agents timed out after %.0fs", hung, timeout)
+        logger.info("Pool shut down %d agents (%d timed out)", len(runners), hung)
 
     async def remove_dead(self) -> None:
         """Remove all DEAD agents from the pool."""

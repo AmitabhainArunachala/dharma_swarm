@@ -7,10 +7,13 @@ thread rotation, quality gates, circuit breakers, and human overrides.
 from __future__ import annotations
 
 import json
+import logging
 from collections import Counter
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
+
+logger = logging.getLogger(__name__)
 
 
 @dataclass
@@ -62,8 +65,8 @@ class DaemonConfig:
 
     # Heartbeat cycle
     heartbeat_interval: float = 21600.0  # 6 hours in seconds
-    max_daily_contributions: int = 4
-    min_between_contributions: float = 14400.0  # 4 hours
+    max_daily_contributions: int = 40
+    min_between_contributions: float = 1800.0  # 30 minutes
     quiet_hours: list[int] = field(default_factory=lambda: [2, 3, 4, 5])
 
     # LLM defaults
@@ -229,7 +232,7 @@ class AdaptiveQuietHours:
             with self._log_path.open("a", encoding="utf-8") as fh:
                 fh.write(entry)
         except Exception:
-            pass  # Best-effort; never block the main daemon loop.
+            logger.debug("Daemon config log write failed", exc_info=True)
 
     # ------------------------------------------------------------------
     # Read / prune path
@@ -268,7 +271,7 @@ class AdaptiveQuietHours:
                     "\n".join(kept) + ("\n" if kept else ""), encoding="utf-8"
                 )
             except Exception:
-                pass
+                logger.debug("Daemon config log trim failed", exc_info=True)
         return recent
 
     def active_hours(self) -> set[int]:

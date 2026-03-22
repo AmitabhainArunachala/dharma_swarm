@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import logging
+
 from fastapi import APIRouter
 
 from api.models import (
@@ -11,6 +13,8 @@ from api.models import (
     HealthOut,
     SwarmOverview,
 )
+
+logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/api", tags=["health"])
 
@@ -97,14 +101,14 @@ async def overview() -> ApiResponse:
         tasks_failed = status.tasks_failed
         uptime = status.uptime_seconds
     except Exception:
-        pass
+        logger.debug("Failed to fetch swarm status for overview", exc_info=True)
 
     health_status = "unknown"
     try:
         report = await monitor.check_health()
         health_status = report.overall_status.value if hasattr(report.overall_status, 'value') else str(report.overall_status)
     except Exception:
-        pass
+        logger.debug("Failed to check health for overview", exc_info=True)
 
     mean_fitness = 0.0
     evolution_entries = 0
@@ -118,7 +122,7 @@ async def overview() -> ApiResponse:
             fitnesses = [e.fitness.weighted() for e in entries]
             mean_fitness = sum(fitnesses) / len(fitnesses)
     except Exception:
-        pass
+        logger.debug("Failed to load evolution archive for overview", exc_info=True)
 
     stig_density = 0
     try:
@@ -126,7 +130,7 @@ async def overview() -> ApiResponse:
         stig = StigmergyStore()
         stig_density = stig.density()
     except Exception:
-        pass
+        logger.debug("Failed to read stigmergy density for overview", exc_info=True)
 
     return ApiResponse(data=SwarmOverview(
         agent_count=agent_count,

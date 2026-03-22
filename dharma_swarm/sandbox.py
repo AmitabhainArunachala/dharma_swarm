@@ -135,27 +135,94 @@ class LocalSandbox(Sandbox):
 
 
 class SandboxManager:
-    """Creates, tracks, and tears down sandboxes."""
+    """Creates, tracks, and tears down sandboxes.
 
-    def __init__(self) -> None:
+    Three-layer isolation stack (auto-selects strongest available):
+        Layer 3: DockerSandbox (container isolation, network policies)
+        Layer 2: LocalSandbox (subprocess with regex safety checks)
+        Layer 1: LocalSandbox (same — always available as fallback)
+
+    Set ``prefer_docker=True`` (default) to auto-select Docker when
+    the daemon is reachable. Falls back to LocalSandbox transparently.
+    """
+
+    def __init__(self, prefer_docker: bool = True) -> None:
         self._active: dict[int, Sandbox] = {}
+        self._prefer_docker = prefer_docker
+        self._docker_available: Optional[bool] = None  # Cached after first check
+
+    async def _check_docker(self) -> bool:
+        """Check Docker availability (cached)."""
+        if self._docker_available is None:
+            try:
+                from dharma_swarm.docker_sandbox import DockerSandbox
+                self._docker_available = await DockerSandbox.docker_available()
+            except ImportError:
+                self._docker_available = False
+        return self._docker_available
 
     def create(
         self,
         sandbox_type: str = "local",
         workdir: Optional[Path] = None,
     ) -> Sandbox:
-        """Create a new sandbox and register it.
+        """Create a sandbox (synchronous — always returns LocalSandbox).
+
+        For Docker sandboxes, use :meth:`create_async` instead.
 
         Args:
-            sandbox_type: Only ``"local"`` is supported today.
+            sandbox_type: ``"local"`` or ``"docker"`` (docker raises if unavailable).
             workdir: Optional working directory override.
 
         Returns:
             A ready-to-use :class:`Sandbox` instance.
         """
+        if sandbox_type == "docker":
+            raise SandboxError(
+                "Docker sandbox requires async creation. Use create_async()."
+            )
         if sandbox_type != "local":
             raise SandboxError(f"Unknown sandbox type: {sandbox_type!r}")
+        sb = LocalSandbox(workdir=workdir)
+        self._active[id(sb)] = sb
+        return sb
+
+    async def create_async(
+        self,
+        sandbox_type: str = "auto",
+        workdir: Optional[Path] = None,
+        docker_config: Optional[object] = None,
+    ) -> Sandbox:
+        """Create a sandbox, auto-selecting Docker when available.
+
+        Args:
+            sandbox_type: ``"auto"`` (default), ``"docker"``, or ``"local"``.
+            workdir: Working directory for local sandboxes.
+            docker_config: Optional :class:`ContainerConfig` for Docker sandboxes.
+
+        Returns:
+            A :class:`DockerSandbox` if Docker is available and preferred,
+            otherwise a :class:`LocalSandbox`.
+        """
+        use_docker = False
+
+        if sandbox_type == "docker":
+            use_docker = True
+        elif sandbox_type == "auto" and self._prefer_docker:
+            use_docker = await self._check_docker()
+
+        if use_docker:
+            try:
+                from dharma_swarm.docker_sandbox import DockerSandbox, ContainerConfig
+                config = docker_config if isinstance(docker_config, ContainerConfig) else ContainerConfig()
+                sb: Sandbox = DockerSandbox(config=config)
+                self._active[id(sb)] = sb
+                return sb
+            except ImportError:
+                pass  # Fall through to local
+            except SandboxError:
+                pass  # Docker unavailable, fall through
+
         sb = LocalSandbox(workdir=workdir)
         self._active[id(sb)] = sb
         return sb
@@ -163,6 +230,10 @@ class SandboxManager:
     @property
     def active_count(self) -> int:
         return len(self._active)
+
+    @property
+    def docker_preferred(self) -> bool:
+        return self._prefer_docker
 
     async def shutdown_all(self) -> None:
         """Cleanup every tracked sandbox."""

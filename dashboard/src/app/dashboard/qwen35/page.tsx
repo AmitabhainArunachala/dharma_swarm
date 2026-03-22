@@ -11,6 +11,7 @@ import {
   useRef,
   useEffect,
   useCallback,
+  useMemo,
   type KeyboardEvent,
 } from "react";
 import { motion, AnimatePresence } from "framer-motion";
@@ -35,13 +36,45 @@ import {
   TrendingUp,
   MessageSquare,
   Plus,
+  Route,
+  ShieldCheck,
+  Banknote,
+  Radio,
+  ArrowRight,
   X,
 } from "lucide-react";
 import Link from "next/link";
+import { ControlPlanePageSummary } from "@/components/dashboard/ControlPlanePageSummary";
+import { ControlPlaneSurfaceGrid } from "@/components/dashboard/ControlPlaneSurfaceGrid";
+import { ControlPlaneStrip } from "@/components/dashboard/ControlPlaneStrip";
+import { buildControlPlanePageMeta } from "@/lib/controlPlanePageMeta";
 import { colors, glowText, glowBox } from "@/lib/theme";
 import { timeAgo } from "@/lib/utils";
 import { useAgent } from "@/hooks/useAgent";
-import { BASE_URL } from "@/lib/api";
+import { useTelemetry } from "@/hooks/useTelemetry";
+import { useRuntimeControlPlane } from "@/hooks/useRuntimeControlPlane";
+import { apiPath, API_TRANSPORT_MODE } from "@/lib/api";
+import {
+  findAdvertisedChatProfile,
+  isAdvertisedChatProfileAvailable,
+} from "@/lib/chatProfiles";
+import {
+  buildControlPlaneSyncState,
+  splitControlPlaneSurfaces,
+  type ControlPlaneSyncState,
+} from "@/lib/controlPlaneShell";
+import {
+  buildControlPlaneSurfaces,
+  type ControlPlaneSurface,
+} from "@/lib/controlPlaneSurfaces";
+import type { RuntimeControlPlaneSnapshot } from "@/lib/runtimeControlPlane";
+import type { ChatStatusOut, HealthOut } from "@/lib/types";
+import type {
+  EconomicSummary,
+  RoutingSummary,
+  TelemetryAgentIdentity,
+  TelemetryOverview,
+} from "@/lib/telemetry";
 
 // ---------------------------------------------------------------------------
 // Constants
@@ -49,7 +82,8 @@ import { BASE_URL } from "@/lib/api";
 
 const PROFILE_ID = "qwen35_surgeon";
 const AGENT_ID = "qwen35-surgeon";
-const ACCENT = colors.botan;
+const PAGE_META = buildControlPlanePageMeta("qwen35");
+const ACCENT = colors[PAGE_META.accent];
 
 // ---------------------------------------------------------------------------
 // Types
@@ -191,6 +225,27 @@ function nextId(): string {
   return `qw35-${Date.now()}-${++msgCounter}`;
 }
 
+function formatUsd(value: number): string {
+  const sign = value < 0 ? "-" : "";
+  return `${sign}$${Math.abs(value).toFixed(2)}`;
+}
+
+function topEntry(record: Record<string, number>): [string, number] | null {
+  const entries = Object.entries(record).sort((a, b) => b[1] - a[1]);
+  return entries[0] ?? null;
+}
+
+function runtimeTone(ready: boolean, health: HealthOut | null): string {
+  if (!ready) return colors.bengara;
+  if (health?.overall_status === "degraded") return colors.kinpaku;
+  return colors.rokusho;
+}
+
+function runtimeLabel(ready: boolean, health: HealthOut | null): string {
+  if (!ready) return "offline";
+  return health?.overall_status ?? "ready";
+}
+
 // ---------------------------------------------------------------------------
 // Main Page Component
 // ---------------------------------------------------------------------------
@@ -216,7 +271,7 @@ interface DispatchTask {
 // Main Page Component
 // ---------------------------------------------------------------------------
 
-type TabId = "chat" | "tasks";
+type TabId = "chat" | "tasks" | "control";
 
 export default function Qwen35Page() {
   const [activeTab, setActiveTab] = useState<TabId>("chat");
@@ -234,6 +289,15 @@ export default function Qwen35Page() {
   const messagesEndRef = useRef<HTMLDivElement>(null);
   const inputRef = useRef<HTMLTextAreaElement>(null);
   const abortRef = useRef<AbortController | null>(null);
+  const {
+    chatStatus,
+    health: runtimeHealth,
+    error: runtimeError,
+    snapshot: runtimeSnapshot,
+    refresh: refreshControlPlane,
+    isLoading: runtimeLoading,
+    isFetching: runtimeFetching,
+  } = useRuntimeControlPlane();
 
   const {
     agent,
@@ -242,6 +306,36 @@ export default function Qwen35Page() {
     fitnessHistory,
     isLoading: agentLoading,
   } = useAgent(AGENT_ID);
+  const {
+    overview,
+    routing,
+    economics,
+    agents: telemetryAgents,
+    routes,
+    policies,
+    interventions,
+    economicEvents,
+    outcomes,
+    isLoading: telemetryLoading,
+    error: telemetryError,
+  } = useTelemetry();
+  const runtimeSyncState = buildControlPlaneSyncState({
+    isLoading: runtimeLoading,
+    isFetching: runtimeFetching,
+  });
+  const controlPlaneSurfaces = useMemo(
+    () =>
+      buildControlPlaneSurfaces({
+        snapshot: runtimeSnapshot,
+        chatStatus,
+        currentPath: "/dashboard/qwen35",
+      }),
+    [chatStatus, runtimeSnapshot],
+  );
+  const { peerSurfaces: operatorSurfaces } = useMemo(
+    () => splitControlPlaneSurfaces(controlPlaneSurfaces),
+    [controlPlaneSurfaces],
+  );
 
   // -------------------------------------------------------------------------
   // Conversation persistence: load on mount
@@ -431,7 +525,7 @@ export default function Qwen35Page() {
           .slice(-120)
           .map((m) => ({ role: m.role, content: m.content }));
 
-        const res = await fetch(`${BASE_URL}/api/chat`, {
+        const res = await fetch(apiPath("/api/chat"), {
           method: "POST",
           headers: { "Content-Type": "application/json" },
           body: JSON.stringify({
@@ -608,12 +702,67 @@ export default function Qwen35Page() {
   // Derive agent status info
   // -------------------------------------------------------------------------
 
+  const advertisedProfile = findAdvertisedChatProfile(chatStatus, PROFILE_ID);
   const agentStatus = agent?.status ?? "unknown";
-  const isOnline = ["busy", "idle", "starting"].includes(agentStatus);
+  const profileReady = isAdvertisedChatProfileAvailable(chatStatus, PROFILE_ID);
+  const statusLabel = agent?.status ?? (profileReady ? "ready" : "offline");
+  const isOnline = profileReady || ["busy", "idle", "starting"].includes(agentStatus);
   const latestFitness =
     fitnessHistory.length > 0
       ? fitnessHistory[fitnessHistory.length - 1]
       : null;
+  const topProvider = topEntry(routing?.provider_counts ?? {});
+  const topPath = topEntry(routing?.path_counts ?? {});
+  const latestOutcome = outcomes[0] ?? null;
+  const controlTone = runtimeTone(Boolean(chatStatus?.ready), runtimeHealth);
+  const controlFeed = useMemo(() => {
+    const combined: ControlFeedEntry[] = [
+      ...routes.slice(0, 4).map((entry) => ({
+        id: entry.decision_id,
+        title: entry.action_name,
+        detail: `${entry.route_path} -> ${entry.selected_provider || "unassigned"}`,
+        status: entry.requires_human ? "human" : entry.selected_provider || "auto",
+        timestamp: entry.created_at,
+        kind: "route" as const,
+      })),
+      ...policies.slice(0, 4).map((entry) => ({
+        id: entry.decision_id,
+        title: entry.policy_name,
+        detail: entry.reason || entry.decision,
+        status: entry.decision,
+        timestamp: entry.created_at,
+        kind: "policy" as const,
+      })),
+      ...interventions.slice(0, 4).map((entry) => ({
+        id: entry.intervention_id,
+        title: entry.intervention_type,
+        detail: entry.summary || entry.outcome_status,
+        status: entry.outcome_status,
+        timestamp: entry.created_at,
+        kind: "intervention" as const,
+      })),
+      ...outcomes.slice(0, 4).map((entry) => ({
+        id: entry.outcome_id,
+        title: entry.outcome_kind,
+        detail: entry.summary || `${entry.value} ${entry.unit}`,
+        status: entry.status,
+        timestamp: entry.created_at,
+        kind: "outcome" as const,
+      })),
+      ...economicEvents.slice(0, 3).map((entry) => ({
+        id: entry.event_id,
+        title: entry.event_kind,
+        detail: `${formatUsd(entry.amount)} · ${entry.summary || entry.counterparty || "economic event"}`,
+        status: entry.currency,
+        timestamp: entry.created_at,
+        kind: "economic" as const,
+      })),
+    ];
+
+    return combined
+      .sort((left, right) => new Date(right.timestamp).getTime() - new Date(left.timestamp).getTime())
+      .slice(0, 8);
+  }, [economicEvents, interventions, outcomes, policies, routes]);
 
   // -------------------------------------------------------------------------
   // Render
@@ -655,7 +804,7 @@ export default function Qwen35Page() {
                 className="font-heading text-xl font-bold tracking-tight"
                 style={{ color: ACCENT, textShadow: glowText(ACCENT, 0.5) }}
               >
-                Qwen3 Coder
+                {PAGE_META.pageTitle}
               </h1>
               <span
                 className="inline-flex items-center gap-1.5 rounded-full px-2.5 py-0.5 font-mono text-[10px] font-medium"
@@ -677,25 +826,47 @@ export default function Qwen35Page() {
                       : "none",
                   }}
                 />
-                {agentStatus.toUpperCase()}
+                {statusLabel.toUpperCase()}
               </span>
               <span className="rounded-full bg-sumi-800 px-2 py-0.5 font-mono text-[10px] text-sumi-600">
-                {agent?.model ?? "qwen3-coder:480b-cloud"}
+                {agent?.model ?? advertisedProfile?.model ?? "qwen/qwen3-coder"}
               </span>
             </div>
             <p className="mt-0.5 text-xs text-sumi-600">
-              In-house code surgeon -- bug fixes, test runs, surgical edits
+              {PAGE_META.pageDetail}
             </p>
+          </div>
+
+          <div className="hidden items-center gap-2 lg:flex">
+            {operatorSurfaces.map((surface) => (
+              <QuickLink
+                key={surface.id}
+                href={surface.href}
+                label={surface.label}
+                accent={colors[surface.accent]}
+              />
+            ))}
           </div>
         </div>
       </motion.header>
+
+      <div
+        className="shrink-0 border-b px-5 py-4"
+        style={{ borderColor: `${colors.sumi[700]}40` }}
+      >
+        <ControlPlanePageSummary
+          routeId="qwen35"
+          snapshot={runtimeSnapshot}
+          surfaces={controlPlaneSurfaces}
+        />
+      </div>
 
       {/* ── Tab bar ── */}
       <div
         className="flex shrink-0 gap-1 border-b px-5 py-1"
         style={{ borderColor: `${colors.sumi[700]}40` }}
       >
-        {(["chat", "tasks"] as const).map((tab) => (
+        {(["chat", "tasks", "control"] as const).map((tab) => (
           <button
             key={tab}
             onClick={() => setActiveTab(tab)}
@@ -708,7 +879,7 @@ export default function Qwen35Page() {
                   : "transparent",
             }}
           >
-            {tab === "chat" ? "Chat" : "Tasks"}
+            {tab === "chat" ? "Chat" : tab === "tasks" ? "Tasks" : "Control"}
           </button>
         ))}
       </div>
@@ -717,6 +888,25 @@ export default function Qwen35Page() {
       <div className="grid min-h-0 flex-1 lg:grid-cols-[1fr_380px]">
         {activeTab === "tasks" ? (
           <Qwen35TasksTab />
+        ) : activeTab === "control" ? (
+          <Qwen35ControlTab
+            chatStatus={chatStatus}
+            runtimeHealth={runtimeHealth}
+            runtimeSnapshot={runtimeSnapshot}
+            runtimeSyncState={runtimeSyncState}
+            runtimeError={runtimeError}
+            controlPlaneSurfaces={controlPlaneSurfaces}
+            overview={overview}
+            routing={routing}
+            economics={economics}
+            telemetryAgents={telemetryAgents}
+            controlFeed={controlFeed}
+            telemetryLoading={telemetryLoading}
+            telemetryError={telemetryError instanceof Error ? telemetryError.message : telemetryError ? String(telemetryError) : null}
+            onRefresh={() => {
+              void refreshControlPlane();
+            }}
+          />
         ) : (
         /* ── Chat column ── */
         <div className="flex min-h-0 flex-col border-r" style={{ borderColor: `${colors.sumi[700]}40` }}>
@@ -847,6 +1037,88 @@ export default function Qwen35Page() {
           style={{ backgroundColor: `${colors.sumi[950]}80` }}
         >
           <div className="space-y-4">
+            <section className="glass-panel-subtle p-4">
+              <div className="mb-3 flex items-center justify-between">
+                <div className="flex items-center gap-2">
+                  <Radio size={14} style={{ color: controlTone }} />
+                  <h2 className="font-heading text-sm font-semibold text-torinoko">
+                    Command Nexus
+                  </h2>
+                </div>
+                <button
+                  onClick={() => setActiveTab("control")}
+                  className="flex items-center gap-1 rounded-md px-2 py-1 font-mono text-[10px] transition-colors"
+                  style={{
+                    color: ACCENT,
+                    backgroundColor: `color-mix(in srgb, ${ACCENT} 10%, transparent)`,
+                  }}
+                >
+                  Open
+                  <ArrowRight size={10} />
+                </button>
+              </div>
+
+              <div className="grid grid-cols-2 gap-2">
+                <StatCell
+                  icon={<Activity size={12} />}
+                  label="Runtime"
+                  value={runtimeSnapshot.statusLabel}
+                  accent={controlTone}
+                />
+                <StatCell
+                  icon={<Bot size={12} />}
+                  label="Agents"
+                  value={`${overview?.active_agents ?? 0}/${overview?.agent_count ?? 0}`}
+                  accent={colors.aozora}
+                />
+                <StatCell
+                  icon={<Route size={12} />}
+                  label="Routes"
+                  value={String(routing?.total_decisions ?? 0)}
+                  accent={colors.kinpaku}
+                />
+                <StatCell
+                  icon={<Banknote size={12} />}
+                  label="Net"
+                  value={formatUsd(economics?.net_usd ?? 0)}
+                  accent={(economics?.net_usd ?? 0) >= 0 ? colors.rokusho : colors.bengara}
+                />
+              </div>
+
+              <div className="mt-3 rounded-lg border border-sumi-700/20 bg-sumi-900/50 px-3 py-2">
+                <div className="flex items-center justify-between gap-3">
+                  <div className="min-w-0">
+                    <p className="font-mono text-[10px] uppercase tracking-widest text-sumi-600">
+                      Top lane
+                    </p>
+                    <p className="truncate text-xs text-torinoko">
+                      {topProvider ? `${topProvider[0]} · ${topProvider[1]} decisions` : "No provider routing data yet"}
+                    </p>
+                  </div>
+                  <span className="font-mono text-[10px] text-sumi-600">
+                    {topPath ? topPath[0] : "pending"}
+                  </span>
+                </div>
+                <p className="mt-2 text-[11px] text-sumi-600">
+                  {latestOutcome
+                    ? `${latestOutcome.outcome_kind}: ${latestOutcome.status} · ${timeAgo(latestOutcome.created_at)}`
+                    : runtimeError || "Provider, intervention, and outcome signals will accumulate here as the shell runs."}
+                </p>
+              </div>
+
+              <div className="mt-3 flex flex-wrap gap-2">
+                {operatorSurfaces.map((surface) => (
+                  <QuickLink
+                    key={surface.id}
+                    href={surface.href}
+                    label={surface.label}
+                    accent={colors[surface.accent]}
+                    compact
+                  />
+                ))}
+              </div>
+            </section>
+
             {/* Conversations panel */}
             <section className="glass-panel-subtle p-4">
               <div className="mb-3 flex items-center justify-between">
@@ -1181,6 +1453,292 @@ export default function Qwen35Page() {
   );
 }
 
+interface ControlFeedEntry {
+  id: string;
+  title: string;
+  detail: string;
+  status: string;
+  timestamp: string;
+  kind: "route" | "policy" | "intervention" | "outcome" | "economic";
+}
+
+interface Qwen35ControlTabProps {
+  chatStatus: ChatStatusOut | null;
+  runtimeHealth: HealthOut | null;
+  runtimeSnapshot: RuntimeControlPlaneSnapshot;
+  runtimeSyncState: ControlPlaneSyncState;
+  runtimeError: string | null;
+  controlPlaneSurfaces: ControlPlaneSurface[];
+  overview: TelemetryOverview | null;
+  routing: RoutingSummary | null;
+  economics: EconomicSummary | null;
+  telemetryAgents: TelemetryAgentIdentity[];
+  controlFeed: ControlFeedEntry[];
+  telemetryLoading: boolean;
+  telemetryError: string | null;
+  onRefresh: () => void | Promise<void>;
+}
+
+function Qwen35ControlTab({
+  chatStatus,
+  runtimeHealth,
+  runtimeSnapshot,
+  runtimeSyncState,
+  runtimeError,
+  controlPlaneSurfaces,
+  overview,
+  routing,
+  economics,
+  telemetryAgents,
+  controlFeed,
+  telemetryLoading,
+  telemetryError,
+  onRefresh,
+}: Qwen35ControlTabProps) {
+  const topProvider = topEntry(routing?.provider_counts ?? {});
+  const topPath = topEntry(routing?.path_counts ?? {});
+  const tone = runtimeTone(Boolean(chatStatus?.ready), runtimeHealth);
+  const anomalyCount = runtimeHealth?.anomalies.length ?? 0;
+  const meanFitness = runtimeHealth?.mean_fitness ?? null;
+  const defaultProfile =
+    chatStatus?.profiles?.find((profile) => profile.id === chatStatus.default_profile_id) ??
+    chatStatus?.profiles?.[0] ??
+    null;
+
+  return (
+    <div className="min-h-0 overflow-y-auto border-r px-4 py-4" style={{ borderColor: `${colors.sumi[700]}40` }}>
+      <div className="space-y-4">
+        <ControlPlaneStrip
+          snapshot={runtimeSnapshot}
+          surfaces={controlPlaneSurfaces}
+          syncState={runtimeSyncState}
+          onRefresh={() => {
+            void onRefresh();
+          }}
+        />
+
+        <ControlPlaneSurfaceGrid
+          surfaces={controlPlaneSurfaces}
+          title={PAGE_META.deckTitle}
+          detail={PAGE_META.deckDetail}
+        />
+
+        <section className="glass-panel-subtle p-4">
+          <div className="flex items-center gap-2">
+            <Radio size={16} style={{ color: tone }} />
+            <h2 className="font-heading text-base font-semibold text-torinoko">
+              Qwen Control Summary
+            </h2>
+          </div>
+          <p className="mt-1 text-sm text-sumi-600">
+            Runtime envelope, routing pressure, and operator economics for the surgical lane.
+          </p>
+
+          <div className="mt-4 grid gap-3 md:grid-cols-2 xl:grid-cols-4">
+            <StatCell
+              icon={<Activity size={12} />}
+              label="Runtime"
+              value={runtimeSnapshot.statusLabel || runtimeLabel(Boolean(chatStatus?.ready), runtimeHealth)}
+              accent={tone}
+            />
+            <StatCell
+              icon={<Bot size={12} />}
+              label="Live Agents"
+              value={`${overview?.active_agents ?? 0}/${overview?.agent_count ?? 0}`}
+              accent={colors.aozora}
+            />
+            <StatCell
+              icon={<Route size={12} />}
+              label="Routes"
+              value={String(routing?.total_decisions ?? 0)}
+              accent={colors.kinpaku}
+            />
+            <StatCell
+              icon={<Banknote size={12} />}
+              label="Net USD"
+              value={formatUsd(economics?.net_usd ?? 0)}
+              accent={(economics?.net_usd ?? 0) >= 0 ? colors.rokusho : colors.bengara}
+            />
+          </div>
+        </section>
+
+        <div className="grid gap-4 xl:grid-cols-[1.1fr_0.9fr]">
+          <section className="glass-panel-subtle p-4">
+            <div>
+              <div className="mb-3 flex items-center gap-2">
+                <Activity size={14} style={{ color: colors.aozora }} />
+                <h2 className="font-heading text-sm font-semibold text-torinoko">Runtime Envelope</h2>
+              </div>
+
+              <div className="grid gap-3 md:grid-cols-2">
+                <div className="rounded-lg border border-sumi-700/20 bg-sumi-900/50 p-3">
+                  <p className="font-mono text-[10px] uppercase tracking-widest text-sumi-600">Default lane</p>
+                  <p className="mt-1 text-xs text-torinoko">
+                    {defaultProfile ? `${defaultProfile.label} · ${defaultProfile.provider}` : "Unknown"}
+                  </p>
+                  <p className="mt-1 font-mono text-[10px] text-sumi-600">
+                    {defaultProfile?.model || chatStatus?.model || "No model advertised"}
+                  </p>
+                </div>
+
+                <div className="rounded-lg border border-sumi-700/20 bg-sumi-900/50 p-3">
+                  <p className="font-mono text-[10px] uppercase tracking-widest text-sumi-600">Transport</p>
+                  <p className="mt-1 text-xs text-torinoko">{API_TRANSPORT_MODE}</p>
+                  <p className="mt-1 font-mono text-[10px] text-sumi-600">
+                    {chatStatus?.chat_contract_version || "unknown contract"}
+                  </p>
+                </div>
+
+                <div className="rounded-lg border border-sumi-700/20 bg-sumi-900/50 p-3">
+                  <p className="font-mono text-[10px] uppercase tracking-widest text-sumi-600">Failure rate</p>
+                  <p className="mt-1 text-xs text-torinoko">
+                    {runtimeHealth ? `${(runtimeHealth.failure_rate * 100).toFixed(1)}%` : "unknown"}
+                  </p>
+                  <p className="mt-1 font-mono text-[10px] text-sumi-600">
+                    {runtimeHealth?.traces_last_hour ?? 0} traces in last hour
+                  </p>
+                </div>
+
+                <div className="rounded-lg border border-sumi-700/20 bg-sumi-900/50 p-3">
+                  <p className="font-mono text-[10px] uppercase tracking-widest text-sumi-600">Anomalies / fitness</p>
+                  <p className="mt-1 text-xs text-torinoko">
+                    {anomalyCount} anomalies · {meanFitness != null ? meanFitness.toFixed(2) : "n/a"} mean fitness
+                  </p>
+                  <p className="mt-1 font-mono text-[10px] text-sumi-600">
+                    {runtimeHealth?.agent_health.length ?? 0} agents in health set
+                  </p>
+                </div>
+              </div>
+
+              <div className="mt-4 rounded-lg border border-sumi-700/20 bg-sumi-900/50 p-3">
+                <p className="font-mono text-[10px] uppercase tracking-widest text-sumi-600">Routing posture</p>
+                <div className="mt-2 grid gap-2 md:grid-cols-2">
+                  <div>
+                    <p className="text-xs text-torinoko">
+                      {topProvider ? `${topProvider[0]} leads with ${topProvider[1]} decisions` : "No provider telemetry yet"}
+                    </p>
+                    <p className="mt-1 font-mono text-[10px] text-sumi-600">
+                      human required: {routing?.human_required_count ?? 0}
+                    </p>
+                  </div>
+                  <div>
+                    <p className="text-xs text-torinoko">
+                      {topPath ? `${topPath[0]} is the most-used route` : "No route-path telemetry yet"}
+                    </p>
+                    <p className="mt-1 font-mono text-[10px] text-sumi-600">
+                      policy events: {overview?.policy_decision_count ?? 0}
+                    </p>
+                  </div>
+                </div>
+              </div>
+
+              {(runtimeError || telemetryError) && (
+                <div className="mt-4 rounded-lg border border-bengara/30 bg-bengara/10 px-3 py-2 text-xs text-bengara">
+                  {runtimeError || telemetryError}
+                </div>
+              )}
+            </div>
+          </section>
+
+          <section className="glass-panel-subtle p-4">
+            <div className="mb-3 flex items-center gap-2">
+              <ShieldCheck size={14} style={{ color: colors.kinpaku }} />
+              <h2 className="font-heading text-sm font-semibold text-torinoko">Recent Control Feed</h2>
+            </div>
+
+            {telemetryLoading && controlFeed.length === 0 ? (
+              <div className="py-10 text-center text-xs text-sumi-600">Loading telemetry...</div>
+            ) : controlFeed.length === 0 ? (
+              <div className="rounded-lg border border-dashed border-sumi-700/30 bg-sumi-850/40 p-5 text-center text-xs text-sumi-600">
+                No control records yet. Provider runs, interventions, and bridge events will appear here.
+              </div>
+            ) : (
+              <div className="space-y-2">
+                {controlFeed.map((entry) => (
+                  <div
+                    key={`${entry.kind}-${entry.id}`}
+                    className="rounded-lg border border-sumi-700/20 bg-sumi-900/50 px-3 py-3"
+                  >
+                    <div className="flex items-center justify-between gap-3">
+                      <p className="truncate text-xs font-medium text-torinoko">{entry.title}</p>
+                      <span className="font-mono text-[10px] text-sumi-600">{entry.status}</span>
+                    </div>
+                    <p className="mt-1 text-xs text-sumi-600">{entry.detail}</p>
+                    <p className="mt-2 font-mono text-[10px] uppercase tracking-widest text-sumi-600">
+                      {entry.kind} · {timeAgo(entry.timestamp)}
+                    </p>
+                  </div>
+                ))}
+              </div>
+            )}
+          </section>
+        </div>
+
+        <section className="glass-panel-subtle p-4">
+          <div className="mb-3 flex items-center gap-2">
+            <Bot size={14} style={{ color: colors.rokusho }} />
+            <h2 className="font-heading text-sm font-semibold text-torinoko">Resident Operators</h2>
+          </div>
+          <p className="mb-4 text-xs text-sumi-600">
+            Live agent identities visible from the telemetry plane while Qwen remains attached to the shared control-plane deck above.
+          </p>
+
+          <div className="grid gap-3 md:grid-cols-2 xl:grid-cols-4">
+            {telemetryAgents.slice(0, 4).map((agent) => (
+              <div
+                key={agent.agent_id}
+                className="rounded-lg border border-sumi-700/20 bg-sumi-900/50 p-3"
+              >
+                <p className="truncate text-xs font-medium text-torinoko">
+                  {agent.codename || agent.agent_id}
+                </p>
+                <p className="mt-1 text-[11px] text-sumi-600">
+                  {(agent.department || "unassigned").toUpperCase()} · lvl {agent.level}
+                </p>
+                <p className="mt-2 font-mono text-[10px] text-kitsurubami">
+                  {agent.status} · {agent.xp.toFixed(1)} xp
+                </p>
+              </div>
+            ))}
+            {telemetryAgents.length === 0 && (
+              <div className="rounded-lg border border-dashed border-sumi-700/30 bg-sumi-850/40 p-5 text-center text-xs text-sumi-600 md:col-span-2 xl:col-span-4">
+                No telemetry agent identities yet. The bridge and provider routers will populate them as traffic flows.
+              </div>
+            )}
+          </div>
+        </section>
+      </div>
+    </div>
+  );
+}
+
+function QuickLink({
+  href,
+  label,
+  accent,
+  compact = false,
+}: {
+  href: string;
+  label: string;
+  accent: string;
+  compact?: boolean;
+}) {
+  return (
+    <Link
+      href={href}
+      className="inline-flex items-center gap-1.5 rounded-md border px-3 py-1.5 font-mono text-[10px] font-medium transition-colors"
+      style={{
+        color: accent,
+        borderColor: `color-mix(in srgb, ${accent} 30%, transparent)`,
+        backgroundColor: `color-mix(in srgb, ${accent} ${compact ? 8 : 10}%, transparent)`,
+      }}
+    >
+      {label}
+      <ArrowRight size={10} />
+    </Link>
+  );
+}
+
 // ===========================================================================
 // Sub-components
 // ===========================================================================
@@ -1328,11 +1886,10 @@ function Qwen35EmptyState({ onSuggestion }: { onSuggestion: (text: string) => vo
         className="font-heading text-lg font-bold"
         style={{ color: ACCENT, textShadow: glowText(ACCENT, 0.4) }}
       >
-        Qwen3 Coder
+        {PAGE_META.pageTitle}
       </h3>
       <p className="mt-1.5 max-w-sm text-center text-xs text-sumi-600">
-        In-house bug fixer with full tool access. Paste errors, describe bugs,
-        or ask for surgical code fixes. Reads, edits, tests, verifies.
+        {PAGE_META.pageDetail} Paste errors, describe bugs, or ask for surgical code fixes.
       </p>
       <div className="mt-6 grid w-full max-w-lg grid-cols-1 gap-2 sm:grid-cols-2">
         {suggestions.map((s) => (
@@ -1487,7 +2044,7 @@ function Qwen35TasksTab() {
     setIsDispatching(true);
 
     try {
-      const res = await fetch(`${BASE_URL}/api/agents/${AGENT_ID}/dispatch`, {
+      const res = await fetch(apiPath(`/api/agents/${AGENT_ID}/dispatch`), {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ title, description: taskDesc.trim() }),

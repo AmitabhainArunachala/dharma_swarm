@@ -267,7 +267,7 @@ class BridgeRegistry:
             try:
                 self._conn.rollback()
             except Exception:
-                pass
+                logger.debug("Bridge registry rollback failed", exc_info=True)
             raise
 
     # -- Lifecycle -----------------------------------------------------------

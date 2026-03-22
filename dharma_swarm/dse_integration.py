@@ -969,7 +969,7 @@ class DSEIntegrator:
             with open(self._observation_log, "a", encoding="utf-8") as f:
                 f.write(json.dumps(record, default=str) + "\n")
         except Exception:
-            pass
+            logger.debug("DSE observation log persist failed", exc_info=True)
 
     async def _persist_coordination(self, snapshot: CoordinationSnapshot) -> None:
         try:
@@ -977,7 +977,7 @@ class DSEIntegrator:
             with open(coord_path, "a", encoding="utf-8") as f:
                 f.write(snapshot.model_dump_json() + "\n")
         except Exception:
-            pass
+            logger.debug("DSE coordination log persist failed", exc_info=True)
 
     def get_coordination_summary(self) -> dict[str, Any]:
         """Return the latest sheaf snapshot in the canonical summary shape."""
@@ -1045,7 +1045,7 @@ class DSEIntegrator:
                     "drifting": drift.get("drifting", False),
                 }
             except Exception:
-                pass
+                logger.debug("DSE drift data read failed", exc_info=True)
 
         if self._last_reciprocity_summary is not None:
             summary = self._last_reciprocity_summary

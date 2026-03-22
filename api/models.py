@@ -52,6 +52,8 @@ class HealthOut(BaseModel):
 class AgentOut(BaseModel):
     id: str
     name: str
+    agent_slug: str = ""
+    display_name: str = ""
     role: str
     status: str = "idle"
     current_task: str | None = None
@@ -61,6 +63,8 @@ class AgentOut(BaseModel):
     tasks_completed: int = 0
     provider: str = ""
     model: str = ""
+    model_label: str = ""
+    model_key: str = ""
     error: str | None = None
 
 
@@ -221,6 +225,10 @@ class StigmergyMarkOut(BaseModel):
     observation: str = ""
     salience: float = 0.5
     connections: list[str] = []
+    semantic_type: str = ""
+    pillar_refs: list[str] = []
+    confidence: float = 0.0
+    impact_score: float = 0.0
 
 
 class HeatmapCell(BaseModel):

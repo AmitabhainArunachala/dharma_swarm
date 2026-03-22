@@ -36,6 +36,8 @@ Usage:
   dgc witness "msg"             Record a witness observation
   dgc develop "what" "evidence" Record a development marker
   dgc gates "action"            Run telos gates on an action
+  dgc meta                      Overseeing I — wholistic system assessment
+  dgc prune [--dry-run]         Sweep the zen garden — cut noise, keep signal
   dgc health                    Ecosystem file health
   dgc ouroboros connections|record  Inspect or canonically bind behavioral observations
   dgc health-check              Monitor-based system health (v0.2.0)
@@ -4470,6 +4472,43 @@ def cmd_foundations(pillar: str | None = None) -> None:
     print(f"\n  Usage: dgc foundations <name> (e.g. dgc foundations hofstadter)")
 
 
+def _run_prune(
+    dry_run: bool = False,
+    stig_threshold: float = 0.3,
+    bridge_threshold: float = 0.2,
+    trace_days: int = 14,
+) -> None:
+    """Sweep the zen garden."""
+    try:
+        from dharma_swarm.pruner import Pruner
+
+        pruner = Pruner(
+            state_dir=DHARMA_STATE,
+            stigmergy_threshold=stig_threshold,
+            bridge_threshold=bridge_threshold,
+            trace_max_days=trace_days,
+            dry_run=dry_run,
+        )
+        report = asyncio.run(pruner.sweep())
+        pruner.print_report(report)
+    except Exception as exc:
+        print(f"Pruner failed: {exc}")
+        raise SystemExit(1)
+
+
+def _run_meta() -> None:
+    """Run the Overseeing I wholistic assessment."""
+    try:
+        from dharma_swarm.overseeing_i import OverseeingI
+
+        oi = OverseeingI(state_dir=DHARMA_STATE)
+        assessment = asyncio.run(oi.assess())
+        oi.print_assessment(assessment)
+    except Exception as exc:
+        print(f"Overseeing I failed: {exc}")
+        raise SystemExit(1)
+
+
 def cmd_telos(doc: str | None = None) -> None:
     """Show telos engine research documents, or preview a specific document."""
     tdir = DHARMA_SWARM / "docs" / "telos-engine"
@@ -5293,6 +5332,14 @@ def _build_parser() -> argparse.ArgumentParser:
 
     p_telos = sub.add_parser("telos", help="Telos Engine research documents")
     p_telos.add_argument("doc", nargs="?", default=None, help="Document name to preview")
+
+    sub.add_parser("meta", help="Overseeing I — wholistic system assessment")
+
+    p_prune = sub.add_parser("prune", help="Sweep the zen garden — cut noise, keep signal")
+    p_prune.add_argument("--dry-run", action="store_true", help="Show what would be pruned without doing it")
+    p_prune.add_argument("--stig-threshold", type=float, default=0.3, help="Stigmergy salience threshold (default 0.3)")
+    p_prune.add_argument("--bridge-threshold", type=float, default=0.2, help="Bridge confidence threshold (default 0.2)")
+    p_prune.add_argument("--trace-days", type=int, default=14, help="Archive traces older than N days (default 14)")
 
     # -- xray (Phase 14: Repo X-Ray Product) --
     p_xray = sub.add_parser("xray", help="Run Repo X-Ray — codebase analysis for any repo")
@@ -6165,6 +6212,15 @@ def main() -> None:
             cmd_foundations(args.pillar)
         case "telos":
             cmd_telos(args.doc)
+        case "meta":
+            _run_meta()
+        case "prune":
+            _run_prune(
+                dry_run=getattr(args, "dry_run", False),
+                stig_threshold=getattr(args, "stig_threshold", 0.3),
+                bridge_threshold=getattr(args, "bridge_threshold", 0.2),
+                trace_days=getattr(args, "trace_days", 14),
+            )
         case "xray":
             cmd_xray(
                 repo_path=args.repo_path,

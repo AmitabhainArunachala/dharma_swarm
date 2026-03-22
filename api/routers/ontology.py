@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from fastapi import APIRouter
 
+from api.routers._agent_aliases import alias_candidates, matches_agent_alias
 from api.models import (
     ActionDefOut,
     ApiResponse,
@@ -36,8 +37,88 @@ _CATEGORY_LAYOUT: dict[str, tuple[int, int]] = {
 
 
 def _get_registry():
-    from dharma_swarm.ontology import OntologyRegistry
-    return OntologyRegistry.create_dharma_registry()
+    from dharma_swarm.ontology_runtime import get_shared_registry
+
+    return get_shared_registry()
+
+
+def _resolve_type_name(reg, requested_type: str | None) -> str | None:
+    if not requested_type:
+        return None
+
+    candidates = [
+        requested_type,
+        requested_type.strip(),
+        requested_type.replace("-", "_"),
+        requested_type.replace("_", " "),
+    ]
+    titleized = candidates[-1].title().replace(" ", "")
+    if titleized not in candidates:
+        candidates.append(titleized)
+
+    requested_lower = requested_type.lower()
+    for obj_type in reg.get_types():
+        if obj_type.name in candidates:
+            return obj_type.name
+        if obj_type.name.lower() == requested_lower:
+            return obj_type.name
+    return None
+
+
+def _find_identity_object(reg, lookup: str):
+    for obj in reg.get_objects_by_type("AgentIdentity"):
+        props = obj.properties
+        values = (
+            obj.id,
+            str(props.get("name") or ""),
+            str(props.get("agent_id") or ""),
+            str(props.get("agent_slug") or ""),
+            str(props.get("display_name") or ""),
+        )
+        if any(matches_agent_alias(value, lookup) for value in values if value):
+            return obj
+    return None
+
+
+def _serialize_object(reg, obj) -> dict:
+    payload = {
+        "id": obj.id,
+        "type": obj.type_name,
+        "properties": obj.properties,
+        "created_by": obj.created_by,
+        "created_at": str(obj.created_at),
+        "updated_at": str(obj.updated_at),
+        "version": obj.version,
+    }
+
+    if obj.type_name == "AgentIdentity":
+        props = obj.properties
+        type_def = reg.get_type(obj.type_name)
+        role = str(props.get("role") or "").strip()
+        roles = [role] if role else []
+        payload.update(
+            {
+                "name": str(props.get("name") or ""),
+                "display_name": str(props.get("display_name") or props.get("name") or ""),
+                "agent_slug": str(props.get("agent_slug") or ""),
+                "runtime_agent_id": str(props.get("agent_id") or ""),
+                "kaizenops_id": str(props.get("kaizenops_id") or props.get("agent_id") or obj.id),
+                "roles": roles,
+                "status": str(props.get("status") or "unknown"),
+                "telos_alignment": float(getattr(type_def, "telos_alignment", 0.0) or 0.0),
+                "witness_quality": float(getattr(type_def, "witness_quality", 0.0) or 0.0),
+                "shakti_energy": 1.0,
+                "tasks_completed": int(props.get("tasks_completed", 0) or 0),
+                "avg_quality": float(props.get("fitness_average", 0.0) or 0.0),
+                "last_active": str(
+                    props.get("last_active")
+                    or props.get("last_heartbeat")
+                    or obj.updated_at
+                ),
+            }
+        )
+
+    return payload
 
 
 @router.get("/ontology/types")
@@ -168,19 +249,34 @@ async def ontology_stats() -> ApiResponse:
 
 
 @router.get("/ontology/objects")
-async def list_objects(type_name: str | None = None) -> ApiResponse:
+async def list_objects(
+    type_name: str | None = None,
+    type: str | None = None,
+) -> ApiResponse:
     reg = _get_registry()
-    if type_name:
-        objs = reg.get_objects_by_type(type_name)
+    requested_type = type_name or type
+    resolved_type = _resolve_type_name(reg, requested_type)
+    if requested_type and resolved_type is None:
+        objs = []
+    elif resolved_type:
+        objs = reg.get_objects_by_type(resolved_type)
     else:
         objs = list(reg._objects.values())
-    return ApiResponse(data=[
-        {
-            "id": o.id,
-            "type": o.type_name,
-            "properties": o.properties,
-            "created_by": o.created_by,
-            "version": o.version,
-        }
-        for o in objs
-    ])
+    return ApiResponse(data=[_serialize_object(reg, o) for o in objs])
+
+
+@router.get("/ontology/objects/{obj_id}")
+async def get_object(obj_id: str) -> ApiResponse:
+    reg = _get_registry()
+    obj = reg.get_object(obj_id)
+    if obj is None:
+        for candidate in alias_candidates(obj_id):
+            obj = _find_identity_object(reg, candidate)
+            if obj is not None:
+                break
+    if obj is None:
+        return ApiResponse(status="error", error=f"Object not found: {obj_id}")
+
+    payload = _serialize_object(reg, obj)
+    payload["context"] = reg.object_context_for_llm(obj.id)
+    return ApiResponse(data=payload)

@@ -172,7 +172,7 @@ class OverseeingI:
                     ]
                     conn.close()
             except Exception:
-                pass
+                logger.debug("Recent tasks query failed", exc_info=True)
 
         except Exception as exc:
             logger.debug("Bridge probe failed: %s", exc)
@@ -213,7 +213,7 @@ class OverseeingI:
             from dharma_swarm.stigmergy import StigmergyStore
 
             store = StigmergyStore(
-                marks_file=self._state_dir / "stigmergy" / "marks.jsonl",
+                base_path=self._state_dir / "stigmergy",
             )
             recent = await store.read_marks(limit=10)
             a.stigmergy_density = len(recent)
@@ -228,7 +228,7 @@ class OverseeingI:
             ]
 
             hot = await store.hot_paths(window_hours=24, min_marks=2)
-            a.hotspot_files = [h.get("file_path", "") if isinstance(h, dict) else str(h) for h in hot[:5]]
+            a.hotspot_files = [h[0] if isinstance(h, tuple) else str(h) for h in hot[:5]]
 
         except Exception as exc:
             logger.debug("Stigmergy probe failed: %s", exc)
@@ -238,7 +238,7 @@ class OverseeingI:
         try:
             from dharma_swarm.traces import TraceStore
 
-            store = TraceStore(trace_dir=self._state_dir / "traces")
+            store = TraceStore(base_path=self._state_dir / "traces")
             recent = await store.get_recent(limit=20)
             a.agent_traces = len(recent)
 
@@ -258,7 +258,7 @@ class OverseeingI:
             try:
                 total_lines += sum(1 for _ in f.open())
             except Exception:
-                pass
+                logger.debug("Foundations line count failed", exc_info=True)
 
         if md_files:
             a.alive.append(f"lodestones({len(md_files)} files, {total_lines} lines)")

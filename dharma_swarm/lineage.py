@@ -157,7 +157,9 @@ class LineageGraph:
 
     def __init__(self, db_path: Path | str | None = None) -> None:
         if db_path is None:
-            db_path = Path.home() / ".dharma" / "lineage.db"
+            from dharma_swarm.ontology_runtime import ontology_path
+
+            db_path = ontology_path()
         self.db_path = Path(db_path)
         self.db_path.parent.mkdir(parents=True, exist_ok=True)
         self._init_db()

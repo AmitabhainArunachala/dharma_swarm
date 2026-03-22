@@ -8,6 +8,7 @@
 
 import { useEffect, useState, useCallback } from "react";
 import { motion } from "framer-motion";
+import { apiFetch } from "@/lib/api";
 
 interface LogEntry {
   timestamp: string;
@@ -35,8 +36,6 @@ interface LogStats {
   hours_covered: number;
 }
 
-const BASE = process.env.NEXT_PUBLIC_API_URL ?? "http://localhost:8420";
-
 function timeAgo(ts: string): string {
   const diff = Date.now() - new Date(ts).getTime();
   const mins = Math.floor(diff / 60000);
@@ -59,16 +58,14 @@ export default function ConversationLogPage() {
   const fetchData = useCallback(async () => {
     setLoading(true);
     try {
-      const unwrap = (json: Record<string, unknown>) =>
-        json && typeof json === "object" && "data" in json ? json.data : json;
       const [logRes, promRes, statRes] = await Promise.all([
-        fetch(`${BASE}/api/conversation-log/recent?hours=${hours}`).then(r => r.ok ? r.json() : {data:[]}).then(unwrap),
-        fetch(`${BASE}/api/conversation-log/promises?hours=${hours}`).then(r => r.ok ? r.json() : {data:[]}).then(unwrap),
-        fetch(`${BASE}/api/conversation-log/stats?hours=${hours}`).then(r => r.ok ? r.json() : {data:null}).then(unwrap),
+        apiFetch<LogEntry[]>(`/api/conversation-log/recent?hours=${hours}`),
+        apiFetch<PromiseEntry[]>(`/api/conversation-log/promises?hours=${hours}`),
+        apiFetch<LogStats | null>(`/api/conversation-log/stats?hours=${hours}`),
       ]);
-      setEntries((logRes as LogEntry[]) ?? []);
-      setPromises((promRes as PromiseEntry[]) ?? []);
-      setStats((statRes as LogStats) ?? null);
+      setEntries(logRes ?? []);
+      setPromises(promRes ?? []);
+      setStats(statRes ?? null);
     } catch {
       // API not available — show empty state
     }

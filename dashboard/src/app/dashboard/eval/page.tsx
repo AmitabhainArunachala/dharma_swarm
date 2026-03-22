@@ -6,6 +6,7 @@
 
 import { useEffect, useState, useCallback } from "react";
 import { motion } from "framer-motion";
+import { apiFetch } from "@/lib/api";
 
 interface EvalResult {
   name: string;
@@ -25,8 +26,6 @@ interface EvalReport {
   duration_seconds: number;
 }
 
-const BASE = process.env.NEXT_PUBLIC_API_URL ?? "http://localhost:8420";
-
 export default function EvalPage() {
   const [latest, setLatest] = useState<EvalReport | null>(null);
   const [trend, setTrend] = useState<EvalReport[]>([]);
@@ -35,14 +34,12 @@ export default function EvalPage() {
   const fetchData = useCallback(async () => {
     setLoading(true);
     try {
-      const unwrap = (json: Record<string, unknown>) =>
-        json && typeof json === "object" && "data" in json ? json.data : json;
       const [latestRes, trendRes] = await Promise.all([
-        fetch(`${BASE}/api/eval/latest`).then(r => r.ok ? r.json() : {data:null}).then(unwrap),
-        fetch(`${BASE}/api/eval/trend`).then(r => r.ok ? r.json() : {data:[]}).then(unwrap),
+        apiFetch<EvalReport | null>("/api/eval/latest"),
+        apiFetch<EvalReport[]>("/api/eval/trend"),
       ]);
-      setLatest(latestRes as EvalReport | null);
-      setTrend((trendRes as EvalReport[]) ?? []);
+      setLatest(latestRes ?? null);
+      setTrend(trendRes ?? []);
     } catch { /* API unavailable */ }
     setLoading(false);
   }, []);

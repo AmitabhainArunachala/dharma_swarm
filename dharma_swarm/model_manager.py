@@ -7,12 +7,15 @@ across Claude, OpenAI, and other providers.
 from __future__ import annotations
 
 import json
+import logging
 import os
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Literal
 
 from dharma_swarm.models import ProviderType
+
+logger = logging.getLogger(__name__)
 
 
 @dataclass
@@ -141,7 +144,7 @@ def get_current_model() -> str:
             if model := config.get("model"):
                 return model
         except Exception:
-            pass
+            logger.debug("Model config read failed", exc_info=True)
 
     # Default from environment info
     return "claude-sonnet-4-5"
@@ -194,7 +197,7 @@ def resolve_model_request(request: str) -> tuple[ModelInfo | None, str | None]:
                 cfg = json.loads(config_path.read_text(encoding="utf-8"))
                 existing_id = cfg.get("model")
             except Exception:
-                pass
+                logger.debug("Model config parse failed", exc_info=True)
         if existing_id:
             m = get_model_info(existing_id)
             if m and m.provider == ProviderType.ANTHROPIC:

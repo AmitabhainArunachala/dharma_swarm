@@ -27,6 +27,8 @@ import sys
 from datetime import datetime, timezone
 from pathlib import Path
 
+logger = logging.getLogger(__name__)
+
 # -- Paths ---------------------------------------------------------------
 
 HOME = Path.home()
@@ -407,7 +409,7 @@ async def run_skill(skill_key: str) -> dict:
                 proc.terminate()
                 await proc.wait()
         except Exception:
-            pass
+            logger.debug("Process cleanup failed", exc_info=True)
 
     except Exception as e:
         result = {

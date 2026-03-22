@@ -83,14 +83,15 @@ class TestAutonomyDecisions:
         assert decision.auto_approve is True
 
     def test_aggressive_approves_most(self):
-        auto = AdaptiveAutonomy(base_level="aggressive")
+        # quiet_hours=set() avoids time-dependent downgrade during 2-4 AM
+        auto = AdaptiveAutonomy(base_level="aggressive", quiet_hours=set())
         medium = auto.should_auto_approve("edit", RiskLevel.MEDIUM)
         high = auto.should_auto_approve("deploy", RiskLevel.HIGH, confidence=0.8)
         assert medium.auto_approve is True
         assert high.auto_approve is True
 
     def test_full_approves_everything_except_critical(self):
-        auto = AdaptiveAutonomy(base_level="full")
+        auto = AdaptiveAutonomy(base_level="full", quiet_hours=set())
         high = auto.should_auto_approve("deploy", RiskLevel.HIGH)
         critical = auto.should_auto_approve("delete all", RiskLevel.CRITICAL)
         assert high.auto_approve is True
@@ -123,7 +124,7 @@ class TestAdaptiveHistory:
         assert abs(auto.success_rate - 2 / 3) < 0.01
 
     def test_consecutive_failures_degrade(self):
-        auto = AdaptiveAutonomy(base_level="aggressive")
+        auto = AdaptiveAutonomy(base_level="aggressive", quiet_hours=set())
         assert auto.effective_level == "aggressive"
         auto.record_outcome(False)
         auto.record_outcome(False)

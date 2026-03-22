@@ -26,6 +26,8 @@ Reports:
   - Alert file on critical failures
 """
 
+from __future__ import annotations
+
 import argparse
 import asyncio
 import importlib

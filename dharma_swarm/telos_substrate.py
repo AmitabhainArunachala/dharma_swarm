@@ -4383,7 +4383,7 @@ class TelosSubstrate:
             try:
                 await registry.close()
             except Exception:
-                pass
+                logger.debug("Registry close failed", exc_info=True)
 
         logger.info("Bridge edges seeded: %d edges (from %d pairs)", created, len(bridge_pairs))
         return created

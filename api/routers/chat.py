@@ -10,22 +10,26 @@ from __future__ import annotations
 import json
 import logging
 import os
+from collections import OrderedDict, deque
 from dataclasses import dataclass, replace
 from datetime import datetime, timezone
 from pathlib import Path
+from threading import Lock
 from typing import Any
 
-from fastapi import APIRouter
+from fastapi import APIRouter, WebSocket, WebSocketDisconnect
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
 
 from api.chat_tools import TOOL_DEFINITIONS, execute_tool
+from api.ws import manager
 
 CONVERSATIONS_DIR = Path.home() / ".dharma" / "conversations"
 
 logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/api", tags=["chat"])
+ws_router = APIRouter(tags=["chat"])
 
 OPENROUTER_URL = "https://openrouter.ai/api/v1/chat/completions"
 DEFAULT_MODEL = "anthropic/claude-opus-4-6"
@@ -38,6 +42,12 @@ DEFAULT_TEMPERATURE = 0.3
 DEFAULT_PROFILE_ID = "claude_opus"
 CHAT_CONTRACT_VERSION = "2026-03-19.chat.v1"
 QWEN_MAX_TOOL_ROUNDS = 24
+CHAT_WS_PATH_TEMPLATE = "/ws/chat/session/{session_id}"
+MAX_CHAT_SESSION_EVENTS = 96
+MAX_CHAT_SESSION_COUNT = 128
+
+_chat_session_events: OrderedDict[str, deque[dict[str, Any]]] = OrderedDict()
+_chat_session_lock = Lock()
 
 
 @dataclass(frozen=True)
@@ -306,6 +316,98 @@ def _profile_status_note(settings: ChatRuntimeSettings) -> str:
     return "Requires OPENROUTER_API_KEY on the backend."
 
 
+def _new_session_id() -> str:
+    return f"dash-{datetime.now(timezone.utc).strftime('%Y%m%d-%H%M%S')}"
+
+
+def _chat_channel(session_id: str) -> str:
+    return (
+        CHAT_WS_PATH_TEMPLATE.replace("{session_id}", session_id)
+        .removeprefix("/ws/")
+        .strip("/")
+    )
+
+
+def _sse_data(payload: dict[str, Any]) -> str:
+    return f"data: {json.dumps(payload, default=str)}\n\n"
+
+
+def _event_text(value: Any) -> str:
+    if isinstance(value, str):
+        return value
+    if value is None:
+        return ""
+    try:
+        return json.dumps(value, default=str)
+    except TypeError:
+        return str(value)
+
+
+def _remember_chat_event(session_id: str, payload: dict[str, Any]) -> None:
+    if not session_id:
+        return
+    with _chat_session_lock:
+        bucket = _chat_session_events.get(session_id)
+        if bucket is None:
+            bucket = deque(maxlen=MAX_CHAT_SESSION_EVENTS)
+            _chat_session_events[session_id] = bucket
+        else:
+            _chat_session_events.move_to_end(session_id)
+        bucket.append(payload)
+        while len(_chat_session_events) > MAX_CHAT_SESSION_COUNT:
+            _chat_session_events.popitem(last=False)
+
+
+def _chat_session_event_snapshot(session_id: str) -> list[dict[str, Any]]:
+    with _chat_session_lock:
+        bucket = _chat_session_events.get(session_id)
+        if not bucket:
+            return []
+        return [dict(event) for event in bucket]
+
+
+def _chat_session_turn_snapshot(events: list[dict[str, Any]]) -> list[dict[str, str]]:
+    turns: list[dict[str, str]] = []
+    for event in events:
+        if event.get("event") == "chat_user_turn":
+            turns.append(
+                {
+                    "role": "user",
+                    "content": _event_text(event.get("content")).strip(),
+                    "timestamp": str(event.get("timestamp", "")),
+                }
+            )
+        elif event.get("event") == "chat_assistant_turn":
+            turns.append(
+                {
+                    "role": "assistant",
+                    "content": _event_text(event.get("content")).strip(),
+                    "timestamp": str(event.get("timestamp", "")),
+                }
+            )
+    return turns
+
+
+async def _publish_chat_event(
+    session_id: str,
+    event: str,
+    *,
+    profile_id: str = "",
+    **fields: Any,
+) -> dict[str, Any]:
+    payload = {
+        "event": event,
+        "session_id": session_id,
+        "timestamp": datetime.now(timezone.utc).isoformat(),
+    }
+    if profile_id:
+        payload["profile_id"] = profile_id
+    payload.update(fields)
+    _remember_chat_event(session_id, payload)
+    await manager.broadcast(_chat_channel(session_id), payload)
+    return payload
+
+
 class ChatMessage(BaseModel):
     role: str
     content: Any = None  # str or list for tool results
@@ -333,7 +435,7 @@ async def _gather_brief_context() -> str:
                 f"(running={status.tasks_running}, completed={status.tasks_completed})"
             )
         except Exception:
-            pass
+            logger.debug("Failed to gather swarm status for brief context", exc_info=True)
 
         monitor = get_monitor()
         try:
@@ -341,9 +443,9 @@ async def _gather_brief_context() -> str:
             hs = report.overall_status.value if hasattr(report.overall_status, "value") else str(report.overall_status)
             parts.append(f"Health: {hs}, traces={report.total_traces}")
         except Exception:
-            pass
+            logger.debug("Failed to gather health report for brief context", exc_info=True)
     except Exception:
-        pass
+        logger.debug("Failed to import swarm/monitor for brief context", exc_info=True)
     return " | ".join(parts) if parts else "(context unavailable)"
 
 
@@ -453,6 +555,9 @@ def _extract_assistant_content(message: dict[str, Any]) -> str:
 async def _agentic_stream(
     messages_for_api: list[dict],
     settings: ChatRuntimeSettings,
+    *,
+    session_id: str = "",
+    profile_id: str = "",
 ):
     """Run the agentic tool-use loop, streaming the final response.
 
@@ -472,7 +577,20 @@ async def _agentic_stream(
         try:
             result = await _call_openrouter(messages, settings)
         except Exception as exc:
-            yield f"data: {json.dumps({'error': str(exc)})}\n\n"
+            if session_id:
+                await _publish_chat_event(
+                    session_id,
+                    "chat_error",
+                    profile_id=profile_id,
+                    error=str(exc),
+                )
+                await _publish_chat_event(
+                    session_id,
+                    "chat_done",
+                    profile_id=profile_id,
+                    stopped="error",
+                )
+            yield _sse_data({"error": str(exc)})
             yield "data: [DONE]\n\n"
             return
 
@@ -493,7 +611,7 @@ async def _agentic_stream(
 
             # If there's text content before tools, stream it
             if msg.get("content"):
-                yield f"data: {json.dumps({'content': msg['content']})}\n\n"
+                yield _sse_data({"content": msg["content"]})
 
             # Execute each tool call
             for tc in tool_calls:
@@ -506,7 +624,15 @@ async def _agentic_stream(
                 tool_id = tc.get("id", "")
 
                 # Emit tool status to frontend
-                yield f"data: {json.dumps({'tool_call': {'name': tool_name, 'args': tool_args}})}\n\n"
+                if session_id:
+                    await _publish_chat_event(
+                        session_id,
+                        "chat_tool_call",
+                        profile_id=profile_id,
+                        tool_name=tool_name,
+                        tool_args=tool_args,
+                    )
+                yield _sse_data({"tool_call": {"name": tool_name, "args": tool_args}})
 
                 # Execute
                 tool_result = await execute_tool(tool_name, tool_args)
@@ -519,7 +645,15 @@ async def _agentic_stream(
 
                 # Emit summary to frontend
                 summary = tool_result[:150].replace("\n", " ")
-                yield f"data: {json.dumps({'tool_result': {'name': tool_name, 'summary': summary}})}\n\n"
+                if session_id:
+                    await _publish_chat_event(
+                        session_id,
+                        "chat_tool_result",
+                        profile_id=profile_id,
+                        tool_name=tool_name,
+                        summary=summary,
+                    )
+                yield _sse_data({"tool_result": {"name": tool_name, "summary": summary}})
 
                 # Add tool result to conversation
                 messages.append({
@@ -538,20 +672,56 @@ async def _agentic_stream(
             try:
                 from dharma_swarm.conversation_log import log_exchange
                 log_exchange(
-                    "assistant", final_content, interface="api",
-                    metadata={"model": settings.model},
+                    "assistant",
+                    final_content,
+                    interface="api",
+                    session_id=session_id or None,
+                    metadata={
+                        "model": settings.model,
+                        "profile_id": profile_id,
+                    },
                 )
             except Exception:
-                pass
+                logger.debug("Failed to log assistant response to conversation log", exc_info=True)
             # We already have the full text from the non-streaming call.
             # Send it in chunks to maintain SSE feel.
             chunk_size = 20
             for i in range(0, len(final_content), chunk_size):
                 chunk = final_content[i : i + chunk_size]
-                yield f"data: {json.dumps({'content': chunk})}\n\n"
+                if session_id:
+                    await _publish_chat_event(
+                        session_id,
+                        "chat_text",
+                        profile_id=profile_id,
+                        content=chunk,
+                    )
+                yield _sse_data({"content": chunk})
+            if session_id:
+                await _publish_chat_event(
+                    session_id,
+                    "chat_assistant_turn",
+                    profile_id=profile_id,
+                    content=final_content,
+                )
         else:
             model_note = settings.model
             if msg.get("reasoning"):
+                if session_id:
+                    await _publish_chat_event(
+                        session_id,
+                        "chat_error",
+                        profile_id=profile_id,
+                        error=(
+                            f"{model_note} returned reasoning without visible output. "
+                            "Retry, lower the lane complexity, or switch models."
+                        ),
+                    )
+                    await _publish_chat_event(
+                        session_id,
+                        "chat_done",
+                        profile_id=profile_id,
+                        stopped="error",
+                    )
                 yield (
                     "data: "
                     + json.dumps(
@@ -567,11 +737,33 @@ async def _agentic_stream(
                 yield "data: [DONE]\n\n"
                 return
 
+        if session_id:
+            await _publish_chat_event(
+                session_id,
+                "chat_done",
+                profile_id=profile_id,
+                stopped="complete",
+                provider="openrouter",
+            )
         yield "data: [DONE]\n\n"
         return
 
     # Safety: hit max rounds
-    yield f"data: {json.dumps({'content': '\\n\\n[Reached maximum tool rounds. Stopping.]'})}\n\n"
+    if session_id:
+        await _publish_chat_event(
+            session_id,
+            "chat_assistant_turn",
+            profile_id=profile_id,
+            content="\n\n[Reached maximum tool rounds. Stopping.]",
+        )
+        await _publish_chat_event(
+            session_id,
+            "chat_done",
+            profile_id=profile_id,
+            stopped="max_tool_rounds",
+            provider="openrouter",
+        )
+    yield _sse_data({"content": "\n\n[Reached maximum tool rounds. Stopping.]"})
     yield "data: [DONE]\n\n"
 
 
@@ -613,7 +805,7 @@ async def chat_stream(req: ChatRequest):
         )
 
     # Log incoming messages server-side for distillation
-    session_id = f"dash-{datetime.now(timezone.utc).strftime('%Y%m%d-%H%M%S')}"
+    session_id = _new_session_id()
     _log_conversation(
         [{"role": m.role, "content": m.content} for m in req.messages],
         session_id=session_id,
@@ -630,7 +822,7 @@ async def chat_stream(req: ChatRequest):
                     metadata={"profile_id": profile.profile_id},
                 )
     except Exception:
-        pass
+        logger.debug("Failed to log user messages to conversation log", exc_info=True)
 
     # Brief context for system prompt
     brief = await _gather_brief_context()
@@ -641,8 +833,41 @@ async def chat_stream(req: ChatRequest):
     for m in req.messages:
         api_messages.append({"role": m.role, "content": m.content})
 
+    latest_user_message = next(
+        (
+            _event_text(message.content).strip()
+            for message in reversed(req.messages)
+            if message.role == "user" and _event_text(message.content).strip()
+        ),
+        "",
+    )
+
+    async def stream():
+        yield _sse_data({"session_id": session_id})
+        await _publish_chat_event(
+            session_id,
+            "chat_session_ready",
+            profile_id=profile.profile_id,
+            provider="openrouter",
+            model=settings.model,
+        )
+        if latest_user_message:
+            await _publish_chat_event(
+                session_id,
+                "chat_user_turn",
+                profile_id=profile.profile_id,
+                content=latest_user_message,
+            )
+        async for chunk in _agentic_stream(
+            api_messages,
+            settings,
+            session_id=session_id,
+            profile_id=profile.profile_id,
+        ):
+            yield chunk
+
     return StreamingResponse(
-        _agentic_stream(api_messages, settings),
+        stream(),
         media_type="text/event-stream",
         headers={
             "Cache-Control": "no-cache",
@@ -683,6 +908,7 @@ async def chat_status():
         )
     return {
         "chat_contract_version": CHAT_CONTRACT_VERSION,
+        "chat_ws_path_template": CHAT_WS_PATH_TEMPLATE,
         "ready": bool(settings.openrouter_api_key),
         "model": settings.model,
         "provider": "openrouter",
@@ -697,3 +923,29 @@ async def chat_status():
         "default_profile_id": default_profile_id,
         "profiles": profiles,
     }
+
+
+@ws_router.websocket("/ws/chat/session/{session_id}")
+async def ws_chat_session(websocket: WebSocket, session_id: str):
+    channel = _chat_channel(session_id)
+    await manager.connect(websocket, channel)
+    try:
+        events = _chat_session_event_snapshot(session_id)
+        await manager.send_personal(
+            websocket,
+            {
+                "event": "chat_snapshot",
+                "session_id": session_id,
+                "timestamp": datetime.now(timezone.utc).isoformat(),
+                "turns": _chat_session_turn_snapshot(events),
+                "events": events,
+            },
+        )
+        for event in events:
+            await manager.send_personal(websocket, event)
+        while True:
+            await websocket.receive_text()
+    except WebSocketDisconnect:
+        pass
+    finally:
+        await manager.disconnect(websocket, channel)

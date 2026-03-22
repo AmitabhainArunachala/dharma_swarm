@@ -12,10 +12,14 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
 import json
+import logging
+import os
 from pathlib import Path
 from typing import Any
 
 import aiosqlite
+
+logger = logging.getLogger(__name__)
 
 from dharma_swarm.message_bus import MessageBus
 from dharma_swarm.models import Message, MessagePriority, _new_id
@@ -28,6 +32,13 @@ from dharma_swarm.runtime_state import (
     TaskClaim,
 )
 from dharma_swarm.session_ledger import SessionLedger
+from dharma_swarm.telemetry_plane import (
+    AgentIdentityRecord,
+    ExternalOutcomeRecord,
+    InterventionOutcomeRecord,
+    TelemetryPlaneStore,
+    WorkflowScoreRecord,
+)
 
 BRIDGE_STATUS_QUEUED = "queued"
 BRIDGE_STATUS_IN_PROGRESS = "in_progress"
@@ -222,6 +233,9 @@ class OperatorBridge:
         bridge_agent_id: str = "operator_bridge",
         lifecycle_topic: str = "operator.bridge.lifecycle",
         runtime_state: RuntimeStateStore | None = None,
+        telemetry: TelemetryPlaneStore | None = None,
+        telemetry_enabled: bool | None = None,
+        telemetry_db_path: Path | None = None,
     ) -> None:
         self._bus = message_bus
         self._ledger = ledger or SessionLedger(
@@ -232,6 +246,33 @@ class OperatorBridge:
         self.bridge_agent_id = bridge_agent_id
         self.lifecycle_topic = lifecycle_topic
         self._initialized = False
+        telemetry_enabled_env = os.environ.get("DGC_ROUTER_TELEMETRY_ENABLE", "").strip()
+        env_telemetry_db = os.environ.get("DGC_ROUTER_TELEMETRY_DB", "").strip()
+        telemetry_requested = telemetry_db_path is not None or bool(env_telemetry_db)
+        if telemetry is not None:
+            self._telemetry = telemetry
+            self._telemetry_enabled = (
+                bool(telemetry_enabled) if telemetry_enabled is not None else True
+            )
+        else:
+            if telemetry_enabled is None:
+                self._telemetry_enabled = (
+                    telemetry_enabled_env.lower() in {"1", "true", "yes", "on"}
+                    or telemetry_requested
+                )
+            else:
+                self._telemetry_enabled = bool(telemetry_enabled)
+            if self._telemetry_enabled:
+                configured_telemetry_path = telemetry_db_path
+                if configured_telemetry_path is None and env_telemetry_db:
+                    configured_telemetry_path = Path(env_telemetry_db)
+                self._telemetry = (
+                    TelemetryPlaneStore(configured_telemetry_path)
+                    if configured_telemetry_path is not None
+                    else TelemetryPlaneStore()
+                )
+            else:
+                self._telemetry = None
 
     async def init_db(self) -> None:
         if self._initialized:
@@ -253,6 +294,11 @@ class OperatorBridge:
                     metadata={"bridge_agent_id": self.bridge_agent_id},
                 )
             )
+        await self._upsert_telemetry_agent(
+            self.bridge_agent_id,
+            role="bridge",
+            metadata={"source": "operator_bridge"},
+        )
         self._initialized = True
 
     async def enqueue_task(
@@ -519,7 +565,7 @@ class OperatorBridge:
         await self._publish_lifecycle(
             "bridge_task_acknowledged",
             updated,
-            extra={"acknowledged_by": acknowledged_by},
+            extra={"acknowledged_by": acknowledged_by, "note": note},
         )
         return updated
 
@@ -711,7 +757,10 @@ class OperatorBridge:
             await self._publish_lifecycle(
                 "bridge_task_recovered",
                 task_record,
-                extra={"retry_count": task_record.retry_count},
+                extra={
+                    "retry_count": task_record.retry_count,
+                    "recovery_reason": task_record.recovery_reason,
+                },
             )
         return recovered
 
@@ -843,7 +892,12 @@ class OperatorBridge:
         await self._publish_lifecycle(
             "bridge_task_responded",
             updated,
-            extra={"status": status, "responded_by": responded_by},
+            extra={
+                "status": status,
+                "responded_by": responded_by,
+                "summary": summary,
+                "error": error,
+            },
         )
         return updated
 
@@ -893,7 +947,7 @@ class OperatorBridge:
         await self._publish_lifecycle(
             "bridge_response_acknowledged",
             updated,
-            extra={"acknowledged_by": acknowledged_by},
+            extra={"acknowledged_by": acknowledged_by, "note": note},
         )
         return updated
 
@@ -1495,6 +1549,146 @@ class OperatorBridge:
     def _record_progress_event(self, event: str, **payload: Any) -> None:
         self._ledger.progress_event(event, **payload)
 
+    @staticmethod
+    def _telemetry_id(prefix: str) -> str:
+        return f"{prefix}_{_new_id()}"
+
+    async def _upsert_telemetry_agent(
+        self,
+        agent_id: str,
+        *,
+        role: str = "",
+        metadata: dict[str, Any] | None = None,
+    ) -> None:
+        if self._telemetry is None:
+            return
+        cleaned = str(agent_id).strip()
+        if not cleaned:
+            return
+        try:
+            await self._telemetry.upsert_agent_identity(
+                AgentIdentityRecord(
+                    agent_id=cleaned,
+                    codename=cleaned,
+                    specialization=role,
+                    status="active",
+                    last_active=_utc_now(),
+                    metadata=dict(metadata or {}),
+                )
+            )
+        except Exception:
+            return
+
+    async def _record_bridge_lifecycle_telemetry(
+        self,
+        *,
+        event: str,
+        task: OperatorBridgeTask,
+        extra: dict[str, Any] | None = None,
+    ) -> None:
+        if self._telemetry is None:
+            return
+        merged_extra = dict(extra or {})
+        run_id = str(task.metadata.get("runtime_run_id") or "")
+
+        await self._upsert_telemetry_agent(
+            task.sender,
+            role="operator",
+            metadata={"source": "operator_bridge", "bridge_event": event},
+        )
+        if task.claimed_by:
+            await self._upsert_telemetry_agent(
+                task.claimed_by,
+                role="worker",
+                metadata={"source": "operator_bridge", "bridge_event": event},
+            )
+
+        for actor_key, role in (
+            ("sender", "operator"),
+            ("claimed_by", "worker"),
+            ("acknowledged_by", "worker"),
+            ("heartbeat_by", "worker"),
+            ("responded_by", "worker"),
+        ):
+            actor = merged_extra.get(actor_key)
+            if actor:
+                await self._upsert_telemetry_agent(
+                    str(actor),
+                    role=role,
+                    metadata={"source": "operator_bridge", "bridge_event": event},
+                )
+
+        summary = (
+            merged_extra.get("summary")
+            or (task.response.summary if task.response is not None else "")
+            or task.task
+        )
+        progress = merged_extra.get("progress")
+        value = float(progress) if isinstance(progress, (int, float)) else 1.0
+        unit = "progress_ratio" if isinstance(progress, (int, float)) else "event"
+        status = str(task.status or event)
+        metadata = {
+            "bridge_event": event,
+            "bridge_status": task.status,
+            "sender": task.sender,
+            "claimed_by": task.claimed_by or "",
+            "retry_count": task.retry_count,
+            "scope": list(task.scope),
+            "output": list(task.output),
+            "constraints": list(task.constraints),
+            "payload": dict(task.payload),
+            "task_metadata": dict(task.metadata),
+            **merged_extra,
+        }
+        try:
+            await self._telemetry.record_external_outcome(
+                ExternalOutcomeRecord(
+                    outcome_id=self._telemetry_id("bridge"),
+                    outcome_kind=event,
+                    value=value,
+                    unit=unit,
+                    confidence=1.0,
+                    status=status,
+                    subject_id=task.id,
+                    summary=str(summary or task.task),
+                    session_id=self._ledger.session_id,
+                    task_id=task.id,
+                    run_id=run_id,
+                    metadata=metadata,
+                )
+            )
+            if isinstance(progress, (int, float)):
+                await self._telemetry.record_workflow_score(
+                    WorkflowScoreRecord(
+                        score_id=self._telemetry_id("workflow"),
+                        workflow_id=task.id,
+                        score_name="bridge_progress",
+                        score_value=float(progress),
+                        session_id=self._ledger.session_id,
+                        task_id=task.id,
+                        run_id=run_id,
+                        metadata={"bridge_event": event, **merged_extra},
+                    )
+                )
+            if event == "bridge_response_acknowledged":
+                acknowledged_by = str(merged_extra.get("acknowledged_by") or "")
+                if acknowledged_by:
+                    await self._telemetry.record_intervention_outcome(
+                        InterventionOutcomeRecord(
+                            intervention_id=self._telemetry_id("intervention"),
+                            intervention_type="bridge_response_acknowledged",
+                            outcome_status="helpful",
+                            operator_id=acknowledged_by,
+                            summary=str(summary or task.task),
+                            session_id=self._ledger.session_id,
+                            task_id=task.id,
+                            run_id=run_id,
+                            metadata=metadata,
+                        )
+                    )
+        except Exception:
+            return
+
     async def _publish_lifecycle(
         self,
         event: str,
@@ -1521,7 +1715,12 @@ class OperatorBridge:
                 ),
             )
         except Exception:
-            return
+            logger.debug("Operator bridge emit failed", exc_info=True)
+        await self._record_bridge_lifecycle_telemetry(
+            event=event,
+            task=task,
+            extra=extra,
+        )
 
     @staticmethod
     def _is_stale(

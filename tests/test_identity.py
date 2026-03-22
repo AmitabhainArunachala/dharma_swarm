@@ -80,10 +80,10 @@ class TestRegimeClassification:
         witness_dir = state_dir / "witness"
         witness_dir.mkdir(parents=True)
 
-        # Create witness logs that all fail (decision = "block")
+        # Create witness JSONL logs that all fail (decision = "block")
         for i in range(10):
-            (witness_dir / f"gate_{i}.json").write_text(
-                json.dumps({"decision": "block"})
+            (witness_dir / f"gate_{i}.jsonl").write_text(
+                json.dumps({"decision": "block"}) + "\n"
             )
 
         monitor = IdentityMonitor(state_dir=state_dir)
@@ -102,8 +102,8 @@ class TestRegimeClassification:
 
         # All gates fail
         for i in range(10):
-            (witness_dir / f"gate_{i}.json").write_text(
-                json.dumps({"decision": "block"})
+            (witness_dir / f"gate_{i}.jsonl").write_text(
+                json.dumps({"decision": "block"}) + "\n"
             )
 
         # Empty shared dir (BSI will try to read but find nothing -> 0.5)
@@ -151,8 +151,8 @@ class TestThreatBoost:
 
         # All gates fail -> GPR = 0
         for i in range(5):
-            (witness_dir / f"gate_{i}.json").write_text(
-                json.dumps({"decision": "block"})
+            (witness_dir / f"gate_{i}.jsonl").write_text(
+                json.dumps({"decision": "block"}) + "\n"
             )
 
         # High RM: many archive entries
@@ -190,8 +190,8 @@ class TestCorrectionDirective:
 
         # All gates blocked -> GPR = 0 -> drifting
         for i in range(10):
-            (witness_dir / f"gate_{i}.json").write_text(
-                json.dumps({"decision": "block"})
+            (witness_dir / f"gate_{i}.jsonl").write_text(
+                json.dumps({"decision": "block"}) + "\n"
             )
 
         monitor = IdentityMonitor(state_dir=state_dir)
@@ -278,8 +278,8 @@ class TestGprEdgeCases:
         witness_dir.mkdir(parents=True)
 
         for i in range(5):
-            (witness_dir / f"gate_{i}.json").write_text(
-                json.dumps({"decision": "allow"})
+            (witness_dir / f"gate_{i}.jsonl").write_text(
+                json.dumps({"decision": "allow"}) + "\n"
             )
 
         monitor = IdentityMonitor(state_dir=state_dir)
@@ -292,10 +292,10 @@ class TestGprEdgeCases:
         witness_dir = state_dir / "witness"
         witness_dir.mkdir(parents=True)
 
-        (witness_dir / "gate_0.json").write_text(json.dumps({"decision": "allow"}))
-        (witness_dir / "gate_1.json").write_text(json.dumps({"decision": "block"}))
-        (witness_dir / "gate_2.json").write_text(json.dumps({"decision": "PASS"}))
-        (witness_dir / "gate_3.json").write_text(json.dumps({"decision": "block"}))
+        (witness_dir / "gate_0.jsonl").write_text(json.dumps({"decision": "allow"}) + "\n")
+        (witness_dir / "gate_1.jsonl").write_text(json.dumps({"decision": "block"}) + "\n")
+        (witness_dir / "gate_2.jsonl").write_text(json.dumps({"decision": "PASS"}) + "\n")
+        (witness_dir / "gate_3.jsonl").write_text(json.dumps({"decision": "block"}) + "\n")
 
         monitor = IdentityMonitor(state_dir=state_dir)
         gpr = await monitor._measure_gpr()

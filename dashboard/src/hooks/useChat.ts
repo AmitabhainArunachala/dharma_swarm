@@ -3,12 +3,13 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { create } from "zustand";
 import { persist, createJSONStorage } from "zustand/middleware";
-import { BASE_URL, fetchChatStatus } from "@/lib/api";
+import { apiPath, fetchChatStatus } from "@/lib/api";
 import {
   CHAT_CONTRACT_VERSION_STORAGE_KEY,
   DEFAULT_CHAT_PROFILE_ID,
   resolveChatProfileId,
 } from "@/lib/chatProfiles";
+import { startPendingChatSession } from "@/lib/chatSessionContract";
 import type { ChatStatusOut } from "@/lib/types";
 
 export interface ToolEvent {
@@ -236,7 +237,10 @@ interface UseChatReturn {
   stopStreaming: () => void;
 }
 
-export function useChat(profileId: string = DEFAULT_CHAT_PROFILE_ID): UseChatReturn {
+export function useChat(
+  profileId: string = DEFAULT_CHAT_PROFILE_ID,
+  options?: { allowAdvertisedFallback?: boolean },
+): UseChatReturn {
   const {
     messagesByProfile,
     sessionIdByProfile,
@@ -251,7 +255,10 @@ export function useChat(profileId: string = DEFAULT_CHAT_PROFILE_ID): UseChatRet
     clearMessages,
   } = useChatStore();
   const [status, setStatus] = useState<ChatStatusOut | null>(null);
-  const activeProfileId = resolveChatProfileId(status, profileId);
+  const allowAdvertisedFallback = options?.allowAdvertisedFallback ?? true;
+  const activeProfileId = resolveChatProfileId(status, profileId, {
+    allowAdvertisedFallback,
+  });
   const messages = messagesByProfile[activeProfileId] ?? [];
   const sessionId = sessionIdByProfile[activeProfileId] ?? "";
   const isStreaming = isStreamingByProfile[activeProfileId] ?? false;
@@ -293,7 +300,7 @@ export function useChat(profileId: string = DEFAULT_CHAT_PROFILE_ID): UseChatRet
 
       while (true) {
         try {
-          const res = await fetch(`${BASE_URL}/api/chat`, {
+          const res = await fetch(apiPath("/api/chat"), {
             method: "POST",
             headers: { "Content-Type": "application/json" },
             body,
@@ -339,7 +346,7 @@ export function useChat(profileId: string = DEFAULT_CHAT_PROFILE_ID): UseChatRet
     }) => {
       _setError(currentProfileId, null);
       _setActiveTools(currentProfileId, () => []);
-      _setSessionId(currentProfileId, `dash-local-${currentProfileId}-${Date.now()}`);
+      _setSessionId(currentProfileId, startPendingChatSession());
 
       const now = new Date().toISOString();
       const userMsg: ChatMessage = {
@@ -519,7 +526,9 @@ export function useChat(profileId: string = DEFAULT_CHAT_PROFILE_ID): UseChatRet
 
   const sendMessage = useCallback(
     async (content: string, context?: string) => {
-      const currentProfileId = resolveChatProfileId(status, profileId);
+      const currentProfileId = resolveChatProfileId(status, profileId, {
+        allowAdvertisedFallback,
+      });
       await streamAssistantReply({
         currentProfileId,
         content,
@@ -527,13 +536,15 @@ export function useChat(profileId: string = DEFAULT_CHAT_PROFILE_ID): UseChatRet
         appendUser: true,
       });
     },
-    [profileId, status, streamAssistantReply],
+    [allowAdvertisedFallback, profileId, status, streamAssistantReply],
   );
 
   const retryLastMessage = useCallback(async () => {
     if (isStreaming) return;
 
-    const currentProfileId = resolveChatProfileId(status, profileId);
+    const currentProfileId = resolveChatProfileId(status, profileId, {
+      allowAdvertisedFallback,
+    });
     const currentMessages =
       useChatStore.getState().messagesByProfile[currentProfileId] ?? [];
     const lastUserMessage = [...currentMessages]
@@ -547,7 +558,7 @@ export function useChat(profileId: string = DEFAULT_CHAT_PROFILE_ID): UseChatRet
       content: lastUserMessage.content,
       appendUser: false,
     });
-  }, [isStreaming, profileId, status, streamAssistantReply]);
+  }, [allowAdvertisedFallback, isStreaming, profileId, status, streamAssistantReply]);
 
   const canRetry = !isStreaming && messages.some((message) => message.role === "user");
 

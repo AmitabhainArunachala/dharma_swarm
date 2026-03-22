@@ -15,6 +15,9 @@ Systems run concurrently:
     3. Evolution loop — periodic Darwin Engine cycles
     4. Living layers — stigmergy decay, shakti perception, subconscious dreams
     5. Health monitor — anomaly detection, auto-healing
+    6. Zeitgeist (S4) — environmental scanning, gate pressure feedback
+    7. Witness (S3*) — sporadic random audit of agent behavior
+    8. Training flywheel — trajectory scoring, strategy reinforcement, dataset building
 """
 
 from __future__ import annotations
@@ -73,6 +76,11 @@ async def run_swarm_loop(
     swarm = SwarmManager(state_dir=str(STATE_DIR), daemon_config=cfg)
     await swarm.init()
 
+    # MessageBus for instinct signal consumption
+    from dharma_swarm.message_bus import MessageBus as _MBus
+    _instinct_bus = _MBus(STATE_DIR / "db" / "messages.db")
+    await _instinct_bus.init_db()
+
     agents = await swarm.list_agents()
     _log("swarm", f"Ready: {len(agents)} agents, thread={swarm.current_thread}")
 
@@ -84,6 +92,23 @@ async def run_swarm_loop(
                     anomaly_signals = signal_bus.drain(["ANOMALY_DETECTED"])
                     if anomaly_signals:
                         _log("swarm", f"Signal bus: {len(anomaly_signals)} anomaly signal(s)")
+
+                # Drain instinct signals — negative patterns inform task quality
+                try:
+                    instinct_events = await _instinct_bus.consume_events(
+                        "ECC_INSTINCT_SIGNAL", limit=10,
+                    )
+                    negatives = [
+                        e for e in instinct_events
+                        if e.get("payload", {}).get("signal") == "negative"
+                    ]
+                    if negatives:
+                        _log("swarm", f"Instinct: {len(negatives)} negative pattern(s) detected")
+                        for neg in negatives[:3]:
+                            p = neg.get("payload", {})
+                            _log("swarm", f"  ↳ {p.get('pattern_type', '?')}: {p.get('detail', '')[:60]}")
+                except Exception:
+                    logger.debug("Swarm: instinct drain failed", exc_info=True)
 
                 activity = await swarm.tick()
 
@@ -177,6 +202,12 @@ async def run_evolution_loop(shutdown_event: asyncio.Event) -> None:
     _bus = _MBus(db_dir / "messages.db")
     await _bus.init_db()
 
+    # Subscribe to orchestrator.lifecycle — track task throughput for fitness context
+    try:
+        await _bus.subscribe("evolution_loop", "orchestrator.lifecycle")
+    except Exception:
+        logger.debug("Evolution: lifecycle subscription failed", exc_info=True)
+
     while not shutdown_event.is_set():
         try:
             count = len(engine.archive._entries) if engine.archive else 0
@@ -190,14 +221,29 @@ async def run_evolution_loop(shutdown_event: asyncio.Event) -> None:
             except Exception as exc:
                 _log("evolution", f"Bus consume error: {exc}")
 
+            # Drain lifecycle events — task completion throughput for fitness context
+            try:
+                lifecycle_msgs = await _bus.receive("evolution_loop", limit=20)
+                completions = sum(
+                    1 for m in lifecycle_msgs
+                    if m.metadata.get("event") == "task_completed"
+                )
+                if completions:
+                    _log("evolution", f"Lifecycle: {completions} task completion(s) since last cycle")
+                # Mark consumed so they don't pile up
+                for m in lifecycle_msgs:
+                    await _bus.mark_read(m.id)
+            except Exception:
+                logger.debug("Evolution: lifecycle drain failed", exc_info=True)
+
             # Check fitness trend
             try:
-                trend = engine.fitness_trend(window=5)
+                trend = await engine.get_fitness_trend(limit=5)
                 if trend:
-                    avg = sum(t.get("fitness", 0) for t in trend) / len(trend)
+                    avg = sum(f for _, f in trend) / len(trend)
                     _log("evolution", f"Fitness trend (last {len(trend)}): avg={avg:.3f}")
             except Exception:
-                pass  # fitness_trend may not exist
+                logger.debug("Fitness trend read failed", exc_info=True)
 
             # Bus metrics for observability
             try:
@@ -205,7 +251,7 @@ async def run_evolution_loop(shutdown_event: asyncio.Event) -> None:
                 if stats.get("queued", 0) > 0:
                     _log("evolution", f"Bus: {stats['queued']} queued, {stats['consumed']} consumed")
             except Exception:
-                pass
+                logger.debug("Bus event stats failed", exc_info=True)
 
         except Exception as e:
             _log("evolution", f"Error: {e}")
@@ -218,15 +264,31 @@ async def run_health_loop(shutdown_event: asyncio.Event) -> None:
     _log("health", f"Starting (interval={HEALTH_INTERVAL}s)")
     await asyncio.sleep(15)  # Let swarm init first
 
+    # Hoist heavy objects out of the loop
+    from dharma_swarm.monitor import SystemMonitor
+    from dharma_swarm.traces import TraceStore
+
+    traces_dir = STATE_DIR / "traces"
+    store = TraceStore(base_path=traces_dir)
+    await store.init()
+    monitor = SystemMonitor(trace_store=store)
+
+    # Import signal bus for WITNESS_AUDIT drain
+    from dharma_swarm.signal_bus import SignalBus
+    signal_bus = SignalBus.get()
+
     while not shutdown_event.is_set():
         try:
-            from dharma_swarm.monitor import SystemMonitor
-            from dharma_swarm.traces import TraceStore
-
-            traces_dir = STATE_DIR / "traces"
-            store = TraceStore(base_path=traces_dir)
-            await store.init()
-            monitor = SystemMonitor(trace_store=store)
+            # Drain WITNESS_AUDIT signals — close the S3* feedback loop
+            witness_signals = signal_bus.drain(["WITNESS_AUDIT"])
+            for ws in witness_signals:
+                criticals = ws.get("severities", {}).get("critical", 0)
+                warnings = ws.get("severities", {}).get("warning", 0)
+                total = ws.get("total_findings", 0)
+                if criticals:
+                    _log("health", f"WITNESS: {criticals} critical finding(s) in audit cycle {ws.get('cycle', '?')}")
+                elif warnings:
+                    _log("health", f"WITNESS: {warnings} warning(s), {total} total in cycle {ws.get('cycle', '?')}")
 
             anomalies = await monitor.detect_anomalies()
             if anomalies:
@@ -260,13 +322,17 @@ async def run_living_layers(shutdown_event: asyncio.Event) -> None:
     _log("living", f"Starting (interval={LIVING_INTERVAL}s)")
     await asyncio.sleep(45)  # Let other systems init first
 
+    # Hoist heavy objects out of the loop
+    from dharma_swarm.stigmergy import StigmergyStore
+    from dharma_swarm.subconscious import SubconsciousStream
+    from dharma_swarm.shakti import ShaktiLoop
+
+    store = StigmergyStore()
+    stream = SubconsciousStream(stigmergy=store)
+    loop = ShaktiLoop(stigmergy=store)
+
     while not shutdown_event.is_set():
         try:
-            from dharma_swarm.stigmergy import StigmergyStore
-            from dharma_swarm.subconscious import SubconsciousStream
-            from dharma_swarm.shakti import ShaktiLoop
-
-            store = StigmergyStore()
             density = store.density()
             summary = [f"density={density}"]
 
@@ -277,13 +343,11 @@ async def run_living_layers(shutdown_event: asyncio.Event) -> None:
                     summary.append(f"decayed={decayed}")
 
             # Subconscious dreams (trigger on density threshold)
-            stream = SubconsciousStream(stigmergy=store)
             if await stream.should_wake():
                 associations = await stream.dream()
                 summary.append(f"dreams={len(associations)}")
 
             # Shakti perception
-            loop = ShaktiLoop(stigmergy=store)
             perceptions = await loop.perceive(
                 current_context="orchestrator living-layer tick",
                 agent_role="orchestrator",
@@ -326,6 +390,14 @@ def _stop_old_daemon() -> None:
     pid_file.unlink(missing_ok=True)
 
 
+CONSOLIDATION_INTERVAL = _ll.consolidation_interval_seconds
+
+WITNESS_INTERVAL = 3600  # 60 minutes between S3* sporadic audits
+
+ZEITGEIST_INTERVAL = 300  # 5 minutes between S4 environmental scans
+
+REPLICATION_INTERVAL = _ll.replication_check_interval_seconds
+
 RECOGNITION_INTERVAL = 7200  # 2 hours between recognition synthesis
 
 
@@ -335,10 +407,11 @@ async def _run_recognition_loop(shutdown_event: asyncio.Event) -> None:
     Every 2 hours, synthesizes signals from all subsystems into a recognition
     seed that feeds back into agent context via L9 META layer.
     """
+    from dharma_swarm.meta_daemon import RecognitionEngine
+    engine = RecognitionEngine()
+
     while not shutdown_event.is_set():
         try:
-            from dharma_swarm.meta_daemon import RecognitionEngine
-            engine = RecognitionEngine()
             seed = await engine.synthesize("light")
             _log("recognition", f"Seed updated ({len(seed)} chars)")
         except Exception as e:
@@ -348,6 +421,239 @@ async def _run_recognition_loop(shutdown_event: asyncio.Event) -> None:
         try:
             await asyncio.wait_for(
                 shutdown_event.wait(), timeout=RECOGNITION_INTERVAL
+            )
+            break
+        except asyncio.TimeoutError:
+            pass
+
+
+async def _run_witness_loop(shutdown_event: asyncio.Event) -> None:
+    """S3* Sporadic Audit — random direct audit of agent behavior.
+
+    Implements Beer's S3* function: the Witness samples recent traces,
+    evaluates telos alignment, detects mimicry, and publishes findings
+    to stigmergy governance channel + signal bus. Closes VSM Gap #2.
+    """
+    # Let other systems produce traces first
+    await asyncio.sleep(120)
+    _log("witness", f"S3* Witness auditor starting (cycle={WITNESS_INTERVAL}s)")
+
+    from dharma_swarm.witness import WitnessAuditor
+
+    auditor = WitnessAuditor(cycle_seconds=WITNESS_INTERVAL)
+
+    while not shutdown_event.is_set():
+        try:
+            findings = await auditor.run_cycle()
+            actionable = [f for f in findings if f.is_actionable]
+            stats = auditor.get_stats()
+            _log(
+                "witness",
+                f"S3* audit cycle {stats['cycles_completed']}: "
+                f"{len(findings)} findings, {len(actionable)} actionable",
+            )
+            if actionable:
+                for f in actionable[:3]:
+                    _log("witness", f"  [{f.severity}] {f.agent}/{f.action}: {f.observation[:100]}")
+        except Exception as e:
+            _log("witness", f"S3* audit failed: {e}")
+
+        try:
+            await asyncio.wait_for(
+                shutdown_event.wait(), timeout=WITNESS_INTERVAL
+            )
+            break
+        except asyncio.TimeoutError:
+            pass
+
+    auditor.stop()
+    _log("witness", "S3* Witness auditor stopped")
+
+
+async def _run_consolidation_loop(shutdown_event: asyncio.Event) -> None:
+    """Consolidation Cycle — system-wide sleep/backpropagation.
+
+    Two consolidator agents (Alpha/Beta) read ALL agents' state, have a
+    structured contrarian debate, and modify behavioral DNA based on
+    observed "loss". Mirrors sleep consolidation in the brain.
+    """
+    # Wait 2 hours after boot to let other systems produce traces
+    await asyncio.sleep(7200)
+    _log("consolidation", f"Sleep cycle starting (interval={CONSOLIDATION_INTERVAL}s)")
+
+    from dharma_swarm.consolidation import ConsolidationCycle
+
+    cycle = ConsolidationCycle(state_dir=STATE_DIR)
+
+    while not shutdown_event.is_set():
+        try:
+            outcome = await cycle.run()
+            _log(
+                "consolidation",
+                f"Cycle {outcome.cycle_number}: loss={outcome.system_loss_score:.3f} "
+                f"corrections={outcome.corrections_applied}/{outcome.corrections_proposed} "
+                f"({outcome.duration_seconds:.1f}s)",
+            )
+        except Exception as e:
+            _log("consolidation", f"Cycle failed: {e}")
+
+        try:
+            await asyncio.wait_for(
+                shutdown_event.wait(), timeout=CONSOLIDATION_INTERVAL
+            )
+            break
+        except asyncio.TimeoutError:
+            pass
+
+    _log("consolidation", "Sleep cycle stopped")
+
+
+async def _run_replication_monitor_loop(shutdown_event: asyncio.Event) -> None:
+    """Loop 9: Replication monitor -- process proposals, manage child lifecycles.
+
+    Waits for consolidation to run first (initial delay = consolidation interval
+    + 1 hour), then periodically drains pending proposals from
+    ``~/.dharma/replication/proposals.jsonl`` and runs each through the
+    checkpoint-gated ReplicationProtocol pipeline.
+
+    Successful materialization creates a PersistentAgent whose ``run_loop``
+    is spawned as a new asyncio task. Probation and apoptosis checks run
+    on every tick for all tracked agents.
+    """
+    # Let consolidation produce proposals before we start consuming them
+    initial_delay = CONSOLIDATION_INTERVAL + 3600
+    _log("replication", f"Waiting {initial_delay}s for consolidation to run first...")
+    try:
+        await asyncio.wait_for(shutdown_event.wait(), timeout=initial_delay)
+        _log("replication", "Shutdown during initial delay, exiting")
+        return
+    except asyncio.TimeoutError:
+        pass
+
+    _log("replication", f"Replication monitor starting (interval={REPLICATION_INTERVAL}s)")
+
+    # Lazy imports to avoid circular deps and startup cost
+    from dharma_swarm.replication_protocol import ReplicationProtocol
+
+    protocol = ReplicationProtocol(state_dir=STATE_DIR)
+
+    # Track spawned child tasks so we can cancel on shutdown
+    child_tasks: list[asyncio.Task[None]] = []
+
+    while not shutdown_event.is_set():
+        try:
+            pending = protocol.get_pending_proposals()
+            if pending:
+                _log("replication", f"Processing {len(pending)} pending proposal(s)")
+
+            for proposal_data in pending:
+                try:
+                    outcome = await protocol.run(proposal_data.model_dump())
+                    status = "SUCCESS" if outcome.success else "FAILED"
+                    _log(
+                        "replication",
+                        f"Proposal '{proposal_data.proposed_role}': {status} "
+                        f"({outcome.duration_seconds:.1f}s)"
+                        + (f" -- {outcome.error}" if outcome.error else ""),
+                    )
+
+                    # On success, spawn PersistentAgent for the child
+                    if outcome.success and outcome.child_agent_name and outcome.child_spec:
+                        try:
+                            from dharma_swarm.persistent_agent import PersistentAgent
+                            from dharma_swarm.models import AgentRole, ProviderType as PT
+
+                            child = PersistentAgent(
+                                name=outcome.child_agent_name,
+                                role=outcome.child_spec.get("role", "worker"),
+                                provider_type=outcome.child_spec.get(
+                                    "default_provider", "openrouter_free"
+                                ),
+                                model=outcome.child_spec.get("default_model", ""),
+                                state_dir=STATE_DIR,
+                                wake_interval_seconds=float(
+                                    outcome.child_spec.get("wake_interval", 3600)
+                                ),
+                                system_prompt=outcome.child_spec.get("system_prompt", ""),
+                            )
+                            task = asyncio.create_task(
+                                child.run_loop(shutdown_event),
+                                name=f"child-{outcome.child_agent_name}",
+                            )
+                            child_tasks.append(task)
+                            _log(
+                                "replication",
+                                f"Spawned child agent '{outcome.child_agent_name}' as asyncio task",
+                            )
+                        except Exception as spawn_exc:
+                            _log(
+                                "replication",
+                                f"Failed to spawn child '{outcome.child_agent_name}': {spawn_exc}",
+                            )
+                except Exception as run_exc:
+                    _log(
+                        "replication",
+                        f"Pipeline error for '{proposal_data.proposed_role}': {run_exc}",
+                    )
+
+            # Probation + apoptosis checks
+            try:
+                from dharma_swarm.population_control import PopulationController
+                pop_ctrl = PopulationController(state_dir=STATE_DIR)
+                probation_map = pop_ctrl.get_all_probation()
+                for name, status in probation_map.items():
+                    if not status.is_complete:
+                        _log("replication", f"Probation active: '{name}' ({status.cycles_remaining} cycles left)")
+            except Exception as pc_exc:
+                _log("replication", f"Population check error: {pc_exc}")
+
+        except Exception as e:
+            _log("replication", f"Monitor error: {e}")
+
+        # Clean up completed child tasks
+        child_tasks = [t for t in child_tasks if not t.done()]
+
+        try:
+            await asyncio.wait_for(
+                shutdown_event.wait(), timeout=REPLICATION_INTERVAL
+            )
+            break
+        except asyncio.TimeoutError:
+            pass
+
+    # Cancel child tasks on shutdown
+    for t in child_tasks:
+        t.cancel()
+    if child_tasks:
+        await asyncio.gather(*child_tasks, return_exceptions=True)
+
+    _log("replication", "Replication monitor stopped")
+
+
+async def _run_zeitgeist_loop(shutdown_event: asyncio.Event) -> None:
+    """S4 Environmental Intelligence — periodic zeitgeist scanning.
+
+    Scans witness logs, shared notes, and external signals. When high gate
+    block rates are detected, writes gate_pressure.json to tighten S3 trust
+    mode. This closes VSM Gap #1: S3<->S4 bidirectional feedback.
+    """
+    # Initial delay to let other systems boot first
+    await asyncio.sleep(30)
+
+    from dharma_swarm.zeitgeist import ZeitgeistScanner
+    scanner = ZeitgeistScanner(state_dir=STATE_DIR)
+
+    while not shutdown_event.is_set():
+        try:
+            signals = await scanner.scan()
+            threats = [s for s in signals if s.category == "threat"]
+            _log("zeitgeist", f"S4 scan: {len(signals)} signals, {len(threats)} threats")
+        except Exception as e:
+            _log("zeitgeist", f"S4 scan failed: {e}")
+
+        try:
+            await asyncio.wait_for(
+                shutdown_event.wait(), timeout=ZEITGEIST_INTERVAL
             )
             break
         except asyncio.TimeoutError:
@@ -437,6 +743,7 @@ async def orchestrate(background: bool = False) -> None:
     # Strange Loop Phase 0: unified swarm tick handles evolution + living layers + health
     # Only genuinely independent loops remain as separate tasks
     from dharma_swarm.context_agent import run_context_agent_loop
+    from dharma_swarm.training_flywheel import run_training_flywheel_loop
 
     tasks = [
         asyncio.create_task(run_swarm_loop(shutdown_event, signal_bus=bus), name="swarm"),
@@ -448,9 +755,24 @@ async def orchestrate(background: bool = False) -> None:
         asyncio.create_task(
             run_context_agent_loop(shutdown_event, signal_bus=bus), name="context-agent"
         ),
+        asyncio.create_task(
+            _run_zeitgeist_loop(shutdown_event), name="zeitgeist"
+        ),
+        asyncio.create_task(
+            _run_witness_loop(shutdown_event), name="witness"
+        ),
+        asyncio.create_task(
+            _run_consolidation_loop(shutdown_event), name="consolidation"
+        ),
+        asyncio.create_task(
+            _run_replication_monitor_loop(shutdown_event), name="replication"
+        ),
+        asyncio.create_task(
+            run_training_flywheel_loop(shutdown_event), name="flywheel"
+        ),
     ]
 
-    _log("orchestrator", f"All {len(tasks)} systems launched (incl. conductors + context-agent)")
+    _log("orchestrator", f"All {len(tasks)} systems launched (10 loops incl. training flywheel)")
 
     try:
         # Wait for shutdown or first failure

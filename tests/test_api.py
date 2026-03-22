@@ -12,6 +12,7 @@ from fastapi.testclient import TestClient
 from dharma_swarm.api import ApiResponse, create_app
 from dharma_swarm.lineage import LineageGraph
 from dharma_swarm.ontology import OntologyRegistry
+from dharma_swarm.ontology_runtime import reset_shared_registry
 from dharma_swarm.workflow import _REGISTRY, workflow
 
 
@@ -39,6 +40,14 @@ def clean_workflow_registry():
     _REGISTRY.clear()
     yield
     _REGISTRY.clear()
+
+
+@pytest.fixture()
+def isolated_shared_ontology(tmp_path, monkeypatch):
+    monkeypatch.setenv("DHARMA_ONTOLOGY_PATH", str(tmp_path / "ontology.json"))
+    reset_shared_registry()
+    yield tmp_path / "ontology.json"
+    reset_shared_registry()
 
 
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
@@ -222,6 +231,29 @@ class TestOntologyObjects:
         assert "properties" in obj
         assert "created_by" in obj
         assert "version" in obj
+
+    def test_default_registry_persists_across_app_instances(
+        self,
+        isolated_shared_ontology,
+    ):
+        app = create_app()
+        client = TestClient(app)
+
+        create_resp = client.post("/api/ontology/objects", json={
+            "type_name": "Experiment",
+            "properties": {"name": "persisted_exp", "status": "designed"},
+            "created_by": "tester",
+        })
+        assert create_resp.status_code == 200
+        assert isolated_shared_ontology.exists()
+
+        reset_shared_registry()
+
+        reloaded = TestClient(create_app())
+        resp = reloaded.get("/api/ontology/objects")
+        data = resp.json()["data"]
+        assert len(data) == 1
+        assert data[0]["properties"]["name"] == "persisted_exp"
 
 
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━

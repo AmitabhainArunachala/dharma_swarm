@@ -1,0 +1,47 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>com.dharma.dashboard-web</string>
+
+    <key>ProgramArguments</key>
+    <array>
+        <string>/bin/bash</string>
+        <string>__REPO_ROOT__/scripts/run_dashboard_ui.sh</string>
+    </array>
+
+    <key>RunAtLoad</key>
+    <true/>
+
+    <key>KeepAlive</key>
+    <dict>
+        <key>SuccessfulExit</key>
+        <false/>
+    </dict>
+
+    <key>ThrottleInterval</key>
+    <integer>10</integer>
+
+    <key>StandardOutPath</key>
+    <string>__HOME__/.dharma/logs/dashboard-web.stdout.log</string>
+
+    <key>StandardErrorPath</key>
+    <string>__HOME__/.dharma/logs/dashboard-web.stderr.log</string>
+
+    <key>WorkingDirectory</key>
+    <string>__REPO_ROOT__/dashboard</string>
+
+    <key>EnvironmentVariables</key>
+    <dict>
+        <key>PATH</key>
+        <string>/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin</string>
+        <key>HOME</key>
+        <string>__HOME__</string>
+        <key>DASHBOARD_HOST</key>
+        <string>127.0.0.1</string>
+        <key>DASHBOARD_PORT</key>
+        <string>3420</string>
+    </dict>
+</dict>
+</plist>

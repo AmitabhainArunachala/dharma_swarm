@@ -283,9 +283,18 @@ class Orchestrator:
                     if inspect.isawaitable(result):
                         await result
             except Exception:
-                pass  # Tick event emission is non-fatal
+                logger.debug("Tick event emission failed", exc_info=True)
 
         return summary
+
+    async def tick_settle_only(self) -> dict[str, int]:
+        """Settle completed tasks without dispatching new ones.
+
+        Used when the Gnani says HOLD — let in-flight work finish,
+        but don't create more.
+        """
+        settled, recovered = await self._collect_completed()
+        return {"settled": settled, "recovered": recovered, "dispatched": 0}
 
     async def run(self, interval: float = 1.0) -> None:
         """Continuous loop calling tick() until stop() is called."""
@@ -1439,6 +1448,39 @@ class Orchestrator:
                 "max_retries": max_retries,
             },
         )
+        # ── Algedonic signal: task exhausted all retries → pain to S5 ──
+        try:
+            from dharma_swarm.signal_bus import SignalBus
+            task_title = task.title[:100] if task else td.task_id
+            SignalBus.get().emit({
+                "type": "ALGEDONIC_TASK_DEAD",
+                "severity": "warning",
+                "task_id": td.task_id,
+                "task_title": task_title,
+                "agent_id": td.agent_id,
+                "failure_class": failure_class,
+                "retry_count": retry_count,
+                "max_retries": max_retries,
+                "error": error[:300],
+                "timestamp": datetime.now(timezone.utc).isoformat(),
+            })
+            # Also persist to algedonic log (S5 bypass)
+            _alg_path = Path.home() / ".dharma" / "algedonic_signals.jsonl"
+            _alg_path.parent.mkdir(parents=True, exist_ok=True)
+            with _alg_path.open("a", encoding="utf-8") as _af:
+                _af.write(json.dumps({
+                    "kind": "task_retries_exhausted",
+                    "severity": "warning",
+                    "value": retry_count,
+                    "action": f"dead-letter: {task_title}",
+                    "timestamp": time.time(),
+                }) + "\n")
+            logger.warning(
+                "ALGEDONIC: task %s exhausted %d retries — dead-lettered",
+                td.task_id, max_retries,
+            )
+        except Exception:
+            logger.debug("Algedonic signal emission failed", exc_info=True)
 
     async def _assign_dispatch(self, td: TaskDispatch) -> None:
         """Record dispatch, update board + pool, kick off execution, notify via bus."""
@@ -1456,7 +1498,7 @@ class Orchestrator:
                 )
                 td.metadata["telic_proposal_id"] = proposal_id or ""
             except Exception:
-                pass  # Seam recording is never fatal
+                logger.debug("Telic seam dispatch recording failed", exc_info=True)
 
         action_ref = (
             f"dispatch task {task_for_gate.title} -> {td.agent_id}"
@@ -1486,7 +1528,7 @@ class Orchestrator:
                     witness_reroutes=gate.attempts,
                 )
             except Exception:
-                pass  # Seam recording is never fatal
+                logger.debug("Telic seam gate decision recording failed", exc_info=True)
 
         if gate.result.decision.value == "block":
             await self._safe_update_task(

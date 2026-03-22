@@ -14,6 +14,7 @@ Uses existing rv.py, bridge.py, metrics.py infrastructure.
 
 from __future__ import annotations
 
+import importlib.util
 import logging
 import math
 import random
@@ -439,11 +440,15 @@ def load_prompt_bank(
         logger.warning("Prompt bank not found at %s", path)
         return []
 
-    # Execute the prompt bank file to get prompt_bank_1c dict
-    namespace: dict = {}
-    exec(path.read_text(), namespace)  # noqa: S102
+    # Load the prompt bank as a module (avoids raw exec)
+    spec = importlib.util.spec_from_file_location("_prompt_bank", str(path))
+    if spec is None or spec.loader is None:
+        logger.warning("Cannot create module spec for %s", path)
+        return []
+    mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)
 
-    bank = namespace.get("prompt_bank_1c", {})
+    bank = getattr(mod, "prompt_bank_1c", {})
     if not bank:
         logger.warning("No prompt_bank_1c found in %s", path)
         return []

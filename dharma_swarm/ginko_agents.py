@@ -1,6 +1,6 @@
 """Ginko Agent Fleet — persistent AI agents for Dharmic Quant analysis.
 
-6 frontier AI agents analyze markets via OpenRouter:
+6 frontier AI agents analyze markets via the preferred runtime stack:
   - KIMI: macro oracle (moonshotai/kimi-k2.5)
   - DEEPSEEK: quant architect (deepseek/deepseek-chat-v3-0324)
   - NEMOTRON: intelligence synthesizer (nvidia/llama-3.1-nemotron-70b-instruct:free)
@@ -28,14 +28,16 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
-import httpx
+from dharma_swarm.models import LLMRequest, ProviderType
+from dharma_swarm.runtime_provider import (
+    create_runtime_provider,
+    preferred_runtime_provider_configs,
+)
 
 logger = logging.getLogger(__name__)
 
 GINKO_DIR = Path(os.getenv("DHARMA_HOME", Path.home() / ".dharma")) / "ginko"
 AGENTS_DIR = GINKO_DIR / "agents"
-
-OPENROUTER_URL = "https://openrouter.ai/api/v1/chat/completions"
 
 # Maximum task entries kept in the in-memory history (full log on disk is unlimited)
 _MAX_MEMORY_HISTORY = 50
@@ -60,7 +62,7 @@ class GinkoAgent:
     Attributes:
         name: Lowercase identifier (e.g. "kimi", "sentinel").
         role: Functional role in the fleet (e.g. "macro_oracle").
-        model: OpenRouter model identifier.
+        model: Runtime-model identifier.
         system_prompt: System-level instruction for the LLM.
         status: Current lifecycle state ("idle", "busy", "error", "retired").
         fitness: Composite performance score in [0.0, 1.0].
@@ -255,6 +257,31 @@ FLEET_SPEC: list[dict[str, str]] = [
         ),
     },
 ]
+
+
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+# DOMAIN CREW CLASSIFICATION
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+# Ginko fleet is a domain crew under the Strategist (constitutional agent).
+# Health rolls up to Strategist; not in organism-level health check.
+DOMAIN_CREW = "ginko"
+PARENT_AGENT = "strategist"
+
+
+def get_parent_agent() -> str:
+    """Return the constitutional agent that owns this domain crew."""
+    return PARENT_AGENT
+
+
+def is_domain_crew() -> bool:
+    """True: Ginko fleet is a domain crew, not an organism-level roster."""
+    return True
+
+
+def get_fleet_agent_names() -> list[str]:
+    """Return names of all agents in the Ginko fleet."""
+    return [spec["name"] for spec in FLEET_SPEC]
 
 
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
@@ -501,10 +528,11 @@ async def _call_openrouter(
     max_tokens: int = 2048,
     timeout_s: float = 120.0,
 ) -> dict[str, Any]:
-    """Call OpenRouter chat completions API with automatic fallback.
+    """Call the preferred runtime provider stack with OpenRouter fallback models.
 
-    On 429 (rate limit) or 400 (invalid model), retries with fallback
-    models from _MODEL_FALLBACKS before giving up.
+    Prefers Ollama and NVIDIA NIM before any OpenRouter lane. When an
+    OpenRouter lane is reached, retries with model fallbacks from
+    _MODEL_FALLBACKS before giving up.
 
     Args:
         model: OpenRouter model identifier (e.g. "moonshotai/kimi-k2.5").
@@ -520,140 +548,82 @@ async def _call_openrouter(
         No exceptions — errors are returned in the content field with
         tokens=0 for graceful downstream handling.
     """
-    api_key = os.getenv("OPENROUTER_API_KEY", "")
-    if not api_key:
+    configs = preferred_runtime_provider_configs(
+        model_overrides={
+            ProviderType.OPENROUTER_FREE: model,
+            ProviderType.OPENROUTER: model,
+        }
+    )
+    if not configs:
         return {
-            "content": "ERROR: OPENROUTER_API_KEY not set",
+            "content": "ERROR: No preferred providers available",
             "tokens": 0,
             "latency_ms": 0.0,
             "model": model,
             "error": True,
         }
 
-    headers = {
-        "Authorization": f"Bearer {api_key}",
-        "Content-Type": "application/json",
-        "HTTP-Referer": "https://github.com/shakti-saraswati/dharma_swarm",
-        "X-Title": "Dharmic Quant Ginko Fleet",
-    }
-
-    payload = {
-        "model": model,
-        "messages": messages,
-        "temperature": temperature,
-        "max_tokens": max_tokens,
-    }
-
     t0 = time.monotonic()
-    try:
-        async with httpx.AsyncClient() as client:
-            resp = await client.post(
-                OPENROUTER_URL,
-                json=payload,
-                headers=headers,
-                timeout=timeout_s,
-            )
+    last_exc: Exception | None = None
+    for config in configs:
+        provider = create_runtime_provider(config)
+        try:
+            candidate_models = [config.default_model or model]
+            if config.provider in (ProviderType.OPENROUTER_FREE, ProviderType.OPENROUTER):
+                candidate_models.extend(
+                    fallback for fallback in _MODEL_FALLBACKS.get(model, [])
+                    if fallback not in candidate_models
+                )
 
-        latency_ms = (time.monotonic() - t0) * 1000.0
-
-        if resp.status_code in (429, 400):
-            # Try fallback models
-            fallbacks = _MODEL_FALLBACKS.get(model, [])
-            for fb_model in fallbacks:
-                logger.info("Falling back from %s to %s", model, fb_model)
-                payload["model"] = fb_model
+            for candidate_model in candidate_models:
                 try:
-                    async with httpx.AsyncClient() as fb_client:
-                        fb_resp = await fb_client.post(
-                            OPENROUTER_URL, json=payload,
-                            headers=headers, timeout=timeout_s,
+                    response = await provider.complete(
+                        LLMRequest(
+                            model=candidate_model,
+                            messages=messages,
+                            max_tokens=max_tokens,
+                            temperature=temperature,
                         )
-                    if fb_resp.status_code == 200:
-                        fb_data = fb_resp.json()
-                        fb_choices = fb_data.get("choices", [])
-                        fb_content = ""
-                        if fb_choices:
-                            fb_content = fb_choices[0].get("message", {}).get("content", "")
-                        fb_usage = fb_data.get("usage", {})
-                        latency_ms = (time.monotonic() - t0) * 1000.0
-                        logger.info("Fallback %s succeeded", fb_model)
-                        return {
-                            "content": fb_content,
-                            "tokens": fb_usage.get("total_tokens", 0),
-                            "latency_ms": round(latency_ms, 1),
-                            "model": fb_data.get("model", fb_model),
-                            "error": False,
-                        }
-                except Exception:
-                    continue
+                    )
+                    latency_ms = (time.monotonic() - t0) * 1000.0
+                    usage = response.usage or {}
+                    tokens = int(
+                        usage.get(
+                            "total_tokens",
+                            (usage.get("prompt_tokens", 0) or 0)
+                            + (usage.get("completion_tokens", 0) or 0),
+                        )
+                        or 0
+                    )
+                    return {
+                        "content": response.content,
+                        "tokens": tokens,
+                        "latency_ms": round(latency_ms, 1),
+                        "model": response.model or candidate_model,
+                        "error": False,
+                    }
+                except Exception as exc:
+                    last_exc = exc
+                    logger.warning(
+                        "Ginko provider %s failed for %s: %s",
+                        config.provider.value,
+                        candidate_model,
+                        exc,
+                    )
+        finally:
+            close = getattr(provider, "close", None)
+            if callable(close):
+                await close()
 
-            error_body = resp.text[:500]
-            logger.warning(
-                "OpenRouter %s returned HTTP %d (all fallbacks exhausted): %s",
-                model, resp.status_code, error_body,
-            )
-            return {
-                "content": f"HTTP {resp.status_code}: {error_body}",
-                "tokens": 0,
-                "latency_ms": latency_ms,
-                "model": model,
-                "error": True,
-            }
-
-        if resp.status_code != 200:
-            error_body = resp.text[:500]
-            logger.warning(
-                "OpenRouter %s returned HTTP %d: %s",
-                model,
-                resp.status_code,
-                error_body,
-            )
-            return {
-                "content": f"HTTP {resp.status_code}: {error_body}",
-                "tokens": 0,
-                "latency_ms": latency_ms,
-                "model": model,
-                "error": True,
-            }
-
-        data = resp.json()
-        choices = data.get("choices", [])
-        content = ""
-        if choices:
-            content = choices[0].get("message", {}).get("content", "")
-
-        usage = data.get("usage", {})
-        tokens = usage.get("total_tokens", 0)
-
-        return {
-            "content": content,
-            "tokens": tokens,
-            "latency_ms": round(latency_ms, 1),
-            "model": data.get("model", model),
-            "error": False,
-        }
-
-    except httpx.TimeoutException:
-        latency_ms = (time.monotonic() - t0) * 1000.0
-        logger.warning("OpenRouter %s timed out after %.0fms", model, latency_ms)
-        return {
-            "content": f"TIMEOUT after {latency_ms:.0f}ms",
-            "tokens": 0,
-            "latency_ms": latency_ms,
-            "model": model,
-            "error": True,
-        }
-
-    except Exception as exc:
-        latency_ms = (time.monotonic() - t0) * 1000.0
-        logger.error("OpenRouter %s call failed: %s", model, exc)
-        return {
-            "content": f"ERROR: {exc}",
-            "tokens": 0,
-            "latency_ms": latency_ms,
-            "model": model,
-            "error": True,
-        }
+    latency_ms = (time.monotonic() - t0) * 1000.0
+    error_text = f"ERROR: {last_exc}" if last_exc is not None else "ERROR: provider chain exhausted"
+    return {
+        "content": error_text if "timed out" not in error_text.lower() else f"TIMEOUT after {latency_ms:.0f}ms",
+        "tokens": 0,
+        "latency_ms": latency_ms,
+        "model": model,
+        "error": True,
+    }
 
 
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
@@ -729,7 +699,7 @@ async def agent_task(
 ) -> dict[str, Any]:
     """Execute a task using a specific fleet agent.
 
-    Dispatches the task to the agent's model via OpenRouter with its
+    Dispatches the task to the agent's model via the preferred runtime stack with its
     system prompt, records timing and token usage, updates the agent's
     persistent state, and logs the result.
 

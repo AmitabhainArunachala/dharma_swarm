@@ -5,10 +5,12 @@ from __future__ import annotations
 import json
 from datetime import datetime, timezone, timedelta
 from pathlib import Path
-from unittest.mock import AsyncMock, MagicMock, patch
+from types import SimpleNamespace
+from unittest.mock import AsyncMock, patch
 
 import pytest
 
+from dharma_swarm.models import LLMResponse, ProviderType
 from dharma_swarm.hypnagogic import (
     _format_dreams_for_journal,
     _load_recent_dreams,
@@ -175,7 +177,7 @@ async def test_process_no_api_keys():
 @pytest.mark.asyncio
 async def test_process_no_dreams(tmp_path: Path):
     with patch("dharma_swarm.hypnagogic._DREAM_FILE", tmp_path / "nope.jsonl"):
-        with patch.dict("os.environ", {"OPENROUTER_API_KEY": "test-key"}):
+        with patch.dict("os.environ", {}, clear=True):
             result = await process_recent_dreams()
             assert result["status"] == "no_dreams"
 
@@ -198,23 +200,22 @@ async def test_process_openrouter_success(tmp_path: Path):
 
     with patch("dharma_swarm.hypnagogic._DREAM_FILE", dream_file):
         with patch("dharma_swarm.hypnagogic._JOURNAL_DIR", journal_dir):
-            with patch.dict("os.environ", {"OPENROUTER_API_KEY": "test-key"}, clear=True):
-                with patch("httpx.AsyncClient") as MockClient:
-                    mock_client = AsyncMock()
-                    mock_resp = MagicMock()  # Sync .json()
-                    mock_resp.status_code = 200
-                    mock_resp.json.return_value = {
-                        "choices": [{"message": {"content": "The dream speaks of convergence..."}}],
-                    }
-                    mock_client.post.return_value = mock_resp
-                    mock_client.__aenter__ = AsyncMock(return_value=mock_client)
-                    mock_client.__aexit__ = AsyncMock(return_value=False)
-                    MockClient.return_value = mock_client
-
-                    result = await process_recent_dreams()
-                    assert result["status"] == "ok"
-                    assert result["dreams_processed"] == 1
-                    assert "convergence" in result["preview"]
+            with patch(
+                "dharma_swarm.hypnagogic.complete_via_preferred_runtime_providers",
+                new=AsyncMock(
+                    return_value=(
+                        LLMResponse(
+                            content="The dream speaks of convergence...",
+                            model="nim-local",
+                        ),
+                        SimpleNamespace(provider=ProviderType.NVIDIA_NIM),
+                    )
+                ),
+            ):
+                result = await process_recent_dreams()
+                assert result["status"] == "ok"
+                assert result["dreams_processed"] == 1
+                assert "convergence" in result["preview"]
 
 
 @pytest.mark.asyncio
@@ -225,20 +226,17 @@ async def test_process_openrouter_empty_choices(tmp_path: Path):
     dream_file.write_text(json.dumps(entry))
 
     with patch("dharma_swarm.hypnagogic._DREAM_FILE", dream_file):
-        with patch.dict("os.environ", {"OPENROUTER_API_KEY": "test-key"}, clear=True):
-            with patch("httpx.AsyncClient") as MockClient:
-                mock_client = AsyncMock()
-                mock_resp = MagicMock()  # Sync .json()
-                mock_resp.status_code = 200
-                mock_resp.json.return_value = {"choices": []}
-                mock_client.post.return_value = mock_resp
-                mock_client.__aenter__ = AsyncMock(return_value=mock_client)
-                mock_client.__aexit__ = AsyncMock(return_value=False)
-                MockClient.return_value = mock_client
-
-                result = await process_recent_dreams()
-                # Should handle gracefully -- either empty or error
-                assert result["status"] in ("empty", "error")
+        with patch(
+            "dharma_swarm.hypnagogic.complete_via_preferred_runtime_providers",
+            new=AsyncMock(
+                return_value=(
+                    LLMResponse(content="", model="nim-local"),
+                    SimpleNamespace(provider=ProviderType.NVIDIA_NIM),
+                )
+            ),
+        ):
+            result = await process_recent_dreams()
+            assert result["status"] in ("empty", "error")
 
 
 @pytest.mark.asyncio
@@ -249,20 +247,13 @@ async def test_process_openrouter_http_error(tmp_path: Path):
     dream_file.write_text(json.dumps(entry))
 
     with patch("dharma_swarm.hypnagogic._DREAM_FILE", dream_file):
-        with patch.dict("os.environ", {"OPENROUTER_API_KEY": "test-key"}, clear=True):
-            with patch("httpx.AsyncClient") as MockClient:
-                mock_client = AsyncMock()
-                mock_resp = MagicMock()  # Sync .text
-                mock_resp.status_code = 429
-                mock_resp.text = "Rate limited"
-                mock_client.post.return_value = mock_resp
-                mock_client.__aenter__ = AsyncMock(return_value=mock_client)
-                mock_client.__aexit__ = AsyncMock(return_value=False)
-                MockClient.return_value = mock_client
-
-                result = await process_recent_dreams()
-                assert result["status"] == "error"
-                assert "429" in result.get("error", "")
+        with patch(
+            "dharma_swarm.hypnagogic.complete_via_preferred_runtime_providers",
+            new=AsyncMock(side_effect=RuntimeError("OpenRouter error 429: Rate limited")),
+        ):
+            result = await process_recent_dreams()
+            assert result["status"] == "error"
+            assert "429" in result.get("error", "")
 
 
 @pytest.mark.asyncio
@@ -273,14 +264,10 @@ async def test_process_openrouter_network_error(tmp_path: Path):
     dream_file.write_text(json.dumps(entry))
 
     with patch("dharma_swarm.hypnagogic._DREAM_FILE", dream_file):
-        with patch.dict("os.environ", {"OPENROUTER_API_KEY": "test-key"}, clear=True):
-            with patch("httpx.AsyncClient") as MockClient:
-                mock_client = AsyncMock()
-                mock_client.post.side_effect = ConnectionError("network down")
-                mock_client.__aenter__ = AsyncMock(return_value=mock_client)
-                mock_client.__aexit__ = AsyncMock(return_value=False)
-                MockClient.return_value = mock_client
-
-                result = await process_recent_dreams()
-                assert result["status"] == "error"
-                assert "ConnectionError" in result.get("error", "")
+        with patch(
+            "dharma_swarm.hypnagogic.complete_via_preferred_runtime_providers",
+            new=AsyncMock(side_effect=ConnectionError("network down")),
+        ):
+            result = await process_recent_dreams()
+            assert result["status"] == "error"
+            assert "ConnectionError" in result.get("error", "")

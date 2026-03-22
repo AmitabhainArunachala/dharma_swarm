@@ -15,12 +15,15 @@ Context budget: ~30K chars max (fits in system prompt alongside v7 rules).
 from __future__ import annotations
 
 import json
+import logging
 import sqlite3
 import time
 from dataclasses import dataclass
 from datetime import timezone
 from pathlib import Path
 from typing import Literal
+
+logger = logging.getLogger(__name__)
 
 from dharma_swarm.injection_scanner import scan_and_sanitize
 
@@ -653,7 +656,7 @@ def read_memory_context(
                     if plane_result:
                         return plane_result
                 except Exception:
-                    pass
+                    logger.debug("Memory plane recall failed", exc_info=True)
             return "No memories stored yet."
         return "\n".join(f"  [{r['layer']}] {r['content'][:100]}" for r in rows)
     except Exception as e:
@@ -803,23 +806,37 @@ def read_recent_memories(
         return ""
 
 
-def read_agent_notes(exclude_role: str | None = None, max_per_agent: int = 500) -> str:
+def read_agent_notes(
+    exclude_role: str | None = None,
+    max_per_agent: int = 500,
+    state_dir: Path | None = None,
+) -> str:
     """Read recent notes from other agents in the swarm.
 
     Prefers distilled versions (from context_agent) when they exist and
     are fresh (< 6 hours old). Falls back to tail of raw notes.
+
+    Args:
+        state_dir: Override for ~/.dharma state directory. If provided,
+                   reads from state_dir/shared/ instead of the global path.
     """
-    if not SHARED_DIR.exists():
+    if state_dir is not None:
+        shared_dir = state_dir / "shared"
+        base = state_dir
+    else:
+        shared_dir = SHARED_DIR
+        base = STATE_DIR
+    if not shared_dir.exists():
         return ""
     sections = ["# Other Agents' Recent Findings"]
-    notes_files = sorted(SHARED_DIR.glob("*_notes.md"),
+    notes_files = sorted(shared_dir.glob("*_notes.md"),
                          key=lambda f: f.stat().st_mtime, reverse=True)
     for nf in notes_files[:5]:
         role = nf.stem.replace("_notes", "")
         if exclude_role and role.lower() == exclude_role.lower():
             continue
         # Check for distilled version first
-        distilled_path = STATE_DIR / "context" / "distilled" / f"{role}_distilled.md"
+        distilled_path = base / "context" / "distilled" / f"{role}_distilled.md"
         if distilled_path.exists() and _is_fresh(distilled_path):
             try:
                 content = distilled_path.read_text()
@@ -830,7 +847,7 @@ def read_agent_notes(exclude_role: str | None = None, max_per_agent: int = 500) 
                     )
                     continue
             except Exception:
-                pass
+                logger.debug("Distilled notes read failed for %s", nf.name, exc_info=True)
         # Fall back to tail of raw notes
         try:
             content = nf.read_text()
@@ -950,7 +967,7 @@ def _read_winners(state_dir: Path | None = None, max_chars: int = 1500) -> str:
                     lines.append(f"  {stars:.1f}* {name} (swabhaav={sw:.2f})")
                 sections.append("\n".join(lines))
         except Exception:
-            pass
+            logger.debug("Evolution fitness read failed", exc_info=True)
     evo_dir = base / "evolution"
     if evo_dir.exists():
         try:
@@ -985,7 +1002,7 @@ def _read_winners(state_dir: Path | None = None, max_chars: int = 1500) -> str:
                         wlines.append(f"  {fit:.2f} fitness: {comp} (gen {gen})")
                     sections.append("\n".join(wlines))
         except Exception:
-            pass
+            logger.debug("Evolution archive read failed", exc_info=True)
     result = "\n\n".join(sections)
     return result[:max_chars] if result else ""
 
@@ -1021,7 +1038,7 @@ def _read_stigmergy_signals(state_dir: Path | None = None, max_chars: int = 1500
                     desc = m.get("description", "")[:80]
                     sections.append(f"  [{sal:.2f}] {path} ({src}): {desc}")
         except Exception:
-            pass
+            logger.debug("Stigmergy mycelium read failed", exc_info=True)
     tcs_file = stig_dir / "mycelium_identity_tcs.json"
     if tcs_file.exists():
         try:
@@ -1030,7 +1047,7 @@ def _read_stigmergy_signals(state_dir: Path | None = None, max_chars: int = 1500
             regime = tcs_data.get("regime", "unknown")
             sections.append(f"  System TCS: {tcs:.3f} ({regime})")
         except Exception:
-            pass
+            logger.debug("TCS identity read failed", exc_info=True)
     result = "\n".join(sections)
     return result[:max_chars] if len(sections) > 1 else ""
 
@@ -1178,7 +1195,7 @@ def build_agent_context(
     # L5: Swarm — other agents' notes
     notes_budget = int(budget * profile.get("notes_weight", 0.2))
     if notes_budget > 200:
-        notes = read_agent_notes(exclude_role=role, max_per_agent=notes_budget // 5)
+        notes = read_agent_notes(exclude_role=role, max_per_agent=notes_budget // 5, state_dir=state_dir)
         if notes:
             blocks.append(ContextBlock("swarm_notes", 9, notes, len(notes)))
 

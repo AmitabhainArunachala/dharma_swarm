@@ -27,6 +27,7 @@ from typing import Any
 logger = logging.getLogger(__name__)
 
 LOG_DIR = Path.home() / ".dharma" / "conversation_log"
+_MASTER_MAX_BYTES = 50 * 1024 * 1024  # 50 MB rotation threshold
 
 # Promise detection patterns
 _PROMISE_PATTERNS = [
@@ -103,8 +104,16 @@ def log_exchange(
     daily = LOG_DIR / f"{now.strftime('%Y-%m-%d')}.jsonl"
     _atomic_append(daily, line)
 
-    # Write to master log
-    _atomic_append(LOG_DIR / "all.jsonl", line)
+    # Write to master log (with rotation at 50 MB)
+    master = LOG_DIR / "all.jsonl"
+    try:
+        if master.exists() and master.stat().st_size > _MASTER_MAX_BYTES:
+            stamp = now.strftime("%Y%m%d_%H%M%S")
+            master.rename(LOG_DIR / f"all.{stamp}.jsonl")
+            logger.info("Conversation master log rotated → all.%s.jsonl", stamp)
+    except Exception:
+        logger.debug("Conversation log rotation failed", exc_info=True)
+    _atomic_append(master, line)
 
     # Extract promises from assistant responses
     if role == "assistant" and content:

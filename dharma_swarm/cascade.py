@@ -443,14 +443,20 @@ async def feedback_ascent(result: LoopResult) -> None:
 
         store = StigmergyStore()
         status = "EIGENFORM" if result.eigenform_reached else ("CONVERGED" if result.converged else "INCOMPLETE")
-        mark = StigmergicMark(
-            agent="cascade_engine",
-            file_path=f"cascade_domain_{result.domain}",
-            action="write",
-            observation=f"cascade:{result.domain} fitness={result.best_fitness:.3f} {status} iter={result.iterations_completed}",
-            salience=0.7 if result.eigenform_reached else 0.5,
-        )
-        await store.leave_mark(mark)
+        obs = f"cascade:{result.domain} fitness={result.best_fitness:.3f} {status} iter={result.iterations_completed}"
+        # Deduplicate: skip if last mark for this domain has identical observation
+        recent = await store.read_marks(file_path=f"cascade_domain_{result.domain}", limit=1)
+        if recent and recent[0].observation == obs:
+            logger.debug("Cascade mark deduplicated for domain %s", result.domain)
+        else:
+            mark = StigmergicMark(
+                agent="cascade_engine",
+                file_path=f"cascade_domain_{result.domain}",
+                action="write",
+                observation=obs,
+                salience=0.7 if result.eigenform_reached else 0.5,
+            )
+            await store.leave_mark(mark)
     except Exception as e:
         logger.debug("Stigmergy mark failed: %s", e)
 

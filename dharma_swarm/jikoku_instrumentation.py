@@ -21,12 +21,15 @@ Usage:
 import os
 import functools
 import inspect
+import logging
 from contextvars import ContextVar
 from contextlib import asynccontextmanager, contextmanager
 from typing import Optional, Any, Callable, TypeVar
 import time
 
 from .jikoku_samaya import get_global_tracer  # type: ignore
+
+logger = logging.getLogger(__name__)
 
 # Feature flag - disable for zero overhead
 JIKOKU_ENABLED = os.environ.get('JIKOKU_ENABLED', '1') == '1'
@@ -202,7 +205,7 @@ def jikoku_traced(
                 try:
                     metadata = extract_metadata(args, kwargs)
                 except Exception:
-                    pass  # Don't fail if metadata extraction fails
+                    logger.debug("Jikoku metadata extraction failed", exc_info=True)
 
             # Generate intent from template or function name
             if intent_template:
@@ -225,7 +228,7 @@ def jikoku_traced(
                 try:
                     metadata = extract_metadata(args, kwargs)
                 except Exception:
-                    pass
+                    logger.debug("Jikoku metadata extraction failed", exc_info=True)
 
             # Generate intent from template or function name
             if intent_template:

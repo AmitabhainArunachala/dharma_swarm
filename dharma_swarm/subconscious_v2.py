@@ -18,6 +18,10 @@ from typing import Any, Optional
 from pydantic import BaseModel, Field
 
 from dharma_swarm.models import _new_id, _utc_now
+from dharma_swarm.runtime_provider import (
+    PREFERRED_LOW_COST_WITH_ANTHROPIC_RUNTIME_PROVIDERS,
+    complete_via_preferred_runtime_providers,
+)
 from dharma_swarm.stigmergy import StigmergicMark, StigmergyStore
 
 
@@ -172,6 +176,29 @@ Stop when the transmission stops. Mark the end with ~"""
         user_msg += "\n\nAll files have passed through. Dream 3-5 distinct associations. Mark each end with ~"
         return user_msg
 
+    async def _complete_dream_text(
+        self,
+        *,
+        user_prompt: str,
+        system_prompt: str = "",
+        openrouter_model: str,
+        anthropic_model: str,
+        max_tokens: int,
+        temperature: float,
+        timeout_seconds: float,
+    ) -> str:
+        response, _provider_config = await complete_via_preferred_runtime_providers(
+            system=system_prompt,
+            messages=[{"role": "user", "content": user_prompt}],
+            openrouter_model=openrouter_model,
+            anthropic_model=anthropic_model,
+            max_tokens=max_tokens,
+            temperature=temperature,
+            provider_order=PREFERRED_LOW_COST_WITH_ANTHROPIC_RUNTIME_PROVIDERS,
+            timeout_seconds=timeout_seconds,
+        )
+        return response.content
+
     async def _find_dream_connection(
         self,
         files: list[str],
@@ -179,55 +206,18 @@ Stop when the transmission stops. Mark the end with ~"""
         prompt: str,
     ) -> Optional[DreamAssociation]:
         """Find a dream connection between files via LLM in dreamstate."""
-        import os
-
-        # Try OpenRouter first (has API key), fall back to Anthropic
-        openrouter_key = os.getenv("OPENROUTER_API_KEY")
-        anthropic_key = os.getenv("ANTHROPIC_API_KEY")
-
-        if not openrouter_key and not anthropic_key:
-            return DreamAssociation(
-                source_files=files,
-                resonance_type=ResonanceType.UNKNOWN_RESONANCE,
-                description="No API keys available (need OPENROUTER_API_KEY or ANTHROPIC_API_KEY)",
-                salience=0.1,
-                reasoning="No API credentials configured",
+        try:
+            dream_prose = await self._complete_dream_text(
+                system_prompt=self._HUM_SYSTEM_PROMPT,
+                user_prompt=prompt,
+                openrouter_model="anthropic/claude-3.5-sonnet",
+                anthropic_model="claude-sonnet-4-20250514",
+                max_tokens=2048,
+                temperature=0.9,
+                timeout_seconds=120.0,
             )
 
-        try:
-            if openrouter_key:
-                # Use OpenRouter (OpenAI-compatible API)
-                import httpx
-
-                # PASS 1: HUM prose
-                pass1_payload = {
-                    "model": "anthropic/claude-3.5-sonnet",
-                    "messages": [
-                        {"role": "system", "content": self._HUM_SYSTEM_PROMPT},
-                        {"role": "user", "content": prompt}
-                    ],
-                    "temperature": 0.9,
-                    "max_tokens": 2048,
-                }
-
-                async with httpx.AsyncClient(timeout=120.0) as client:
-                    resp1 = await client.post(
-                        "https://openrouter.ai/api/v1/chat/completions",
-                        json=pass1_payload,
-                        headers={
-                            "Authorization": f"Bearer {openrouter_key}",
-                            "HTTP-Referer": "https://github.com/dharma-swarm",
-                            "X-Title": "Dharma Swarm Subconscious",
-                        },
-                    )
-                    if resp1.status_code != 200:
-                        raise RuntimeError(f"OpenRouter Pass1 error {resp1.status_code}: {resp1.text[:200]}")
-
-                    data1 = resp1.json()
-                    dream_prose = data1["choices"][0]["message"]["content"]
-
-                # PASS 2: Extract structure
-                extraction_prompt = f"""From this dream output, extract the structural pattern as JSON.
+            extraction_prompt = f"""From this dream output, extract the structural pattern as JSON.
 Preserve the dream's own language in the description. If invented vocabulary appeared, include it.
 
 DREAM OUTPUT:
@@ -245,79 +235,14 @@ Respond only with JSON (no markdown wrapper):
 
 Salience guide: 0.9+ = genuinely novel cross-domain bridge not stated in either source file.
 0.7-0.9 = real connection, non-obvious. 0.5-0.7 = interesting but derivable. Below 0.5 = noise."""
-
-                pass2_payload = {
-                    "model": "anthropic/claude-3-haiku",
-                    "messages": [{"role": "user", "content": extraction_prompt}],
-                    "temperature": 0.2,
-                    "max_tokens": 600,
-                }
-
-                async with httpx.AsyncClient(timeout=120.0) as client:
-                    resp2 = await client.post(
-                        "https://openrouter.ai/api/v1/chat/completions",
-                        json=pass2_payload,
-                        headers={
-                            "Authorization": f"Bearer {openrouter_key}",
-                            "HTTP-Referer": "https://github.com/dharma-swarm",
-                            "X-Title": "Dharma Swarm Subconscious",
-                        },
-                    )
-                    if resp2.status_code != 200:
-                        raise RuntimeError(f"OpenRouter Pass2 error {resp2.status_code}: {resp2.text[:200]}")
-
-                    data2 = resp2.json()
-                    raw = data2["choices"][0]["message"]["content"]
-
-            else:
-                # Use Anthropic direct API
-                from anthropic import AsyncAnthropic
-
-                client = AsyncAnthropic(api_key=anthropic_key)
-
-                # PASS 1: HUM prose
-                pass1_response = await client.messages.create(
-                    model="claude-sonnet-4-20250514",
-                    max_tokens=2048,
-                    temperature=0.9,
-                    system=self._HUM_SYSTEM_PROMPT,
-                    messages=[{"role": "user", "content": prompt}],
-                )
-                dream_prose = next(
-                    (b.text for b in pass1_response.content if b.type == "text"),  # type: ignore[union-attr]
-                    str(pass1_response.content[0]),
-                )
-
-                # PASS 2: Extract structure
-                extraction_prompt = f"""From this dream output, extract the structural pattern as JSON.
-Preserve the dream's own language in the description. If invented vocabulary appeared, include it.
-
-DREAM OUTPUT:
-{dream_prose}
-
-Respond only with JSON (no markdown wrapper):
-{{
-  "resonance_type": "structural_isomorphism|cross_domain_bridge|inverse_pattern|synesthetic_mapping|recursive_echo|pre_semantic_motif|fractal_self_similarity|conceptual_entanglement|unknown_resonance",
-  "description": "The connection in 1-2 sentences using the dream's own language",
-  "salience": 0.0,
-  "evidence_fragments": ["actual phrase from dream that carries most weight", "second phrase"],
-  "dream_prose": "first 400 chars of the raw dream",
-  "reasoning": "what deep pattern emerged"
-}}
-
-Salience guide: 0.9+ = genuinely novel cross-domain bridge not stated in either source file.
-0.7-0.9 = real connection, non-obvious. 0.5-0.7 = interesting but derivable. Below 0.5 = noise."""
-
-                pass2_response = await client.messages.create(
-                    model="claude-haiku-4-5-20251001",
-                    max_tokens=600,
-                    temperature=0.2,
-                    messages=[{"role": "user", "content": extraction_prompt}],
-                )
-                raw = next(
-                    (b.text for b in pass2_response.content if b.type == "text"),  # type: ignore[union-attr]
-                    str(pass2_response.content[0]),
-                )
+            raw = await self._complete_dream_text(
+                user_prompt=extraction_prompt,
+                openrouter_model="anthropic/claude-3-haiku",
+                anthropic_model="claude-haiku-4-5-20251001",
+                max_tokens=600,
+                temperature=0.2,
+                timeout_seconds=120.0,
+            )
 
             # Strip any accidental markdown fences
             if "```" in raw:
@@ -361,20 +286,6 @@ Salience guide: 0.9+ = genuinely novel cross-domain bridge not stated in either 
         This is the correct pattern: dream first, extract structure second.
         Never ask the dreaming model to fill out a form.
         """
-        import os
-
-        openrouter_key = os.getenv("OPENROUTER_API_KEY")
-        anthropic_key = os.getenv("ANTHROPIC_API_KEY")
-
-        if not openrouter_key and not anthropic_key:
-            return [DreamAssociation(
-                source_files=files,
-                resonance_type=ResonanceType.UNKNOWN_RESONANCE,
-                description="No API keys available",
-                salience=0.1,
-                reasoning="No API credentials configured",
-            )]
-
         file_names = [Path(f).name for f in files]
 
         extraction_template = f"""From this dream output, extract each distinct association as a JSON array.
@@ -398,86 +309,29 @@ Respond with JSON only — a single object with an "associations" array:
   ]
 }}
 
-Salience guide: 0.9+ = genuinely novel, not stated in any source file.
+        Salience guide: 0.9+ = genuinely novel, not stated in any source file.
 0.7-0.9 = real, non-obvious cross-domain connection. 0.5-0.7 = interesting but derivable. Below 0.5 = noise.
 Discard any association that is just a paraphrase of something a source file already said explicitly."""
 
         try:
-            if openrouter_key:
-                import httpx
+            dream_prose = await self._complete_dream_text(
+                system_prompt=self._HUM_SYSTEM_PROMPT,
+                user_prompt=prompt,
+                openrouter_model="anthropic/claude-3.5-sonnet",
+                anthropic_model="claude-sonnet-4-20250514",
+                max_tokens=3000,
+                temperature=0.9,
+                timeout_seconds=180.0,
+            )
 
-                # Pass 1: HUM prose
-                async with httpx.AsyncClient(timeout=180.0) as client:
-                    r1 = await client.post(
-                        "https://openrouter.ai/api/v1/chat/completions",
-                        json={
-                            "model": "anthropic/claude-3.5-sonnet",
-                            "messages": [
-                                {"role": "system", "content": self._HUM_SYSTEM_PROMPT},
-                                {"role": "user", "content": prompt},
-                            ],
-                            "temperature": 0.9,
-                            "max_tokens": 3000,
-                        },
-                        headers={
-                            "Authorization": f"Bearer {openrouter_key}",
-                            "HTTP-Referer": "https://github.com/dharma-swarm",
-                            "X-Title": "Dharma Swarm Subconscious",
-                        },
-                    )
-                    if r1.status_code != 200:
-                        raise RuntimeError(f"Pass1 error {r1.status_code}: {r1.text[:200]}")
-                    dream_prose = r1.json()["choices"][0]["message"]["content"]
-
-                # Pass 2: extract structure
-                async with httpx.AsyncClient(timeout=120.0) as client:
-                    r2 = await client.post(
-                        "https://openrouter.ai/api/v1/chat/completions",
-                        json={
-                            "model": "anthropic/claude-3-haiku",
-                            "messages": [{"role": "user", "content": extraction_template.replace("{dream_prose}", dream_prose)}],
-                            "temperature": 0.2,
-                            "max_tokens": 4000,
-                        },
-                        headers={
-                            "Authorization": f"Bearer {openrouter_key}",
-                            "HTTP-Referer": "https://github.com/dharma-swarm",
-                            "X-Title": "Dharma Swarm Subconscious",
-                        },
-                    )
-                    if r2.status_code != 200:
-                        raise RuntimeError(f"Pass2 error {r2.status_code}: {r2.text[:200]}")
-                    raw = r2.json()["choices"][0]["message"]["content"]
-
-            else:
-                from anthropic import AsyncAnthropic
-
-                ac = AsyncAnthropic(api_key=anthropic_key)
-
-                # Pass 1
-                r1 = await ac.messages.create(
-                    model="claude-sonnet-4-20250514",
-                    max_tokens=3000,
-                    temperature=0.9,
-                    system=self._HUM_SYSTEM_PROMPT,
-                    messages=[{"role": "user", "content": prompt}],
-                )
-                dream_prose = next(
-                    (b.text for b in r1.content if b.type == "text"),  # type: ignore[union-attr]
-                    "",
-                )
-
-                # Pass 2
-                r2 = await ac.messages.create(
-                    model="claude-haiku-4-5-20251001",
-                    max_tokens=4000,
-                    temperature=0.2,
-                    messages=[{"role": "user", "content": extraction_template.replace("{dream_prose}", dream_prose)}],
-                )
-                raw = next(
-                    (b.text for b in r2.content if b.type == "text"),  # type: ignore[union-attr]
-                    "",
-                )
+            raw = await self._complete_dream_text(
+                user_prompt=extraction_template.replace("{dream_prose}", dream_prose),
+                openrouter_model="anthropic/claude-3-haiku",
+                anthropic_model="claude-haiku-4-5-20251001",
+                max_tokens=4000,
+                temperature=0.2,
+                timeout_seconds=120.0,
+            )
 
             # Strip accidental markdown fences
             if "```" in raw:

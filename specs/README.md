@@ -1,5 +1,18 @@
 # Formal Verification Specifications
 
+## Active Build Packets
+
+The following documents are active implementation packets for current
+architecture work and should be read before launching new build agents into the
+same area:
+
+- `SOVEREIGN_BUILD_PHASE_MASTER_SPEC_2026-03-19.md`
+- `ONTOLOGY_PHASE2_SQLITE_UNIFICATION_SPEC_2026-03-19.md`
+- `ONTOLOGY_PHASE2_SQLITE_UNIFICATION_TODO_2026-03-19.md`
+
+The ontology Phase 2 packet is the current canonical guide for making the
+shared ontology runtime durable and authoritative.
+
 This directory contains **mathematical proofs** of correctness for critical dharma_swarm components using TLA+ (Temporal Logic of Actions).
 
 TLA+ is the industry standard for verifying distributed systems, used by AWS to prevent bugs in S3, DynamoDB, Aurora, and 10+ other major systems.

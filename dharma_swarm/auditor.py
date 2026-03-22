@@ -174,7 +174,7 @@ class Auditor:
                         self._findings.append(finding)
                         return finding
         except Exception:
-            pass
+            logger.debug("Auditor finding creation failed", exc_info=True)
         return None
 
     async def _audit_elegance(self) -> AuditFinding | None:

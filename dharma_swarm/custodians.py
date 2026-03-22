@@ -440,10 +440,14 @@ def _update_role_ontology(role_name: str) -> None:
 
     Registers CustodianRole objects in the ontology and updates their
     status based on the plant lifecycle ratchet.
+    Uses the shared singleton registry so updates persist and are visible
+    to API, TUI, and other subsystems.
     """
     try:
-        from dharma_swarm.ontology import OntologyRegistry, OntologyObj
-        registry = OntologyRegistry.create_dharma_registry()
+        from dharma_swarm.ontology import OntologyObj
+        from dharma_swarm.ontology_runtime import get_shared_registry, persist_shared_registry
+
+        registry = get_shared_registry()
 
         lifecycle = _compute_role_lifecycle(role_name)
         role = ROLES.get(role_name)
@@ -453,23 +457,30 @@ def _update_role_ontology(role_name: str) -> None:
         obj_id = f"custodian-{role_name}"
         model = _get_model_for_role(role_name)
 
-        obj = OntologyObj(
-            id=obj_id,
-            type_name="CustodianRole",
-            properties={
-                "name": role_name,
-                "tier": role.tier,
-                "model": model,
-                "status": lifecycle["status"],
-                "total_runs": lifecycle["total_runs"],
-                "success_rate": lifecycle["success_rate"],
-                "files_healed": lifecycle["files_healed"],
-            },
-            created_by="custodians",
-        )
+        properties = {
+            "name": role_name,
+            "tier": role.tier,
+            "model": model,
+            "status": lifecycle["status"],
+            "total_runs": lifecycle["total_runs"],
+            "success_rate": lifecycle["success_rate"],
+            "files_healed": lifecycle["files_healed"],
+        }
 
-        # Upsert into registry
-        registry._objects[obj_id] = obj
+        obj, errors = registry.put_object(
+            OntologyObj(
+                id=obj_id,
+                type_name="CustodianRole",
+                properties=properties,
+                created_by="custodians",
+            ),
+            updated_by="custodians",
+        )
+        if obj is None or errors:
+            logger.debug("Ontology update skipped for %s: %s", role_name, errors)
+            return
+
+        persist_shared_registry(registry)
         logger.debug(
             "Ontology update: %s status=%s runs=%d rate=%.1f%%",
             role_name, lifecycle["status"],

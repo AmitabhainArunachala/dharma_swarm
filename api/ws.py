@@ -54,6 +54,7 @@ class ConnectionManager:
             try:
                 await ws.send_text(message)
             except Exception:
+                logger.debug("Failed to send broadcast to WebSocket on channel %s", channel, exc_info=True)
                 dead.append(ws)
 
         if dead:
@@ -68,7 +69,7 @@ class ConnectionManager:
         try:
             await websocket.send_text(json.dumps(data, default=str))
         except Exception:
-            pass
+            logger.debug("Failed to send personal WebSocket message", exc_info=True)
 
 
 # Singleton

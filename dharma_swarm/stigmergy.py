@@ -11,6 +11,7 @@ non-blocking I/O.
 
 from __future__ import annotations
 
+import asyncio
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Literal
@@ -26,6 +27,21 @@ from dharma_swarm.models import _new_id, _utc_now
 
 Action = Literal["read", "write", "scan", "connect", "dream"]
 
+# Stigmergy channels — scoped visibility per domain.
+# Marks are visible only within their channel unless salience exceeds
+# the cross-channel threshold (default 0.8).
+STIGMERGY_CHANNELS: list[str] = [
+    "general",      # Default catch-all
+    "research",     # R_V, MI, experiments
+    "systems",      # Code, infra, debugging
+    "strategy",     # Business, grants, partnerships
+    "governance",   # Telos alignment, audit findings
+    "memory",       # Consolidation, retrieval, knowledge graph
+]
+
+# Marks above this salience are visible across all channels
+CROSS_CHANNEL_SALIENCE_THRESHOLD: float = 0.8
+
 
 class StigmergicMark(BaseModel):
     """A single mark left by an agent on the stigmergic lattice."""
@@ -39,6 +55,34 @@ class StigmergicMark(BaseModel):
     salience: float = 0.5
     connections: list[str] = Field(default_factory=list)
     access_count: int = 0
+    channel: str = "general"  # Stigmergy channel for scoped visibility
+
+
+# ---------------------------------------------------------------------------
+# Channel derivation
+# ---------------------------------------------------------------------------
+
+_AGENT_CHANNEL_PREFIXES: dict[str, str] = {
+    "dashboard:": "dashboard",
+    "cascade": "cascade",
+    "test-": "test",
+    "mem-": "test",
+    "bad-": "test",
+    "ok-": "test",
+    "ginko": "strategy",
+}
+
+
+def _derive_channel(agent: str) -> str:
+    """Derive a stigmergy channel from the agent name.
+
+    Returns ``"general"`` when no prefix matches.
+    """
+    lower = agent.lower()
+    for prefix, channel in _AGENT_CHANNEL_PREFIXES.items():
+        if lower.startswith(prefix):
+            return channel
+    return "general"
 
 
 # ---------------------------------------------------------------------------
@@ -56,21 +100,38 @@ class StigmergyStore:
 
     All public methods (except ``density``) are async, backed by
     ``aiofiles`` so the event loop never blocks.
+
+    Thread-safety: an ``asyncio.Lock`` serializes all mutations
+    (``leave_mark``, ``decay``, ``access_decay``) so concurrent
+    coroutines cannot interleave reads and writes — preventing
+    silent mark loss during decay rewrites.
     """
 
     def __init__(self, base_path: Path | None = None) -> None:
         self.base_path: Path = base_path or _DEFAULT_BASE
         self._marks_file: Path = self.base_path / "marks.jsonl"
         self._archive_file: Path = self.base_path / "archive.jsonl"
+        self._write_lock: asyncio.Lock = asyncio.Lock()
 
     # -- write ---------------------------------------------------------------
 
     async def leave_mark(self, mark: StigmergicMark) -> str:
-        """Append *mark* as a JSON line and return its id."""
+        """Append *mark* as a JSON line and return its id.
+
+        Derives a channel from the agent name when the mark uses the
+        default channel (``general``), giving dashboard, cascade, and
+        test agents proper channel separation.
+        """
+        if mark.channel == "general" and mark.agent:
+            derived = _derive_channel(mark.agent)
+            if derived != "general":
+                # Pydantic frozen? Use model_copy for immutable marks.
+                mark = mark.model_copy(update={"channel": derived})
         self.base_path.mkdir(parents=True, exist_ok=True)
         line = mark.model_dump_json() + "\n"
-        async with aiofiles.open(self._marks_file, "a") as f:
-            await f.write(line)
+        async with self._write_lock:
+            async with aiofiles.open(self._marks_file, "a") as f:
+                await f.write(line)
         return mark.id
 
     # -- read ----------------------------------------------------------------
@@ -106,14 +167,25 @@ class StigmergyStore:
         self,
         file_path: str | None = None,
         limit: int = 20,
+        channel: str | None = None,
     ) -> list[StigmergicMark]:
-        """Return recent marks, optionally filtered by *file_path*.
+        """Return recent marks, optionally filtered by *file_path* and/or *channel*.
+
+        When *channel* is specified, only marks in that channel are returned,
+        plus any marks whose salience exceeds CROSS_CHANNEL_SALIENCE_THRESHOLD
+        (cross-channel bleed for high-salience signals).
 
         Results are sorted newest-first and capped at *limit*.
         """
         marks = await self._load_marks()
         if file_path is not None:
             marks = [m for m in marks if m.file_path == file_path]
+        if channel is not None:
+            marks = [
+                m for m in marks
+                if m.channel == channel
+                or m.salience >= CROSS_CHANNEL_SALIENCE_THRESHOLD
+            ]
         marks.sort(key=lambda m: m.timestamp, reverse=True)
         return marks[:limit]
 
@@ -158,11 +230,26 @@ class StigmergyStore:
                 connections.update(m.connections)
         return sorted(connections)
 
-    async def query_relevant(self, task_keywords: list[str], limit: int = 10) -> list[StigmergicMark]:
-        """Filter marks by keyword overlap, sorted by salience (PULL protocol)."""
+    async def query_relevant(
+        self,
+        task_keywords: list[str],
+        limit: int = 10,
+        channel: str | None = None,
+    ) -> list[StigmergicMark]:
+        """Filter marks by keyword overlap, sorted by salience (PULL protocol).
+
+        When *channel* is specified, results are scoped to that channel
+        (plus cross-channel high-salience marks).
+        """
         if not task_keywords:
             return await self.high_salience(limit=limit)
         marks = await self._load_marks()
+        if channel is not None:
+            marks = [
+                m for m in marks
+                if m.channel == channel
+                or m.salience >= CROSS_CHANNEL_SALIENCE_THRESHOLD
+            ]
         keywords_lower = [kw.lower() for kw in task_keywords if kw.strip()]
         if not keywords_lower:
             return await self.high_salience(limit=limit)
@@ -176,53 +263,64 @@ class StigmergyStore:
         """Move marks older than *max_age_hours* to the archive file.
 
         Returns the count of archived marks.
+
+        The write lock prevents concurrent ``leave_mark`` calls from
+        appending between the read and the rewrite — which would
+        silently lose the new mark.
         """
-        marks = await self._load_marks()
-        if not marks:
-            return 0
+        async with self._write_lock:
+            marks = await self._load_marks()
+            if not marks:
+                return 0
 
-        cutoff = datetime.now(timezone.utc) - timedelta(hours=max_age_hours)
-        keep: list[StigmergicMark] = []
-        archive: list[StigmergicMark] = []
+            cutoff = datetime.now(timezone.utc) - timedelta(hours=max_age_hours)
+            keep: list[StigmergicMark] = []
+            archive: list[StigmergicMark] = []
 
-        for m in marks:
-            if m.timestamp < cutoff:
-                archive.append(m)
-            else:
-                keep.append(m)
+            for m in marks:
+                if m.timestamp < cutoff:
+                    archive.append(m)
+                else:
+                    keep.append(m)
 
-        if not archive:
-            return 0
+            if not archive:
+                return 0
 
-        # Append old marks to archive file
-        self.base_path.mkdir(parents=True, exist_ok=True)
-        async with aiofiles.open(self._archive_file, "a") as f:
-            for m in archive:
-                await f.write(m.model_dump_json() + "\n")
+            # Append old marks to archive file
+            self.base_path.mkdir(parents=True, exist_ok=True)
+            async with aiofiles.open(self._archive_file, "a") as f:
+                for m in archive:
+                    await f.write(m.model_dump_json() + "\n")
 
-        # Rewrite marks file with only the kept marks
-        async with aiofiles.open(self._marks_file, "w") as f:
-            for m in keep:
-                await f.write(m.model_dump_json() + "\n")
+            # Atomic rewrite: temp file → rename
+            tmp = self._marks_file.with_suffix(".tmp")
+            async with aiofiles.open(tmp, "w") as f:
+                for m in keep:
+                    await f.write(m.model_dump_json() + "\n")
+            tmp.replace(self._marks_file)
 
-        return len(archive)
+            return len(archive)
 
     async def access_decay(self, decay_factor: float = 0.95) -> int:
         """Decay marks based on access count -- unused marks fade faster."""
-        marks = await self._load_marks()
-        if not marks:
-            return 0
-        dead_count = 0
-        for m in marks:
-            exponent = max(1, 3 - m.access_count)
-            m.salience *= decay_factor ** exponent
-            if m.salience < 0.1:
-                dead_count += 1
-        self.base_path.mkdir(parents=True, exist_ok=True)
-        async with aiofiles.open(self._marks_file, "w") as f:
+        async with self._write_lock:
+            marks = await self._load_marks()
+            if not marks:
+                return 0
+            dead_count = 0
             for m in marks:
-                await f.write(m.model_dump_json() + "\n")
-        return dead_count
+                exponent = max(1, 3 - m.access_count)
+                m.salience *= decay_factor ** exponent
+                if m.salience < 0.1:
+                    dead_count += 1
+            self.base_path.mkdir(parents=True, exist_ok=True)
+            # Atomic rewrite: temp file → rename
+            tmp = self._marks_file.with_suffix(".tmp")
+            async with aiofiles.open(tmp, "w") as f:
+                for m in marks:
+                    await f.write(m.model_dump_json() + "\n")
+            tmp.replace(self._marks_file)
+            return dead_count
 
     # -- sync helpers --------------------------------------------------------
 
@@ -239,8 +337,18 @@ class StigmergyStore:
 
 
 # ---------------------------------------------------------------------------
-# Module-level convenience
+# Module-level convenience (singleton store for lock sharing)
 # ---------------------------------------------------------------------------
+
+_default_store: StigmergyStore | None = None
+
+
+def _get_default_store() -> StigmergyStore:
+    """Return the module-level singleton store so all callers share one lock."""
+    global _default_store
+    if _default_store is None:
+        _default_store = StigmergyStore()
+    return _default_store
 
 
 async def leave_stigmergic_mark(
@@ -250,8 +358,9 @@ async def leave_stigmergic_mark(
     salience: float = 0.5,
     connections: list[str] | None = None,
     action: Action = "write",
+    channel: str = "general",
 ) -> str:
-    """Create a mark and persist it via a default store. Returns the mark id."""
+    """Create a mark and persist it via the default store. Returns the mark id."""
     mark = StigmergicMark(
         agent=agent,
         file_path=file_path,
@@ -259,6 +368,6 @@ async def leave_stigmergic_mark(
         observation=observation,
         salience=salience,
         connections=connections or [],
+        channel=channel,
     )
-    store = StigmergyStore()
-    return await store.leave_mark(mark)
+    return await _get_default_store().leave_mark(mark)

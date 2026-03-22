@@ -20,6 +20,21 @@ from collections import deque
 from typing import Any
 
 
+# ---------------------------------------------------------------------------
+# Canonical signal type constants — use these instead of bare strings.
+# ---------------------------------------------------------------------------
+SIGNAL_AGENT_FITNESS = "AGENT_FITNESS"
+SIGNAL_WORKER_FITNESS = "WORKER_FITNESS"
+SIGNAL_ANOMALY_DETECTED = "ANOMALY_DETECTED"
+SIGNAL_CASCADE_EIGENFORM_DISTANCE = "CASCADE_EIGENFORM_DISTANCE"
+SIGNAL_RECOGNITION_UPDATED = "RECOGNITION_UPDATED"
+
+# Replication lifecycle signals
+SIGNAL_AGENT_REPLICATED = "AGENT_REPLICATED"
+SIGNAL_AGENT_APOPTOSIS = "AGENT_APOPTOSIS"
+SIGNAL_REPLICATION_PROPOSAL = "REPLICATION_PROPOSAL"
+
+
 class SignalBus:
     """Simple in-process event bus for inter-loop signaling.
 
@@ -113,6 +128,37 @@ class SignalBus:
     def clear(self) -> None:
         """Drop all events."""
         self._events.clear()
+
+    def get_agent_fitness(
+        self,
+        agent_name: str,
+        n: int = 5,
+    ) -> list[dict[str, Any]]:
+        """Return the last *n* AGENT_FITNESS events for *agent_name*.
+
+        Non-destructive: events stay in the bus. Returns newest-first.
+        Also includes WORKER_FITNESS events where parent_agent matches,
+        so fitness rolls up from workers to their parent.
+
+        This closes the strange loop: agents can see their own recent
+        fitness scores before executing a new task.
+        """
+        now = time.monotonic()
+        cutoff = now - self.ttl_seconds
+
+        matches: list[tuple[float, dict[str, Any]]] = []
+        for ts, event in self._events:
+            if ts < cutoff:
+                continue
+            etype = event.get("type", "")
+            if etype == "AGENT_FITNESS" and event.get("agent") == agent_name:
+                matches.append((ts, event))
+            elif etype == "WORKER_FITNESS" and event.get("parent_agent") == agent_name:
+                matches.append((ts, event))
+
+        # Sort newest-first, return at most n
+        matches.sort(key=lambda t: t[0], reverse=True)
+        return [event for _, event in matches[:n]]
 
     # Module-level singleton
     _instance: SignalBus | None = None

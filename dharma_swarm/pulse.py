@@ -108,6 +108,30 @@ Active thread: {thread}
     return prompt
 
 
+def _resolve_claude_binary() -> str:
+    """Find the claude CLI binary, checking known locations beyond PATH."""
+    import shutil
+    found = shutil.which("claude")
+    if found:
+        return found
+    for candidate in [
+        Path.home() / ".npm-global" / "bin" / "claude",
+        Path("/usr/local/bin/claude"),
+        Path("/opt/homebrew/bin/claude"),
+    ]:
+        if candidate.exists():
+            return str(candidate)
+    return "claude"  # fallback — will raise FileNotFoundError
+
+
+_MODEL_ALIASES: dict[str, str] = {
+    "flash": "haiku",       # Gemini Flash → Claude Haiku (fast/cheap)
+    "gemini": "haiku",
+    "gpt4": "sonnet",
+    "gpt-4": "sonnet",
+}
+
+
 def run_claude_headless(
     prompt: str,
     timeout: int = 600,
@@ -115,9 +139,11 @@ def run_claude_headless(
 ) -> str:
     """Run Claude Code in headless mode — the REAL agent."""
     try:
-        command = ["claude", "-p", prompt, "--output-format", "text"]
+        claude_bin = _resolve_claude_binary()
+        command = [claude_bin, "-p", prompt, "--output-format", "text"]
         if model:
-            command.extend(["--model", model])
+            resolved = _MODEL_ALIASES.get(model.lower(), model)
+            command.extend(["--model", resolved])
 
         result = subprocess.run(
             command,
@@ -325,7 +351,7 @@ def pulse(config: DaemonConfig | None = None) -> str:
                     if reading.is_contracted:
                         summary += " [CONTRACTED]"
                 except Exception:
-                    pass
+                    logger.debug("Colony R_V reading failed", exc_info=True)
             if report.errors:
                 summary += f" errors={len(report.errors)}"
             print(f"[pulse] {summary}")
@@ -596,7 +622,7 @@ def show_status():
         print(f"\nCurrent thread: {stats['current_thread']}")
         print(f"Contributions: {stats['contributions']}")
     except Exception:
-        pass
+        logger.debug("Thread stats display failed", exc_info=True)
 
 
 if __name__ == "__main__":

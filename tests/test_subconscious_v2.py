@@ -1,7 +1,11 @@
 """Tests for dharma_swarm.subconscious_v2 — data models, dream prompt, file selection."""
 
+from types import SimpleNamespace
+from unittest.mock import AsyncMock, patch
+
 import pytest
 
+from dharma_swarm.models import LLMResponse, ProviderType
 from dharma_swarm.subconscious_v2 import (
     DreamAssociation,
     ResonanceType,
@@ -129,6 +133,42 @@ async def test_sleep():
     state = await agent.sleep()
     assert state["state"] == "dormant"
     assert "timestamp" in state
+
+
+@pytest.mark.asyncio
+async def test_find_dream_connection_uses_runtime_provider_stack():
+    agent = SubconsciousAgent()
+
+    with patch(
+        "dharma_swarm.subconscious_v2.complete_via_preferred_runtime_providers",
+        new=AsyncMock(
+            side_effect=[
+                (
+                    LLMResponse(content="A hidden bridge appears ~", model="nim-local"),
+                    SimpleNamespace(provider=ProviderType.NVIDIA_NIM),
+                ),
+                (
+                    LLMResponse(
+                        content='{"resonance_type":"cross_domain_bridge","description":"A hidden bridge appears","salience":0.8,"evidence_fragments":["hidden bridge"],"dream_prose":"A hidden bridge appears ~","reasoning":"deep pattern"}',
+                        model="nim-local",
+                    ),
+                    SimpleNamespace(provider=ProviderType.NVIDIA_NIM),
+                ),
+            ]
+        ),
+    ):
+        result = await agent._find_dream_connection(
+            ["/tmp/a.md", "/tmp/b.md"],
+            {
+                "/tmp/a.md": "R_V collapse",
+                "/tmp/b.md": "structural bridge",
+            },
+            "dream prompt",
+        )
+
+    assert result is not None
+    assert result.resonance_type is ResonanceType.CROSS_DOMAIN_BRIDGE
+    assert result.description == "A hidden bridge appears"
 
 
 # ---------------------------------------------------------------------------

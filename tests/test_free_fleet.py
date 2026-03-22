@@ -1,13 +1,13 @@
 """Tests for the FREE_FLEET zero-cost OpenRouter model preset.
 
 Covers:
-  - Module constants and tier definitions
+  - Module constants and tier definitions (now auto-discovered)
   - FreeFleetConfig model selection per tier
   - Fallback chain construction
   - is_free_fleet_enabled env-flag detection
   - build_free_fleet_crew crew spec structure
   - free_fleet_summary output (text + JSON)
-  - OpenRouterFreeProvider.FREE_MODELS and FREE_FLEET_TIERS class attributes
+  - OpenRouterFreeProvider auto-discovery
   - dgc free-fleet CLI command (parser round-trip)
 """
 
@@ -15,32 +15,20 @@ from __future__ import annotations
 
 import json
 import os
-import sys
 from typing import Any
 from unittest.mock import patch
 
 
 # ---------------------------------------------------------------------------
-# Test: module-level constants
+# Test: module-level constants (now live-discovered)
 # ---------------------------------------------------------------------------
 
 
-def test_all_seven_required_models_present() -> None:
-    """All 7 models specified in the task are present in the free fleet."""
+def test_all_free_models_populated() -> None:
+    """ALL_FREE_MODELS must be non-empty after import (live discovery ran)."""
     from dharma_swarm.free_fleet import ALL_FREE_MODELS
 
-    required = {
-        "meta-llama/llama-3.3-70b-instruct:free",
-        "qwen/qwen-2.5-72b-instruct:free",
-        "google/gemini-2.0-flash-exp:free",
-        "microsoft/phi-4:free",
-        "deepseek/deepseek-r1:free",
-        "nousresearch/hermes-3-llama-3.1-405b:free",
-        "mistralai/mistral-small-3.1-24b-instruct:free",
-    }
-    present = set(ALL_FREE_MODELS)
-    missing = required - present
-    assert not missing, f"Missing required models: {missing}"
+    assert len(ALL_FREE_MODELS) >= 1, "No free models discovered"
 
 
 def test_tier_models_are_non_empty() -> None:
@@ -68,6 +56,16 @@ def test_every_model_has_free_suffix() -> None:
 
     bad = [m for m in ALL_FREE_MODELS if not m.endswith(":free")]
     assert not bad, f"Non-free models found: {bad}"
+
+
+def test_refresh_fleet_repopulates() -> None:
+    """refresh_fleet() should repopulate module-level lists."""
+    from dharma_swarm.free_fleet import refresh_fleet, ALL_FREE_MODELS
+
+    result = refresh_fleet()
+    assert isinstance(result, dict)
+    assert all(k in result for k in (1, 2, 3))
+    assert len(ALL_FREE_MODELS) >= 1
 
 
 # ---------------------------------------------------------------------------
@@ -297,65 +295,34 @@ def test_free_fleet_summary_json_enabled_flag_reflects_env() -> None:
 
 
 # ---------------------------------------------------------------------------
-# Test: OpenRouterFreeProvider class attributes
+# Test: OpenRouterFreeProvider auto-discovery
 # ---------------------------------------------------------------------------
 
 
-def test_openrouter_free_provider_free_models_contains_required() -> None:
-    """OpenRouterFreeProvider.FREE_MODELS must include core required models.
-
-    Updated 2026-03-17: reduced to stable free-tier models that persist across
-    OpenRouter rotations. Previously asserted 7 models; several were retired.
-    """
+def test_openrouter_free_provider_has_get_free_models() -> None:
+    """OpenRouterFreeProvider must expose get_free_models() classmethod."""
     from dharma_swarm.providers import OpenRouterFreeProvider
 
-    # Minimal set — models that have been free for months and are unlikely to rotate
-    required = {
-        "meta-llama/llama-3.3-70b-instruct:free",
-        "mistralai/mistral-small-3.1-24b-instruct:free",
-    }
-    present = set(OpenRouterFreeProvider.FREE_MODELS)
-    missing = required - present
-    assert not missing, f"Missing from OpenRouterFreeProvider.FREE_MODELS: {missing}"
+    assert hasattr(OpenRouterFreeProvider, "get_free_models")
+    assert callable(OpenRouterFreeProvider.get_free_models)
 
 
-def test_openrouter_free_provider_has_tier_attributes() -> None:
-    """OpenRouterFreeProvider must expose FREE_FLEET_TIERS and FREE_FLEET_ALL."""
+def test_openrouter_free_provider_discovers_models() -> None:
+    """Auto-discovery should find at least 3 free models on OpenRouter."""
+    import asyncio
     from dharma_swarm.providers import OpenRouterFreeProvider
 
-    assert hasattr(OpenRouterFreeProvider, "FREE_FLEET_TIERS")
-    assert hasattr(OpenRouterFreeProvider, "FREE_FLEET_ALL")
+    # Reset cache to force fresh discovery
+    OpenRouterFreeProvider._discovered_models = []
+    OpenRouterFreeProvider._discovery_done = False
 
-    tiers = OpenRouterFreeProvider.FREE_FLEET_TIERS
-    assert isinstance(tiers, dict)
-    assert all(k in tiers for k in (1, 2, 3))
+    async def _discover():
+        return await OpenRouterFreeProvider.get_free_models()
 
-    all_models = OpenRouterFreeProvider.FREE_FLEET_ALL
-    assert isinstance(all_models, list)
-    assert len(all_models) > 0
-
-
-def test_openrouter_free_provider_tier_models_all_end_with_free() -> None:
-    """Every model in FREE_FLEET_TIERS must end with ':free'."""
-    from dharma_swarm.providers import OpenRouterFreeProvider
-
-    for tier_num, models in OpenRouterFreeProvider.FREE_FLEET_TIERS.items():
-        for model in models:
-            assert model.endswith(":free"), (
-                f"Tier {tier_num} model {model!r} missing ':free' suffix"
-            )
-
-
-def test_openrouter_free_provider_free_fleet_all_matches_tiers() -> None:
-    """FREE_FLEET_ALL must be the flat union of all FREE_FLEET_TIERS values."""
-    from dharma_swarm.providers import OpenRouterFreeProvider
-
-    expected = [
-        m
-        for tier_models in OpenRouterFreeProvider.FREE_FLEET_TIERS.values()
-        for m in tier_models
-    ]
-    assert expected == OpenRouterFreeProvider.FREE_FLEET_ALL
+    models = asyncio.run(_discover())
+    assert len(models) >= 3, f"Expected >=3 free models, got {len(models)}: {models}"
+    for m in models:
+        assert m.endswith(":free"), f"Non-free model in roster: {m}"
 
 
 # ---------------------------------------------------------------------------
@@ -368,7 +335,6 @@ def test_dgc_free_fleet_parser_registered() -> None:
     from dharma_swarm.dgc_cli import _build_parser
 
     parser = _build_parser()
-    # Parse with no args to verify the subcommand is known
     args = parser.parse_args(["free-fleet"])
     assert args.command == "free-fleet"
     assert args.tier is None
@@ -428,7 +394,6 @@ def test_cmd_free_fleet_tier_filter(capsys: Any) -> None:
 
     cmd_free_fleet(tier=1)
     captured = capsys.readouterr()
-    # All tier-1 models should appear
     for model in TIER_MODELS[1]:
         assert model in captured.out, f"Tier-1 model {model} missing from output"
 
