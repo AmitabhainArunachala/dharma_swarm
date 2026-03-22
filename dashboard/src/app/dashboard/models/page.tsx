@@ -1,7 +1,7 @@
 "use client";
 
 import Link from "next/link";
-import { useEffect, useState } from "react";
+import { useState } from "react";
 import { motion } from "framer-motion";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import {
@@ -71,21 +71,6 @@ export default function ModelsPage() {
     queryFn: () => apiFetch<TopModelOut[]>("/api/pool/top10/status"),
     refetchInterval: 30_000,
   });
-
-  useEffect(() => {
-    setDrafts((prev) => {
-      const next = { ...prev };
-      for (const model of models) {
-        if (!next[model.id]) {
-          next[model.id] = {
-            custom_label: model.custom_label ?? "",
-            short_name: model.short_name ?? "",
-          };
-        }
-      }
-      return next;
-    });
-  }, [models]);
 
   const verifyMutation = useMutation({
     mutationFn: () => apiFetch<VerifyTop10Out>("/api/pool/top10/verify", { method: "POST" }),
@@ -189,7 +174,10 @@ export default function ModelsPage() {
 
       <div className="grid gap-4 xl:grid-cols-2">
         {models.map((model, index) => {
-          const draft = drafts[model.id] ?? { custom_label: "", short_name: "" };
+          const draft = drafts[model.id] ?? {
+            custom_label: model.custom_label ?? "",
+            short_name: model.short_name ?? "",
+          };
           return (
             <motion.article
               key={model.id}

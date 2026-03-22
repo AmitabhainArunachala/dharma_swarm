@@ -95,7 +95,6 @@ export default function EcosystemPage() {
   const [selectedFile, setSelectedFile] = useState<string | null>(null);
   const [selectedAgent, setSelectedAgent] = useState<string>("");
   const [agentCommentary, setAgentCommentary] = useState("");
-  const [activityFeed, setActivityFeed] = useState<AgentActivityEvent[]>([]);
   const [graphExpanded, setGraphExpanded] = useState(false);
   const [search, setSearch] = useState("");
 
@@ -141,26 +140,27 @@ export default function EcosystemPage() {
     return () => socket.close();
   }, [qc]);
 
-  useEffect(() => {
-    const next = traces.slice(0, 20).map((trace) => {
-      const metadata = trace.metadata ?? {};
-      const filePath =
-        (metadata.file_path as string | undefined) ??
-        (metadata.path as string | undefined) ??
-        (metadata.target_file as string | undefined) ??
-        null;
-      return {
-        id: trace.id,
-        timestamp: trace.timestamp,
-        agent: trace.agent,
-        action: trace.action,
-        state: trace.state,
-        commentary: summarizeTrace(trace),
-        file_path: filePath,
-      } satisfies AgentActivityEvent;
-    });
-    setActivityFeed(next);
-  }, [traces]);
+  const activityFeed = useMemo(
+    () =>
+      traces.slice(0, 20).map((trace) => {
+        const metadata = trace.metadata ?? {};
+        const filePath =
+          (metadata.file_path as string | undefined) ??
+          (metadata.path as string | undefined) ??
+          (metadata.target_file as string | undefined) ??
+          null;
+        return {
+          id: trace.id,
+          timestamp: trace.timestamp,
+          agent: trace.agent,
+          action: trace.action,
+          state: trace.state,
+          commentary: summarizeTrace(trace),
+          file_path: filePath,
+        } satisfies AgentActivityEvent;
+      }),
+    [traces],
+  );
 
   const clusters = useMemo<SemanticCluster[]>(() => {
     const groups = new Map<string, Set<string>>();

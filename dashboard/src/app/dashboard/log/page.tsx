@@ -55,24 +55,52 @@ export default function ConversationLogPage() {
   const [loading, setLoading] = useState(true);
   const [roleFilter, setRoleFilter] = useState<string>("all");
 
+  const loadData = useCallback(async () => {
+    const [logRes, promRes, statRes] = await Promise.all([
+      apiFetch<LogEntry[]>(`/api/conversation-log/recent?hours=${hours}`),
+      apiFetch<PromiseEntry[]>(`/api/conversation-log/promises?hours=${hours}`),
+      apiFetch<LogStats | null>(`/api/conversation-log/stats?hours=${hours}`),
+    ]);
+    return {
+      entries: logRes ?? [],
+      promises: promRes ?? [],
+      stats: statRes ?? null,
+    };
+  }, [hours]);
+
   const fetchData = useCallback(async () => {
     setLoading(true);
     try {
-      const [logRes, promRes, statRes] = await Promise.all([
-        apiFetch<LogEntry[]>(`/api/conversation-log/recent?hours=${hours}`),
-        apiFetch<PromiseEntry[]>(`/api/conversation-log/promises?hours=${hours}`),
-        apiFetch<LogStats | null>(`/api/conversation-log/stats?hours=${hours}`),
-      ]);
-      setEntries(logRes ?? []);
-      setPromises(promRes ?? []);
-      setStats(statRes ?? null);
+      const next = await loadData();
+      setEntries(next.entries);
+      setPromises(next.promises);
+      setStats(next.stats);
     } catch {
       // API not available — show empty state
+    } finally {
+      setLoading(false);
     }
-    setLoading(false);
-  }, [hours]);
+  }, [loadData]);
 
-  useEffect(() => { fetchData(); }, [fetchData]);
+  useEffect(() => {
+    let active = true;
+    void (async () => {
+      try {
+        const next = await loadData();
+        if (!active) return;
+        setEntries(next.entries);
+        setPromises(next.promises);
+        setStats(next.stats);
+      } catch {
+        // API not available — show empty state
+      } finally {
+        if (active) setLoading(false);
+      }
+    })();
+    return () => {
+      active = false;
+    };
+  }, [loadData]);
 
   // Auto-refresh every 30s
   useEffect(() => {
@@ -172,7 +200,7 @@ export default function ConversationLogPage() {
 
           {filteredEntries.length === 0 ? (
             <div className="py-12 text-center text-sumi-500">
-              No conversation entries yet. Start talking and they'll appear here.
+              No conversation entries yet. Start talking and they&apos;ll appear here.
             </div>
           ) : (
             <div className="max-h-[600px] overflow-y-auto space-y-1">

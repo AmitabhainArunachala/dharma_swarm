@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import logging
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
@@ -20,6 +21,8 @@ from dharma_swarm.runtime_state import (
     SessionState,
     WorkspaceLease,
 )
+
+logger = logging.getLogger(__name__)
 
 
 def _canonical_json(data: dict[str, Any]) -> str:
@@ -91,10 +94,11 @@ class ContextCompiler:
     _SECTION_WEIGHTS = {
         "Governance": 0.10,
         "Operator Intent": 0.12,
-        "Task State": 0.16,
+        "Task State": 0.12,
         "Always-On Memory": 0.14,
-        "Recent Session": 0.12,
-        "Retrieved Recall": 0.14,
+        "Recent Session": 0.10,
+        "Retrieved Recall": 0.10,
+        "Memory Palace": 0.10,
         "Durable Facts": 0.10,
         "Artifacts": 0.06,
         "Workspace": 0.06,
@@ -106,10 +110,12 @@ class ContextCompiler:
         runtime_state: RuntimeStateStore,
         memory_lattice: MemoryLattice,
         provider_policy: ProviderPolicyRouter | None = None,
+        memory_palace: Any = None,
     ) -> None:
         self.runtime_state = runtime_state
         self.memory_lattice = memory_lattice
         self.provider_policy = provider_policy or ProviderPolicyRouter()
+        self.memory_palace = memory_palace
         # Frozen snapshot cache: session_id -> ContextBundleRecord
         self._frozen_bundles: dict[str, ContextBundleRecord] = {}
 
@@ -191,6 +197,13 @@ class ContextCompiler:
             else []
         )
         always_on = await self.memory_lattice.always_on_context(max_chars=_approx_char_budget(token_budget) // 4)
+        palace_hits: list[dict[str, Any]] = []
+        if self.memory_palace is not None:
+            try:
+                if recall_query:
+                    palace_hits = self.memory_palace.search(recall_query, top_k=5)
+            except Exception as exc:
+                logger.debug("Memory Palace search failed: %s", exc)
         sections = self._build_sections(
             session=session,
             task_id=task_id,
@@ -202,6 +215,7 @@ class ContextCompiler:
             always_on=always_on,
             recent_events=recent_events,
             recall_hits=recall_hits,
+            palace_hits=palace_hits,
             facts=facts,
             artifacts=artifacts,
             workspace_root=Path(workspace_root).expanduser() if workspace_root else None,
@@ -284,6 +298,7 @@ class ContextCompiler:
         always_on: str,
         recent_events: list[dict[str, Any]],
         recall_hits: list[MemoryRecallHit],
+        palace_hits: list[dict[str, Any]],
         facts: list[MemoryFact],
         artifacts: list[ArtifactRecord],
         workspace_root: Path | None,
@@ -403,6 +418,22 @@ class ContextCompiler:
                     priority=6,
                     content="\n".join(recall_lines),
                     source_refs=_dedupe(refs),
+                )
+            )
+
+        if palace_hits:
+            palace_lines = []
+            for hit in palace_hits[:5]:
+                score = hit.get("score", 0.0)
+                text = str(hit.get("text", ""))[:180].replace("\n", " ")
+                source = hit.get("source", "palace")
+                palace_lines.append(f"- [{source}] score={score:.3f} | {text}")
+            sections.append(
+                ContextSection(
+                    name="Memory Palace",
+                    priority=6,
+                    content="\n".join(palace_lines),
+                    source_refs=[],
                 )
             )
 

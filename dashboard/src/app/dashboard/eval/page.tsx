@@ -31,20 +31,48 @@ export default function EvalPage() {
   const [trend, setTrend] = useState<EvalReport[]>([]);
   const [loading, setLoading] = useState(true);
 
+  const loadData = useCallback(async () => {
+    const [latestRes, trendRes] = await Promise.all([
+      apiFetch<EvalReport | null>("/api/eval/latest"),
+      apiFetch<EvalReport[]>("/api/eval/trend"),
+    ]);
+    return {
+      latest: latestRes ?? null,
+      trend: trendRes ?? [],
+    };
+  }, []);
+
   const fetchData = useCallback(async () => {
     setLoading(true);
     try {
-      const [latestRes, trendRes] = await Promise.all([
-        apiFetch<EvalReport | null>("/api/eval/latest"),
-        apiFetch<EvalReport[]>("/api/eval/trend"),
-      ]);
-      setLatest(latestRes ?? null);
-      setTrend(trendRes ?? []);
-    } catch { /* API unavailable */ }
-    setLoading(false);
-  }, []);
+      const next = await loadData();
+      setLatest(next.latest);
+      setTrend(next.trend);
+    } catch {
+      /* API unavailable */
+    } finally {
+      setLoading(false);
+    }
+  }, [loadData]);
 
-  useEffect(() => { fetchData(); }, [fetchData]);
+  useEffect(() => {
+    let active = true;
+    void (async () => {
+      try {
+        const next = await loadData();
+        if (!active) return;
+        setLatest(next.latest);
+        setTrend(next.trend);
+      } catch {
+        /* API unavailable */
+      } finally {
+        if (active) setLoading(false);
+      }
+    })();
+    return () => {
+      active = false;
+    };
+  }, [loadData]);
 
   return (
     <motion.div
