@@ -81,6 +81,8 @@ class Orchestrator:
         session_id: str | None = None,
         event_memory: Any = None,
         yoga: YogaScheduler | None = None,
+        state_dir: Path | str | None = None,
+        ontology_path: Path | str | None = None,
     ) -> None:
         from dharma_swarm.config import DEFAULT_CONFIG
         _cfg = DEFAULT_CONFIG.orchestrator
@@ -90,6 +92,18 @@ class Orchestrator:
         self._bus = message_bus
         self._event_memory = event_memory
         self._yoga = yoga
+        if state_dir is not None:
+            self._state_dir = Path(state_dir).expanduser()
+        elif ledger_dir is not None:
+            self._state_dir = Path(ledger_dir).expanduser()
+        else:
+            self._state_dir = None
+        if ontology_path is not None:
+            self._ontology_path = Path(ontology_path).expanduser()
+        elif self._state_dir is not None:
+            self._ontology_path = self._state_dir / "ontology.db"
+        else:
+            self._ontology_path = None
         self._ledger = ledger or SessionLedger(
             base_dir=ledger_dir,
             session_id=session_id,
@@ -112,6 +126,40 @@ class Orchestrator:
         self._last_coordination_result: CoordinationResult | None = None
         self._last_coordination_summary: dict[str, Any] = self._empty_coordination_summary()
         self._last_coordination_signature = ""
+
+    def _shared_dir(self) -> Path | None:
+        state_dir = getattr(self, "_state_dir", None)
+        if state_dir is None:
+            return None
+        return state_dir / "shared"
+
+    def _algedonic_log_path(self) -> Path | None:
+        state_dir = getattr(self, "_state_dir", None)
+        if state_dir is None:
+            return None
+        return state_dir / "algedonic_signals.jsonl"
+
+    def _get_telic_seam(self):
+        if not hasattr(self, "_ontology_path"):
+            from dharma_swarm import telic_seam as telic_seam_module
+            from dharma_swarm.ontology import OntologyRegistry
+            from dharma_swarm.telic_seam import TelicSeam
+
+            seam = telic_seam_module._SEAM
+            if seam is not None:
+                return seam
+
+            seam = getattr(self, "_legacy_telic_seam", None)
+            if seam is None:
+                seam = TelicSeam(registry=OntologyRegistry.create_dharma_registry())
+                self._legacy_telic_seam = seam
+            return seam
+
+        if self._ontology_path is None:
+            return None
+        from dharma_swarm.telic_seam import get_seam
+
+        return get_seam(self._ontology_path)
 
     async def dispatch(
         self,
@@ -754,8 +802,9 @@ class Orchestrator:
 
         try:
             import random
-            from dharma_swarm.telic_seam import get_seam
-            seam = get_seam()
+            seam = self._get_telic_seam()
+            if seam is None:
+                return None
 
             # Exploration: 10% of the time, pick randomly
             if random.random() < self._EXPLORATION_RATE:
@@ -1465,20 +1514,21 @@ class Orchestrator:
                 "timestamp": datetime.now(timezone.utc).isoformat(),
             })
             # Also persist to algedonic log (S5 bypass)
-            _alg_path = Path.home() / ".dharma" / "algedonic_signals.jsonl"
-            _alg_path.parent.mkdir(parents=True, exist_ok=True)
-            with _alg_path.open("a", encoding="utf-8") as _af:
-                _af.write(json.dumps({
-                    "kind": "task_retries_exhausted",
-                    "severity": "warning",
-                    "value": retry_count,
-                    "action": f"dead-letter: {task_title}",
-                    "timestamp": time.time(),
-                }) + "\n")
-            logger.warning(
-                "ALGEDONIC: task %s exhausted %d retries — dead-lettered",
-                td.task_id, max_retries,
-            )
+            _alg_path = self._algedonic_log_path()
+            if _alg_path is not None:
+                _alg_path.parent.mkdir(parents=True, exist_ok=True)
+                with _alg_path.open("a", encoding="utf-8") as _af:
+                    _af.write(json.dumps({
+                        "kind": "task_retries_exhausted",
+                        "severity": "warning",
+                        "value": retry_count,
+                        "action": f"dead-letter: {task_title}",
+                        "timestamp": time.time(),
+                    }) + "\n")
+                logger.warning(
+                    "ALGEDONIC: task %s exhausted %d retries — dead-lettered",
+                    td.task_id, max_retries,
+                )
         except Exception:
             logger.debug("Algedonic signal emission failed", exc_info=True)
 
@@ -1491,12 +1541,13 @@ class Orchestrator:
         proposal_id: str | None = None
         if task_for_gate is not None:
             try:
-                from dharma_swarm.telic_seam import get_seam
-                proposal_id = get_seam().record_dispatch(
-                    task_for_gate, td.agent_id,
-                    topology=td.topology.value if td.topology else "dispatch",
-                )
-                td.metadata["telic_proposal_id"] = proposal_id or ""
+                seam = self._get_telic_seam()
+                if seam is not None:
+                    proposal_id = seam.record_dispatch(
+                        task_for_gate, td.agent_id,
+                        topology=td.topology.value if td.topology else "dispatch",
+                    )
+                    td.metadata["telic_proposal_id"] = proposal_id or ""
             except Exception:
                 logger.debug("Telic seam dispatch recording failed", exc_info=True)
 
@@ -1522,11 +1573,12 @@ class Orchestrator:
         # ── Telic Seam: record GateDecision in ontology ──
         if proposal_id is not None:
             try:
-                from dharma_swarm.telic_seam import get_seam
-                get_seam().record_gate_decision(
-                    proposal_id, gate.result,
-                    witness_reroutes=gate.attempts,
-                )
+                seam = self._get_telic_seam()
+                if seam is not None:
+                    seam.record_gate_decision(
+                        proposal_id, gate.result,
+                        witness_reroutes=gate.attempts,
+                    )
             except Exception:
                 logger.debug("Telic seam gate decision recording failed", exc_info=True)
 
@@ -1786,7 +1838,9 @@ class Orchestrator:
         from pathlib import Path
         from datetime import datetime, timezone
 
-        shared_dir = Path.home() / ".dharma" / "shared"
+        shared_dir = self._shared_dir()
+        if shared_dir is None:
+            return
         shared_dir.mkdir(parents=True, exist_ok=True)
 
         # Write shared notes (append, not overwrite)

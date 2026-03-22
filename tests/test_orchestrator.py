@@ -9,6 +9,8 @@ from dharma_swarm.models import (
     AgentRole,
     AgentState,
     AgentStatus,
+    GateCheckResult,
+    GateDecision,
     Message,
     Task,
     TaskStatus,
@@ -91,6 +93,26 @@ class MockEventMemory:
 
     async def ingest_envelope(self, envelope):
         self.envelopes.append(envelope)
+
+
+@pytest.fixture(autouse=True)
+def fast_dispatch_gate():
+    """Default orchestrator dispatch gates to ALLOW for non-gate tests."""
+    from unittest.mock import patch
+
+    from dharma_swarm.telos_gates import ReflectiveGateOutcome
+
+    allow = ReflectiveGateOutcome(
+        result=GateCheckResult(
+            decision=GateDecision.ALLOW,
+            reason="All gates passed (test mock)",
+        ),
+    )
+    with patch(
+        "dharma_swarm.orchestrator.check_with_reflective_reroute",
+        return_value=allow,
+    ):
+        yield allow
 
 
 @pytest.fixture
@@ -472,9 +494,21 @@ async def test_route_next_skips_running_tasks(agents, tasks):
 
 
 @pytest.mark.asyncio
-async def test_assign_dispatch_telos_block_marks_failed_and_skips_assignment(agents):
+async def test_assign_dispatch_telos_block_marks_failed_and_skips_assignment(agents, monkeypatch):
     """Harmful dispatch should fail fast before pool assignment."""
     from dharma_swarm.models import TaskDispatch
+    from dharma_swarm.telos_gates import ReflectiveGateOutcome
+
+    monkeypatch.setattr(
+        "dharma_swarm.orchestrator.check_with_reflective_reroute",
+        lambda **_: ReflectiveGateOutcome(
+            result=GateCheckResult(
+                decision=GateDecision.BLOCK,
+                reason="Mock telos block",
+            ),
+        ),
+        raising=True,
+    )
 
     board = MockTaskBoard()
     board.tasks = [

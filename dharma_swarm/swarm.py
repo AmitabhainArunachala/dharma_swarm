@@ -271,6 +271,9 @@ class SwarmManager:
             message_bus=self._message_bus,
             event_memory=self._event_memory,
             yoga=self._yoga,
+            ledger_dir=self.state_dir,
+            state_dir=self.state_dir,
+            ontology_path=self.state_dir / "ontology.db",
         )
 
         self._running = True
