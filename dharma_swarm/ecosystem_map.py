@@ -12,6 +12,8 @@ Usage:
   python3 ecosystem_map.py all        -> full map
 """
 
+from __future__ import annotations
+
 from pathlib import Path
 from datetime import datetime
 

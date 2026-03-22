@@ -83,6 +83,7 @@ class TestAutonomyDecisions:
         assert decision.auto_approve is True
 
     def test_aggressive_approves_most(self):
+        # quiet_hours=set() avoids time-dependent downgrade during 2-4 AM
         auto = AdaptiveAutonomy(base_level="aggressive", quiet_hours=set())
         medium = auto.should_auto_approve("edit", RiskLevel.MEDIUM)
         high = auto.should_auto_approve("deploy", RiskLevel.HIGH, confidence=0.8)

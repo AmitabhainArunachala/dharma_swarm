@@ -118,6 +118,46 @@ def test_build_opportunities_biases_to_autonomy_director(
     assert "director" in primary.title.lower()
 
 
+def test_sense_can_promote_world_service_signals_from_jk_artifacts(
+    tmp_path: Path,
+) -> None:
+    repo_root = tmp_path / "repo"
+    state_dir = tmp_path / ".dharma"
+    repo_root.mkdir(parents=True, exist_ok=True)
+    scout = _write(
+        tmp_path / "external" / "SCOUT_LOG.md",
+        "# Jagat Kalyan Scout Log\n\n"
+        "## 2026-03-21 — Auto Scout\n\n"
+        "### HIGH URGENCY\n"
+        "- Symbiosis Coalition mangrove RFP appears live.\n"
+        "- Anthropic Economic Futures grant should submit this week.\n"
+        "- AI company carbon buyers want verified MRV and community employment for displaced workers.\n"
+        "- This ecological restoration opportunity is grounded in welfare-ton logic.\n",
+    )
+
+    director = ThinkodynamicDirector(
+        repo_root=repo_root,
+        state_dir=state_dir,
+        scan_roots=(),
+        external_roots=(scout,),
+        mission_brief="Choose the next highest-leverage real-world mission.",
+        signal_limit=6,
+        max_candidates=8,
+        max_active_tasks=4,
+    )
+
+    sense = director.sense()
+
+    assert sense["signals"]
+    top_signal = sense["signals"][0]
+    assert "external_urgency" in top_signal.markers
+    assert "world_service" in top_signal.markers
+    primary = sense["primary"]
+    assert primary is not None
+    assert primary.theme == "sustainability_impact"
+    assert "ecological restoration" in primary.title.lower()
+
+
 def test_sense_can_promote_latent_gold_without_file_signals(tmp_path: Path) -> None:
     repo_root = tmp_path / "repo"
     state_dir = tmp_path / ".dharma"

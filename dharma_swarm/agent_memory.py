@@ -152,7 +152,8 @@ class AgentMemoryBank:
             evicted = self._evict_lowest(tier)
             if evicted and tier_name == "working":
                 # Demoted to archival instead of lost
-                logger.debug("Auto-evicted working memory '%s' to archival", evicted)
+                if evicted:
+                    logger.debug("Auto-evicted working memory '%s' to archival", evicted)
 
         entry = AgentMemoryEntry(
             key=key,

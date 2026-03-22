@@ -17,6 +17,8 @@ from dharma_swarm.lineage import (
     LineageGraph,
     ProvenanceChain,
 )
+from dharma_swarm.ontology_hub import OntologyHub
+from dharma_swarm.ontology_runtime import ontology_path, reset_shared_registry
 
 
 @pytest.fixture()
@@ -324,3 +326,27 @@ class TestPersistence:
         edge = g2.producers_of("y")
         assert len(edge) == 1
         assert edge[0].task_id == "t1"
+
+    def test_default_db_path_follows_shared_ontology_db(self, tmp_path, monkeypatch):
+        monkeypatch.setenv("DHARMA_ONTOLOGY_PATH", str(tmp_path / "ontology.json"))
+        reset_shared_registry()
+
+        graph = LineageGraph()
+
+        assert graph.db_path == ontology_path()
+        assert graph.db_path.name == "ontology.db"
+
+        reset_shared_registry()
+
+    def test_lineage_and_ontology_can_share_one_db(self, tmp_path):
+        db = tmp_path / "ontology.db"
+        hub = OntologyHub(db_path=db)
+        graph = LineageGraph(db_path=db)
+
+        graph.record_transformation("t1", ["a"], ["b"], operation="derive")
+        stats = graph.stats()
+
+        assert stats["total_edges"] == 1
+        assert hub.total_objects() == 0
+
+        hub.close()

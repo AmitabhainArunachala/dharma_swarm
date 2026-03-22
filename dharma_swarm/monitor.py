@@ -573,12 +573,12 @@ class SystemMonitor:
                     "summary": correlation.summary,
                 }
             except Exception:
-                pass
+                logger.debug("Bridge correlation failed", exc_info=True)
 
             try:
                 result["group_summary"] = bridge.group_summary()
             except Exception:
-                pass
+                logger.debug("Bridge group_summary failed", exc_info=True)
 
             return result
         except Exception:

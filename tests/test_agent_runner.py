@@ -3,6 +3,7 @@
 import builtins
 import re
 from pathlib import Path
+import sqlite3
 
 import pytest
 from unittest.mock import AsyncMock
@@ -10,6 +11,7 @@ from unittest.mock import AsyncMock
 from dharma_swarm.models import AgentConfig, AgentRole, AgentStatus, Task
 from dharma_swarm.agent_runner import AgentPool, AgentRunner, _build_prompt
 from dharma_swarm.lineage import LineageGraph
+from dharma_swarm.message_bus import MessageBus
 from dharma_swarm.ontology import OntologyRegistry
 from dharma_swarm.telic_seam import TelicSeam
 
@@ -17,6 +19,26 @@ from dharma_swarm.telic_seam import TelicSeam
 @pytest.fixture
 def config():
     return AgentConfig(name="test-agent", role=AgentRole.CODER)
+
+
+def _with_state_dir(config: AgentConfig, tmp_path: Path) -> AgentConfig:
+    state_dir = tmp_path / ".dharma"
+    state_dir.mkdir(exist_ok=True)
+    return config.model_copy(
+        update={
+            "metadata": {
+                **config.metadata,
+                "state_dir": str(state_dir),
+                "memory_state_dir": str(state_dir),
+            }
+        }
+    )
+
+
+def _ontology_path(tmp_path: Path) -> Path:
+    state_dir = tmp_path / ".dharma"
+    state_dir.mkdir(exist_ok=True)
+    return state_dir / "ontology.db"
 
 
 @pytest.mark.asyncio
@@ -28,9 +50,35 @@ async def test_runner_start(config):
 
 
 @pytest.mark.asyncio
+async def test_runner_start_registers_bus_presence_and_topics(config, tmp_path: Path):
+    bus = MessageBus(tmp_path / "messages.db")
+    await bus.init_db()
+    runner = AgentRunner(config, message_bus=bus)
+
+    await runner.start()
+
+    status = await bus.get_agent_status("test-agent")
+    with sqlite3.connect(tmp_path / "messages.db") as db:
+        subscriptions = db.execute(
+            "SELECT topic FROM subscriptions WHERE agent_id = ? ORDER BY topic",
+            ("test-agent",),
+        ).fetchall()
+
+    assert status is not None
+    assert status["metadata"]["runtime_agent_id"] == config.id
+    assert [row[0] for row in subscriptions] == [
+        "operator.bridge.lifecycle",
+        "orchestrator.lifecycle",
+    ]
+
+
+@pytest.mark.asyncio
 @pytest.mark.timeout(90)
-async def test_runner_mock_task(config, fast_gate):
-    runner = AgentRunner(config)
+async def test_runner_mock_task(config, fast_gate, tmp_path: Path):
+    runner = AgentRunner(
+        _with_state_dir(config, tmp_path),
+        ontology_path=_ontology_path(tmp_path),
+    )
     await runner.start()
     task = Task(title="Write tests")
     result = await runner.run_task(task)
@@ -60,7 +108,10 @@ async def test_runner_records_telic_chain_with_stable_agent_id_and_cell_scope(
     telic_module._SEAM = seam
 
     try:
-        named_config = config.model_copy(
+        named_config = _with_state_dir(
+            config,
+            tmp_path,
+        ).model_copy(
             update={"name": "display-name", "id": "agent-stable-id"}
         )
         runner = AgentRunner(named_config, provider=provider)
@@ -97,7 +148,7 @@ async def test_runner_records_telic_chain_with_stable_agent_id_and_cell_scope(
         telic_module._SEAM = old_seam
 
 
-def test_build_prompt_uses_recent_only_memory_recall_by_default(config, monkeypatch):
+def test_build_prompt_uses_active_memory_recall_by_default(config, monkeypatch):
     recorded: dict[str, object] = {}
 
     def _fake_memory(**kwargs):
@@ -109,7 +160,26 @@ def test_build_prompt_uses_recent_only_memory_recall_by_default(config, monkeypa
 
     _build_prompt(Task(title="Build prompt", description="Use memory carefully"), config)
 
-    assert recorded["allow_semantic_search"] is False
+    # Default mode is now "active" — semantic search enabled for richer recall
+    assert recorded["allow_semantic_search"] is True
+
+
+def test_build_prompt_prefers_local_state_dir_when_available(config, monkeypatch, tmp_path):
+    recorded: dict[str, object] = {}
+
+    def _fake_memory(*, state_dir=None, **kwargs):
+        recorded["state_dir"] = state_dir
+        recorded.update(kwargs)
+        return "No memory database yet."
+
+    monkeypatch.chdir(tmp_path)
+    (tmp_path / ".dharma").mkdir()
+    monkeypatch.setattr("dharma_swarm.context.read_memory_context", _fake_memory, raising=True)
+    monkeypatch.setattr("dharma_swarm.context.read_latent_gold_context", lambda **_: "", raising=True)
+
+    _build_prompt(Task(title="Build prompt", description="Prefer local state"), config)
+
+    assert recorded["state_dir"] == tmp_path / ".dharma"
 
 
 def test_build_prompt_handles_memory_context_import_failure(config, monkeypatch):
@@ -136,16 +206,21 @@ def test_build_prompt_handles_memory_context_import_failure(config, monkeypatch)
 
 @pytest.mark.asyncio
 @pytest.mark.timeout(180)
-async def test_runner_provider_error_string_marks_failure(config, fast_gate):
+async def test_runner_provider_error_string_marks_failure(config, fast_gate, tmp_path: Path):
     from dharma_swarm.models import LLMResponse
 
+    isolated_config = _with_state_dir(config, tmp_path)
     for text in ("ERROR: upstream unavailable", "API Error: Unable to connect to API (ENOTFOUND)"):
         provider = AsyncMock()
         provider.complete = AsyncMock(
             return_value=LLMResponse(content=text, model="test"),
         )
 
-        runner = AgentRunner(config, provider=provider)
+        runner = AgentRunner(
+            isolated_config,
+            provider=provider,
+            ontology_path=_ontology_path(tmp_path),
+        )
         await runner.start()
 
         with pytest.raises(RuntimeError, match=re.escape(text)):

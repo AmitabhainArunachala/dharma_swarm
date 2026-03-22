@@ -125,7 +125,7 @@ class SystemRV:
                 note_count = len(list(shared_dir.glob("*.md")))
                 vector.append(float(note_count))
         except Exception:
-            pass
+            logger.debug("System R_V shared-dir scan failed", exc_info=True)
 
         # Ensure minimum dimensionality
         if len(vector) < 2:

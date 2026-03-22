@@ -25,8 +25,32 @@ import type {
 // Configuration
 // ---------------------------------------------------------------------------
 
+const DEFAULT_INTERNAL_API_URL = "http://127.0.0.1:8420";
+
+function trimTrailingSlash(value: string): string {
+  return value.replace(/\/+$/, "");
+}
+
+function defaultApiBaseUrl(): string {
+  if (typeof window !== "undefined") {
+    return "";
+  }
+  return DEFAULT_INTERNAL_API_URL;
+}
+
 const BASE_URL =
-  process.env.NEXT_PUBLIC_API_URL ?? "http://localhost:8420";
+  trimTrailingSlash(
+    process.env.NEXT_PUBLIC_API_URL ??
+      process.env.DHARMA_API_INTERNAL_URL ??
+      defaultApiBaseUrl(),
+  );
+
+export const API_TRANSPORT_MODE = BASE_URL ? "direct" : "same-origin";
+
+export function apiPath(path: string): string {
+  const normalizedPath = path.startsWith("/") ? path : `/${path}`;
+  return `${BASE_URL}${normalizedPath}`;
+}
 
 // ---------------------------------------------------------------------------
 // Core fetch wrapper
@@ -36,7 +60,7 @@ async function _fetchWrapped<T>(
   path: string,
   init?: RequestInit,
 ): Promise<ApiResponse<T>> {
-  const url = `${BASE_URL}${path}`;
+  const url = apiPath(path);
 
   try {
     const res = await fetch(url, {
@@ -121,11 +145,13 @@ export function fetchTasks(params?: {
   limit?: number;
   offset?: number;
 }): Promise<ApiResponse<TaskOut[]>> {
+  void params;
   // API serves tasks at /api/commands/tasks
   return apiGet<TaskOut[]>("/api/commands/tasks");
 }
 
 export function fetchTask(id: string): Promise<ApiResponse<TaskOut>> {
+  void id;
   // No individual task endpoint yet — fetch all and filter client-side
   return apiGet<TaskOut>(`/api/commands/tasks`);
 }
@@ -248,7 +274,21 @@ export function fetchModules(): Promise<ApiResponse<ModuleTruthOut[]>> {
 // ---------------------------------------------------------------------------
 
 export function wsBaseUrl(): string {
-  return BASE_URL.replace(/^http/, "ws");
+  const explicit = process.env.NEXT_PUBLIC_WS_URL?.trim();
+  if (explicit) {
+    return trimTrailingSlash(explicit);
+  }
+
+  if (BASE_URL) {
+    return BASE_URL.replace(/^http/, "ws");
+  }
+
+  if (typeof window !== "undefined") {
+    const protocol = window.location.protocol === "https:" ? "wss:" : "ws:";
+    return `${protocol}//${window.location.host}`;
+  }
+
+  return DEFAULT_INTERNAL_API_URL.replace(/^http/, "ws");
 }
 
 export { BASE_URL };
@@ -271,7 +311,7 @@ export class ApiError extends Error {
 }
 
 export async function apiFetch<T>(path: string, init?: RequestInit): Promise<T> {
-  const url = `${BASE_URL}${path}`;
+  const url = apiPath(path);
   const res = await fetch(url, {
     ...init,
     headers: {

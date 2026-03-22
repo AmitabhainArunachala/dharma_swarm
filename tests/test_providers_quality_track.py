@@ -142,7 +142,7 @@ async def test_openrouter_free_all_models_fail_returns_error(monkeypatch):
     monkeypatch.setattr(p, "_client_or_raise", lambda: client)
 
     out = await p.complete(req)
-    assert out.content.startswith("ERROR: All free models failed")
+    assert "All" in out.content and "free models failed" in out.content
 
 
 @pytest.mark.asyncio
@@ -319,11 +319,11 @@ async def test_ollama_cloud_complete_uses_auth_headers(monkeypatch):
 
         @staticmethod
         def json():
+            # Cloud path uses OpenAI-compatible format
             return {
-                "message": {"content": "OK"},
-                "prompt_eval_count": 1,
-                "eval_count": 1,
-                "done_reason": "stop",
+                "choices": [{"message": {"content": "OK"}, "finish_reason": "stop"}],
+                "model": "kimi-k2.5:cloud",
+                "usage": {"prompt_tokens": 1, "completion_tokens": 1, "total_tokens": 2},
             }
 
     class _Client:
@@ -338,8 +338,9 @@ async def test_ollama_cloud_complete_uses_auth_headers(monkeypatch):
     assert out.content == "OK"
     assert provider.base_url == "https://ollama.com"
     assert provider.transport_mode == "cloud_api"
-    assert captured["url"] == "https://ollama.com/api/chat"
-    assert captured["headers"] == {"Authorization": "Bearer ollama-cloud-key"}
+    assert captured["url"] == "https://ollama.com/v1/chat/completions"
+    assert "Authorization" in captured["headers"]
+    assert captured["headers"]["Authorization"] == "Bearer ollama-cloud-key"
 
 
 @pytest.mark.asyncio

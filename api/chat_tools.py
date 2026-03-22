@@ -11,6 +11,7 @@ import glob as globmod
 import json
 import logging
 import os
+import re
 import subprocess
 from pathlib import Path
 
@@ -427,15 +428,43 @@ async def exec_edit_file(args: dict) -> str:
         return f"ERROR editing {path}: {e}"
 
 
+_DANGEROUS_PATTERNS = [
+    re.compile(r"rm\s+(-\w*[rf]\w*\s+)+/(?:\s|$)"),  # rm -rf /
+    re.compile(r"rm\s+(-\w*[rf]\w*\s+)+~"),            # rm -rf ~
+    re.compile(r"mkfs\b"),
+    re.compile(r"dd\s+.*if\s*="),
+    re.compile(r">\s*/dev/"),
+    re.compile(r"chmod\s+.*777\s+/"),
+    re.compile(r"curl\s+.*\|\s*(?:ba)?sh"),             # curl | sh
+    re.compile(r"wget\s+.*\|\s*(?:ba)?sh"),
+    re.compile(r":\(\)\s*\{\s*:\|:\s*&\s*\}"),          # fork bomb
+    re.compile(r">\s*/etc/"),
+    re.compile(r"sudo\s"),
+]
+
+
 async def exec_shell(args: dict) -> str:
     command = args["command"]
     timeout = min(60, args.get("timeout", 30))
 
-    # Block obviously dangerous commands
-    dangerous = ["rm -rf /", "rm -rf ~", "mkfs", "dd if=", "> /dev/"]
-    for d in dangerous:
-        if d in command:
-            return f"ERROR: Blocked dangerous command pattern: {d}"
+    # Gate check (S3 control — telos gates evaluate before execution)
+    try:
+        from dharma_swarm.telos_gates import check_action
+        gate = check_action(action=f"shell_exec: {command[:200]}", content=command)
+        if gate.decision.value == "BLOCK":
+            logger.warning("Gate blocked shell command: %s — %s", command[:100], gate.reason)
+            return f"ERROR: Gate blocked command: {gate.reason}"
+    except Exception:
+        logger.debug("Gate evaluation failed for shell command", exc_info=True)
+
+    # Pattern-based blocklist (defense in depth)
+    for pattern in _DANGEROUS_PATTERNS:
+        if pattern.search(command):
+            logger.warning("Blocked dangerous shell command: %s", command[:200])
+            return f"ERROR: Blocked dangerous command pattern"
+
+    # Audit log (P6 — witness everything)
+    logger.info("shell_exec: %s", command[:300])
 
     try:
         proc = await asyncio.create_subprocess_shell(

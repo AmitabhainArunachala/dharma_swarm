@@ -105,6 +105,33 @@ def create_mcp_server(state_dir: str = ".dharma"):
                     },
                 },
             ),
+            Tool(
+                name="graph_nexus_query",
+                description="Query all dharma_swarm graphs for information about a concept or term",
+                inputSchema={
+                    "type": "object",
+                    "properties": {
+                        "term": {"type": "string", "description": "Concept or term to search for"},
+                    },
+                    "required": ["term"],
+                },
+            ),
+            Tool(
+                name="concept_blast_radius",
+                description="Compute cross-graph impact of changing or removing a concept",
+                inputSchema={
+                    "type": "object",
+                    "properties": {
+                        "concept": {"type": "string", "description": "Concept name to analyze"},
+                    },
+                    "required": ["concept"],
+                },
+            ),
+            Tool(
+                name="telos_status",
+                description="Show strategic objectives, key results, and progress",
+                inputSchema={"type": "object", "properties": {}},
+            ),
         ]
 
     @server.call_tool()
@@ -150,6 +177,25 @@ def create_mcp_server(state_dir: str = ".dharma"):
             entries = await swarm.recall(limit=arguments.get("limit", 10))
             data = [{"layer": e.layer.value, "content": e.content[:200]} for e in entries]
             return [TextContent(type="text", text=json.dumps(data, indent=2))]
+
+        elif name == "graph_nexus_query":
+            from dharma_swarm.graph_nexus import GraphNexus
+            async with GraphNexus() as nexus:
+                result = await nexus.query_about(arguments["term"])
+            return [TextContent(type="text", text=result.model_dump_json(indent=2))]
+
+        elif name == "concept_blast_radius":
+            from dharma_swarm.concept_blast_radius import ConceptBlastRadius
+            cbr = ConceptBlastRadius()
+            result = await cbr.compute_by_name(arguments["concept"])
+            return [TextContent(type="text", text=result.model_dump_json(indent=2))]
+
+        elif name == "telos_status":
+            from dharma_swarm.telos_graph import TelosGraph
+            telos = TelosGraph()
+            await telos.load()
+            summary = telos.strategy_map_summary()
+            return [TextContent(type="text", text=json.dumps(summary, indent=2, default=str))]
 
         return [TextContent(type="text", text=f"Unknown tool: {name}")]
 

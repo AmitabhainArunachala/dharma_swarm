@@ -40,6 +40,8 @@ interface AgentCardProps {
 export function AgentCard({ agent, index = 0, onClick }: AgentCardProps) {
   const accent = accentAt(index);
   const hp = agentHealthPercent(agent);
+  const displayName = agent.display_name || agent.name;
+  const modelLabel = agent.model_label || agent.model;
 
   return (
     <motion.div
@@ -57,9 +59,16 @@ export function AgentCard({ agent, index = 0, onClick }: AgentCardProps) {
       <div className="mb-2 flex items-center justify-between">
         <div className="flex items-center gap-2.5">
           <HealthBadge status={agentHealthStatus(agent)} size="sm" />
-          <span className="text-sm font-semibold" style={{ color: colors.torinoko }}>
-            {agent.name}
-          </span>
+          <div className="min-w-0">
+            <div className="truncate text-sm font-semibold" style={{ color: colors.torinoko }}>
+              {displayName}
+            </div>
+            {modelLabel && (
+              <div className="truncate text-[10px]" style={{ color: colors.sumi[600] }}>
+                {modelLabel}
+              </div>
+            )}
+          </div>
         </div>
         <span
           className="text-[10px] font-medium uppercase tracking-wider"

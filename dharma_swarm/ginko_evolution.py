@@ -275,7 +275,7 @@ class PromptTournament:
             try:
                 return active.read_text(encoding="utf-8")
             except Exception:
-                pass
+                logger.debug("Active prompt read failed for %s", name, exc_info=True)
         # Fallback to identity.json
         identity = _read_json(self._identity_path(name))
         if identity:
@@ -526,7 +526,7 @@ class PromptTournament:
                 try:
                     is_active = active_path.read_text(encoding="utf-8") == text
                 except Exception:
-                    pass
+                    logger.debug("Active prompt comparison failed for %s", agent_name, exc_info=True)
 
             variant = PromptVariant(
                 text=text,

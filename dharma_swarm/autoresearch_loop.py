@@ -604,7 +604,7 @@ class AutoResearchLoop:
                             )
                             await self._archive.add_entry(entry)
                         except Exception:
-                            pass
+                            logger.debug("Evolution archive entry failed", exc_info=True)
                     else:
                         # REVERT — tests failed or fitness decreased
                         await self._revert_module(module_path)

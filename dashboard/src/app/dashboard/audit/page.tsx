@@ -6,6 +6,7 @@
 
 import { useEffect, useState, useCallback } from "react";
 import { motion } from "framer-motion";
+import { apiFetch } from "@/lib/api";
 
 interface AuditCategory {
   name: string;
@@ -20,8 +21,6 @@ interface AuditReport {
   overall_score: number;
   duration_seconds: number;
 }
-
-const BASE = process.env.NEXT_PUBLIC_API_URL ?? "http://localhost:8420";
 
 const CATEGORY_LABELS: Record<string, string> = {
   tool_coverage: "Tool Coverage",
@@ -47,14 +46,12 @@ export default function AuditPage() {
   const fetchData = useCallback(async () => {
     setLoading(true);
     try {
-      const unwrap = (json: Record<string, unknown>) =>
-        json && typeof json === "object" && "data" in json ? json.data : json;
       const [latestRes, trendRes] = await Promise.all([
-        fetch(`${BASE}/api/audit/latest`).then(r => r.ok ? r.json() : {data:null}).then(unwrap),
-        fetch(`${BASE}/api/audit/trend`).then(r => r.ok ? r.json() : {data:[]}).then(unwrap),
+        apiFetch<AuditReport | null>("/api/audit/latest"),
+        apiFetch<AuditReport[]>("/api/audit/trend"),
       ]);
-      setLatest(latestRes as AuditReport | null);
-      setTrend((trendRes as AuditReport[]) ?? []);
+      setLatest(latestRes ?? null);
+      setTrend(trendRes ?? []);
     } catch { /* API unavailable */ }
     setLoading(false);
   }, []);

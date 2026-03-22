@@ -111,9 +111,16 @@ def create_app(
             if registry is not None:
                 _state["registry"] = registry
             else:
-                from dharma_swarm.ontology import OntologyRegistry
-                _state["registry"] = OntologyRegistry.create_dharma_registry()
+                from dharma_swarm.ontology_runtime import get_shared_registry
+
+                _state["registry"] = get_shared_registry()
         return _state["registry"]
+
+    def _persist_registry() -> None:
+        if registry is None:
+            from dharma_swarm.ontology_runtime import persist_shared_registry
+
+            persist_shared_registry(_get_registry())
 
     def _get_lineage():
         if "lineage" not in _state:
@@ -196,6 +203,7 @@ def create_app(
         )
         if errors:
             raise HTTPException(400, "; ".join(errors))
+        _persist_registry()
         return ApiResponse(data={
             "id": obj.id,
             "type": obj.type_name,
@@ -227,6 +235,7 @@ def create_app(
             params=req.params,
             executed_by=req.executed_by,
         )
+        _persist_registry()
         if execution.result in ("failed", "blocked"):
             raise HTTPException(400, execution.error)
         return ApiResponse(data={

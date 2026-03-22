@@ -235,6 +235,12 @@ export default function ClaudePage() {
                   accent: colors.aozora,
                   onClick: () => openOverlay("claude_opus"),
                 },
+                {
+                  label: "Open Qwen Surgeon",
+                  caption: "Fast bounded scan and repair lane for coding work",
+                  accent: colors.rokusho,
+                  onClick: () => openOverlay("qwen35_surgeon"),
+                },
               ]}
             />
           </div>

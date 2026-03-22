@@ -25,7 +25,13 @@ logger = logging.getLogger(__name__)
 
 def _provider_string(provider_type: ProviderType) -> str:
     """Map ProviderType enum to the string AutonomousAgent expects."""
-    if provider_type in (ProviderType.ANTHROPIC, ProviderType.CLAUDE_CODE, ProviderType.CODEX):
+    if provider_type in (ProviderType.ANTHROPIC, ProviderType.CLAUDE_CODE):
+        return "anthropic"
+    if provider_type == ProviderType.CODEX:
+        logger.warning(
+            "ProviderType.CODEX passed to PersistentAgent — remapping to 'anthropic'. "
+            "If this agent uses an Anthropic model, set provider_type=ANTHROPIC instead."
+        )
         return "anthropic"
     if provider_type in (ProviderType.OPENROUTER, ProviderType.OPENROUTER_FREE):
         return "openrouter"
@@ -265,7 +271,7 @@ class PersistentAgent:
                 with open(self._witness_log, "a") as f:
                     f.write(json.dumps(entry) + "\n")
             except Exception:
-                pass
+                logger.debug("Witness log write failed", exc_info=True)
 
     # -- Daemon loop -----------------------------------------------------
 
@@ -299,7 +305,7 @@ class PersistentAgent:
                         salience=0.9,
                     ))
                 except Exception:
-                    pass
+                    logger.debug("Stigmergy mark on wake failure failed", exc_info=True)
 
             # Sleep until next wake or shutdown
             try:

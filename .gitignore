@@ -54,5 +54,7 @@ results.tsv
 run.log
 dashboard/playwright-report/
 dashboard/playwright/
+dashboard/test-results/
+desktop-shell/src-tauri/target/
 spec-forge/
 .superpowers/

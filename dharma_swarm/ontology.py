@@ -449,6 +449,63 @@ class OntologyRegistry:
         obj.version += 1
         return obj, []
 
+    def put_object(
+        self,
+        obj: OntologyObj,
+        *,
+        updated_by: str = "system",  # noqa: ARG002
+    ) -> tuple[OntologyObj | None, list[str]]:
+        """Insert or update an object using its exact ID with validation."""
+        obj_type = self._types.get(obj.type_name)
+        if obj_type is None:
+            return None, [f"type not registered: {obj.type_name}"]
+
+        existing = self._objects.get(obj.id)
+        if existing is None:
+            candidate = obj.model_copy(
+                update={
+                    "updated_at": obj.updated_at or obj.created_at,
+                    "version": max(1, obj.version),
+                }
+            )
+            errors = validate_object(candidate, obj_type)
+            if errors:
+                return None, errors
+            self._objects[candidate.id] = candidate
+            return candidate, []
+
+        if existing.type_name != obj.type_name:
+            return None, [
+                f"type mismatch for {obj.id}: '{existing.type_name}' vs '{obj.type_name}'"
+            ]
+
+        for key, value in obj.properties.items():
+            prop_def = obj_type.properties.get(key)
+            if (
+                prop_def
+                and prop_def.immutable
+                and key in existing.properties
+                and existing.properties.get(key) != value
+            ):
+                return None, [f"immutable property: {key}"]
+
+        merged_properties = {**existing.properties, **obj.properties}
+        candidate = existing.model_copy(
+            update={
+                "properties": merged_properties,
+                "updated_at": _utc_now(),
+                "version": max(existing.version + 1, obj.version),
+            }
+        )
+        errors = validate_object(candidate, obj_type)
+        if errors:
+            return None, errors
+
+        existing.properties = merged_properties
+        existing.updated_at = candidate.updated_at
+        existing.version = candidate.version
+        return existing, []
+
     # ── Link Operations ──────────────────────────────────────────────
 
     def create_link(
@@ -897,12 +954,26 @@ _AGENT_IDENTITY = ObjectType(
     properties={
         "name": PropertyDef(name="name", property_type=PropertyType.STRING,
                            required=True, immutable=True),
+        "agent_id": PropertyDef(name="agent_id", property_type=PropertyType.STRING),
+        "agent_slug": PropertyDef(name="agent_slug", property_type=PropertyType.STRING),
+        "display_name": PropertyDef(name="display_name", property_type=PropertyType.STRING),
         "role": PropertyDef(name="role", property_type=PropertyType.ENUM,
                            enum_values=["coder", "reviewer", "researcher", "tester",
                                        "orchestrator", "general", "cartographer",
-                                       "archeologist", "surgeon", "architect", "validator"]),
+                                       "archeologist", "surgeon", "architect", "validator",
+                                       "conductor",
+                                       "operator", "archivist", "research_director",
+                                       "systems_architect", "strategist", "witness",
+                                       "worker"]),
+        "status": PropertyDef(name="status", property_type=PropertyType.ENUM,
+                              enum_values=["idle", "busy", "starting", "stopping",
+                                           "dead", "retired", "unknown"]),
         "provider": PropertyDef(name="provider", property_type=PropertyType.STRING),
         "model": PropertyDef(name="model", property_type=PropertyType.STRING),
+        "model_key": PropertyDef(name="model_key", property_type=PropertyType.STRING),
+        "current_task": PropertyDef(name="current_task", property_type=PropertyType.STRING),
+        "started_at": PropertyDef(name="started_at", property_type=PropertyType.STRING),
+        "last_heartbeat": PropertyDef(name="last_heartbeat", property_type=PropertyType.STRING),
         "capabilities": PropertyDef(name="capabilities", property_type=PropertyType.LIST),
         "swabhaav_capacity": PropertyDef(name="swabhaav_capacity",
                                         property_type=PropertyType.FLOAT,
@@ -917,7 +988,8 @@ _AGENT_IDENTITY = ObjectType(
                  description="Create and start a new agent",
                  creates=["AgentIdentity"], telos_gates=["AHIMSA"]),
         ActionDef(name="Retire", object_type="AgentIdentity",
-                 description="Gracefully stop an agent"),
+                 description="Gracefully stop an agent",
+                 modifies=["status"]),
     ],
     security=SecurityPolicy(
         create_roles=["orchestrator", "system"],
@@ -927,6 +999,67 @@ _AGENT_IDENTITY = ObjectType(
     shakti_energy=ShaktiEnergy.MAHAKALI,
     pydantic_model="dharma_swarm.models.AgentConfig",
     icon="A",
+)
+
+_CUSTODIAN_ROLE = ObjectType(
+    name="CustodianRole",
+    description="A persistent identity for an autonomous code-maintenance custodian role",
+    properties={
+        "name": PropertyDef(
+            name="name",
+            property_type=PropertyType.STRING,
+            required=True,
+            immutable=True,
+            searchable=True,
+        ),
+        "tier": PropertyDef(
+            name="tier",
+            property_type=PropertyType.INTEGER,
+            required=True,
+        ),
+        "model": PropertyDef(
+            name="model",
+            property_type=PropertyType.STRING,
+        ),
+        "status": PropertyDef(
+            name="status",
+            property_type=PropertyType.ENUM,
+            required=True,
+            enum_values=["seed", "growing", "solid", "shipped"],
+        ),
+        "total_runs": PropertyDef(
+            name="total_runs",
+            property_type=PropertyType.INTEGER,
+            required=True,
+        ),
+        "success_rate": PropertyDef(
+            name="success_rate",
+            property_type=PropertyType.FLOAT,
+            required=True,
+        ),
+        "files_healed": PropertyDef(
+            name="files_healed",
+            property_type=PropertyType.INTEGER,
+            required=True,
+        ),
+    },
+    actions=[
+        ActionDef(
+            name="Refresh",
+            object_type="CustodianRole",
+            description="Refresh lifecycle metrics for a custodian role",
+            modifies=["status", "total_runs", "success_rate", "files_healed", "model"],
+        ),
+    ],
+    security=SecurityPolicy(
+        create_roles=["system"],
+        write_roles=["system"],
+        delete_roles=["system"],
+        audit_all=True,
+    ),
+    telos_alignment=0.75,
+    shakti_energy=ShaktiEnergy.MAHASARASWATI,
+    icon="U",
 )
 
 _KNOWLEDGE_ARTIFACT = ObjectType(
@@ -1350,7 +1483,7 @@ _METABOLIC_LINKS: list[LinkDef] = [
 
 
 _DOMAIN_TYPES: list[ObjectType] = [
-    _RESEARCH_THREAD, _EXPERIMENT, _PAPER, _AGENT_IDENTITY,
+    _RESEARCH_THREAD, _EXPERIMENT, _PAPER, _AGENT_IDENTITY, _CUSTODIAN_ROLE,
     _KNOWLEDGE_ARTIFACT, _TYPED_TASK, _EVOLUTION_ENTRY, _WITNESS_LOG,
     _ACTION_PROPOSAL, _GATE_DECISION_TYPE, _OUTCOME, _VALUE_EVENT,
     _CONTRIBUTION, _VENTURE_CELL,

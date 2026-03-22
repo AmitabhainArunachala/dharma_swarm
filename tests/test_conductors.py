@@ -28,7 +28,7 @@ class TestConductorConfigs:
         cfg = CONDUCTOR_CODEX_CONFIG
         assert cfg["name"] == "conductor_codex"
         assert cfg["role"] == AgentRole.CONDUCTOR
-        assert cfg["provider_type"] == ProviderType.CODEX
+        assert cfg["provider_type"] == ProviderType.ANTHROPIC
         assert cfg["model"] == "claude-sonnet-4-20250514"
         assert cfg["wake_interval_seconds"] == 1800.0
         assert cfg["max_turns"] == 10

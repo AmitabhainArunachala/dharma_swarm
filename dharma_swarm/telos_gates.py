@@ -3,18 +3,27 @@
 Eleven gates from Akram Vignan mapped to computational safety checks.
 Ported from dgc-core/hooks/telos_gate.py into a clean class-based API.
 Think-point witness logs are written to ~/.dharma/witness/ for audit.
+
+Variety Expansion Protocol (VSM Gap 5 / Beer):
+Custom pattern-based gates can be proposed, approved by S5 (Dhyana),
+and loaded at runtime. This ensures governance variety can grow to
+match threat variety without code changes.
 """
 
 from __future__ import annotations
 
 from dataclasses import dataclass, field
 import json
+import logging
 import os
 import re
 from datetime import datetime, timezone
 from pathlib import Path
+from typing import Any
 
 from dharma_swarm.anekanta_gate import evaluate_anekanta
+
+logger = logging.getLogger(__name__)
 from dharma_swarm.models import (
     GateCheckResult,
     GateDecision,
@@ -23,6 +32,170 @@ from dharma_swarm.models import (
 )
 
 WITNESS_DIR = Path.home() / ".dharma" / "witness"
+_GATE_REGISTRY_DIR = Path.home() / ".dharma" / "meta"
+_GATE_PROPOSALS_FILE = _GATE_REGISTRY_DIR / "gate_proposals.jsonl"
+
+
+@dataclass
+class GateProposal:
+    """A proposed custom gate for the variety expansion protocol.
+
+    Custom gates are pattern-based: they match keyword lists against
+    combined action+content text, just like the built-in gates.
+    Proposals require S5 (Dhyana) approval before activation.
+    """
+
+    name: str
+    tier: str  # "A", "B", or "C"
+    justification: str
+    trigger_patterns: list[str]  # keywords/phrases that trigger this gate
+    proposed_by: str = "system"
+    proposed_at: str = ""
+    status: str = "proposed"  # proposed | approved | rejected
+    reviewed_at: str = ""
+    review_note: str = ""
+
+    def __post_init__(self) -> None:
+        if not self.proposed_at:
+            self.proposed_at = datetime.now(timezone.utc).isoformat()
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "name": self.name,
+            "tier": self.tier,
+            "justification": self.justification,
+            "trigger_patterns": self.trigger_patterns,
+            "proposed_by": self.proposed_by,
+            "proposed_at": self.proposed_at,
+            "status": self.status,
+            "reviewed_at": self.reviewed_at,
+            "review_note": self.review_note,
+        }
+
+    @classmethod
+    def from_dict(cls, d: dict[str, Any]) -> "GateProposal":
+        return cls(
+            name=d["name"],
+            tier=d["tier"],
+            justification=d["justification"],
+            trigger_patterns=d.get("trigger_patterns", []),
+            proposed_by=d.get("proposed_by", "system"),
+            proposed_at=d.get("proposed_at", ""),
+            status=d.get("status", "proposed"),
+            reviewed_at=d.get("reviewed_at", ""),
+            review_note=d.get("review_note", ""),
+        )
+
+
+class GateRegistry:
+    """Manages the gate variety expansion lifecycle.
+
+    Beer's VSM requires that governance variety can grow to match threat
+    variety. This registry provides the formal protocol:
+
+    1. propose() — any agent or subsystem proposes a new gate
+    2. approve() / reject() — S5 (Dhyana) reviews
+    3. load_approved() — returns approved custom gates for runtime use
+    """
+
+    def __init__(self, proposals_file: Path | None = None) -> None:
+        self._proposals_file = proposals_file or _GATE_PROPOSALS_FILE
+
+    def propose(self, proposal: GateProposal) -> str:
+        """Submit a gate proposal. Returns the proposal name.
+
+        Validates the proposal and appends to the proposals file.
+        Duplicate names (regardless of status) are rejected.
+        """
+        name = proposal.name.upper().replace(" ", "_")
+        proposal.name = name
+
+        if proposal.tier not in ("A", "B", "C"):
+            raise ValueError(f"Invalid tier '{proposal.tier}', must be A/B/C")
+        if not proposal.trigger_patterns:
+            raise ValueError("Gate must have at least one trigger pattern")
+        if not proposal.justification.strip():
+            raise ValueError("Gate must have a justification")
+
+        # Check for duplicates
+        existing = self._load_all()
+        for p in existing:
+            if p.name == name:
+                raise ValueError(f"Gate '{name}' already exists (status={p.status})")
+
+        self._append(proposal)
+        logger.info("Gate proposed: %s (tier %s) by %s", name, proposal.tier, proposal.proposed_by)
+        return name
+
+    def approve(self, name: str, note: str = "") -> GateProposal:
+        """S5 approval of a proposed gate. Returns the updated proposal."""
+        return self._set_status(name.upper(), "approved", note)
+
+    def reject(self, name: str, note: str = "") -> GateProposal:
+        """S5 rejection of a proposed gate. Returns the updated proposal."""
+        return self._set_status(name.upper(), "rejected", note)
+
+    def load_approved(self) -> list[GateProposal]:
+        """Load all approved gate proposals for runtime use."""
+        return [p for p in self._load_all() if p.status == "approved"]
+
+    def list_proposals(self, status: str | None = None) -> list[GateProposal]:
+        """List proposals, optionally filtered by status."""
+        proposals = self._load_all()
+        if status:
+            proposals = [p for p in proposals if p.status == status]
+        return proposals
+
+    def _set_status(self, name: str, status: str, note: str) -> GateProposal:
+        """Update proposal status. Rewrites the proposals file atomically."""
+        proposals = self._load_all()
+        target = None
+        for p in proposals:
+            if p.name == name:
+                target = p
+                break
+        if target is None:
+            raise ValueError(f"No proposal named '{name}'")
+        if target.status != "proposed":
+            raise ValueError(f"Gate '{name}' is already {target.status}")
+
+        target.status = status
+        target.reviewed_at = datetime.now(timezone.utc).isoformat()
+        target.review_note = note
+
+        self._rewrite_all(proposals)
+        logger.info("Gate %s: %s (note: %s)", status, name, note or "none")
+        return target
+
+    def _load_all(self) -> list[GateProposal]:
+        """Load all proposals from disk."""
+        if not self._proposals_file.exists():
+            return []
+        proposals = []
+        try:
+            with open(self._proposals_file, encoding="utf-8") as f:
+                for line in f:
+                    line = line.strip()
+                    if line:
+                        proposals.append(GateProposal.from_dict(json.loads(line)))
+        except Exception:
+            logger.debug("Failed to load gate proposals", exc_info=True)
+        return proposals
+
+    def _append(self, proposal: GateProposal) -> None:
+        """Append a single proposal to the file."""
+        self._proposals_file.parent.mkdir(parents=True, exist_ok=True)
+        with open(self._proposals_file, "a", encoding="utf-8") as f:
+            f.write(json.dumps(proposal.to_dict()) + "\n")
+
+    def _rewrite_all(self, proposals: list[GateProposal]) -> None:
+        """Atomic rewrite of the proposals file."""
+        self._proposals_file.parent.mkdir(parents=True, exist_ok=True)
+        tmp = self._proposals_file.with_suffix(".tmp")
+        with open(tmp, "w", encoding="utf-8") as f:
+            for p in proposals:
+                f.write(json.dumps(p.to_dict()) + "\n")
+        tmp.replace(self._proposals_file)
 
 
 @dataclass
@@ -36,14 +209,19 @@ class ReflectiveGateOutcome:
 
 
 class TelosGatekeeper:
-    """Runs 11 dharmic gates against proposed actions.
+    """Runs dharmic gates against proposed actions.
+
+    Core 11 gates are hardcoded (immutable, kernel-level).
+    Custom gates from the Variety Expansion Protocol are loaded at init
+    and evaluated alongside the core gates.
 
     Tier A failures block unconditionally.
     Tier B failures block unconditionally.
     Tier C failures produce a review advisory (not a block).
     """
 
-    GATES: dict[str, GateTier] = {
+    # Core gates — immutable, kernel-level. Never removed at runtime.
+    CORE_GATES: dict[str, GateTier] = {
         "AHIMSA": GateTier.A,
         "SATYA": GateTier.B,
         "CONSENT": GateTier.B,
@@ -56,6 +234,38 @@ class TelosGatekeeper:
         "DOGMA_DRIFT": GateTier.C,
         "STEELMAN": GateTier.C,
     }
+
+    def __init__(self, registry: GateRegistry | None = None) -> None:
+        self._registry = registry or GateRegistry()
+        # Merge core + approved custom gates
+        self._custom_gates: dict[str, GateProposal] = {}
+        self.GATES: dict[str, GateTier] = dict(self.CORE_GATES)
+        self._load_custom_gates()
+
+    def _load_custom_gates(self) -> None:
+        """Load approved custom gates from the registry."""
+        try:
+            approved = self._registry.load_approved()
+        except Exception:
+            logger.debug("Failed to load custom gates", exc_info=True)
+            return
+        for proposal in approved:
+            name = proposal.name
+            if name in self.CORE_GATES:
+                logger.warning("Custom gate '%s' conflicts with core gate — skipped", name)
+                continue
+            tier = GateTier(proposal.tier)
+            self.GATES[name] = tier
+            self._custom_gates[name] = proposal
+
+    def reload_custom_gates(self) -> int:
+        """Reload custom gates from registry. Returns count of custom gates loaded."""
+        # Remove old custom gates
+        for name in list(self._custom_gates):
+            self.GATES.pop(name, None)
+        self._custom_gates.clear()
+        self._load_custom_gates()
+        return len(self._custom_gates)
 
     HARM_WORDS: set[str] = {
         "delete all", "destroy", "rm -rf", "wipe", "kill", "corrupt",
@@ -145,6 +355,30 @@ class TelosGatekeeper:
         "before_pivot",
     }
 
+    # ── S4→S3 feedback: read zeitgeist gate pressure ──
+    _GATE_PRESSURE_PATH = Path.home() / ".dharma" / "meta" / "gate_pressure.json"
+
+    def _apply_gate_pressure(self, current_mode: str) -> str:
+        """Read S4 gate pressure signal and potentially tighten trust mode.
+
+        Zeitgeist writes gate_pressure.json when it detects high gate block
+        rates. This method reads it and overrides to external_strict if
+        the signal is still valid (not expired).
+        """
+        import time as _time
+        try:
+            if not self._GATE_PRESSURE_PATH.exists():
+                return current_mode
+            data = json.loads(self._GATE_PRESSURE_PATH.read_text(encoding="utf-8"))
+            if data.get("expires", 0) < _time.time():
+                return current_mode  # expired
+            override = data.get("trust_mode_override", "").strip().lower()
+            if override and override != current_mode:
+                return override
+        except Exception:
+            logger.debug("Gate pressure read failed", exc_info=True)
+        return current_mode
+
     def check(
         self,
         action: str,
@@ -177,6 +411,8 @@ class TelosGatekeeper:
             .strip()
             .lower()
         )
+        # ── S4→S3 feedback: zeitgeist gate pressure override ──
+        resolved_mode = self._apply_gate_pressure(resolved_mode)
         action_lower = action.lower()
         content_lower = content.lower()
         combined = action_lower + " " + content_lower
@@ -357,6 +593,20 @@ class TelosGatekeeper:
             steelman_reason = sm_result.reason
         results["STEELMAN"] = (steelman_result, steelman_reason)
 
+        # --- Custom gates (Variety Expansion Protocol) ---
+        for gate_name, proposal in self._custom_gates.items():
+            pattern_hit = next(
+                (p for p in proposal.trigger_patterns if p in combined),
+                None,
+            )
+            if pattern_hit:
+                results[gate_name] = (
+                    GateResult.FAIL,
+                    f"Custom gate triggered: {pattern_hit}",
+                )
+            else:
+                results[gate_name] = (GateResult.PASS, "")
+
         # --- Evaluate decision ---
         tier_a_fail = any(
             results[g][0] == GateResult.FAIL
@@ -452,7 +702,7 @@ class TelosGatekeeper:
             if MetricsAnalyzer().detect_mimicry(reflection):
                 return False
         except Exception:
-            pass
+            logger.debug("Mimicry detection failed", exc_info=True)
         return True
 
     @staticmethod
@@ -478,7 +728,7 @@ class TelosGatekeeper:
             with open(log_file, "a", encoding="utf-8") as f:
                 f.write(entry + "\n")
         except Exception:
-            pass  # Witnessing must never block
+            logger.debug("Witness log write failed", exc_info=True)
 
 
 DEFAULT_GATEKEEPER = TelosGatekeeper()

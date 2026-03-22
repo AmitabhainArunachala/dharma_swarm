@@ -333,7 +333,7 @@ async def test_leave_task_mark_best_effort(monkeypatch):
             captured["mark"] = mark
             return "id"
 
-    monkeypatch.setattr("dharma_swarm.stigmergy.StigmergyStore", _FakeStore, raising=True)
+    monkeypatch.setattr("dharma_swarm.stigmergy._get_default_store", lambda: _FakeStore(), raising=True)
 
     task = Task(
         title="Write patch",

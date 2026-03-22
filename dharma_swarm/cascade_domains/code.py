@@ -201,7 +201,7 @@ def _find_test_file(file_path: str) -> Path | None:
         if sibling.exists():
             return sibling
     except Exception:
-        pass
+        logger.debug("Test sibling lookup failed", exc_info=True)
     return None
 
 

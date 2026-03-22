@@ -127,8 +127,8 @@ class CommandCenterScreen(Screen):
             logger.debug("SystemMonitor init failed", exc_info=True)
 
         try:
-            from dharma_swarm.ontology import OntologyRegistry
-            self._registry = OntologyRegistry.create_dharma_registry()
+            from dharma_swarm.ontology_runtime import get_shared_registry
+            self._registry = get_shared_registry()
         except Exception:
             logger.debug("OntologyRegistry init failed", exc_info=True)
 

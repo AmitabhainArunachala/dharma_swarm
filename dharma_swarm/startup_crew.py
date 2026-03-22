@@ -223,7 +223,6 @@ async def spawn_default_crew(swarm) -> list:
             if base_prompt
             else MEMORY_SURVIVAL_INSTINCT
         )
-
         spawn_tasks.append(
             swarm.spawn_agent(
                 name=spec["name"],
@@ -235,15 +234,14 @@ async def spawn_default_crew(swarm) -> list:
             )
         )
 
-    # Spawn all agents in parallel
-    agents = await asyncio.gather(*spawn_tasks)
-
     # Log results
     for spec in specs_to_spawn:
         logger.info("Spawned %s (%s) on %s [%s]",
                      spec["name"], spec["role"].value,
                      spec.get("provider", ProviderType.CLAUDE_CODE).value,
                      spec["thread"])
+    # Spawn all agents in parallel
+    agents = await asyncio.gather(*spawn_tasks)
 
     return list(agents)
 

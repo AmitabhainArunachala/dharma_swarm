@@ -1011,6 +1011,37 @@ class RuntimeStateStore:
             ).fetchall()
         return [_row_to_session_event(row) for row in rows]
 
+    async def list_session_events(
+        self,
+        *,
+        session_id: str | None = None,
+        ledger_kind: str | None = None,
+        event_name: str | None = None,
+        limit: int = 20,
+    ) -> list[SessionEventRecord]:
+        await self.init_db()
+        query = (
+            "SELECT event_id, session_id, ledger_kind, event_name, task_id, run_id,"
+            " agent_id, summary, event_text, payload_json, created_at"
+            " FROM session_events WHERE 1=1"
+        )
+        params: list[Any] = []
+        if session_id is not None:
+            query += " AND session_id = ?"
+            params.append(session_id)
+        if ledger_kind is not None:
+            query += " AND ledger_kind = ?"
+            params.append(ledger_kind)
+        if event_name is not None:
+            query += " AND event_name = ?"
+            params.append(event_name)
+        query += " ORDER BY created_at DESC LIMIT ?"
+        params.append(max(1, limit))
+        async with aiosqlite.connect(self.db_path) as db:
+            db.row_factory = aiosqlite.Row
+            rows = await (await db.execute(query, params)).fetchall()
+        return [_row_to_session_event(row) for row in rows]
+
     def index_ledger_session_sync(self, session_dir: Path | str) -> int:
         session_path = Path(session_dir)
         if not session_path.exists() or not session_path.is_dir():
@@ -1123,6 +1154,41 @@ class RuntimeStateStore:
                 )
             ).fetchone()
         return _row_to_claim(row) if row is not None else None
+
+    async def list_task_claims(
+        self,
+        *,
+        session_id: str | None = None,
+        task_id: str | None = None,
+        agent_id: str | None = None,
+        status: str | None = None,
+        limit: int = 20,
+    ) -> list[TaskClaim]:
+        await self.init_db()
+        query = (
+            "SELECT claim_id, task_id, session_id, agent_id, status, claimed_at,"
+            " acked_at, heartbeat_at, stale_after, recovered_at, retry_count,"
+            " metadata_json FROM task_claims WHERE 1=1"
+        )
+        params: list[Any] = []
+        if session_id is not None:
+            query += " AND session_id = ?"
+            params.append(session_id)
+        if task_id is not None:
+            query += " AND task_id = ?"
+            params.append(task_id)
+        if agent_id is not None:
+            query += " AND agent_id = ?"
+            params.append(agent_id)
+        if status is not None:
+            query += " AND status = ?"
+            params.append(status)
+        query += " ORDER BY claimed_at DESC LIMIT ?"
+        params.append(max(1, limit))
+        async with aiosqlite.connect(self.db_path) as db:
+            db.row_factory = aiosqlite.Row
+            rows = await (await db.execute(query, params)).fetchall()
+        return [_row_to_claim(row) for row in rows]
 
     async def acknowledge_task_claim(
         self,

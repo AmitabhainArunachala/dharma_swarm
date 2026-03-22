@@ -20,6 +20,7 @@ import {
   Database,
   CheckCircle2,
   Wrench,
+  RotateCcw,
 } from "lucide-react";
 import { useChat, type ChatMessage, type ToolEvent } from "@/hooks/useChat";
 import { getChatProfiles, resolveChatProfile, shortProfileLabel } from "@/lib/chatProfiles";
@@ -80,7 +81,10 @@ export function ChatInterface({
     activeTools,
     error,
     status,
+    profileId: activeProfileId,
     sendMessage,
+    retryLastMessage,
+    canRetry,
     clearMessages,
     stopStreaming,
   } = useChat(profileId);
@@ -90,7 +94,7 @@ export function ChatInterface({
   const profiles = getChatProfiles(status);
   const activeProfile = resolveChatProfile(
     status,
-    profileId ?? status?.default_profile_id ?? profiles[0]?.id ?? "claude_opus",
+    activeProfileId,
   );
   const accentColor = profileAccentColor(activeProfile.accent);
 
@@ -152,18 +156,25 @@ export function ChatInterface({
                 {profiles.map((profile) => {
                   const isActive = profile.id === activeProfile.id;
                   const profileAccent = profileAccentColor(profile.accent);
+                  const isAvailable = profile.available !== false;
                   return (
                     <button
                       key={profile.id}
                       onClick={() => onProfileChange(profile.id)}
+                      disabled={!isAvailable}
                       className="rounded-md px-2 py-1 font-mono text-[10px] transition-colors"
                       style={{
-                        color: isActive ? profileAccent : colors.sumi[600],
+                        color: !isAvailable
+                          ? colors.sumi[700]
+                          : isActive
+                            ? profileAccent
+                            : colors.sumi[600],
                         background: isActive
                           ? `color-mix(in srgb, ${profileAccent} 14%, transparent)`
                           : "transparent",
+                        opacity: isAvailable ? 1 : 0.55,
                       }}
-                      title={profile.summary}
+                      title={profile.status_note || profile.summary}
                     >
                       {shortProfileLabel(profile)}
                     </button>
@@ -219,8 +230,18 @@ export function ChatInterface({
 
       {error && (
         <div className="px-4 py-2">
-          <div className="rounded-lg border border-bengara/30 bg-bengara/10 px-3 py-2 text-xs text-bengara">
-            {error}
+          <div className="flex items-center justify-between gap-3 rounded-lg border border-bengara/30 bg-bengara/10 px-3 py-2 text-xs text-bengara">
+            <span>{error}</span>
+            {canRetry && (
+              <button
+                onClick={() => void retryLastMessage()}
+                className="inline-flex shrink-0 items-center gap-1 rounded-md border border-bengara/30 px-2 py-1 font-mono text-[10px] text-bengara transition-colors hover:bg-bengara/10"
+                title="Retry the last message"
+              >
+                <RotateCcw size={11} />
+                Retry
+              </button>
+            )}
           </div>
         </div>
       )}

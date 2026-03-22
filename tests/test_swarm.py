@@ -6,8 +6,14 @@ from pathlib import Path
 import pytest
 
 from dharma_swarm.engine.conversation_memory import ConversationMemoryStore
-from dharma_swarm.models import AgentRole, Message, TaskPriority, TaskStatus
+from dharma_swarm.message_bus import MessageBus
+from dharma_swarm.models import AgentRole, AgentState, AgentStatus, Message, TaskPriority, TaskStatus
 from dharma_swarm.swarm import SwarmCoordinationState, SwarmManager
+from dharma_swarm.telemetry_plane import (
+    AgentIdentityRecord,
+    TeamRosterRecord,
+    TelemetryPlaneStore,
+)
 
 
 # startup_crew auto-spawns agents and seed tasks on init.
@@ -31,6 +37,7 @@ async def swarm(tmp_path):
 
 
 @pytest.mark.asyncio
+@pytest.mark.timeout(20)
 async def test_init(swarm):
     state = await swarm.status()
     assert state.tasks_pending == _AUTO_TASKS
@@ -72,6 +79,153 @@ async def test_spawn_agent(swarm):
 
     agents = await swarm.list_agents()
     assert len(agents) >= _AUTO_AGENTS + 1
+
+
+@pytest.mark.asyncio
+async def test_sync_agents_retires_stale_live_contracts(tmp_path, monkeypatch):
+    db_path = tmp_path / "runtime.db"
+    telemetry = TelemetryPlaneStore(db_path)
+    await telemetry.init_db()
+    await telemetry.upsert_agent_identity(
+        AgentIdentityRecord(
+            agent_id="stale-agent",
+            codename="stale-agent",
+            status="idle",
+        )
+    )
+    await telemetry.record_team_roster(
+        TeamRosterRecord(
+            roster_id="roster:dharma_swarm:stale-agent",
+            team_id="dharma_swarm",
+            agent_id="stale-agent",
+            role="surgeon",
+            active=True,
+        )
+    )
+
+    class _StaticPool:
+        async def list_agents(self) -> list[AgentState]:
+            return [
+                AgentState(
+                    id="agent-live-1",
+                    name="live-agent",
+                    role=AgentRole.CODER,
+                    status=AgentStatus.IDLE,
+                )
+            ]
+
+    monkeypatch.setenv("DHARMA_RUNTIME_DB", str(db_path))
+
+    swarm = SwarmManager(state_dir=tmp_path / ".dharma")
+    swarm._agent_pool = _StaticPool()
+    swarm._agent_configs = {}
+
+    results = await swarm.sync_agents()
+
+    retired_identity = await telemetry.get_agent_identity("stale-agent")
+    retired_roster = await telemetry.list_team_roster(
+        team_id="dharma_swarm",
+        agent_id="stale-agent",
+        active_only=False,
+        limit=10,
+    )
+
+    assert len(results) == 1
+    assert retired_identity is not None
+    assert retired_identity.status == "retired"
+    assert retired_roster[0].active is False
+
+
+@pytest.mark.asyncio
+async def test_sync_agents_preserves_bus_readiness_for_live_agents(tmp_path, monkeypatch):
+    db_path = tmp_path / "runtime.db"
+    bus = MessageBus(tmp_path / "message_bus.db")
+    await bus.init_db()
+    await bus.subscribe("live-agent", "orchestrator.lifecycle")
+    await bus.subscribe("live-agent", "operator.bridge.lifecycle")
+    await bus.heartbeat("live-agent", metadata={"role": "coder"})
+
+    class _StaticPool:
+        async def list_agents(self) -> list[AgentState]:
+            return [
+                AgentState(
+                    id="agent-live-1",
+                    name="live-agent",
+                    role=AgentRole.CODER,
+                    status=AgentStatus.IDLE,
+                )
+            ]
+
+    monkeypatch.setenv("DHARMA_RUNTIME_DB", str(db_path))
+
+    telemetry = TelemetryPlaneStore(db_path)
+    await telemetry.init_db()
+
+    swarm = SwarmManager(state_dir=tmp_path / ".dharma")
+    swarm._agent_pool = _StaticPool()
+    swarm._agent_configs = {}
+    swarm._message_bus = bus
+
+    results = await swarm.sync_agents()
+    identity = await telemetry.get_agent_identity("live-agent")
+
+    assert len(results) == 1
+    assert results[0]["communication_ready"] is True
+    assert results[0]["bus_status"] == "online"
+    assert results[0]["missing_topics"] == []
+    assert identity is not None
+    assert identity.metadata["communication_ready"] is True
+    assert identity.metadata["bus_status"] == "online"
+
+
+@pytest.mark.asyncio
+async def test_list_agents_retires_stale_live_contracts_when_pool_is_empty(
+    tmp_path,
+    monkeypatch,
+):
+    db_path = tmp_path / "runtime.db"
+    telemetry = TelemetryPlaneStore(db_path)
+    await telemetry.init_db()
+    await telemetry.upsert_agent_identity(
+        AgentIdentityRecord(
+            agent_id="stale-agent",
+            codename="stale-agent",
+            status="idle",
+        )
+    )
+    await telemetry.record_team_roster(
+        TeamRosterRecord(
+            roster_id="roster:dharma_swarm:stale-agent",
+            team_id="dharma_swarm",
+            agent_id="stale-agent",
+            role="surgeon",
+            active=True,
+        )
+    )
+
+    class _StaticPool:
+        async def list_agents(self) -> list[AgentState]:
+            return []
+
+    monkeypatch.setenv("DHARMA_RUNTIME_DB", str(db_path))
+
+    swarm = SwarmManager(state_dir=tmp_path / ".dharma")
+    swarm._agent_pool = _StaticPool()
+    swarm._agent_configs = {}
+
+    agents = await swarm.list_agents()
+    retired_identity = await telemetry.get_agent_identity("stale-agent")
+    retired_roster = await telemetry.list_team_roster(
+        team_id="dharma_swarm",
+        agent_id="stale-agent",
+        active_only=False,
+        limit=10,
+    )
+
+    assert agents == []
+    assert retired_identity is not None
+    assert retired_identity.status == "retired"
+    assert retired_roster[0].active is False
 
 
 @pytest.mark.asyncio
@@ -477,3 +631,91 @@ async def test_corpus_claims_count(swarm):
     await swarm.propose_claim("Counting test", category="operational")
     s2 = await swarm.dharma_status()
     assert s2["corpus_claims"] == initial + 1
+
+
+# ---------------------------------------------------------------------------
+# Algedonic channel (Beer S5 bypass)
+# ---------------------------------------------------------------------------
+
+
+def test_algedonic_handler_writes_signal_log(tmp_path):
+    """_algedonic_handler writes JSONL entry to algedonic_signals.jsonl."""
+    import json
+
+    sm = SwarmManager.__new__(SwarmManager)
+    sm.state_dir = tmp_path
+
+    # Simulate a critical AlgedonicSignal via a simple namespace
+    class FakeSignal:
+        kind = "telos_drift"
+        severity = "critical"
+        action = "gnani_checkpoint"
+        value = 0.28
+        timestamp = 1234567890.0
+
+    sm._algedonic_handler(FakeSignal())
+
+    log_path = tmp_path / "algedonic_signals.jsonl"
+    assert log_path.exists()
+    entry = json.loads(log_path.read_text().strip())
+    assert entry["kind"] == "telos_drift"
+    assert entry["severity"] == "critical"
+    assert entry["value"] == 0.28
+
+
+def test_algedonic_critical_creates_emergency_hold(tmp_path):
+    """Critical signal writes EMERGENCY_HOLD marker file."""
+    sm = SwarmManager.__new__(SwarmManager)
+    sm.state_dir = tmp_path
+
+    class FakeSignal:
+        kind = "telos_drift"
+        severity = "critical"
+        action = "gnani_checkpoint"
+        value = 0.15
+        timestamp = 0.0
+
+    sm._algedonic_handler(FakeSignal())
+
+    hold_path = tmp_path / "EMERGENCY_HOLD"
+    assert hold_path.exists()
+    assert "telos_drift" in hold_path.read_text()
+
+
+def test_algedonic_noncritical_no_emergency_hold(tmp_path):
+    """Non-critical signal does NOT write EMERGENCY_HOLD."""
+    sm = SwarmManager.__new__(SwarmManager)
+    sm.state_dir = tmp_path
+
+    class FakeSignal:
+        kind = "omega_divergence"
+        severity = "medium"
+        action = "rebalance_priorities"
+        value = 0.55
+        timestamp = 0.0
+
+    sm._algedonic_handler(FakeSignal())
+
+    # Log file should exist, but not the emergency hold
+    assert (tmp_path / "algedonic_signals.jsonl").exists()
+    assert not (tmp_path / "EMERGENCY_HOLD").exists()
+
+
+def test_emergency_hold_pauses_dispatch(tmp_path):
+    """EMERGENCY_HOLD marker causes _check_human_overrides to report paused."""
+    import types
+
+    sm = SwarmManager.__new__(SwarmManager)
+    sm.state_dir = tmp_path
+    # Minimal daemon stub with pause_file attribute
+    sm._daemon = types.SimpleNamespace(pause_file=".PAUSE")
+    sm._thread_mgr = None
+
+    # No hold → not paused
+    result = sm._check_human_overrides()
+    assert result["paused"] is False
+
+    # Create hold marker → paused
+    (tmp_path / "EMERGENCY_HOLD").write_text("telos_drift: value=0.15\n")
+    result = sm._check_human_overrides()
+    assert result["paused"] is True

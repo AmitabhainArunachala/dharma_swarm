@@ -8,11 +8,17 @@ NOT about R_V contraction (that's separate research).
 THIS is about: span tracing, pramāda detection, kaizen loops.
 """
 
+import logging
 import time
 import json
 from pathlib import Path
 from datetime import datetime, timezone
 from typing import Optional, Dict, Any, List
+
+logger = logging.getLogger(__name__)
+
+# Rotate JIKOKU_LOG.jsonl when it exceeds this size (bytes).
+_LOG_ROTATION_BYTES = 50 * 1024 * 1024  # 50 MB
 from contextlib import contextmanager
 from dataclasses import dataclass, asdict, field
 import asyncio
@@ -83,6 +89,24 @@ class JikokuTracer:
         self.session_id = session_id or f"session-{int(time.time() * 1000)}"
         self.active_spans: Dict[str, JikokuSpan] = {}
         self._span_counter = 0
+        self._rotation_check_counter = 0
+
+    def _maybe_rotate(self) -> None:
+        """Rotate log file if it exceeds _LOG_ROTATION_BYTES.
+
+        Checked every 100 writes to avoid stat() on every span.
+        """
+        self._rotation_check_counter += 1
+        if self._rotation_check_counter % 100 != 0:
+            return
+        try:
+            if self.log_path.exists() and self.log_path.stat().st_size > _LOG_ROTATION_BYTES:
+                stamp = datetime.now(timezone.utc).strftime("%Y%m%d_%H%M%S")
+                rotated = self.log_path.with_name(f"JIKOKU_LOG.{stamp}.jsonl")
+                self.log_path.rename(rotated)
+                logger.info("JIKOKU log rotated → %s", rotated.name)
+        except Exception:
+            logger.debug("JIKOKU log rotation failed", exc_info=True)
 
     def _generate_span_id(self) -> str:
         """Generate unique span ID"""
@@ -164,6 +188,7 @@ class JikokuTracer:
 
         # Append to JIKOKU_LOG.jsonl. Tracing must never break the caller.
         if not self._logging_disabled:
+            self._maybe_rotate()
             try:
                 with open(self.log_path, 'a') as f:
                     f.write(span.to_jsonl() + '\n')
@@ -196,7 +221,7 @@ class JikokuTracer:
         finally:
             self.end(span_id)
 
-    def get_session_spans(self, session_id: str | None = None) -> List[JikokuSpan]:
+    def get_session_spans(self, session_id: Optional[str] = None) -> List[JikokuSpan]:
         """Get all spans for a specific session (or current session if None)"""
         target_session = session_id or self.session_id
         if not self.log_path.exists():

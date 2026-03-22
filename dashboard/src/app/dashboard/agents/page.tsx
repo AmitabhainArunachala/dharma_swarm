@@ -101,7 +101,16 @@ export default function AgentsPage() {
                     <td className="px-5 py-3">
                       <div className="flex items-center gap-2.5">
                         <Bot size={14} style={{ color: accentAt(i) }} />
-                        <span className="font-medium text-torinoko">{agent.name}</span>
+                        <div className="min-w-0">
+                          <div className="truncate font-medium text-torinoko">
+                            {agent.display_name || agent.name}
+                          </div>
+                          {agent.model_label && (
+                            <div className="truncate text-[10px] text-sumi-600">
+                              {agent.model_label}
+                            </div>
+                          )}
+                        </div>
                       </div>
                     </td>
                     <td className="px-5 py-3">
@@ -186,7 +195,14 @@ function AgentDrawer({ agent, onClose }: { agent: AgentOut; onClose: () => void 
         <div className="flex items-center justify-between border-b border-sumi-700/30 px-6 py-4">
           <div className="flex items-center gap-3">
             <Bot size={18} className="text-aozora" />
-            <h2 className="font-heading text-lg font-bold text-torinoko">{agent.name}</h2>
+            <div>
+              <h2 className="font-heading text-lg font-bold text-torinoko">
+                {agent.display_name || agent.name}
+              </h2>
+              {agent.agent_slug && (
+                <p className="font-mono text-[10px] text-sumi-600">{agent.agent_slug}</p>
+              )}
+            </div>
           </div>
           <button
             onClick={onClose}
@@ -202,7 +218,8 @@ function AgentDrawer({ agent, onClose }: { agent: AgentOut; onClose: () => void 
             <DetailRow label="Status" value={agent.status} />
             <DetailRow label="Role" value={agent.role} />
             <DetailRow label="Provider" value={agent.provider || "—"} />
-            <DetailRow label="Model" value={agent.model || "—"} />
+            <DetailRow label="Model" value={agent.model_label || agent.model || "—"} />
+            {agent.model_key && <DetailRow label="Model Key" value={agent.model_key} />}
             <DetailRow label="Turns Used" value={String(agent.turns_used)} />
             <DetailRow label="Last Heartbeat" value={agent.last_heartbeat ? timeAgo(agent.last_heartbeat) : "never"} />
             {agent.current_task && <DetailRow label="Current Task" value={agent.current_task} />}

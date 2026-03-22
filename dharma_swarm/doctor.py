@@ -11,6 +11,7 @@ import contextlib
 import importlib.util
 import io
 import json
+import logging
 import os
 from pathlib import Path
 import shutil
@@ -21,6 +22,7 @@ import sys
 from typing import Any
 from urllib.parse import urlparse
 
+logger = logging.getLogger(__name__)
 
 HOME = Path.home()
 REPO_ROOT = HOME / "dharma_swarm"
@@ -1099,7 +1101,7 @@ def render_doctor_report(report: dict[str, Any]) -> str:
             lines.append("")
             lines.append(render_assurance_report(assurance))
         except Exception:
-            pass
+            logger.debug("Assurance report render failed", exc_info=True)
 
     fixes = [str(item).strip() for item in report.get("recommended_fixes", []) if str(item).strip()]
     if fixes:

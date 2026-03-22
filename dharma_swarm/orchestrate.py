@@ -17,7 +17,9 @@ file access, bash. Not API calls. Real agents.
 from __future__ import annotations
 
 import json
+import logging
 import os
+import shutil
 import subprocess
 import sys
 import time
@@ -25,7 +27,26 @@ from datetime import datetime, timezone
 from pathlib import Path
 from dataclasses import dataclass, field
 
+logger = logging.getLogger(__name__)
+
 HOME = Path.home()
+
+
+def _resolve_claude_binary() -> str:
+    """Find the claude CLI binary, checking known locations beyond PATH."""
+    found = shutil.which("claude")
+    if found:
+        return found
+    for candidate in [
+        HOME / ".npm-global" / "bin" / "claude",
+        Path("/usr/local/bin/claude"),
+        Path("/opt/homebrew/bin/claude"),
+    ]:
+        if candidate.exists():
+            return str(candidate)
+    return "claude"
+
+
 SHARED = HOME / ".dharma" / "shared"
 STATE_FILE = HOME / ".dharma" / "orchestrator_state.json"
 AGENT_DIR = HOME / ".dharma" / "agents"
@@ -144,7 +165,7 @@ def spawn_agent(spec: AgentSpec) -> subprocess.Popen:
         from dharma_swarm.context import build_agent_context
         context_block = build_agent_context(role=spec.role.lower())
     except Exception:
-        pass  # Graceful degradation — still spawn without context
+        logger.debug("Agent context build failed for %s", spec.name, exc_info=True)
 
     full_prompt = f"""You are agent {spec.name} in DHARMA SWARM.
 
@@ -165,7 +186,7 @@ def spawn_agent(spec: AgentSpec) -> subprocess.Popen:
     output_fh = open(output_file, "w")
     try:
         proc = subprocess.Popen(
-            ["claude", "-p", full_prompt, "--output-format", "text"],
+            [_resolve_claude_binary(), "-p", full_prompt, "--output-format", "text"],
             stdout=output_fh,
             stderr=subprocess.STDOUT,
             env=env,

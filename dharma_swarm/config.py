@@ -128,6 +128,11 @@ class LiveLoopConfig(BaseModel):
         ge=10, le=3600,
         description="Living layers (stigmergy, shakti, subconscious) interval",
     )
+    consolidation_interval_seconds: int = Field(
+        default=int(os.environ.get("DGC_CONSOLIDATION_INTERVAL", "86400")),
+        ge=3600, le=604800,
+        description="Consolidation (sleep) cycle interval (default 24h)",
+    )
     max_daily_tasks: int = Field(
         default=int(os.environ.get("DGC_MAX_DAILY", "50")),
         ge=1, le=1000,

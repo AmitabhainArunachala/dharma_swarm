@@ -37,7 +37,10 @@ class SleepPhase(str, Enum):
     LIGHT = "light"      # Quick cleanup: expire old stigmergy marks
     DEEP = "deep"        # Heavy lifting: consolidate all agent memories
     REM = "rem"          # Creative: subconscious dreaming + association
+    NEURAL = "neural"    # Neural consolidation: forward scan → loss → contrarian discuss → backprop
     SEMANTIC = "semantic" # Semantic evolution: digest→research→synthesize→harden→gravitize
+    BRIDGE = "bridge"    # Cross-graph bridge discovery: connect semantic↔temporal↔telos
+    PRUNE = "prune"      # Sweep the zen garden: archive noise, merge duplicates
     WAKE = "wake"        # Prepare for morning: generate sleep report
 
 
@@ -53,6 +56,10 @@ class SleepReport(BaseModel):
     hot_paths_found: list[str] = Field(default_factory=list)
     high_salience_observations: list[str] = Field(default_factory=list)
     errors: list[str] = Field(default_factory=list)
+    # Neural consolidation stats
+    neural_losses: int = 0
+    neural_corrections: int = 0
+    neural_division_proposals: int = 0
     # Colony-level R_V: dimensional contraction through sleep
     colony_rv: float | None = None
     density_before: int = 0
@@ -104,9 +111,9 @@ class SleepCycle:
                 d = self._stigmergy.density()
                 report.density_before = int(d) if isinstance(d, (int, float)) else 0
         except Exception:
-            pass
+            logger.debug("Pre-sleep density measurement failed", exc_info=True)
 
-        for phase in (SleepPhase.LIGHT, SleepPhase.DEEP, SleepPhase.REM, SleepPhase.SEMANTIC):
+        for phase in (SleepPhase.LIGHT, SleepPhase.DEEP, SleepPhase.REM, SleepPhase.NEURAL, SleepPhase.SEMANTIC, SleepPhase.BRIDGE, SleepPhase.PRUNE):
             try:
                 result = await self.run_phase(phase)
                 report.phases_completed.append(phase.value)
@@ -124,7 +131,7 @@ class SleepCycle:
                 if report.density_before > 0 and report.density_after >= 0:
                     report.colony_rv = report.density_after / report.density_before
         except Exception:
-            pass
+            logger.debug("Post-sleep density measurement failed", exc_info=True)
 
         # WAKE always runs (writes the report itself)
         try:
@@ -144,7 +151,10 @@ class SleepCycle:
             SleepPhase.LIGHT: self._light_sleep,
             SleepPhase.DEEP: self._deep_sleep,
             SleepPhase.REM: self._rem_sleep,
+            SleepPhase.NEURAL: self._neural_sleep,
             SleepPhase.SEMANTIC: self._semantic_sleep,
+            SleepPhase.BRIDGE: self._bridge_sleep,
+            SleepPhase.PRUNE: self._prune_sleep,
         }
         handler = dispatch.get(phase)
         if handler is None:
@@ -166,6 +176,9 @@ class SleepCycle:
 
         decayed = await self._stigmergy.decay()
         result["marks_decayed"] = decayed
+
+        faded = await self._stigmergy.access_decay()
+        result["marks_faded"] = faded
 
         hot = await self._stigmergy.hot_paths()
         result["hot_paths"] = [path for path, _count in hot]
@@ -233,6 +246,44 @@ class SleepCycle:
 
         return result
 
+    async def _neural_sleep(self) -> dict[str, Any]:
+        """Phase 3.5: Neural consolidation — the backpropagation loop.
+
+        Two consolidation agents (advocate + critic) read all system state,
+        have a contrarian discussion, and modify the behavioral correction
+        files that agents read on their next forward pass.
+
+        This mirrors what happens in the brain during sleep: memory replay,
+        error correction, and weight adjustment.
+
+        Returns:
+            Dict with losses_found, corrections_applied, division_proposals.
+        """
+        from dharma_swarm.neural_consolidator import NeuralConsolidator
+
+        result: dict[str, Any] = {
+            "losses_found": 0,
+            "corrections_applied": 0,
+            "division_proposals": 0,
+        }
+        state_root = self._memory_dir.parent
+
+        consolidator = NeuralConsolidator(
+            provider=None,  # Algorithmic mode during sleep (no LLM spend)
+            base_path=state_root,
+            corrections_dir=state_root / "consolidation" / "corrections",
+            reports_dir=state_root / "consolidation" / "reports",
+        )
+
+        report = await consolidator.consolidation_cycle()
+        result["losses_found"] = report.losses_found
+        result["corrections_applied"] = report.corrections_applied
+        result["division_proposals"] = report.division_proposals
+        if report.errors:
+            result["errors"] = report.errors
+
+        return result
+
     async def _semantic_sleep(self) -> dict[str, Any]:
         """Phase 4: Semantic evolution + recognition synthesis.
 
@@ -244,10 +295,17 @@ class SleepCycle:
 
         from dharma_swarm.semantic_memory_bridge import run_semantic_sleep_phase
 
+        state_root = self._memory_dir.parent
+        project_root = Path(__file__).resolve().parent.parent
         try:
-            result = await run_semantic_sleep_phase()
+            result = await run_semantic_sleep_phase(
+                project_root=project_root,
+                graph_path=state_root / "semantic" / "concept_graph.json",
+                db_path=state_root / "memory" / "semantic_sleep.db",
+            )
         except _sqlite3.OperationalError as exc:
-            if "locked" in str(exc).lower():
+            lowered = str(exc).lower()
+            if "locked" in lowered or "readonly" in lowered:
                 logger.warning("Semantic sleep skipped: DB locked (%s)", exc)
                 return {"phase": "semantic", "skipped": True}
             raise
@@ -264,8 +322,64 @@ class SleepCycle:
 
         return result
 
+    async def _bridge_sleep(self) -> dict[str, Any]:
+        """Phase 5: Cross-graph bridge discovery.
+
+        Runs the BridgeCoordinator to discover edges connecting the
+        semantic, temporal, telos, and catalytic graphs.  These bridge
+        edges enable cross-graph queries like conceptual blast radius.
+        """
+        result: dict[str, Any] = {"bridges_discovered": 0, "errors": []}
+        try:
+            from dharma_swarm.bridge_coordinator import BridgeCoordinator
+
+            coordinator = BridgeCoordinator(state_dir=self._memory_dir.parent)
+            discovery = await coordinator.discover_all()
+            result["bridges_discovered"] = discovery.discovered
+            result["duration_seconds"] = discovery.duration_seconds
+            if discovery.errors:
+                result["errors"] = discovery.errors
+            logger.info(
+                "Bridge sleep: discovered %d edges in %.1fs",
+                discovery.discovered,
+                discovery.duration_seconds,
+            )
+        except Exception as exc:
+            logger.warning("Bridge sleep failed: %s", exc)
+            result["errors"].append(str(exc))
+        return result
+
+    async def _prune_sleep(self) -> dict[str, Any]:
+        """Phase 6: Sweep the zen garden.
+
+        Archives low-salience stigmergy, prunes weak bridges,
+        flags duplicate telos objectives, identifies isolated concepts.
+        Signal stays, noise goes.
+        """
+        result: dict[str, Any] = {"noise_removed": 0, "signal_remaining": 0}
+        try:
+            from dharma_swarm.pruner import Pruner
+
+            pruner = Pruner(state_dir=self._memory_dir.parent)
+            report = await pruner.sweep()
+            result["noise_removed"] = report.noise_removed
+            result["signal_remaining"] = report.signal_remaining
+            result["actions"] = report.actions_taken[:5]
+            if report.errors:
+                result["errors"] = report.errors
+            logger.info(
+                "Prune sleep: removed %d noise, %d signal remaining (%.2fs)",
+                report.noise_removed,
+                report.signal_remaining,
+                report.duration_seconds,
+            )
+        except Exception as exc:
+            logger.warning("Prune sleep failed: %s", exc)
+            result["errors"] = [str(exc)]
+        return result
+
     async def _wake(self, report: SleepReport) -> dict[str, Any]:
-        """Phase 5: Generate morning summary + update bootstrap manifest.
+        """Phase 6: Generate morning summary + update bootstrap manifest.
 
         Writes the sleep report as JSON to
         ``~/.dharma/sleep_reports/YYYY-MM-DD.json``.
@@ -283,24 +397,32 @@ class SleepCycle:
 
         # Update bootstrap manifest so next instance is oriented
         manifest_path = ""
-        try:
-            from dharma_swarm.bootstrap import NOW_PATH, generate_manifest
-            manifest = generate_manifest()
-            manifest_path = str(NOW_PATH)
-            logger.info("Bootstrap manifest updated: %s", manifest_path)
-            # Log whether the kernel crystal was loaded
-            crystal = manifest.get("kernel_crystal", "")
-            if crystal:
-                logger.info(
-                    "Kernel crystal loaded (%d chars) — orientation active",
-                    len(crystal),
-                )
-            else:
-                logger.warning(
-                    "Kernel crystal NOT found — check specs/KERNEL_CORE_SPEC.md"
-                )
-        except Exception as exc:
-            logger.warning("Failed to update bootstrap manifest: %s", exc)
+        state_root = self._memory_dir.parent
+        default_state_root = Path.home() / ".dharma"
+        if state_root == default_state_root:
+            try:
+                from dharma_swarm.bootstrap import NOW_PATH, generate_manifest
+                manifest = generate_manifest()
+                manifest_path = str(NOW_PATH)
+                logger.info("Bootstrap manifest updated: %s", manifest_path)
+                # Log whether the kernel crystal was loaded
+                crystal = manifest.get("kernel_crystal", "")
+                if crystal:
+                    logger.info(
+                        "Kernel crystal loaded (%d chars) — orientation active",
+                        len(crystal),
+                    )
+                else:
+                    logger.warning(
+                        "Kernel crystal NOT found — check specs/KERNEL_CORE_SPEC.md"
+                    )
+            except Exception as exc:
+                logger.warning("Failed to update bootstrap manifest: %s", exc)
+        else:
+            logger.info(
+                "Skipping bootstrap manifest refresh for non-default state root: %s",
+                state_root,
+            )
 
         return {"report_path": str(report_path), "manifest_path": manifest_path}
 
@@ -323,6 +445,15 @@ class SleepCycle:
             report.high_salience_observations.extend(
                 result.get("high_salience", [])
             )
+        elif phase == SleepPhase.NEURAL:
+            losses = result.get("losses_found", 0)
+            corrections = result.get("corrections_applied", 0)
+            divisions = result.get("division_proposals", 0)
+            if losses or corrections:
+                report.high_salience_observations.append(
+                    f"neural: {losses} losses → {corrections} corrections, "
+                    f"{divisions} division proposals"
+                )
         elif phase == SleepPhase.SEMANTIC:
             # Semantic phase results are informational; log key stats
             concepts = result.get("concepts_digested", 0)
@@ -330,6 +461,12 @@ class SleepCycle:
             if concepts:
                 report.high_salience_observations.append(
                     f"semantic: {concepts} concepts digested, {clusters} clusters"
+                )
+        elif phase == SleepPhase.BRIDGE:
+            bridges = result.get("bridges_discovered", 0)
+            if bridges:
+                report.high_salience_observations.append(
+                    f"bridge: {bridges} cross-graph edges discovered"
                 )
 
     @staticmethod

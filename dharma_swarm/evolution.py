@@ -1279,7 +1279,7 @@ class DarwinEngine:
                     _, modifiers = score_behavioral_fitness(proposal_text)
                     fitness = apply_behavioral_modifiers(fitness, modifiers)
             except Exception:
-                pass  # Ouroboros is always non-fatal
+                logger.debug("Ouroboros behavioral modifiers failed", exc_info=True)
 
             # L4 compression: measure behavioral compression ability (non-fatal).
             # Only applied when the description alone has substantial text
@@ -1305,7 +1305,7 @@ class DarwinEngine:
                         "paradox_tolerance": sig.paradox_tolerance,
                     }
             except Exception:
-                pass  # L4 correlation is always non-fatal
+                logger.debug("L4 behavioral correlation failed", exc_info=True)
 
             proposal.actual_fitness = fitness
             proposal.status = EvolutionStatus.EVALUATED
@@ -1417,7 +1417,7 @@ class DarwinEngine:
                     if drift["is_drifting"]:
                         entry.test_results["gaia_warning"] = drift["diagnosis"]
             except Exception:
-                pass  # GAIA fitness is always non-fatal
+                logger.debug("GAIA fitness evaluation failed", exc_info=True)
 
             entry_id = await self.archive.add_entry(entry)
             proposal.status = EvolutionStatus.ARCHIVED
@@ -1585,23 +1585,6 @@ class DarwinEngine:
         await self.reflect_on_cycle(result, proposals)
         await self._maybe_run_meta_evolution(result)
         await self._emit_coalgebra_observation(result, proposals, new_entries)
-
-        # ── Organism: feed cycle metrics into nervous system ──
-        try:
-            from dharma_swarm.organism import get_organism
-            _org = get_organism()
-            if _org is not None:
-                _stagnation = getattr(self, '_cycles_without_improvement', 0)
-                await _org.on_evolution_cycle(
-                    cycle_number=result.proposals_submitted,
-                    best_fitness=result.best_fitness,
-                    cycles_without_improvement=_stagnation,
-                )
-                # C2 fix: Check Gnani verdict — if HOLD, log awareness hook
-                if hasattr(_org, '_last_gnani_verdict') and _org._last_gnani_verdict is False:
-                    logger.warning("Gnani checkpoint: HOLD — evolution stagnation detected")
-        except Exception:
-            pass  # Organism wiring is never fatal
 
         return result
 
@@ -1891,23 +1874,6 @@ class DarwinEngine:
         await self.reflect_on_cycle(result, proposals)
         await self._maybe_run_meta_evolution(result)
         await self._emit_coalgebra_observation(result, proposals, new_entries)
-
-        # ── Organism: feed sandbox cycle metrics into nervous system ──
-        try:
-            from dharma_swarm.organism import get_organism
-            _org = get_organism()
-            if _org is not None:
-                _stagnation = getattr(self, '_cycles_without_improvement', 0)
-                await _org.on_evolution_cycle(
-                    cycle_number=result.proposals_submitted,
-                    best_fitness=result.best_fitness,
-                    cycles_without_improvement=_stagnation,
-                )
-                # C2 fix: Check Gnani verdict — if HOLD, log awareness hook
-                if hasattr(_org, '_last_gnani_verdict') and _org._last_gnani_verdict is False:
-                    logger.warning("Gnani checkpoint: HOLD — evolution stagnation detected")
-        except Exception:
-            pass  # Organism wiring is never fatal
 
         return result
 

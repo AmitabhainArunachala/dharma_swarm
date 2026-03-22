@@ -29,9 +29,11 @@ from dharma_swarm.custodians import (
     _record_run,
     _get_model_for_role,
     _compute_role_lifecycle,
+    _update_role_ontology,
     _git_merge_to_main,
     install_launchd_service,
 )
+from dharma_swarm.ontology_runtime import get_shared_registry, reset_shared_registry
 
 
 # ── Fixtures ─────────────────────────────────────────────────────────
@@ -204,6 +206,40 @@ class TestHistory:
         ))
         touched = _load_last_touched()
         assert touched.get("foo.py") == "linter"
+
+    def test_update_role_ontology_persists_custodian_role(
+        self,
+        history_dir,
+        tmp_path,
+        monkeypatch,
+    ):
+        monkeypatch.setenv("DHARMA_ONTOLOGY_PATH", str(tmp_path / "ontology.json"))
+        reset_shared_registry()
+
+        _record_run(
+            CustodianResult(
+                role="linter",
+                success=True,
+                dry_run=False,
+                model="gpt-5.4-mini",
+                files_changed=["a.py", "b.py"],
+            )
+        )
+
+        _update_role_ontology("linter")
+        obj = get_shared_registry().get_object("custodian-linter")
+
+        assert obj is not None
+        assert obj.type_name == "CustodianRole"
+        assert obj.properties["name"] == "linter"
+        assert obj.properties["status"] == "growing"
+        assert obj.properties["total_runs"] == 1
+        assert obj.properties["files_healed"] == 2
+
+        reset_shared_registry()
+        reloaded = get_shared_registry().get_object("custodian-linter")
+        assert reloaded is not None
+        assert reloaded.properties["status"] == "growing"
 
 
 # ── Dry Run Execution ────────────────────────────────────────────────

@@ -252,3 +252,126 @@ class TestLatestThreats:
         ]
         threats = scanner.latest_threats
         assert threats == []
+
+
+# -- S3↔S4 gate pressure feedback tests -----------------------------------
+
+
+class TestGatePressureFeedback:
+    """Test the S4→S3 bidirectional feedback: zeitgeist gate pressure → telos gates."""
+
+    @pytest.mark.asyncio
+    async def test_high_block_rate_writes_gate_pressure(self, tmp_path: Path) -> None:
+        """When witness logs show >=3 BLOCKEDs, zeitgeist writes gate_pressure.json."""
+        state_dir = tmp_path / ".dharma"
+        witness_dir = state_dir / "witness"
+        witness_dir.mkdir(parents=True)
+
+        from datetime import datetime, timezone
+        today = datetime.now(timezone.utc).strftime("%Y%m%d")
+        log_file = witness_dir / f"witness_{today}.jsonl"
+
+        # Write 5 BLOCKED + 2 PASS outcomes
+        lines = []
+        for i in range(5):
+            lines.append(json.dumps({"outcome": "BLOCKED", "phase": f"t{i}"}))
+        for i in range(2):
+            lines.append(json.dumps({"outcome": "PASS", "phase": f"p{i}"}))
+        log_file.write_text("\n".join(lines))
+
+        scanner = ZeitgeistScanner(state_dir=state_dir)
+        signals = await scanner.scan()
+
+        # Should have generated a gate_block threat signal
+        gate_signals = [s for s in signals if "gate_block" in s.keywords]
+        assert len(gate_signals) >= 1
+
+        # Should have written gate_pressure.json
+        pressure_file = state_dir / "meta" / "gate_pressure.json"
+        assert pressure_file.exists()
+
+        data = json.loads(pressure_file.read_text())
+        assert data["trust_mode_override"] == "external_strict"
+        assert "expires" in data
+        assert data["expires"] > data["set_at"]
+
+    @pytest.mark.asyncio
+    async def test_no_blocks_no_pressure_file(self, tmp_path: Path) -> None:
+        """When witness logs are clean, no gate_pressure.json is written."""
+        state_dir = tmp_path / ".dharma"
+        witness_dir = state_dir / "witness"
+        witness_dir.mkdir(parents=True)
+
+        from datetime import datetime, timezone
+        today = datetime.now(timezone.utc).strftime("%Y%m%d")
+        log_file = witness_dir / f"witness_{today}.jsonl"
+
+        lines = [json.dumps({"outcome": "PASS"}) for _ in range(10)]
+        log_file.write_text("\n".join(lines))
+
+        scanner = ZeitgeistScanner(state_dir=state_dir)
+        await scanner.scan()
+
+        pressure_file = state_dir / "meta" / "gate_pressure.json"
+        assert not pressure_file.exists()
+
+    def test_gate_reads_pressure_override(self, tmp_path: Path) -> None:
+        """TelosGatekeeper._apply_gate_pressure reads the pressure file."""
+        import time
+        from dharma_swarm.telos_gates import TelosGatekeeper
+
+        gk = TelosGatekeeper()
+        # Write a valid pressure file
+        pressure_dir = tmp_path / "meta"
+        pressure_dir.mkdir(parents=True)
+        pressure_file = pressure_dir / "gate_pressure.json"
+        pressure_file.write_text(json.dumps({
+            "trust_mode_override": "external_strict",
+            "set_at": time.time(),
+            "expires": time.time() + 3600,
+        }))
+
+        # Monkey-patch the path
+        original = TelosGatekeeper._GATE_PRESSURE_PATH
+        TelosGatekeeper._GATE_PRESSURE_PATH = pressure_file
+        try:
+            result = gk._apply_gate_pressure("internal_yolo")
+            assert result == "external_strict"
+        finally:
+            TelosGatekeeper._GATE_PRESSURE_PATH = original
+
+    def test_gate_ignores_expired_pressure(self, tmp_path: Path) -> None:
+        """Expired gate_pressure.json does not override trust mode."""
+        import time
+        from dharma_swarm.telos_gates import TelosGatekeeper
+
+        gk = TelosGatekeeper()
+        pressure_dir = tmp_path / "meta"
+        pressure_dir.mkdir(parents=True)
+        pressure_file = pressure_dir / "gate_pressure.json"
+        pressure_file.write_text(json.dumps({
+            "trust_mode_override": "external_strict",
+            "set_at": time.time() - 7200,
+            "expires": time.time() - 3600,  # expired 1 hour ago
+        }))
+
+        original = TelosGatekeeper._GATE_PRESSURE_PATH
+        TelosGatekeeper._GATE_PRESSURE_PATH = pressure_file
+        try:
+            result = gk._apply_gate_pressure("internal_yolo")
+            assert result == "internal_yolo"  # not overridden
+        finally:
+            TelosGatekeeper._GATE_PRESSURE_PATH = original
+
+    def test_gate_no_pressure_file_passthrough(self) -> None:
+        """When no gate_pressure.json exists, mode passes through unchanged."""
+        from dharma_swarm.telos_gates import TelosGatekeeper
+
+        gk = TelosGatekeeper()
+        original = TelosGatekeeper._GATE_PRESSURE_PATH
+        TelosGatekeeper._GATE_PRESSURE_PATH = Path("/nonexistent/gate_pressure.json")
+        try:
+            result = gk._apply_gate_pressure("internal_yolo")
+            assert result == "internal_yolo"
+        finally:
+            TelosGatekeeper._GATE_PRESSURE_PATH = original
