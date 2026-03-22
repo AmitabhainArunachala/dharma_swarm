@@ -1,8 +1,12 @@
 # Elastic Agent Runtime Control Plane
 
 **Date:** 2026-03-23
-**Status:** Draft
+**Status:** Supporting note for `docs/plans/2026-03-23-constitutional-evolution-engine-product-spec.md`
 **System:** `dharma_swarm`
+
+> This note remains useful as a focused runtime-control-plane reference, but the
+> merged product-level synthesis now lives in
+> `docs/plans/2026-03-23-constitutional-evolution-engine-product-spec.md`.
 
 ## Core Distinction
 

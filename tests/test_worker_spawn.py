@@ -112,6 +112,13 @@ def test_create_spawner_for_agent():
     assert spawner._max_concurrent >= 3  # Fallback
 
 
+def test_create_spawner_for_known_zero_cap_agent():
+    """Known agents with zero worker authority should not get fallback capacity."""
+    spawner = create_spawner_for_agent("witness")
+    assert spawner._parent_name == "witness"
+    assert spawner._max_concurrent == 0
+
+
 # ---------------------------------------------------------------------------
 # AgentRunner integration
 # ---------------------------------------------------------------------------

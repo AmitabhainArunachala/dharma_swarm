@@ -78,12 +78,28 @@ class Orchestrator:
         message_bus: Any = None,
         ledger: SessionLedger | None = None,
         ledger_dir: Path | None = None,
+        runtime_db_path: Path | None = None,
+        shared_dir: Path | None = None,
+        stigmergy_dir: Path | None = None,
         session_id: str | None = None,
         event_memory: Any = None,
         yoga: YogaScheduler | None = None,
     ) -> None:
         from dharma_swarm.config import DEFAULT_CONFIG
         _cfg = DEFAULT_CONFIG.orchestrator
+        resolved_ledger_dir = Path(ledger_dir) if ledger_dir is not None else None
+        resolved_runtime_db_path = runtime_db_path
+        if (
+            resolved_runtime_db_path is None
+            and ledger is None
+            and resolved_ledger_dir is not None
+        ):
+            if resolved_ledger_dir.name == "ledgers":
+                resolved_runtime_db_path = (
+                    resolved_ledger_dir.parent / "state" / "runtime.db"
+                )
+            else:
+                resolved_runtime_db_path = resolved_ledger_dir / "runtime.db"
 
         self._board = task_board
         self._pool = agent_pool
@@ -91,9 +107,12 @@ class Orchestrator:
         self._event_memory = event_memory
         self._yoga = yoga
         self._ledger = ledger or SessionLedger(
-            base_dir=ledger_dir,
+            base_dir=resolved_ledger_dir,
             session_id=session_id,
+            runtime_db_path=resolved_runtime_db_path,
         )
+        self._shared_dir = shared_dir or self._derive_runtime_artifact_dir("shared")
+        self._stigmergy_dir = stigmergy_dir or self._derive_runtime_artifact_dir("stigmergy")
         self._running = False
         self._active_dispatches: dict[str, TaskDispatch] = {}
         # Track running asyncio tasks for actual LLM execution
@@ -112,6 +131,13 @@ class Orchestrator:
         self._last_coordination_result: CoordinationResult | None = None
         self._last_coordination_summary: dict[str, Any] = self._empty_coordination_summary()
         self._last_coordination_signature = ""
+
+    def _derive_runtime_artifact_dir(self, leaf: str) -> Path:
+        """Resolve state-local artifact directories from the ledger root when possible."""
+        base_dir = self._ledger.base_dir
+        if base_dir.name == "ledgers":
+            return base_dir.parent / leaf
+        return base_dir / leaf
 
     async def dispatch(
         self,
@@ -1783,10 +1809,9 @@ class Orchestrator:
         This is the critical persistence step that makes agent output
         visible to future sessions. Without it, the colony has no memory.
         """
-        from pathlib import Path
         from datetime import datetime, timezone
 
-        shared_dir = Path.home() / ".dharma" / "shared"
+        shared_dir = self._shared_dir
         shared_dir.mkdir(parents=True, exist_ok=True)
 
         # Write shared notes (append, not overwrite)
@@ -1850,7 +1875,7 @@ class Orchestrator:
         try:
             from dharma_swarm.stigmergy import StigmergyStore, StigmergicMark
 
-            store = StigmergyStore()
+            store = StigmergyStore(self._stigmergy_dir)
             # Extract first meaningful line as observation
             lines = [l.strip() for l in result.split("\n") if l.strip()]
             observation = lines[0][:200] if lines else f"Completed: {task.title}"

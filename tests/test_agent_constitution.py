@@ -2,12 +2,17 @@
 
 from __future__ import annotations
 
+from pathlib import Path
+
 import pytest
+import dharma_swarm.agent_constitution as constitution
 
 from dharma_swarm.agent_constitution import (
     AgentSpec,
     CONSTITUTIONAL_ROSTER,
     ConstitutionalLayer,
+    bootstrap_dynamic_roster,
+    DynamicRoster,
     MAX_STABLE_AGENTS,
     can_spawn_worker,
     get_agent_by_role,
@@ -15,9 +20,33 @@ from dharma_swarm.agent_constitution import (
     get_agents_by_layer,
     get_expected_roster_size,
     get_max_workers,
+    get_runtime_agent_spec,
+    get_runtime_max_workers,
     get_stable_agent_names,
+    runtime_can_spawn_worker,
 )
 from dharma_swarm.models import AgentRole, ProviderType
+
+
+def _make_dynamic_spec(name: str, **overrides: object) -> AgentSpec:
+    defaults: dict[str, object] = dict(
+        name=name,
+        role=AgentRole.WORKER,
+        layer=ConstitutionalLayer.DIRECTOR,
+        vsm_function="runtime specialization",
+        domain="dynamic runtime agent",
+        system_prompt="You are a dynamic runtime specialist.",
+        default_provider=ProviderType.OPENROUTER,
+        default_model="dynamic-model",
+        backup_models=[],
+        constitutional_gates=["SATYA"],
+        max_concurrent_workers=4,
+        memory_namespace=name,
+        spawn_authority=["code_worker"],
+        audit_cycle_seconds=0.0,
+    )
+    defaults.update(overrides)
+    return AgentSpec(**defaults)  # type: ignore[arg-type]
 
 
 # ---------------------------------------------------------------------------
@@ -142,6 +171,38 @@ class TestLookups:
         names = get_stable_agent_names()
         assert isinstance(names, list)
         assert len(names) == 6
+
+    def test_get_runtime_agent_spec_reads_dynamic_roster(self, tmp_path: Path):
+        roster = DynamicRoster(state_dir=tmp_path)
+        roster.add(_make_dynamic_spec("runtime_specialist"))
+
+        spec = get_runtime_agent_spec("runtime_specialist", state_dir=tmp_path)
+
+        assert spec is not None
+        assert spec.name == "runtime_specialist"
+        assert spec.default_model == "dynamic-model"
+
+    def test_runtime_worker_authority_reads_dynamic_roster(self, tmp_path: Path):
+        roster = DynamicRoster(state_dir=tmp_path)
+        roster.add(_make_dynamic_spec("runtime_specialist"))
+
+        assert get_runtime_max_workers("runtime_specialist", state_dir=tmp_path) == 4
+        assert runtime_can_spawn_worker(
+            "runtime_specialist",
+            "code_worker",
+            state_dir=tmp_path,
+        ) is True
+
+    def test_bootstrap_dynamic_roster_sets_helper_singleton(self, tmp_path: Path, monkeypatch):
+        monkeypatch.setattr(constitution, "_dynamic_roster", None)
+        seeded = DynamicRoster(state_dir=tmp_path)
+        seeded.add(_make_dynamic_spec("bootstrapped_agent"))
+
+        roster = bootstrap_dynamic_roster(state_dir=tmp_path)
+
+        assert roster.get("bootstrapped_agent") is not None
+        assert get_agent_spec("bootstrapped_agent") is not None
+        assert get_agent_spec("bootstrapped_agent").name == "bootstrapped_agent"  # type: ignore[union-attr]
 
 
 # ---------------------------------------------------------------------------

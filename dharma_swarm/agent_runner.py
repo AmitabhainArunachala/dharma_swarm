@@ -1827,8 +1827,12 @@ class AgentPool:
         """
         # Enrich config from constitutional roster if a matching spec exists
         try:
-            from dharma_swarm.agent_constitution import get_agent_spec
-            spec = get_agent_spec(config.name)
+            from dharma_swarm.agent_constitution import get_runtime_agent_spec
+
+            spec = get_runtime_agent_spec(
+                config.name,
+                state_dir=config.metadata.get("state_dir"),
+            )
             if spec is not None and not config.system_prompt and spec.system_prompt:
                 config = config.model_copy(update={"system_prompt": spec.system_prompt})
                 logger.info("Constitution enriched %s with system_prompt", config.name)

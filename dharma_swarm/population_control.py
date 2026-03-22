@@ -141,6 +141,7 @@ class PopulationController:
         apoptosis_cycle_count: int = 5,
         probation_cycles: int = 10,
         daily_token_budget: int = 500_000,
+        agent_registry: Any = None,
     ) -> None:
         self._state_dir = state_dir or Path.home() / ".dharma"
         self._max_population = max_population
@@ -148,6 +149,7 @@ class PopulationController:
         self._apoptosis_cycles = apoptosis_cycle_count
         self._probation_cycles = probation_cycles
         self._daily_token_budget = daily_token_budget
+        self._agent_registry = agent_registry
 
         # Persistence paths
         self._replication_dir = self._state_dir / "replication"
@@ -157,6 +159,28 @@ class PopulationController:
         # In-memory probation state, loaded from disk
         self._probation: dict[str, ProbationStatus] = {}
         self._load_probation()
+
+    # ------------------------------------------------------------------
+    # Default fitness function (uses real AgentRegistry data)
+    # ------------------------------------------------------------------
+
+    def _default_fitness_fn(self, name: str) -> float:
+        """Get real composite fitness from AgentRegistry.
+
+        Falls back to 0.5 only if the registry is unavailable or the
+        agent has no task history.
+        """
+        if self._agent_registry is None:
+            try:
+                from dharma_swarm.agent_registry import AgentRegistry
+                self._agent_registry = AgentRegistry()
+            except Exception:
+                return 0.5
+        try:
+            data = self._agent_registry.get_agent_fitness(name)
+            return float(data.get("composite_fitness", 0.5))
+        except Exception:
+            return 0.5
 
     # ------------------------------------------------------------------
     # Population assessment
@@ -177,11 +201,13 @@ class PopulationController:
         Args:
             current_agents: Names of all currently active agents.
             fitness_fn: Callable that returns composite fitness for a
-                given agent name. If None, defaults to 0.5 for all.
+                given agent name. If None, uses AgentRegistry composite.
 
         Returns:
             PopulationAssessment with the decision and rationale.
         """
+        if fitness_fn is None:
+            fitness_fn = self._default_fitness_fn
         pop = len(current_agents)
 
         if pop < self._max_population:

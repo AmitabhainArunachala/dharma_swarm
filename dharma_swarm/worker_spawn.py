@@ -25,6 +25,7 @@ import time
 from dataclasses import dataclass, field
 from datetime import datetime
 from enum import Enum
+from pathlib import Path
 from typing import Any
 
 from dharma_swarm.models import (
@@ -333,17 +334,21 @@ class WorkerSpawner:
 # Factory
 # ---------------------------------------------------------------------------
 
-def create_spawner_for_agent(agent_name: str) -> WorkerSpawner:
-    """Create a WorkerSpawner configured for a constitutional agent.
+def create_spawner_for_agent(
+    agent_name: str,
+    *,
+    state_dir: str | Path | None = None,
+) -> WorkerSpawner:
+    """Create a WorkerSpawner configured for a runtime agent.
 
-    Uses the agent's max_concurrent_workers from the constitutional roster.
-    Falls back to 3 if the agent is not in the roster.
+    Uses the agent's max_concurrent_workers from the runtime roster.
+    Falls back to 3 only when the agent cannot be resolved at all.
     """
     try:
-        from dharma_swarm.agent_constitution import get_max_workers
-        max_workers = get_max_workers(agent_name)
-        if max_workers == 0:
-            max_workers = 3  # Fallback for non-roster agents
+        from dharma_swarm.agent_constitution import get_runtime_agent_spec
+
+        spec = get_runtime_agent_spec(agent_name, state_dir=state_dir)
+        max_workers = spec.max_concurrent_workers if spec is not None else 3
     except Exception:
         max_workers = 3
     return WorkerSpawner(parent_name=agent_name, max_concurrent=max_workers)

@@ -153,16 +153,33 @@ class ThinkodynamicScorer:
 
         Aggregates scores across all chunks, weighted by chunk position
         (later chunks get more weight, like IPA's discounted return).
+        Also considers outcome.result_preview as a fallback when chunk
+        responses are stubs (e.g. from mock/lightweight providers).
         """
         chunks = getattr(trajectory, "chunks", [])
+
+        # Fallback: if chunks have empty responses, score the outcome text
+        outcome = getattr(trajectory, "outcome", None)
+        outcome_text = getattr(outcome, "result_preview", "") if outcome else ""
+
         if not chunks:
+            if outcome_text:
+                return self.score_text(
+                    prompt=getattr(trajectory, "task_title", ""),
+                    response=outcome_text,
+                    metadata={"tokens_used": getattr(trajectory, "total_tokens", 0)},
+                )
             return ThinkodynamicScore()
 
         scores: list[ThinkodynamicScore] = []
         for chunk in chunks:
+            response = getattr(chunk, "response", "")
+            # Use outcome text as response if chunk response is empty/stub
+            if not response or response.startswith("[mock]"):
+                response = outcome_text
             s = self.score_text(
                 prompt=getattr(chunk, "prompt", ""),
-                response=getattr(chunk, "response", ""),
+                response=response,
                 metadata={
                     "model": getattr(chunk, "model", ""),
                     "tokens_used": getattr(chunk, "tokens_used", 0),

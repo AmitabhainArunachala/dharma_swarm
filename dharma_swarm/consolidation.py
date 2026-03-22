@@ -712,13 +712,24 @@ class DifferentiationCheck:
                 )
                 gap_severity = matching_gap.severity if matching_gap else 0.5
 
+                # Derive generation from parent's actual lineage
+                parent_generation = 0
+                try:
+                    from dharma_swarm.agent_registry import AgentRegistry
+                    _reg = AgentRegistry()
+                    _identity = _reg.load_agent(parent)
+                    if _identity and "prompt_generation" in _identity:
+                        parent_generation = int(_identity["prompt_generation"])
+                except Exception:
+                    pass  # Static founding agents default to gen 0
+
                 return DifferentiationProposal(
                     proposed_role=f"specialist_{desc[:30].replace(' ', '_')}",
                     justification=f"Persistent capability gap detected in {count} cycles",
                     capability_gap=desc,
                     evidence_cycles=cycles_seen,
                     parent_agent=parent,
-                    generation=0,
+                    generation=parent_generation + 1,
                     severity=gap_severity,
                 )
 

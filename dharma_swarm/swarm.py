@@ -65,6 +65,7 @@ if TYPE_CHECKING:
     from dharma_swarm.skills import SkillRegistry
     from dharma_swarm.stigmergy import StigmergyStore
     from dharma_swarm.task_board import TaskBoard
+    from dharma_swarm.telemetry_plane import TelemetryPlaneStore
     from dharma_swarm.thinkodynamic_director import ThinkodynamicDirector
     from dharma_swarm.thread_manager import ThreadManager
     from dharma_swarm.traces import TraceStore
@@ -132,6 +133,7 @@ class SwarmManager:
         # CRITICAL: core infrastructure
         self._memory: StrangeLoopMemory | None = None
         self._event_memory: EventMemoryStore | None = None
+        self._telemetry: TelemetryPlaneStore | None = None
         self._thread_mgr: ThreadManager | None = None
         self._router = create_default_router()
 
@@ -240,11 +242,13 @@ class SwarmManager:
         from dharma_swarm.message_bus import MessageBus
         from dharma_swarm.orchestrator import Orchestrator
         from dharma_swarm.task_board import TaskBoard
+        from dharma_swarm.telemetry_plane import TelemetryPlaneStore
         from dharma_swarm.telos_gates import DEFAULT_GATEKEEPER
         from dharma_swarm.thread_manager import ThreadManager
 
         db_dir = self.state_dir / "db"
         db_dir.mkdir(exist_ok=True)
+        state_runtime_db = self.state_dir / "state" / "runtime.db"
 
         self._task_board = TaskBoard(db_dir / "tasks.db")
         await self._task_board.init_db()
@@ -256,6 +260,8 @@ class SwarmManager:
         await self._memory.init_db()
         self._event_memory = EventMemoryStore(db_dir / "memory_plane.db")
         await self._event_memory.init_db()
+        self._telemetry = TelemetryPlaneStore(state_runtime_db)
+        await self._telemetry.init_db()
 
         self._agent_pool = AgentPool()
         self._gatekeeper = DEFAULT_GATEKEEPER
@@ -269,6 +275,8 @@ class SwarmManager:
             task_board=self._task_board,
             agent_pool=self._agent_pool,
             message_bus=self._message_bus,
+            ledger_dir=self.state_dir / "ledgers",
+            runtime_db_path=state_runtime_db,
             event_memory=self._event_memory,
             yoga=self._yoga,
         )
@@ -503,8 +511,9 @@ class SwarmManager:
         """
         # Constitutional roster check: apply spec defaults for stable agents
         try:
-            from dharma_swarm.agent_constitution import get_agent_spec
-            spec = get_agent_spec(name)
+            from dharma_swarm.agent_constitution import get_runtime_agent_spec
+
+            spec = get_runtime_agent_spec(name, state_dir=self.state_dir)
             if spec is not None:
                 # Stable agent — use constitutional defaults unless caller overrides
                 if role == AgentRole.GENERAL:
@@ -522,7 +531,10 @@ class SwarmManager:
                 # Create worker spawner for constitutional agents
                 try:
                     from dharma_swarm.worker_spawn import create_spawner_for_agent
-                    self._worker_spawners[name] = create_spawner_for_agent(name)
+                    self._worker_spawners[name] = create_spawner_for_agent(
+                        name,
+                        state_dir=self.state_dir,
+                    )
                 except Exception:
                     logger.debug("Worker spawner creation failed for %s", name, exc_info=True)
         except Exception:
@@ -548,6 +560,7 @@ class SwarmManager:
                 provider=provider_type,
                 system_prompt=system_prompt + extra_prompt if system_prompt else extra_prompt,
                 thread=thread,
+                metadata={"state_dir": str(self.state_dir)},
             )
             # Route through the shared ModelRouter so live agent tasks contribute
             # to routing memory, retries, and audit trails while staying pinned
@@ -625,6 +638,7 @@ class SwarmManager:
             managed_team_ids.append(resolve_team_id(metadata={"team_id": DEFAULT_TEAM_ID}))
         results = await sync_live_agent_registrations(
             agents,
+            telemetry=self._telemetry,
             metadata_by_agent_id=metadata_by_agent_id,
             thread_by_agent_id=thread_by_agent_id,
             message_bus=self._message_bus,
@@ -646,6 +660,7 @@ class SwarmManager:
         metadata.setdefault("source", "swarm.spawn_agent" if config is not None else "swarm.list_agents")
         result = await sync_live_agent_registration(
             agent,
+            telemetry=self._telemetry,
             thread=config.thread if config is not None else None,
             metadata=metadata,
             message_bus=self._message_bus,

@@ -255,8 +255,11 @@ _ROSTER_BY_ROLE: dict[AgentRole, AgentSpec] = {spec.role: spec for spec in CONST
 
 
 def get_agent_spec(name: str) -> AgentSpec | None:
-    """Look up a constitutional agent by name."""
-    return _ROSTER_BY_NAME.get(name)
+    """Look up an agent by name (static roster first, then dynamic)."""
+    spec = _ROSTER_BY_NAME.get(name)
+    if spec is None and _dynamic_roster is not None:
+        spec = _dynamic_roster.get(name)
+    return spec
 
 
 def get_agent_by_role(role: AgentRole) -> AgentSpec | None:
@@ -265,8 +268,14 @@ def get_agent_by_role(role: AgentRole) -> AgentSpec | None:
 
 
 def get_stable_agent_names() -> list[str]:
-    """Return names of all stable agents in the constitutional roster."""
-    return [spec.name for spec in CONSTITUTIONAL_ROSTER]
+    """Return names of all agents (static + dynamic)."""
+    names = [spec.name for spec in CONSTITUTIONAL_ROSTER]
+    if _dynamic_roster is not None:
+        names.extend(
+            name for name in _dynamic_roster._dynamic
+            if name not in _ROSTER_BY_NAME
+        )
+    return names
 
 
 def get_expected_roster_size() -> int:
@@ -280,16 +289,91 @@ def get_agents_by_layer(layer: ConstitutionalLayer) -> list[AgentSpec]:
 
 
 def can_spawn_worker(parent_name: str, worker_type: str) -> bool:
-    """Check if a stable agent is authorized to spawn a given worker type."""
-    spec = _ROSTER_BY_NAME.get(parent_name)
+    """Check if an agent is authorized to spawn a given worker type."""
+    spec = get_agent_spec(parent_name)  # checks static + dynamic
     if spec is None:
         return False
     return worker_type in spec.spawn_authority
 
 
 def get_max_workers(parent_name: str) -> int:
-    """Return the max concurrent worker count for a stable agent."""
-    spec = _ROSTER_BY_NAME.get(parent_name)
+    """Return the max concurrent worker count for an agent."""
+    spec = get_agent_spec(parent_name)  # checks static + dynamic
+    if spec is None:
+        return 0
+    return spec.max_concurrent_workers
+
+
+def _coerce_state_dir(state_dir: Path | str | None) -> Path | None:
+    if state_dir is None:
+        return None
+    return Path(state_dir)
+
+
+def get_runtime_roster(*, state_dir: Path | str | None = None) -> "DynamicRoster":
+    """Return a roster view resolved from the provided runtime state directory."""
+    return DynamicRoster(state_dir=_coerce_state_dir(state_dir))
+
+
+def get_runtime_agent_spec(
+    name: str,
+    *,
+    state_dir: Path | str | None = None,
+) -> AgentSpec | None:
+    """Look up an agent by name from the runtime roster."""
+    return get_runtime_roster(state_dir=state_dir).get(name)
+
+
+def get_runtime_agent_by_role(
+    role: AgentRole,
+    *,
+    state_dir: Path | str | None = None,
+) -> AgentSpec | None:
+    """Look up the first runtime agent matching the requested role."""
+    for spec in get_runtime_roster(state_dir=state_dir).get_all():
+        if spec.role == role:
+            return spec
+    return None
+
+
+def get_runtime_agent_names(*, state_dir: Path | str | None = None) -> list[str]:
+    """Return names of all runtime agents, including dynamic additions."""
+    return [spec.name for spec in get_runtime_roster(state_dir=state_dir).get_all()]
+
+
+def get_runtime_agents_by_layer(
+    layer: ConstitutionalLayer,
+    *,
+    state_dir: Path | str | None = None,
+) -> list[AgentSpec]:
+    """Return runtime agents in the given constitutional layer."""
+    return [
+        spec
+        for spec in get_runtime_roster(state_dir=state_dir).get_all()
+        if spec.layer == layer
+    ]
+
+
+def runtime_can_spawn_worker(
+    parent_name: str,
+    worker_type: str,
+    *,
+    state_dir: Path | str | None = None,
+) -> bool:
+    """Check worker authority against the runtime roster."""
+    spec = get_runtime_agent_spec(parent_name, state_dir=state_dir)
+    if spec is None:
+        return False
+    return worker_type in spec.spawn_authority
+
+
+def get_runtime_max_workers(
+    parent_name: str,
+    *,
+    state_dir: Path | str | None = None,
+) -> int:
+    """Return the max worker count for any runtime agent."""
+    spec = get_runtime_agent_spec(parent_name, state_dir=state_dir)
     if spec is None:
         return 0
     return spec.max_concurrent_workers
@@ -297,6 +381,19 @@ def get_max_workers(parent_name: str) -> int:
 
 # Maximum stable agents (ceiling from Four Shaktis x 2 aspects)
 MAX_STABLE_AGENTS = 8
+
+
+# ---------------------------------------------------------------------------
+# Dynamic Roster singleton — set at orchestrator startup
+# ---------------------------------------------------------------------------
+
+_dynamic_roster: "DynamicRoster | None" = None
+
+
+def set_dynamic_roster(roster: "DynamicRoster") -> None:
+    """Register the DynamicRoster so all lookup helpers see dynamic agents."""
+    global _dynamic_roster
+    _dynamic_roster = roster
 
 
 # ---------------------------------------------------------------------------
