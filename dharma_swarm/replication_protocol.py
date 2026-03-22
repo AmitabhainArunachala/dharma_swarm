@@ -231,8 +231,9 @@ class ReplicationProtocol:
     def _get_dynamic_roster(self) -> Any:
         """Return DynamicRoster, creating default if not injected."""
         if self._dynamic_roster is None:
-            from dharma_swarm.agent_constitution import DynamicRoster
-            self._dynamic_roster = DynamicRoster(state_dir=self._state_dir)
+            from dharma_swarm.agent_constitution import bootstrap_dynamic_roster
+
+            self._dynamic_roster = bootstrap_dynamic_roster(state_dir=self._state_dir)
         return self._dynamic_roster
 
     # ------------------------------------------------------------------

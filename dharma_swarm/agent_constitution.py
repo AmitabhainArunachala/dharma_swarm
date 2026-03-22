@@ -396,6 +396,16 @@ def set_dynamic_roster(roster: "DynamicRoster") -> None:
     _dynamic_roster = roster
 
 
+def bootstrap_dynamic_roster(
+    *,
+    state_dir: Path | str | None = None,
+) -> "DynamicRoster":
+    """Load and register the runtime dynamic roster for helper-based lookups."""
+    roster = DynamicRoster(state_dir=_coerce_state_dir(state_dir))
+    set_dynamic_roster(roster)
+    return roster
+
+
 # ---------------------------------------------------------------------------
 # Dynamic Roster — overlay for runtime-added agents
 # ---------------------------------------------------------------------------

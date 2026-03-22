@@ -31,6 +31,7 @@ Usage::
 from __future__ import annotations
 
 import logging
+from pathlib import Path
 from typing import Any
 
 from dharma_swarm.lineage import LineageEdge, LineageGraph
@@ -55,9 +56,11 @@ class TelicSeam:
         self,
         registry: OntologyRegistry | None = None,
         lineage: LineageGraph | None = None,
+        registry_path: str | Path | None = None,
     ) -> None:
-        self._registry = registry or get_shared_registry()
-        self._persist_registry = registry is None
+        self._registry_path = Path(registry_path) if registry_path is not None else None
+        self._registry = registry or get_shared_registry(path=self._registry_path)
+        self._persist_registry = registry is None or self._registry_path is not None
         self._lineage = lineage or LineageGraph()
         self._proposal_map: dict[str, str] = {}  # task_id -> proposal obj_id
         self._duplicate_suppressions: dict[str, int] = {
@@ -76,7 +79,7 @@ class TelicSeam:
 
     def _flush_registry(self) -> None:
         if self._persist_registry:
-            persist_shared_registry(self._registry)
+            persist_shared_registry(self._registry, path=self._registry_path)
 
     def record_dispatch(
         self,

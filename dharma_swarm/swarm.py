@@ -236,6 +236,8 @@ class SwarmManager:
         """Initialize all subsystems."""
         self.state_dir.mkdir(parents=True, exist_ok=True)
 
+        from dharma_swarm.agent_constitution import bootstrap_dynamic_roster
+
         from dharma_swarm.agent_runner import AgentPool
         from dharma_swarm.engine.event_memory import EventMemoryStore
         from dharma_swarm.memory import StrangeLoopMemory
@@ -256,6 +258,7 @@ class SwarmManager:
         self._message_bus = MessageBus(db_dir / "messages.db")
         await self._message_bus.init_db()
 
+        self._dynamic_roster = bootstrap_dynamic_roster(state_dir=self.state_dir)
         self._memory = StrangeLoopMemory(db_dir / "memory.db")
         await self._memory.init_db()
         self._event_memory = EventMemoryStore(db_dir / "memory_plane.db")

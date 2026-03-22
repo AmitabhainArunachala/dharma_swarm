@@ -111,6 +111,7 @@ class Orchestrator:
             session_id=session_id,
             runtime_db_path=resolved_runtime_db_path,
         )
+        self._telic_seam = self._init_telic_seam()
         self._shared_dir = shared_dir or self._derive_runtime_artifact_dir("shared")
         self._stigmergy_dir = stigmergy_dir or self._derive_runtime_artifact_dir("stigmergy")
         self._running = False
@@ -132,12 +133,28 @@ class Orchestrator:
         self._last_coordination_summary: dict[str, Any] = self._empty_coordination_summary()
         self._last_coordination_signature = ""
 
-    def _derive_runtime_artifact_dir(self, leaf: str) -> Path:
-        """Resolve state-local artifact directories from the ledger root when possible."""
+    def _runtime_root(self) -> Path:
         base_dir = self._ledger.base_dir
         if base_dir.name == "ledgers":
-            return base_dir.parent / leaf
-        return base_dir / leaf
+            return base_dir.parent
+        return base_dir
+
+    def _init_telic_seam(self) -> Any | None:
+        """Prefer a state-local ontology seam over the global singleton."""
+        try:
+            from dharma_swarm.ontology_runtime import get_shared_registry
+            from dharma_swarm.telic_seam import TelicSeam
+
+            ontology_db = self._runtime_root() / "ontology.db"
+            registry = get_shared_registry(path=ontology_db)
+            return TelicSeam(registry=registry, registry_path=ontology_db)
+        except Exception:
+            logger.debug("Failed to initialize local telic seam", exc_info=True)
+            return None
+
+    def _derive_runtime_artifact_dir(self, leaf: str) -> Path:
+        """Resolve state-local artifact directories from the ledger root when possible."""
+        return self._runtime_root() / leaf
 
     async def dispatch(
         self,
@@ -780,8 +797,9 @@ class Orchestrator:
 
         try:
             import random
-            from dharma_swarm.telic_seam import get_seam
-            seam = get_seam()
+            seam = self._telic_seam
+            if seam is None:
+                return None
 
             # Exploration: 10% of the time, pick randomly
             if random.random() < self._EXPLORATION_RATE:
@@ -1517,12 +1535,13 @@ class Orchestrator:
         proposal_id: str | None = None
         if task_for_gate is not None:
             try:
-                from dharma_swarm.telic_seam import get_seam
-                proposal_id = get_seam().record_dispatch(
-                    task_for_gate, td.agent_id,
-                    topology=td.topology.value if td.topology else "dispatch",
-                )
-                td.metadata["telic_proposal_id"] = proposal_id or ""
+                if self._telic_seam is not None:
+                    proposal_id = self._telic_seam.record_dispatch(
+                        task_for_gate,
+                        td.agent_id,
+                        topology=td.topology.value if td.topology else "dispatch",
+                    )
+                    td.metadata["telic_proposal_id"] = proposal_id or ""
             except Exception:
                 logger.debug("Telic seam dispatch recording failed", exc_info=True)
 
@@ -1548,11 +1567,12 @@ class Orchestrator:
         # ── Telic Seam: record GateDecision in ontology ──
         if proposal_id is not None:
             try:
-                from dharma_swarm.telic_seam import get_seam
-                get_seam().record_gate_decision(
-                    proposal_id, gate.result,
-                    witness_reroutes=gate.attempts,
-                )
+                if self._telic_seam is not None:
+                    self._telic_seam.record_gate_decision(
+                        proposal_id,
+                        gate.result,
+                        witness_reroutes=gate.attempts,
+                    )
             except Exception:
                 logger.debug("Telic seam gate decision recording failed", exc_info=True)
 
