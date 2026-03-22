@@ -671,12 +671,9 @@ def _build_system_prompt(config: AgentConfig) -> str:
     return "\n\n".join(parts)
 
 
-def _resolve_prompt_state_dir(task: Task, config: AgentConfig) -> Path | None:
-    """Prefer explicit or repo-local state before falling back to HOME/.dharma."""
-    metadata = task.metadata if isinstance(task.metadata, dict) else {}
+def _resolve_config_state_dir(config: AgentConfig) -> Path | None:
+    """Resolve isolated state from config or repo-local checkout."""
     for candidate in (
-        metadata.get("memory_state_dir"),
-        metadata.get("state_dir"),
         config.metadata.get("memory_state_dir"),
         config.metadata.get("state_dir"),
     ):
@@ -689,6 +686,64 @@ def _resolve_prompt_state_dir(task: Task, config: AgentConfig) -> Path | None:
     if local_state_dir.exists():
         return local_state_dir
     return None
+
+
+def _resolve_prompt_state_dir(task: Task, config: AgentConfig) -> Path | None:
+    """Prefer task/config-local state and never silently fall back to HOME/.dharma."""
+    metadata = task.metadata if isinstance(task.metadata, dict) else {}
+    for candidate in (
+        metadata.get("memory_state_dir"),
+        metadata.get("state_dir"),
+    ):
+        if isinstance(candidate, str) and candidate.strip():
+            return Path(candidate).expanduser()
+        if isinstance(candidate, Path):
+            return candidate
+
+    return _resolve_config_state_dir(config)
+
+
+def _resolve_agent_registry_dir(task: Task, config: AgentConfig) -> Path | None:
+    """Resolve the per-run AgentRegistry directory, if one is configured."""
+    state_dir = _resolve_prompt_state_dir(task, config)
+    if state_dir is None:
+        return None
+    return state_dir / "ginko" / "agents"
+
+
+def _resolve_config_agent_registry_dir(config: AgentConfig) -> Path | None:
+    """Resolve the per-run AgentRegistry directory from config only."""
+    state_dir = _resolve_config_state_dir(config)
+    if state_dir is None:
+        return None
+    return state_dir / "ginko" / "agents"
+
+
+def _resolve_ontology_path(
+    task: Task,
+    config: AgentConfig,
+    explicit_path: Path | str | None,
+) -> Path | None:
+    """Resolve ontology persistence for a task without touching shared home state."""
+    if explicit_path is not None:
+        return Path(explicit_path).expanduser()
+    state_dir = _resolve_prompt_state_dir(task, config)
+    if state_dir is None:
+        return None
+    return state_dir / "ontology.db"
+
+
+def _resolve_config_ontology_path(
+    config: AgentConfig,
+    explicit_path: Path | str | None,
+) -> Path | None:
+    """Resolve ontology persistence for agent startup without HOME fallback."""
+    if explicit_path is not None:
+        return Path(explicit_path).expanduser()
+    state_dir = _resolve_config_state_dir(config)
+    if state_dir is None:
+        return None
+    return state_dir / "ontology.db"
 
 
 def _build_prompt(
@@ -713,7 +768,7 @@ def _build_prompt(
         for part in (task.title, task.description)
         if isinstance(part, str) and part.strip()
     )
-    if memory_query:
+    if memory_query and prompt_state_dir is not None:
         memory_mode = os.getenv("DGC_AGENT_PROMPT_MEMORY_MODE", "active").strip().lower()
         try:
             from dharma_swarm.context import read_memory_context
@@ -891,7 +946,7 @@ class AgentRunner:
         self._memory = memory
         self._message_bus = message_bus
         self._worker_spawner = worker_spawner
-        self._ontology_path = ontology_path
+        self._ontology_path = _resolve_config_ontology_path(config, ontology_path)
         self._state = _state_from_config(config)
         self._lock = asyncio.Lock()
         self._background_tasks: set[asyncio.Task[Any]] = set()
@@ -1183,46 +1238,50 @@ class AgentRunner:
             # ── AgentRegistry: log task for fitness + budget tracking ──
             try:
                 from dharma_swarm.agent_registry import get_registry
-                _reg = get_registry()
-                _reg.log_task(
-                    name=self._config.name,
-                    task=task.title[:200],
-                    success=True,
-                    tokens=_response_total_tokens(response),
-                    latency_ms=completion_latency_ms,
-                    response_preview=result[:500] if result else "",
-                )
+                registry_dir = _resolve_agent_registry_dir(task, self._config)
+                if registry_dir is not None:
+                    _reg = get_registry(registry_dir)
+                    _reg.log_task(
+                        name=self._config.name,
+                        task=task.title[:200],
+                        success=True,
+                        tokens=_response_total_tokens(response),
+                        latency_ms=completion_latency_ms,
+                        response_preview=result[:500] if result else "",
+                    )
             except Exception:
                 logger.debug("AgentRegistry task log failed", exc_info=True)
 
             # ── Telic Seam: record Outcome + ValueEvent + Contribution ──
             try:
                 from dharma_swarm.telic_seam import get_seam
-                seam = get_seam(self._ontology_path)
-                outcome_id = seam.record_outcome(
-                    task,
-                    telic_agent_id,
-                    success=True,
-                    result_summary=result[:200] if result else "",
-                    duration_ms=completion_latency_ms,
-                )
-                if outcome_id:
-                    ve_id = seam.record_value_event(
-                        outcome_id, task, telic_agent_id,
-                        result_text=result[:200] if result else "",
+                ontology_path = _resolve_ontology_path(task, self._config, self._ontology_path)
+                if ontology_path is not None:
+                    seam = get_seam(ontology_path)
+                    outcome_id = seam.record_outcome(
+                        task,
+                        telic_agent_id,
                         success=True,
+                        result_summary=result[:200] if result else "",
                         duration_ms=completion_latency_ms,
-                        cell_id=telic_cell_id,
                     )
-                    if ve_id:
-                        ve_obj = seam.registry.get_object(ve_id)
-                        cv = ve_obj.properties.get("composite_value", 0.0) if ve_obj else 0.0
-                        seam.record_contribution(
-                            ve_id, telic_agent_id,
-                            composite_value=cv,
+                    if outcome_id:
+                        ve_id = seam.record_value_event(
+                            outcome_id, task, telic_agent_id,
+                            result_text=result[:200] if result else "",
+                            success=True,
+                            duration_ms=completion_latency_ms,
                             cell_id=telic_cell_id,
-                            task_type=telic_task_type,
                         )
+                        if ve_id:
+                            ve_obj = seam.registry.get_object(ve_id)
+                            cv = ve_obj.properties.get("composite_value", 0.0) if ve_obj else 0.0
+                            seam.record_contribution(
+                                ve_id, telic_agent_id,
+                                composite_value=cv,
+                                cell_id=telic_cell_id,
+                                task_type=telic_task_type,
+                            )
             except Exception:
                 logger.debug("Telic seam recording failed", exc_info=True)
 
@@ -1269,46 +1328,50 @@ class AgentRunner:
             # ── AgentRegistry: log failure for fitness + budget tracking ──
             try:
                 from dharma_swarm.agent_registry import get_registry
-                _reg = get_registry()
-                _reg.log_task(
-                    name=self._config.name,
-                    task=task.title[:200],
-                    success=False,
-                    tokens=_response_total_tokens(response),
-                    latency_ms=completion_latency_ms,
-                    response_preview=str(exc)[:500],
-                )
+                registry_dir = _resolve_agent_registry_dir(task, self._config)
+                if registry_dir is not None:
+                    _reg = get_registry(registry_dir)
+                    _reg.log_task(
+                        name=self._config.name,
+                        task=task.title[:200],
+                        success=False,
+                        tokens=_response_total_tokens(response),
+                        latency_ms=completion_latency_ms,
+                        response_preview=str(exc)[:500],
+                    )
             except Exception:
                 logger.debug("AgentRegistry failure log failed", exc_info=True)
 
             # ── Telic Seam: record failure Outcome + ValueEvent + Contribution ──
             try:
                 from dharma_swarm.telic_seam import get_seam
-                seam = get_seam(self._ontology_path)
-                outcome_id = seam.record_outcome(
-                    task,
-                    telic_agent_id,
-                    success=False,
-                    error=str(exc)[:200],
-                    duration_ms=completion_latency_ms,
-                )
-                if outcome_id:
-                    ve_id = seam.record_value_event(
-                        outcome_id, task, telic_agent_id,
-                        result_text=str(exc)[:200],
+                ontology_path = _resolve_ontology_path(task, self._config, self._ontology_path)
+                if ontology_path is not None:
+                    seam = get_seam(ontology_path)
+                    outcome_id = seam.record_outcome(
+                        task,
+                        telic_agent_id,
                         success=False,
+                        error=str(exc)[:200],
                         duration_ms=completion_latency_ms,
-                        cell_id=telic_cell_id,
                     )
-                    if ve_id:
-                        ve_obj = seam.registry.get_object(ve_id)
-                        cv = ve_obj.properties.get("composite_value", 0.0) if ve_obj else 0.0
-                        seam.record_contribution(
-                            ve_id, telic_agent_id,
-                            composite_value=cv,
+                    if outcome_id:
+                        ve_id = seam.record_value_event(
+                            outcome_id, task, telic_agent_id,
+                            result_text=str(exc)[:200],
+                            success=False,
+                            duration_ms=completion_latency_ms,
                             cell_id=telic_cell_id,
-                            task_type=telic_task_type,
                         )
+                        if ve_id:
+                            ve_obj = seam.registry.get_object(ve_id)
+                            cv = ve_obj.properties.get("composite_value", 0.0) if ve_obj else 0.0
+                            seam.record_contribution(
+                                ve_id, telic_agent_id,
+                                composite_value=cv,
+                                cell_id=telic_cell_id,
+                                task_type=telic_task_type,
+                            )
             except Exception:
                 logger.debug("Telic seam recording failed", exc_info=True)
 
@@ -1515,10 +1578,13 @@ class AgentRunner:
         consumer = metadata.get("_memory_recall_consumer")
         if not isinstance(consumer, str) or not consumer.strip():
             return
+        db_path = self._memory_plane_db_path(task)
+        if db_path is None:
+            return
         try:
             from dharma_swarm.engine.retrieval_feedback import RetrievalFeedbackStore
 
-            RetrievalFeedbackStore().record_outcome(
+            RetrievalFeedbackStore(db_path).record_outcome(
                 task.id,
                 outcome=outcome,
                 consumer=consumer,
@@ -1536,10 +1602,13 @@ class AgentRunner:
         consumer = metadata.get("_memory_recall_consumer")
         if not isinstance(consumer, str) or not consumer.strip():
             return
+        db_path = self._memory_plane_db_path(task)
+        if db_path is None:
+            return
         try:
             from dharma_swarm.engine.retrieval_feedback import RetrievalFeedbackStore
 
-            RetrievalFeedbackStore().record_citation_uptake(
+            RetrievalFeedbackStore(db_path).record_citation_uptake(
                 task.id,
                 text=result,
                 consumer=consumer,
@@ -1562,10 +1631,13 @@ class AgentRunner:
         """Persist raw conversation turns for later harvesting."""
         if not content.strip():
             return
+        db_path = self._memory_plane_db_path(task)
+        if db_path is None:
+            return
         try:
             from dharma_swarm.engine.conversation_memory import ConversationMemoryStore
 
-            ConversationMemoryStore(self._memory_plane_db_path(task)).record_turn(
+            ConversationMemoryStore(db_path).record_turn(
                 session_id=self._conversation_session_id(task),
                 task_id=task.id,
                 role=role,
@@ -1583,10 +1655,13 @@ class AgentRunner:
 
     def _record_idea_uptake(self, task: Task, result: str) -> None:
         """Mark which harvested task ideas survived into the final output."""
+        db_path = self._memory_plane_db_path(task)
+        if db_path is None:
+            return
         try:
             from dharma_swarm.engine.conversation_memory import ConversationMemoryStore
 
-            ConversationMemoryStore(self._memory_plane_db_path(task)).record_uptake_from_text(
+            ConversationMemoryStore(db_path).record_uptake_from_text(
                 task_id=task.id,
                 text=result,
                 uptake_kind="implemented",
@@ -1610,10 +1685,13 @@ class AgentRunner:
         shard_id = metadata.get("latent_gold_shard_id")
         if not isinstance(shard_id, str) or not shard_id.strip():
             return
+        db_path = self._memory_plane_db_path(task)
+        if db_path is None:
+            return
         try:
             from dharma_swarm.engine.conversation_memory import ConversationMemoryStore
 
-            ConversationMemoryStore(self._memory_plane_db_path(task)).record_follow_up_outcome(
+            ConversationMemoryStore(db_path).record_follow_up_outcome(
                 shard_id=shard_id,
                 follow_up_task_id=task.id,
                 outcome=outcome,
@@ -1628,10 +1706,13 @@ class AgentRunner:
 
     def _mark_idea_outcome(self, task: Task, *, outcome: str) -> None:
         """Keep unchosen but high-salience ideas alive after task completion."""
+        db_path = self._memory_plane_db_path(task)
+        if db_path is None:
+            return
         try:
             from dharma_swarm.engine.conversation_memory import ConversationMemoryStore
 
-            ConversationMemoryStore(self._memory_plane_db_path(task)).mark_task_outcome(
+            ConversationMemoryStore(db_path).mark_task_outcome(
                 task.id,
                 outcome=outcome,
             )
@@ -1655,7 +1736,12 @@ class AgentRunner:
     def _memory_plane_db_path(self, task: Task):
         metadata = task.metadata if isinstance(task.metadata, dict) else {}
         raw = metadata.get("memory_plane_db") or self._config.metadata.get("memory_plane_db")
-        return raw
+        if raw:
+            return raw
+        state_dir = _resolve_prompt_state_dir(task, self._config)
+        if state_dir is None:
+            return None
+        return state_dir / "db" / "memory_plane.db"
 
     async def heartbeat(self) -> None:
         """Update the last_heartbeat timestamp."""
@@ -1787,20 +1873,24 @@ class AgentPool:
         # P4: Agents are objects in the ontology they operate on (Hofstadter)
         try:
             from dharma_swarm.ontology_agents import upsert_agent_identity
-            upsert_agent_identity(runner.state, path=ontology_path)
+            resolved_ontology_path = _resolve_config_ontology_path(config, ontology_path)
+            if resolved_ontology_path is not None:
+                upsert_agent_identity(runner.state, path=resolved_ontology_path)
         except Exception:
             logger.debug("Ontology agent projection skipped", exc_info=True)
 
         # AgentRegistry: ensure agent has an identity record for fitness + budget
         try:
             from dharma_swarm.agent_registry import get_registry
-            _reg = get_registry()
-            _reg.register_agent(
-                name=config.name,
-                role=config.role.value if hasattr(config.role, "value") else str(config.role),
-                model=config.model or "",
-                system_prompt=config.system_prompt or "",
-            )
+            registry_dir = _resolve_config_agent_registry_dir(config)
+            if registry_dir is not None:
+                _reg = get_registry(registry_dir)
+                _reg.register_agent(
+                    name=config.name,
+                    role=config.role.value if hasattr(config.role, "value") else str(config.role),
+                    model=config.model or "",
+                    system_prompt=config.system_prompt or "",
+                )
         except Exception:
             logger.debug("AgentRegistry registration skipped", exc_info=True)
 
