@@ -104,6 +104,9 @@ class StreamOutput(RichLog):
         # Track the last complete reply for copy
         self._last_reply_text: str = ""
         self._current_reply_accumulator: str = ""
+        # True when deltas have streamed content for the current reply,
+        # preventing handle_text_complete from re-rendering the same text.
+        self._streamed_current_reply: bool = False
 
     def on_mount(self) -> None:
         """Start the buffer flush timer at ~15 fps."""
@@ -351,6 +354,7 @@ class StreamOutput(RichLog):
     def handle_text_delta(self, delta: CanonicalTextDelta) -> None:
         self._text_buffer += delta.content
         self._current_reply_accumulator += delta.content
+        self._streamed_current_reply = True
 
     def handle_text_complete(self, msg: CanonicalTextComplete) -> None:
         self._flush_buffer()
@@ -362,10 +366,14 @@ class StreamOutput(RichLog):
             if note:
                 self.write_commentary(note)
             return
-        self._smart_write(Markdown(msg.content))
-        # Save complete reply
+        # If content was already streamed via deltas, skip the duplicate
+        # Markdown re-render. The streaming path already displayed the text.
+        if not self._streamed_current_reply:
+            self._smart_write(Markdown(msg.content))
+        # Save complete reply and reset streaming flag
         self._last_reply_text = msg.content
         self._current_reply_accumulator = ""
+        self._streamed_current_reply = False
 
     def handle_thinking_delta(self, delta: CanonicalThinkingDelta) -> None:
         self._thinking_buffer += delta.content
@@ -394,35 +402,32 @@ class StreamOutput(RichLog):
 
     def handle_tool_call_complete(self, tool_call: CanonicalToolCallComplete) -> None:
         self._flush_buffer()
-        args = tool_call.arguments
-        if len(args) > 300:
-            args = args[:300] + "..."
-        subtitle = f"id: {tool_call.tool_call_id[:12]}..."
-        if tool_call.provider_options.get("requires_confirmation"):
-            subtitle += " | gated"
+        # Clean inline display instead of raw JSON Panel
+        tool_name = tool_call.tool_name or "unknown"
+        # Extract description from arguments if available
+        desc = ""
+        try:
+            import json as _json
+            parsed = _json.loads(tool_call.arguments)
+            desc = parsed.get("description", "") or parsed.get("command", "")[:80] or ""
+        except Exception:
+            desc = tool_call.arguments[:60]
+        gated = " \u2502 gated" if tool_call.provider_options.get("requires_confirmation") else ""
+        label = desc if desc else tool_name
         self._smart_write(
-            Panel(
-                Syntax(args, "json", theme="monokai", word_wrap=True),
-                title=f"[bold]Tool: {tool_call.tool_name or 'unknown'}[/bold]",
-                border_style=self.OCHRE_DEEP,
-                subtitle=subtitle,
-            )
+            Text(f"  \u25cb {tool_name}: {label}{gated}", style=f"dim {self.OCHRE_DEEP}")
         )
 
     def handle_tool_result_canonical(self, result: CanonicalToolResult) -> None:
         self._flush_buffer()
         style = self.BENGARA_DEEP if result.is_error else self.VERDIGRIS_DEEP
         icon = "\u2717" if result.is_error else "\u2713"
-        duration = f" ({result.duration_ms}ms)" if result.duration_ms else ""
-        content = result.content
-        if len(content) > 500:
-            content = content[:500] + f"\n... ({len(result.content)} chars total)"
+        duration = f" ({result.duration_ms:.0f}ms)" if result.duration_ms else ""
+        # Clean inline result — no Panel borders
+        summary = result.content.strip().split("\n")[0][:120] if result.content else ""
+        tool_label = result.tool_name or "tool"
         self._smart_write(
-            Panel(
-                Text(content),
-                title=f"{icon} {result.tool_name or 'tool'}{duration}",
-                border_style=style,
-            )
+            Text(f"  {icon} {tool_label}{duration}  {summary}", style=f"dim {style}")
         )
 
     def handle_tool_progress_canonical(self, progress: CanonicalToolProgress) -> None:
