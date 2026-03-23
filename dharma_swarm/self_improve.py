@@ -283,7 +283,7 @@ class SelfImprovementCycle:
                 source="self_improvement_cycle",
             )
         except Exception:
-            pass
+            logger.debug("Lesson learned recording failed", exc_info=True)
 
     def _check_supervisor(self) -> list[dict]:
         """Check loop supervisor for any active alerts."""
@@ -293,7 +293,7 @@ class SelfImprovementCycle:
             if state:
                 return state.get("recent_alerts", [])
         except Exception:
-            pass
+            logger.debug("Loop supervisor check failed", exc_info=True)
         return []
 
     def _save_report(self, report: CycleReport) -> None:

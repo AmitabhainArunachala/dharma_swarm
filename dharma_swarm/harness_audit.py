@@ -172,7 +172,7 @@ def _score_memory_persistence() -> AuditScore:
                     data = json.loads(bank.read_text())
                     total_entries += len(data) if isinstance(data, list) else 1
             except Exception:
-                pass
+                logger.debug("Harness bank entry read failed", exc_info=True)
 
         score = min(len(banks) * 2 + total_entries * 0.1, 10.0)
 
@@ -233,7 +233,7 @@ def _score_security_guardrails() -> AuditScore:
             try:
                 verified = kernel.verify()
             except Exception:
-                pass
+                logger.debug("Kernel verify failed", exc_info=True)
         elif axiom_count > 0:
             verified = True  # Has axioms = basic integrity
 

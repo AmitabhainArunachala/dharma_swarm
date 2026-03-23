@@ -78,15 +78,15 @@ def populated_registry(registry: OntologyRegistry) -> OntologyRegistry:
 class TestRegistryFactory:
     def test_create_dharma_registry(self, registry: OntologyRegistry) -> None:
         stats = registry.stats()
-        assert stats["registered_types"] == 14  # 8 original + 6 metabolic
+        assert stats["registered_types"] == 15  # 8 original + 6 metabolic + 1 custodian type
         assert stats["registered_links"] >= 40  # 12+8 defs, each with inverse
-        assert stats["registered_actions"] >= 15
+        assert stats["registered_actions"] >= 16
 
     def test_all_type_names(self, registry: OntologyRegistry) -> None:
         names = registry.type_names()
         expected = [
             "ActionProposal", "AgentIdentity", "Contribution",
-            "EvolutionEntry", "Experiment", "GateDecisionRecord",
+            "CustodianRole", "EvolutionEntry", "Experiment", "GateDecisionRecord",
             "KnowledgeArtifact", "Outcome", "Paper", "ResearchThread",
             "TypedTask", "ValueEvent", "VentureCell", "WitnessLog",
         ]
@@ -169,6 +169,104 @@ class TestObjectCRUD:
     def test_update_nonexistent(self, registry: OntologyRegistry) -> None:
         _, errs = registry.update_object("fake-id", {"status": "running"})
         assert any("not found" in e for e in errs)
+
+    def test_put_object_creates_with_exact_id(self, registry: OntologyRegistry) -> None:
+        obj, errs = registry.put_object(
+            OntologyObj(
+                id="custodian-linter",
+                type_name="CustodianRole",
+                properties={
+                    "name": "linter",
+                    "tier": 3,
+                    "model": "gpt-5.4-mini",
+                    "status": "growing",
+                    "total_runs": 1,
+                    "success_rate": 1.0,
+                    "files_healed": 2,
+                },
+                created_by="tester",
+            )
+        )
+        assert obj is not None
+        assert errs == []
+        assert obj.id == "custodian-linter"
+        assert registry.get_object("custodian-linter") is not None
+
+    def test_put_object_updates_existing_with_validation(self, registry: OntologyRegistry) -> None:
+        created, errs = registry.put_object(
+            OntologyObj(
+                id="custodian-linter",
+                type_name="CustodianRole",
+                properties={
+                    "name": "linter",
+                    "tier": 3,
+                    "model": "gpt-5.4-mini",
+                    "status": "growing",
+                    "total_runs": 1,
+                    "success_rate": 1.0,
+                    "files_healed": 2,
+                },
+                created_by="tester",
+            )
+        )
+        assert created is not None
+        assert errs == []
+
+        updated, errs = registry.put_object(
+            OntologyObj(
+                id="custodian-linter",
+                type_name="CustodianRole",
+                properties={
+                    "name": "linter",
+                    "status": "solid",
+                    "total_runs": 5,
+                    "success_rate": 0.8,
+                    "files_healed": 8,
+                },
+                created_by="tester",
+            )
+        )
+        assert updated is not None
+        assert errs == []
+        assert updated.properties["status"] == "solid"
+        assert updated.properties["total_runs"] == 5
+        assert updated.version == 2
+
+    def test_put_object_blocks_immutable_change(self, registry: OntologyRegistry) -> None:
+        created, errs = registry.put_object(
+            OntologyObj(
+                id="custodian-linter",
+                type_name="CustodianRole",
+                properties={
+                    "name": "linter",
+                    "tier": 3,
+                    "model": "gpt-5.4-mini",
+                    "status": "growing",
+                    "total_runs": 1,
+                    "success_rate": 1.0,
+                    "files_healed": 2,
+                },
+                created_by="tester",
+            )
+        )
+        assert created is not None
+        assert errs == []
+
+        _, errs = registry.put_object(
+            OntologyObj(
+                id="custodian-linter",
+                type_name="CustodianRole",
+                properties={
+                    "name": "renamed",
+                    "status": "solid",
+                    "total_runs": 5,
+                    "success_rate": 0.8,
+                    "files_healed": 8,
+                },
+                created_by="tester",
+            )
+        )
+        assert any("immutable" in e for e in errs)
 
 
 # ── Links ───────────────────────────────────────────────────────────

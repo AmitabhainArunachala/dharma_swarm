@@ -31,11 +31,16 @@ Usage::
 from __future__ import annotations
 
 import logging
+from pathlib import Path
 from typing import Any
 
 from dharma_swarm.lineage import LineageEdge, LineageGraph
 from dharma_swarm.models import GateCheckResult, GateDecision, Task
 from dharma_swarm.ontology import OntologyRegistry
+from dharma_swarm.ontology_runtime import (
+    get_shared_registry,
+    persist_shared_registry,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -51,8 +56,11 @@ class TelicSeam:
         self,
         registry: OntologyRegistry | None = None,
         lineage: LineageGraph | None = None,
+        path: str | Path | None = None,
     ) -> None:
-        self._registry = registry or OntologyRegistry.create_dharma_registry()
+        self._path = path
+        self._registry = registry or get_shared_registry(path)
+        self._persist_registry = registry is None
         self._lineage = lineage or LineageGraph()
         self._proposal_map: dict[str, str] = {}  # task_id -> proposal obj_id
         self._duplicate_suppressions: dict[str, int] = {
@@ -68,6 +76,10 @@ class TelicSeam:
     @property
     def lineage(self) -> LineageGraph:
         return self._lineage
+
+    def _flush_registry(self) -> None:
+        if self._persist_registry:
+            persist_shared_registry(self._registry, self._path)
 
     def record_dispatch(
         self,
@@ -100,6 +112,7 @@ class TelicSeam:
                 return None
 
             self._proposal_map[task.id] = obj.id
+            self._flush_registry()
             return obj.id
 
         except Exception as exc:
@@ -163,6 +176,7 @@ class TelicSeam:
                 updated_by="telic_seam",
             )
 
+            self._flush_registry()
             return obj.id
 
         except Exception as exc:
@@ -191,6 +205,7 @@ class TelicSeam:
             if existing is not None:
                 self._duplicate_suppressions["outcomes"] += 1
                 self._ensure_outcome_linkage(proposal_id, existing)
+                self._flush_registry()
                 return existing.id
 
             obj, errors = self._registry.create_object(
@@ -245,6 +260,7 @@ class TelicSeam:
                 },
             ))
 
+            self._flush_registry()
             return obj.id
 
         except Exception as exc:
@@ -280,7 +296,7 @@ class TelicSeam:
                 from dharma_swarm.metrics import MetricsAnalyzer
                 behavioral_signal = MetricsAnalyzer().analyze(result_text).swabhaav_ratio
             except Exception:
-                pass
+                logger.debug("MetricsAnalyzer behavioral signal failed", exc_info=True)
 
             success_value = 1.0 if success else 0.0
             duration_efficiency = min(1.0, 10000.0 / max(duration_ms, 1.0))
@@ -321,6 +337,7 @@ class TelicSeam:
                 created_by="telic_seam",
             )
 
+            self._flush_registry()
             return obj.id
 
         except Exception as exc:
@@ -376,6 +393,7 @@ class TelicSeam:
                 created_by="telic_seam",
             )
 
+            self._flush_registry()
             return obj.id
 
         except Exception as exc:
@@ -601,11 +619,11 @@ class TelicSeam:
 _SEAM: TelicSeam | None = None
 
 
-def get_seam() -> TelicSeam:
+def get_seam(path: str | Path | None = None) -> TelicSeam:
     """Get or create the module-level TelicSeam singleton."""
     global _SEAM
-    if _SEAM is None:
-        _SEAM = TelicSeam()
+    if _SEAM is None or getattr(_SEAM, "_path", None) != path:
+        _SEAM = TelicSeam(path=path)
     return _SEAM
 
 

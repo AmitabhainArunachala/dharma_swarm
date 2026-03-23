@@ -1,5 +1,6 @@
 """Tests for dharma_swarm.stigmergy -- StigmergicMark, StigmergyStore."""
 
+import asyncio
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
@@ -189,12 +190,13 @@ async def test_density_empty(store: StigmergyStore):
 
 
 async def test_leave_stigmergic_mark_convenience(tmp_path: Path, monkeypatch):
-    """The module-level function creates a mark via a default store."""
-    # Monkeypatch the default base path so we don't write to real ~/.dharma/
+    """The module-level function creates a mark via the singleton store."""
+    # Reset singleton and redirect to tmp_path so we don't write to real ~/.dharma/
     monkeypatch.setattr(
         "dharma_swarm.stigmergy._DEFAULT_BASE",
         tmp_path / "stigmergy",
     )
+    monkeypatch.setattr("dharma_swarm.stigmergy._default_store", None)
     mark_id = await leave_stigmergic_mark(
         agent="conv-agent",
         file_path="test.py",
@@ -212,3 +214,70 @@ async def test_leave_stigmergic_mark_convenience(tmp_path: Path, monkeypatch):
     assert len(marks) == 1
     assert marks[0].agent == "conv-agent"
     assert marks[0].action == "scan"
+
+
+# ---------------------------------------------------------------------------
+# Concurrent write safety (atomicity)
+# ---------------------------------------------------------------------------
+
+
+async def test_concurrent_leave_mark_no_data_loss(store: StigmergyStore):
+    """Concurrent leave_mark calls must not lose marks."""
+    n = 50
+    tasks = [
+        store.leave_mark(_make_mark(observation=f"concurrent {i}"))
+        for i in range(n)
+    ]
+    await asyncio.gather(*tasks)
+    marks = await store.read_marks(limit=n + 10)
+    assert len(marks) == n
+
+
+async def test_decay_does_not_lose_concurrent_marks(tmp_path: Path):
+    """A decay running while marks are being written must not discard them.
+
+    The write lock ensures read-then-rewrite in decay serializes with
+    leave_mark, so newly appended marks are never lost.
+    """
+    store = StigmergyStore(base_path=tmp_path / "stigmergy")
+    now = datetime.now(timezone.utc)
+
+    # Seed with old marks (will be archived)
+    for i in range(5):
+        m = _make_mark(observation=f"old {i}")
+        m.timestamp = now - timedelta(hours=200)
+        await store.leave_mark(m)
+
+    # Seed with recent marks (will survive)
+    for i in range(3):
+        m = _make_mark(observation=f"recent {i}")
+        m.timestamp = now
+        await store.leave_mark(m)
+
+    # Run decay and a fresh leave_mark concurrently
+    fresh = _make_mark(observation="written during decay")
+    fresh.timestamp = now
+
+    archived, _ = await asyncio.gather(
+        store.decay(max_age_hours=168),
+        store.leave_mark(fresh),
+    )
+    assert archived == 5
+
+    remaining = await store.read_marks(limit=20)
+    observations = {m.observation for m in remaining}
+    # The 3 recent marks + 1 written during decay must all survive
+    assert "written during decay" in observations
+    assert len(remaining) == 4
+
+
+async def test_access_decay_atomic_rewrite(store: StigmergyStore):
+    """access_decay must not corrupt the marks file."""
+    for i in range(10):
+        await store.leave_mark(_make_mark(salience=0.5, observation=f"mark {i}"))
+
+    dead = await store.access_decay(decay_factor=0.95)
+    # All marks should still be readable (none below 0.1 after one decay pass)
+    marks = await store.read_marks(limit=20)
+    assert len(marks) == 10
+    assert dead == 0  # salience 0.5 * 0.95^2 = 0.45, still above 0.1

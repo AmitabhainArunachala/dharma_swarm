@@ -216,7 +216,7 @@ class ContextSearchEngine:
                         words = re.findall(r'[a-z]{3,}', line.lower())
                         keywords.extend(words)
             except Exception:
-                pass
+                logger.debug("Keyword extraction failed", exc_info=True)
 
         return list(set(keywords))
 

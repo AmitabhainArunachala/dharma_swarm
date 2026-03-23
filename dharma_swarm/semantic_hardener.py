@@ -222,7 +222,7 @@ def _check_engineering(
                 entropies.append(sig.entropy)
                 complexities.append(sig.complexity)
             except Exception:
-                pass
+                logger.debug("Semantic hardener metrics failed", exc_info=True)
 
     avg_entropy = mean(entropies) if entropies else 0.0
     avg_complexity = mean(complexities) if complexities else 0.0

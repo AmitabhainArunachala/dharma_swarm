@@ -11,8 +11,15 @@ import Link from "next/link";
 import { usePathname } from "next/navigation";
 import { useLevel } from "@/hooks/useLevel";
 import {
+  buildDashboardNavSections,
+  isDashboardPathActive,
+  type DashboardNavItem,
+  type DashboardNavSection,
+} from "@/lib/dashboardNav";
+import {
   Activity,
   Bot,
+  Brain,
   BrainCircuit,
   ChevronDown,
   ChevronUp,
@@ -27,6 +34,8 @@ import {
   MessageSquare,
   Microscope,
   Network,
+  Orbit,
+  Settings2,
   Shield,
   Sparkles,
   Workflow,
@@ -40,6 +49,7 @@ import { type ComponentType, type ReactNode } from "react";
 const iconMap: Record<string, ComponentType<{ className?: string; size?: number }>> = {
   LayoutDashboard,
   Bot,
+  Brain,
   BrainCircuit,
   ListTodo,
   Activity,
@@ -51,70 +61,18 @@ const iconMap: Record<string, ComponentType<{ className?: string; size?: number 
   Globe,
   Workflow,
   Grid3X3,
+  Orbit,
   Sparkles,
   MessageSquare,
   ClipboardCheck,
   HeartPulse,
+  Settings2,
 };
 
 // ---------------------------------------------------------------------------
 // Nav structure
 // ---------------------------------------------------------------------------
-
-interface NavItem {
-  label: string;
-  href: string;
-  icon: string;
-  level: number;
-}
-
-interface NavSection {
-  label: string;
-  level: number;
-  items: NavItem[];
-}
-
-const sections: NavSection[] = [
-  {
-    label: "COMMAND",
-    level: 1,
-    items: [
-      { label: "Overview", href: "/dashboard", icon: "LayoutDashboard", level: 1 },
-      { label: "Conv. Log", href: "/dashboard/log", icon: "MessageSquare", level: 1 },
-      { label: "Truth Map", href: "/dashboard/modules", icon: "Activity", level: 1 },
-      { label: "Control Plane", href: "/dashboard/claude", icon: "BrainCircuit", level: 1 },
-      { label: "Agents", href: "/dashboard/agents", icon: "Bot", level: 1 },
-      { label: "Tasks", href: "/dashboard/tasks", icon: "ListTodo", level: 1 },
-    ],
-  },
-  {
-    label: "INTELLIGENCE",
-    level: 3,
-    items: [
-      { label: "Eval Harness", href: "/dashboard/eval", icon: "ClipboardCheck", level: 3 },
-      { label: "System Audit", href: "/dashboard/audit", icon: "HeartPulse", level: 3 },
-      { label: "Evolution", href: "/dashboard/evolution", icon: "Dna", level: 3 },
-      { label: "Gates", href: "/dashboard/gates", icon: "Shield", level: 3 },
-    ],
-  },
-  {
-    label: "DEEP",
-    level: 4,
-    items: [
-      { label: "Ontology", href: "/dashboard/ontology", icon: "Globe", level: 4 },
-      { label: "Lineage", href: "/dashboard/lineage", icon: "GitBranch", level: 4 },
-      { label: "Stigmergy", href: "/dashboard/stigmergy", icon: "Network", level: 4 },
-    ],
-  },
-  {
-    label: "COMPOSE",
-    level: 5,
-    items: [
-      { label: "Workflows", href: "/dashboard/workflows", icon: "Workflow", level: 5 },
-      { label: "Blocks", href: "/dashboard/blocks", icon: "Grid3X3", level: 5 },
-    ],
-  },
-];
+const sections = buildDashboardNavSections();
 
 // ---------------------------------------------------------------------------
 // Sidebar component
@@ -194,7 +152,7 @@ function SectionGroup({
   userLevel,
   pathname,
 }: {
-  section: NavSection;
+  section: DashboardNavSection;
   userLevel: number;
   pathname: string;
 }) {
@@ -213,7 +171,7 @@ function SectionGroup({
         <NavItemLink
           key={item.href}
           item={item}
-          active={pathname === item.href}
+          active={isDashboardPathActive(item.href, pathname)}
           locked={item.level > userLevel}
         />
       ))}
@@ -230,7 +188,7 @@ function NavItemLink({
   active,
   locked,
 }: {
-  item: NavItem;
+  item: DashboardNavItem;
   active: boolean;
   locked: boolean;
 }) {

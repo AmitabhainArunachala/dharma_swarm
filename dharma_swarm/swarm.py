@@ -20,6 +20,12 @@ from uuid import uuid4
 from pydantic import BaseModel, Field
 
 from dharma_swarm.daemon_config import DaemonConfig, THREAD_PROMPTS
+from dharma_swarm.contracts.intelligence_agents import (
+    DEFAULT_TEAM_ID,
+    resolve_team_id,
+    sync_live_agent_registration,
+    sync_live_agent_registrations,
+)
 from dharma_swarm.yoga_node import YogaScheduler
 from dharma_swarm.jikoku_instrumentation import jikoku_auto_span
 from dharma_swarm.models import (
@@ -62,6 +68,8 @@ if TYPE_CHECKING:
     from dharma_swarm.thinkodynamic_director import ThinkodynamicDirector
     from dharma_swarm.thread_manager import ThreadManager
     from dharma_swarm.traces import TraceStore
+    from dharma_swarm.organism import OrganismRuntime, HeartbeatResult
+    from dharma_swarm.witness import WitnessAuditor
 
 logger = logging.getLogger(__name__)
 
@@ -149,10 +157,23 @@ class SwarmManager:
         self._skill_composer: SkillComposer | None = None
         self._handoff: HandoffProtocol | None = None
         self._agent_memories: dict[str, AgentMemoryBank] = {}
+        self._agent_configs: dict[str, AgentConfig] = {}
+        self._worker_spawners: dict[str, Any] = {}  # name → WorkerSpawner
 
         # v0.5.0: Thinkodynamic Director (OPTIONAL)
         self._director: ThinkodynamicDirector | None = None
         self._tick_count: int = 0
+
+        # v0.7.0: Organism brain — Gnani/Samvara wired into the heartbeat
+        self._organism: OrganismRuntime | None = None
+        self._organism_interval_ticks: int = 4  # heartbeat every ~2 min (4 × 30s)
+
+        # v0.8.0: Witness (S3* sporadic audit) — Beer VSM gap #2
+        self._witness: WitnessAuditor | None = None
+        self._witness_interval_ticks: int = 120  # audit every ~60 min (120 × 30s)
+
+        # v0.9.0: Decision Ontology — structured decision governance
+        self._decision_log: Any = None  # DecisionLog
 
         # Central config (Beer's S5 — identity at the parameter level)
         from dharma_swarm.config import DEFAULT_CONFIG
@@ -160,9 +181,6 @@ class SwarmManager:
         _sm = self._config.swarm
         self._director_interval_ticks: int = _sm.director_interval_ticks
         self._living_interval_ticks: int = _sm.living_interval_ticks
-
-        # v0.6.1: Organism
-        self._organism: Any = None
 
         # v0.6.0: Hermes-inspired integration (OPTIONAL)
         self._tool_registry: Any = None    # ToolRegistry
@@ -191,7 +209,7 @@ class SwarmManager:
         "stigmergy", "bridge_rv", "director", "skill_registry",
         "profile_mgr", "intent_router", "context_search", "autonomy",
         "skill_composer", "handoff", "tool_registry", "cron_scheduler",
-        "gateway",
+        "gateway", "decision_log",
     })
 
     def _require_subsystem(self, name: str) -> Any:
@@ -253,6 +271,9 @@ class SwarmManager:
             message_bus=self._message_bus,
             event_memory=self._event_memory,
             yoga=self._yoga,
+            ledger_dir=self.state_dir,
+            state_dir=self.state_dir,
+            ontology_path=self.state_dir / "ontology.db",
         )
 
         self._running = True
@@ -393,19 +414,45 @@ class SwarmManager:
         except Exception as e:
             logger.warning("ThinkodynamicDirector init failed (non-fatal): %s", e)
 
-        # v0.6.1: Organism — autopoietic integration layer
+        # v0.7.0: OrganismRuntime — Gnani, Samvara, LiveCoherence
+        # v0.7.1: Algedonic channel wired — pain signals → file + macOS notification
         try:
-            from dharma_swarm.organism import Organism, set_organism
-            self._organism = Organism(state_dir=self.state_dir)
-            await self._organism.boot()
-            set_organism(self._organism)
-            # Share trace store with organism
-            if self._trace_store is not None:
-                self._organism.traces = self._trace_store
-            logger.info("Organism booted — heartbeat ready")
+            from dharma_swarm.organism import OrganismRuntime
+
+            self._organism = OrganismRuntime(
+                state_dir=self.state_dir,
+                on_algedonic=self._algedonic_handler,
+            )
+            logger.info("OrganismRuntime initialized — Gnani/Samvara/Algedonic active")
         except Exception as e:
-            self._organism = None
-            logger.warning("Organism boot failed (non-fatal): %s", e)
+            logger.warning("OrganismRuntime init failed (non-fatal): %s", e)
+
+        # v0.8.0: Witness auditor (Beer S3* — sporadic random audit)
+        try:
+            from dharma_swarm.witness import WitnessAuditor
+
+            self._witness = WitnessAuditor(
+                cycle_seconds=3600.0,
+                provider=self._router,
+            )
+            logger.info("WitnessAuditor initialized — S3* sporadic audit active")
+        except Exception as e:
+            logger.warning("WitnessAuditor init failed (non-fatal): %s", e)
+
+        # v0.9.0: Decision Ontology (structured decision governance + quality scoring)
+        try:
+            from dharma_swarm.decision_ontology import DecisionLog
+
+            self._decision_log = DecisionLog(
+                path=self.state_dir / "meta" / "decisions.jsonl",
+            )
+            logger.info("DecisionLog initialized — structured decision governance active")
+        except Exception as e:
+            logger.warning("DecisionLog init failed (non-fatal): %s", e)
+
+        # v0.9.1: Telos Substrate — seed ConceptGraph + TelosGraph with pillar data
+        # Deferred to first tick() to avoid heavyweight I/O during init.
+        self._telos_substrate_seeded = False
 
         # Track which subsystems successfully initialized
         for name, attr in [
@@ -424,6 +471,8 @@ class SwarmManager:
             ("skill_registry", self._skill_registry),
             ("director", self._director),
             ("organism", self._organism),
+            ("witness", self._witness),
+            ("decision_log", self._decision_log),
         ]:
             if attr is not None:
                 self._initialized.add(name)
@@ -450,7 +499,38 @@ class SwarmManager:
 
         If no system_prompt is given, v7 induction rules + role briefing are used.
         If a thread is specified, the thread focus prompt is appended.
+
+        When the agent name matches the constitutional roster, roster defaults
+        are applied for role, model, provider, and system_prompt (caller values
+        override only when explicitly non-default).
         """
+        # Constitutional roster check: apply spec defaults for stable agents
+        try:
+            from dharma_swarm.agent_constitution import get_agent_spec
+            spec = get_agent_spec(name)
+            if spec is not None:
+                # Stable agent — use constitutional defaults unless caller overrides
+                if role == AgentRole.GENERAL:
+                    role = spec.role
+                if model == "claude-code" and spec.default_model:
+                    model = spec.default_model
+                if provider_type == ProviderType.CLAUDE_CODE and spec.default_provider:
+                    provider_type = spec.default_provider
+                if not system_prompt and spec.system_prompt:
+                    system_prompt = spec.system_prompt
+                logger.info(
+                    "Constitutional agent %s: role=%s, model=%s, gates=%s",
+                    name, role.value, model, spec.constitutional_gates,
+                )
+                # Create worker spawner for constitutional agents
+                try:
+                    from dharma_swarm.worker_spawn import create_spawner_for_agent
+                    self._worker_spawners[name] = create_spawner_for_agent(name)
+                except Exception:
+                    logger.debug("Worker spawner creation failed for %s", name, exc_info=True)
+        except Exception:
+            logger.debug("Constitutional roster check failed", exc_info=True)
+
         async with jikoku_auto_span(
             category="execute.agent_spawn",
             intent=f"Spawn agent {name} ({role.value})",
@@ -471,11 +551,24 @@ class SwarmManager:
                 provider=provider_type,
                 system_prompt=system_prompt + extra_prompt if system_prompt else extra_prompt,
                 thread=thread,
+                metadata={
+                    "state_dir": str(self.state_dir),
+                    "memory_state_dir": str(self.state_dir),
+                },
             )
             # Route through the shared ModelRouter so live agent tasks contribute
             # to routing memory, retries, and audit trails while staying pinned
             # to config.provider unless task metadata widens the lane set.
-            runner = await self._agent_pool.spawn(config, provider=self._router, message_bus=self._message_bus)
+            spawner = self._worker_spawners.get(name)
+            runner = await self._agent_pool.spawn(
+                config,
+                provider=self._router,
+                message_bus=self._message_bus,
+                worker_spawner=spawner,
+                ontology_path=self.state_dir / "ontology.db",
+            )
+            self._agent_configs[runner.state.id] = config
+            await self._sync_agent_contracts(runner.state)
             await self._memory.remember(
                 f"Agent spawned: {name} ({role.value})"
                 + (f" [thread: {thread}]" if thread else ""),
@@ -484,15 +577,89 @@ class SwarmManager:
             )
             return runner.state
 
+    def get_worker_spawner(self, agent_name: str) -> Any | None:
+        """Return the WorkerSpawner for a constitutional agent, or None."""
+        return self._worker_spawners.get(agent_name)
+
     async def list_agents(self) -> list[AgentState]:
         """List all agents in the pool."""
-        return await self._agent_pool.list_agents()
+        agents = await self._agent_pool.list_agents()
+        await self._sync_agent_contracts_batch(agents, include_kaizenops=False)
+        return agents
 
     async def stop_agent(self, agent_id: str) -> None:
         """Stop a specific agent."""
         runner = await self._agent_pool.get(agent_id)
         if runner:
             await runner.stop()
+            await self._sync_agent_contracts(runner.state, include_kaizenops=False)
+
+    async def sync_agents(
+        self,
+        *,
+        include_kaizenops: bool | None = None,
+    ) -> list[dict[str, Any]]:
+        """Refresh live agent contracts across telemetry and optional KaizenOps."""
+        agents = await self._agent_pool.list_agents()
+        return await self._sync_agent_contracts_batch(
+            agents,
+            include_kaizenops=include_kaizenops,
+        )
+
+    async def _sync_agent_contracts_batch(
+        self,
+        agents: list[AgentState],
+        *,
+        include_kaizenops: bool | None = None,
+    ) -> list[dict[str, Any]]:
+        metadata_by_agent_id: dict[str, dict[str, Any]] = {}
+        thread_by_agent_id: dict[str, str | None] = {}
+        managed_team_ids: list[str] = []
+        for agent in agents:
+            config = self._agent_configs.get(agent.id)
+            metadata = dict(config.metadata) if config is not None else {}
+            metadata.setdefault("provider", agent.provider)
+            metadata.setdefault("model", agent.model)
+            metadata.setdefault(
+                "source",
+                "swarm.spawn_agent" if config is not None else "swarm.sync_agents",
+            )
+            metadata_by_agent_id[agent.id] = metadata
+            thread_by_agent_id[agent.id] = config.thread if config is not None else None
+            managed_team_ids.append(
+                resolve_team_id(thread=thread_by_agent_id[agent.id], metadata=metadata)
+            )
+        if not managed_team_ids:
+            managed_team_ids.append(resolve_team_id(metadata={"team_id": DEFAULT_TEAM_ID}))
+        results = await sync_live_agent_registrations(
+            agents,
+            metadata_by_agent_id=metadata_by_agent_id,
+            thread_by_agent_id=thread_by_agent_id,
+            message_bus=self._message_bus,
+            include_kaizenops=include_kaizenops,
+            managed_team_ids=managed_team_ids,
+        )
+        return [item.as_dict() for item in results]
+
+    async def _sync_agent_contracts(
+        self,
+        agent: AgentState,
+        *,
+        include_kaizenops: bool | None = None,
+    ) -> dict[str, Any]:
+        config = self._agent_configs.get(agent.id)
+        metadata = dict(config.metadata) if config is not None else {}
+        metadata.setdefault("provider", agent.provider)
+        metadata.setdefault("model", agent.model)
+        metadata.setdefault("source", "swarm.spawn_agent" if config is not None else "swarm.list_agents")
+        result = await sync_live_agent_registration(
+            agent,
+            thread=config.thread if config is not None else None,
+            metadata=metadata,
+            message_bus=self._message_bus,
+            include_kaizenops=include_kaizenops,
+        )
+        return result.as_dict()
 
     # --- Task Operations ---
 
@@ -656,29 +823,12 @@ class SwarmManager:
             gate_result = self._gatekeeper.check(action=title, content=description)
             if gate_result.decision.value == "block":
                 raise ValueError(f"Telos gate blocked: {gate_result.reason}")
-            task = await self._task_board.create(
+            return await self._task_board.create(
                 title=title,
                 description=description,
                 priority=priority,
                 metadata=incoming,
             )
-            # Intent routing — set preferred_roles if not already specified
-            try:
-                if self._intent_router is not None:
-                    meta = task.metadata if isinstance(task.metadata, dict) else {}
-                    if not meta.get("preferred_roles"):
-                        route_result = self._intent_router.route(
-                            task.description or task.title or ""
-                        )
-                        if hasattr(route_result, 'skills') and route_result.skills:
-                            # Map top skill to role hints
-                            roles = [s.name for s in route_result.skills[:3]]
-                            meta["preferred_roles"] = roles
-                            meta["intent_complexity"] = getattr(route_result, 'complexity', None)
-                            await self._task_board.update_task(task.id, metadata=meta)
-            except Exception as exc:
-                logger.debug("Intent routing failed (non-fatal): %s", exc)
-            return task
 
     async def create_task_batch(
         self,
@@ -987,12 +1137,80 @@ class SwarmManager:
         await self.spawn_coordination_tasks(coordination=coordination)
         return len(dispatches)
 
+    # ── Algedonic Channel (Beer S5 bypass to operator) ─────────────
+    def _algedonic_handler(self, signal: Any) -> None:
+        """Beer's algedonic channel: pain signal → file + macOS notification.
+
+        This is the S5 bypass — critical signals skip S1-S4 and reach
+        the operator (Dhyana) directly.  Wired as on_algedonic callback
+        in OrganismRuntime.
+        """
+        import json as _json
+        import subprocess
+
+        # 1. Append to persistent signal log
+        log_path = self.state_dir / "algedonic_signals.jsonl"
+        try:
+            log_path.parent.mkdir(parents=True, exist_ok=True)
+            entry = {
+                "kind": getattr(signal, "kind", "unknown"),
+                "severity": getattr(signal, "severity", "unknown"),
+                "action": getattr(signal, "action", ""),
+                "value": getattr(signal, "value", 0.0),
+                "timestamp": getattr(signal, "timestamp", 0.0),
+            }
+            with log_path.open("a", encoding="utf-8") as f:
+                f.write(_json.dumps(entry) + "\n")
+        except OSError as exc:
+            logger.warning("Algedonic log write failed: %s", exc)
+
+        # 2. Write EMERGENCY_HOLD marker if critical
+        severity = getattr(signal, "severity", "")
+        if severity == "critical":
+            hold_path = self.state_dir / "EMERGENCY_HOLD"
+            try:
+                hold_path.write_text(
+                    f"{getattr(signal, 'kind', 'unknown')}: "
+                    f"value={getattr(signal, 'value', 0):.3f}\n",
+                    encoding="utf-8",
+                )
+            except OSError as exc:
+                logger.warning("EMERGENCY_HOLD write failed: %s", exc)
+
+        # 3. macOS notification (non-blocking, best-effort)
+        kind = getattr(signal, "kind", "unknown")
+        value = getattr(signal, "value", 0)
+        try:
+            subprocess.Popen(
+                [
+                    "osascript", "-e",
+                    f'display notification "ALGEDONIC [{severity}]: {kind} = {value:.3f}" '
+                    f'with title "DHARMA SWARM" sound name "Sosumi"',
+                ],
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+            )
+        except Exception:
+            logger.debug("macOS notification failed", exc_info=True)
+
+        logger.warning(
+            "ALGEDONIC SIGNAL [%s] %s = %.3f → %s",
+            severity, kind, value, getattr(signal, "action", ""),
+        )
+
     def _check_human_overrides(self) -> dict[str, Any]:
-        """Check .PAUSE, .FOCUS, .INJECT files. Returns override status."""
+        """Check .PAUSE, .FOCUS, .INJECT, EMERGENCY_HOLD files."""
         result: dict[str, Any] = {"paused": False, "focus": None, "inject": None}
 
         pause_path = self.state_dir / self._daemon.pause_file
         if pause_path.exists():
+            result["paused"] = True
+            return result
+
+        # Algedonic EMERGENCY_HOLD — persists across restarts until operator clears
+        emergency_path = self.state_dir / "EMERGENCY_HOLD"
+        if emergency_path.exists():
+            logger.warning("EMERGENCY_HOLD active — dispatch paused (rm %s to clear)", emergency_path)
             result["paused"] = True
             return result
 
@@ -1049,6 +1267,11 @@ class SwarmManager:
                 summary["stigmergy_decayed"] = decayed
             except Exception as exc:
                 logger.info("Stigmergy decay failed (transient): %s", exc)
+            try:
+                faded = await self._stigmergy.access_decay()
+                summary["stigmergy_faded"] = faded
+            except Exception as exc:
+                logger.debug("Stigmergy access_decay failed: %s", exc)
         return summary
 
     def _derive_failure_source(self, task: Task) -> str:
@@ -1226,12 +1449,17 @@ class SwarmManager:
 
         This is the unified control path -- the ONLY way to advance
         swarm state.  Both run() and orchestrate_live call this.
+
+        v0.7.0: OrganismRuntime heartbeat runs every _organism_interval_ticks.
+        When the Gnani says HOLD, autonomous generation and dispatch are
+        suppressed — the organism's pain signal overrides busywork.
         """
         result: dict[str, Any] = {
             "paused": False, "circuit_broken": False,
             "dispatched": 0, "settled": 0, "rescued": 0,
             "synthesized": 0, "director_proposals": 0,
             "reopened": 0, "living_summary": {},
+            "organism_verdict": None, "organism_power": None,
         }
         overrides = self._check_human_overrides()
         if overrides["paused"]:
@@ -1243,11 +1471,73 @@ class SwarmManager:
             result["circuit_broken"] = True
             return result
 
+        # v0.9.1: Deferred Telos Substrate seeding (once, first tick)
+        if not self._telos_substrate_seeded:
+            self._telos_substrate_seeded = True
+            try:
+                from dharma_swarm.telos_substrate import TelosSubstrate
+
+                substrate = TelosSubstrate(state_dir=self.state_dir)
+                seed_result = await substrate.seed_all()
+                logger.info("TelosSubstrate seeded: %s", seed_result)
+            except Exception as e:
+                logger.warning("TelosSubstrate seeding failed (non-fatal): %s", e)
+
         allow_autonomous_generation = True
         if self._in_quiet_hours():
             allow_autonomous_generation = False
         if not self._contribution_allowed():
             allow_autonomous_generation = False
+
+        # ── Organism heartbeat: Gnani / Samvara ──
+        # Runs every _organism_interval_ticks. When the Gnani says HOLD,
+        # we suppress autonomous generation — no new busywork until
+        # coherence recovers or Samvara completes its diagnostic cycle.
+        self._tick_count += 1
+        gnani_holds = False
+        if (self._organism is not None
+                and self._tick_count % self._organism_interval_ticks == 0):
+            try:
+                hb = await self._organism.heartbeat()
+                result["organism_verdict"] = hb.gnani_verdict.decision if hb.gnani_verdict else None
+                result["organism_power"] = (
+                    self._organism.samvara.current_power.value
+                    if self._organism.samvara.active else None
+                )
+                if hb.gnani_verdict and hb.gnani_verdict.decision == "HOLD":
+                    gnani_holds = True
+                    allow_autonomous_generation = False
+                    logger.warning(
+                        "Gnani HOLD (cycle %d, power=%s): %s — suppressing dispatch",
+                        hb.cycle,
+                        result["organism_power"] or "—",
+                        hb.gnani_verdict.reason,
+                    )
+                # ── Samvara corrections → task pipeline ──
+                # When Samvara diagnoses issues, turn corrections into
+                # high-priority tasks so the TD can act on them.
+                if hb.samvara_diagnostic and hb.samvara_diagnostic.corrections:
+                    try:
+                        corrections_created = 0
+                        for corr in hb.samvara_diagnostic.corrections[:3]:
+                            await self._task_board.create(
+                                title=f"[samvara] {corr[:80]}",
+                                description=(
+                                    f"Samvara correction (power={result['organism_power'] or 'unknown'}, "
+                                    f"cycle={hb.cycle}): {corr}"
+                                ),
+                                priority=TaskPriority.HIGH,
+                                created_by="samvara",
+                            )
+                            corrections_created += 1
+                        if corrections_created:
+                            logger.info(
+                                "Samvara → %d correction tasks enqueued", corrections_created,
+                            )
+                    except Exception as corr_exc:
+                        logger.debug("Samvara correction task creation failed: %s", corr_exc)
+            except Exception as exc:
+                logger.debug("Organism heartbeat error: %s", exc)
 
         rescued: list[Task] = []
         now = datetime.now(timezone.utc)
@@ -1263,28 +1553,47 @@ class SwarmManager:
             reopened = await self.spawn_latent_gold_tasks()
         result["reopened"] = len(reopened)
 
-        activity = await self._orchestrator.tick()
-        result["dispatched"] = activity.get("dispatched", 0)
-        result["settled"] = activity.get("settled", 0)
+        # When Gnani holds, skip orchestrator dispatch — no new task execution
+        if not gnani_holds:
+            activity = await self._orchestrator.tick()
+            result["dispatched"] = activity.get("dispatched", 0)
+            result["settled"] = activity.get("settled", 0)
+        else:
+            # Still settle completed tasks, just don't dispatch new ones
+            activity = await self._orchestrator.tick_settle_only()
 
         coordination = await self.coordination_status(refresh=False)
         synthesized = await self.spawn_coordination_tasks(coordination=coordination)
         result["synthesized"] = len(synthesized)
 
         director_proposals: list[Task] = []
-        self._tick_count += 1
         if (allow_autonomous_generation and self._director is not None
             and self._tick_count % self._director_interval_ticks == 0):
             try:
                 director_proposals = await self._director_pulse()
             except Exception:
-                pass
+                logger.debug("Director pulse failed", exc_info=True)
         result["director_proposals"] = len(director_proposals)
 
         living_summary: dict[str, int] = {}
         if self._tick_count % self._living_interval_ticks == 0:
             living_summary = await self._tick_living_layers()
         result["living_summary"] = living_summary
+
+        # ── Witness audit (Beer S3*): sporadic random audit ──
+        if (self._witness is not None
+                and self._tick_count % self._witness_interval_ticks == 0):
+            try:
+                findings = await self._witness.run_cycle()
+                result["witness_findings"] = len(findings)
+                actionable = sum(1 for f in findings if f.is_actionable)
+                if actionable:
+                    logger.info(
+                        "Witness S3* audit: %d findings, %d actionable",
+                        len(findings), actionable,
+                    )
+            except Exception as exc:
+                logger.debug("Witness audit error: %s", exc)
 
         did_work = (bool(reopened) or bool(rescued) or bool(synthesized)
                     or bool(director_proposals) or self._tick_did_work(activity))
@@ -1313,12 +1622,6 @@ class SwarmManager:
                 if activity.get("circuit_broken"):
                     await asyncio.sleep(min(tick_interval, 300))
                     continue
-                # v0.6.1: Organism heartbeat after each tick
-                if self._organism is not None:
-                    try:
-                        await self._organism.heartbeat()
-                    except Exception as _hb_exc:
-                        logger.debug("Organism heartbeat failed (non-fatal): %s", _hb_exc)
             except Exception as exc:
                 logger.exception("Tick failed: %s", exc)
                 tripped = self._daemon.circuit_breaker.record_failure()
@@ -1339,7 +1642,7 @@ class SwarmManager:
         """Get current swarm state snapshot."""
         agents = await self._agent_pool.list_agents() if self._agent_pool else []
         task_stats = await self._task_board.stats() if self._task_board else {}
-        return SwarmState(
+        state = SwarmState(
             agents=agents,
             tasks_pending=task_stats.get("pending", 0),
             tasks_running=task_stats.get("running", 0),
@@ -1347,6 +1650,10 @@ class SwarmManager:
             tasks_failed=task_stats.get("failed", 0),
             uptime_seconds=time.monotonic() - self._start_time,
         )
+        # Attach organism status if available
+        if self._organism is not None:
+            state.organism = self._organism.status()
+        return state
 
     async def coordination_status(
         self,
@@ -1393,6 +1700,20 @@ class SwarmManager:
     async def recall(self, limit: int = 10) -> list:
         """Recall recent memories."""
         return await self._memory.recall(limit=limit)
+
+    # --- Decision Ontology (v0.9.0) ---
+
+    def record_decision(self, decision: Any) -> Any:
+        """Evaluate and persist a DecisionRecord. Returns DecisionQualityAssessment."""
+        if self._decision_log is None:
+            raise SubsystemNotReady("decision_log not initialized")
+        return self._decision_log.record(decision)
+
+    def list_decisions(self, *, limit: int = 50) -> list:
+        """Return recent decisions from the log."""
+        if self._decision_log is None:
+            return []
+        return self._decision_log.list_decisions(limit=limit)
 
     # --- Evolution (v0.2.0) ---
 
@@ -1464,7 +1785,7 @@ class SwarmManager:
                     result["kernel_axioms"] = len(kernel.principles)
                     result["kernel_integrity"] = kernel.verify_integrity()
             except Exception:
-                pass
+                logger.debug("Kernel status check failed", exc_info=True)
         if self._corpus:
             claims = await self._corpus.list_claims()
             result["corpus"] = True
@@ -1832,7 +2153,7 @@ class SwarmManager:
                     "Swarm shutdown", layer=MemoryLayer.SESSION, source="swarm"
                 )
             except Exception:
-                pass
+                logger.debug("Shutdown memory write failed", exc_info=True)
 
         self._initialized.clear()
         logger.info("Swarm shutdown complete")

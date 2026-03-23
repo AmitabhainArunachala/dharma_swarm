@@ -54,7 +54,7 @@ def test_circuit_breaker_fitness_trend():
 def test_daemon_config_defaults():
     cfg = DaemonConfig()
     assert cfg.heartbeat_interval == 21600.0
-    assert cfg.max_daily_contributions == 4
+    assert cfg.max_daily_contributions == 40
     assert cfg.fitness_threshold == 0.6
     assert cfg.crown_jewel_threshold == 0.85
     assert len(cfg.threads) == 5

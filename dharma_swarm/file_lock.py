@@ -369,7 +369,7 @@ class AsyncLockManager:
             try:
                 await lock.release()
             except Exception:
-                pass
+                logger.debug("Lock release failed", exc_info=True)
         self._locks.clear()
 
     @property

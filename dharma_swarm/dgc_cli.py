@@ -36,6 +36,8 @@ Usage:
   dgc witness "msg"             Record a witness observation
   dgc develop "what" "evidence" Record a development marker
   dgc gates "action"            Run telos gates on an action
+  dgc meta                      Overseeing I — wholistic system assessment
+  dgc prune [--dry-run]         Sweep the zen garden — cut noise, keep signal
   dgc health                    Ecosystem file health
   dgc ouroboros connections|record  Inspect or canonically bind behavioral observations
   dgc health-check              Monitor-based system health (v0.2.0)
@@ -349,49 +351,6 @@ def cmd_status() -> None:
         print(f"\nClaude Code: {result.stdout.strip()}")
     except Exception:
         print("\nClaude Code: not found")
-
-    # Organism status
-    try:
-        from dharma_swarm.organism import get_organism
-        org = get_organism()
-        if org is not None:
-            status = org.status()
-            pulse = status.get("last_pulse")
-            if pulse:
-                print(f"\nOrganism: cycle {pulse['cycle']}, health={pulse['fleet_health']:.2f}, coherence={pulse['identity_coherence']:.2f}")
-                if pulse.get("algedonic_active", 0) > 0:
-                    print(f"  \u26a0 Algedonic signals active: {pulse['algedonic_active']}")
-            else:
-                print("\nOrganism: booted, no heartbeat yet")
-            # Phase 4: Organism memory and algedonic activations
-            try:
-                if hasattr(org, 'memory') and org.memory is not None:
-                    mem_stats = org.memory.stats()
-                    print(f"  Memory entities:  {mem_stats.get('total_entities', 0)}")
-                    print(f"  Relationships:    {mem_stats.get('total_relationships', 0)}")
-                    print(f"  Self-model accuracy: {mem_stats.get('self_model_accuracy', 'N/A')}")
-                if hasattr(org, 'algedonic_activation') and org.algedonic_activation is not None:
-                    recent = org.algedonic_activation.recent_activations
-                    if recent:
-                        print(f"  Algedonic activations (recent): {len(recent)}")
-                        for act in recent[-3:]:
-                            print(f"    [{act['severity']}] {act['signal']} \u2192 {act['action']}")
-                if hasattr(org, 'attractor') and org.attractor is not None:
-                    print(f"  Gnani field: active")
-                try:
-                    if hasattr(org, 'strange_loop') and org.strange_loop is not None:
-                        sl = org.strange_loop.stats
-                        print(f"  Strange loop:     {sl.get('total_mutations', 0)} mutations ({sl.get('kept', 0)} kept, {sl.get('reverted', 0)} reverted, {sl.get('held_by_gnani', 0)} held)")
-                        if sl.get("pending"):
-                            print(f"    Testing mutation...")
-                except Exception:
-                    pass
-            except Exception:
-                pass
-        else:
-            print("\nOrganism: not booted")
-    except Exception:
-        print("\nOrganism: unavailable")
 
     print("\nMission spine: run `dgc mission-status` for full readiness lanes")
     print("Canonical topology: run `dgc canonical-status`")
@@ -1418,44 +1377,6 @@ def cmd_daemon_status() -> None:
             print(f"    {line[:120]}")
     else:
         print("  pulse_log: no entries")
-
-
-def cmd_organism_status() -> None:
-    """Show organism status."""
-    async def _status():
-        from dharma_swarm.organism import get_organism
-        org = get_organism()
-        if org is None:
-            # Try booting a fresh one for status check
-            from dharma_swarm.organism import Organism
-            org = Organism()
-            await org.boot()
-        status = org.status()
-        import json
-        print(json.dumps(status, indent=2, default=str))
-
-    _run(_status())
-
-
-def cmd_organism_pulse() -> None:
-    """Run a single organism heartbeat and display results."""
-    async def _pulse():
-        from dharma_swarm.organism import get_organism, Organism
-        org = get_organism()
-        if org is None:
-            org = Organism()
-            await org.boot()
-        pulse = await org.heartbeat()
-        print(f"Cycle:      {pulse.cycle_number}")
-        print(f"Health:     {pulse.fleet_health:.2f}")
-        print(f"Coherence:  {pulse.identity_coherence:.2f}")
-        print(f"Algedonic:  {pulse.algedonic_active}")
-        print(f"Zeitgeist:  {pulse.zeitgeist_signals}")
-        print(f"AMIROS:     {pulse.amiros_experiments_running} experiments")
-        print(f"Duration:   {pulse.duration_ms:.1f}ms")
-        print(f"Healthy:    {'YES' if pulse.is_healthy else 'NO'}")
-
-    _run(_pulse())
 
 
 def cmd_agni(command: str) -> None:
@@ -4551,6 +4472,43 @@ def cmd_foundations(pillar: str | None = None) -> None:
     print(f"\n  Usage: dgc foundations <name> (e.g. dgc foundations hofstadter)")
 
 
+def _run_prune(
+    dry_run: bool = False,
+    stig_threshold: float = 0.3,
+    bridge_threshold: float = 0.2,
+    trace_days: int = 14,
+) -> None:
+    """Sweep the zen garden."""
+    try:
+        from dharma_swarm.pruner import Pruner
+
+        pruner = Pruner(
+            state_dir=DHARMA_STATE,
+            stigmergy_threshold=stig_threshold,
+            bridge_threshold=bridge_threshold,
+            trace_max_days=trace_days,
+            dry_run=dry_run,
+        )
+        report = asyncio.run(pruner.sweep())
+        pruner.print_report(report)
+    except Exception as exc:
+        print(f"Pruner failed: {exc}")
+        raise SystemExit(1)
+
+
+def _run_meta() -> None:
+    """Run the Overseeing I wholistic assessment."""
+    try:
+        from dharma_swarm.overseeing_i import OverseeingI
+
+        oi = OverseeingI(state_dir=DHARMA_STATE)
+        assessment = asyncio.run(oi.assess())
+        oi.print_assessment(assessment)
+    except Exception as exc:
+        print(f"Overseeing I failed: {exc}")
+        raise SystemExit(1)
+
+
 def cmd_telos(doc: str | None = None) -> None:
     """Show telos engine research documents, or preview a specific document."""
     tdir = DHARMA_SWARM / "docs" / "telos-engine"
@@ -4719,12 +4677,6 @@ def _build_parser() -> argparse.ArgumentParser:
 
     # -- pulse --
     sub.add_parser("pulse", help="Run one heartbeat pulse")
-
-    # -- organism --
-    p_organism = sub.add_parser("organism", help="Organism subsystem (autopoietic integration layer)")
-    organism_sub = p_organism.add_subparsers(dest="organism_cmd")
-    organism_sub.add_parser("status", help="Show organism status")
-    organism_sub.add_parser("pulse", help="Run a single organism heartbeat")
 
     # -- orchestrate-live --
     p_orch_live = sub.add_parser(
@@ -5381,6 +5333,14 @@ def _build_parser() -> argparse.ArgumentParser:
     p_telos = sub.add_parser("telos", help="Telos Engine research documents")
     p_telos.add_argument("doc", nargs="?", default=None, help="Document name to preview")
 
+    sub.add_parser("meta", help="Overseeing I — wholistic system assessment")
+
+    p_prune = sub.add_parser("prune", help="Sweep the zen garden — cut noise, keep signal")
+    p_prune.add_argument("--dry-run", action="store_true", help="Show what would be pruned without doing it")
+    p_prune.add_argument("--stig-threshold", type=float, default=0.3, help="Stigmergy salience threshold (default 0.3)")
+    p_prune.add_argument("--bridge-threshold", type=float, default=0.2, help="Bridge confidence threshold (default 0.2)")
+    p_prune.add_argument("--trace-days", type=int, default=14, help="Archive traces older than N days (default 14)")
+
     # -- xray (Phase 14: Repo X-Ray Product) --
     p_xray = sub.add_parser("xray", help="Run Repo X-Ray — codebase analysis for any repo")
     p_xray.add_argument("repo_path", help="Path to repository to analyze")
@@ -5643,14 +5603,6 @@ def main() -> None:
             cmd_daemon_status()
         case "pulse":
             cmd_pulse()
-        case "organism":
-            match args.organism_cmd:
-                case "status":
-                    cmd_organism_status()
-                case "pulse":
-                    cmd_organism_pulse()
-                case _:
-                    parser.parse_args(["organism", "--help"])
         case "orchestrate-live":
             cmd_orchestrate_live(background=args.background)
         case "swarm":
@@ -6260,6 +6212,15 @@ def main() -> None:
             cmd_foundations(args.pillar)
         case "telos":
             cmd_telos(args.doc)
+        case "meta":
+            _run_meta()
+        case "prune":
+            _run_prune(
+                dry_run=getattr(args, "dry_run", False),
+                stig_threshold=getattr(args, "stig_threshold", 0.3),
+                bridge_threshold=getattr(args, "bridge_threshold", 0.2),
+                trace_days=getattr(args, "trace_days", 14),
+            )
         case "xray":
             cmd_xray(
                 repo_path=args.repo_path,

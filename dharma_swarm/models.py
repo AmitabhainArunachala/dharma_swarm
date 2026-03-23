@@ -54,6 +54,15 @@ class AgentRole(str, Enum):
     ARCHITECT = "architect"
     VALIDATOR = "validator"
     CONDUCTOR = "conductor"
+    # Constitutional topology (6-agent stable roster)
+    OPERATOR = "operator"
+    ARCHIVIST = "archivist"
+    RESEARCH_DIRECTOR = "research_director"
+    SYSTEMS_ARCHITECT = "systems_architect"
+    STRATEGIST = "strategist"
+    WITNESS = "witness"
+    # Ephemeral worker role
+    WORKER = "worker"
 
 
 class MessagePriority(str, Enum):
@@ -168,6 +177,8 @@ class AgentState(BaseModel):
     last_heartbeat: Optional[datetime] = None
     turns_used: int = 0
     tasks_completed: int = 0
+    provider: str = ""
+    model: str = ""
     error: Optional[str] = None
 
 
@@ -215,6 +226,7 @@ class SwarmState(BaseModel):
     tasks_failed: int = 0
     uptime_seconds: float = 0.0
     timestamp: datetime = Field(default_factory=_utc_now)
+    organism: dict[str, Any] | None = None  # OrganismRuntime status when available
 
 
 class TaskDispatch(BaseModel):

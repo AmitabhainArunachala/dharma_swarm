@@ -6,11 +6,13 @@ from dharma_swarm.decision_ontology import (
     DecisionClaim,
     DecisionContext,
     DecisionEvidence,
+    DecisionLog,
     DecisionMetric,
     DecisionOption,
     DecisionQualityVerdict,
     DecisionRecord,
     DecisionReview,
+    DecisionState,
     EvidenceKind,
     ReviewVerdict,
 )
@@ -230,3 +232,83 @@ def test_failed_review_prevents_audit_ready_verdict() -> None:
 
     assert assessment.verdict == DecisionQualityVerdict.DEFENSIBLE
     assert "failed_review_present" in assessment.warnings
+
+
+# ---------------------------------------------------------------------------
+# DecisionLog persistence tests
+# ---------------------------------------------------------------------------
+
+
+def _minimal_record() -> DecisionRecord:
+    """Create a minimal valid record for log tests."""
+    return DecisionRecord(
+        title="Test decision",
+        statement="Should we add logging?",
+        context=DecisionContext(mission="test", owner="operator"),
+        options=[
+            DecisionOption(option_id="a", title="Yes", selected=True),
+            DecisionOption(option_id="b", title="No"),
+        ],
+    )
+
+
+def test_decision_log_record_and_list(tmp_path) -> None:
+    log = DecisionLog(path=tmp_path / "decisions.jsonl")
+    record = _battle_ready_record()
+
+    assessment = log.record(record)
+
+    assert assessment.verdict == DecisionQualityVerdict.AUDIT_READY
+    entries = log.list_decisions()
+    assert len(entries) == 1
+    assert entries[0]["decision"]["title"] == record.title
+    assert entries[0]["assessment"]["verdict"] == "audit_ready"
+
+
+def test_decision_log_multiple_entries(tmp_path) -> None:
+    log = DecisionLog(path=tmp_path / "decisions.jsonl")
+    for _ in range(5):
+        log.record(_minimal_record())
+
+    entries = log.list_decisions(limit=3)
+    assert len(entries) == 3
+
+
+def test_decision_log_empty_file(tmp_path) -> None:
+    log = DecisionLog(path=tmp_path / "decisions.jsonl")
+    assert log.list_decisions() == []
+
+
+def test_decision_log_filter_by_verdict(tmp_path) -> None:
+    log = DecisionLog(path=tmp_path / "decisions.jsonl")
+    # Minimal record → FRAGILE (no evidence, no counterarguments)
+    log.record(_minimal_record())
+    # Battle-ready → AUDIT_READY
+    log.record(_battle_ready_record())
+
+    fragile = log.list_decisions(verdict=DecisionQualityVerdict.FRAGILE)
+    audit = log.list_decisions(verdict=DecisionQualityVerdict.AUDIT_READY)
+
+    assert len(fragile) == 1
+    assert len(audit) == 1
+
+
+def test_decision_log_filter_by_state(tmp_path) -> None:
+    log = DecisionLog(path=tmp_path / "decisions.jsonl")
+    record = _minimal_record()
+    record.state = DecisionState.APPROVED
+    log.record(record)
+    log.record(_minimal_record())  # default = DRAFT
+
+    approved = log.list_decisions(state=DecisionState.APPROVED)
+    draft = log.list_decisions(state=DecisionState.DRAFT)
+
+    assert len(approved) == 1
+    assert len(draft) == 1
+
+
+def test_decision_log_creates_parent_dirs(tmp_path) -> None:
+    log = DecisionLog(path=tmp_path / "deep" / "nested" / "decisions.jsonl")
+    assessment = log.record(_minimal_record())
+    assert assessment is not None
+    assert (tmp_path / "deep" / "nested" / "decisions.jsonl").exists()

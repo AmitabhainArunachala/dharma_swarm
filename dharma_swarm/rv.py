@@ -409,7 +409,7 @@ class EvolutionRVTracker:
             with open(path, "a", encoding="utf-8") as f:
                 f.write(json.dumps(record, default=str) + "\n")
         except Exception:
-            pass
+            logger.debug("R_V persist failed", exc_info=True)
 
     async def load(self) -> None:
         """Load existing readings from JSONL file."""
@@ -423,4 +423,4 @@ class EvolutionRVTracker:
                     if line:
                         self._readings.append(json.loads(line))
         except Exception:
-            pass
+            logger.debug("R_V history load failed", exc_info=True)

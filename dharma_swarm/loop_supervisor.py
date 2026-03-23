@@ -231,7 +231,7 @@ class LoopSupervisor:
                     timestamp=datetime.now(timezone.utc).isoformat(),
                 )
         except Exception:
-            pass
+            logger.debug("Loop supervisor alert failed", exc_info=True)
         return None
 
     def _write_alert_file(self, alerts: list[SupervisorAlert]) -> None:

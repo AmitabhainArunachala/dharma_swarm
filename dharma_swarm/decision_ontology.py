@@ -8,9 +8,12 @@ and traceability instead of prose style alone.
 
 from __future__ import annotations
 
+import json
+import logging
 import uuid
 from datetime import datetime, timezone
 from enum import Enum
+from pathlib import Path
 
 from typing import Any
 
@@ -468,3 +471,67 @@ def _score_observability(record: DecisionRecord) -> tuple[float, list[str]]:
         + (0.20 * kill_criteria_score)
     )
     return score, warnings
+
+
+# ---------------------------------------------------------------------------
+# Persistence — DecisionLog
+# ---------------------------------------------------------------------------
+
+logger = logging.getLogger(__name__)
+
+_DEFAULT_DECISIONS_FILE = Path.home() / ".dharma" / "meta" / "decisions.jsonl"
+
+
+class DecisionLog:
+    """Append-only JSONL log of DecisionRecords and their quality assessments."""
+
+    def __init__(self, path: Path | None = None) -> None:
+        self._path = path or _DEFAULT_DECISIONS_FILE
+
+    def record(self, decision: DecisionRecord) -> DecisionQualityAssessment:
+        """Evaluate quality, persist both record + assessment, return assessment."""
+        assessment = evaluate_decision_quality(decision)
+        entry = {
+            "decision": decision.model_dump(mode="json"),
+            "assessment": assessment.model_dump(mode="json"),
+            "recorded_at": _utc_now().isoformat(),
+        }
+        try:
+            self._path.parent.mkdir(parents=True, exist_ok=True)
+            with self._path.open("a", encoding="utf-8") as fh:
+                fh.write(json.dumps(entry, default=str) + "\n")
+        except OSError:
+            logger.debug("Decision log write failed", exc_info=True)
+        return assessment
+
+    def list_decisions(
+        self,
+        *,
+        limit: int = 50,
+        state: DecisionState | None = None,
+        verdict: DecisionQualityVerdict | None = None,
+    ) -> list[dict[str, Any]]:
+        """Read recent decisions, optionally filtered by state or verdict."""
+        if not self._path.exists():
+            return []
+        try:
+            lines = self._path.read_text(encoding="utf-8").strip().split("\n")
+        except OSError:
+            logger.debug("Decision log read failed", exc_info=True)
+            return []
+        results: list[dict[str, Any]] = []
+        for line in reversed(lines):
+            if not line.strip():
+                continue
+            try:
+                entry = json.loads(line)
+            except json.JSONDecodeError:
+                continue
+            if state and entry.get("decision", {}).get("state") != state.value:
+                continue
+            if verdict and entry.get("assessment", {}).get("verdict") != verdict.value:
+                continue
+            results.append(entry)
+            if len(results) >= limit:
+                break
+        return results

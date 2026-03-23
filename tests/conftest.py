@@ -1,9 +1,6 @@
 """Shared test fixtures for DHARMA SWARM."""
 
-import asyncio
 import os
-import tempfile
-from pathlib import Path
 
 import pytest
 try:
@@ -56,6 +53,15 @@ def _isolate_dgc_env(monkeypatch):
     for key in list(os.environ):
         if any(key.startswith(prefix) for prefix in _DGC_LEAK_PREFIXES):
             monkeypatch.delenv(key)
+
+
+@pytest.fixture(autouse=True)
+def _isolate_stigmergy(tmp_path, monkeypatch):
+    """Redirect StigmergyStore to a tmpdir so tests never pollute ~/.dharma/stigmergy/marks.jsonl."""
+    test_base = tmp_path / "_stigmergy_isolated"
+    monkeypatch.setattr("dharma_swarm.stigmergy._DEFAULT_BASE", test_base)
+    # Reset module-level singleton so each test gets a fresh store with the redirected path
+    monkeypatch.setattr("dharma_swarm.stigmergy._default_store", None)
 
 
 @pytest.fixture

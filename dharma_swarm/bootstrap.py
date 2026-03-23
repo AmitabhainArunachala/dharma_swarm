@@ -292,7 +292,7 @@ def generate_manifest() -> dict[str, Any]:
     if not test_state.get("collection_ok"):
         health = "RED"
         issues.append("Test collection failing")
-    if test_state.get("tests_collected", 0) < 2000:
+    elif test_state.get("tests_collected", 0) < 2000:
         health = "YELLOW"
         issues.append(f"Only {test_state.get('tests_collected', 0)} tests (expected 2500+)")
     if d3_state.get("dgc_gaps", 0) > 5:

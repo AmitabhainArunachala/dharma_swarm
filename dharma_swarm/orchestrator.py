@@ -81,6 +81,8 @@ class Orchestrator:
         session_id: str | None = None,
         event_memory: Any = None,
         yoga: YogaScheduler | None = None,
+        state_dir: Path | str | None = None,
+        ontology_path: Path | str | None = None,
     ) -> None:
         from dharma_swarm.config import DEFAULT_CONFIG
         _cfg = DEFAULT_CONFIG.orchestrator
@@ -90,6 +92,18 @@ class Orchestrator:
         self._bus = message_bus
         self._event_memory = event_memory
         self._yoga = yoga
+        if state_dir is not None:
+            self._state_dir = Path(state_dir).expanduser()
+        elif ledger_dir is not None:
+            self._state_dir = Path(ledger_dir).expanduser()
+        else:
+            self._state_dir = None
+        if ontology_path is not None:
+            self._ontology_path = Path(ontology_path).expanduser()
+        elif self._state_dir is not None:
+            self._ontology_path = self._state_dir / "ontology.db"
+        else:
+            self._ontology_path = None
         self._ledger = ledger or SessionLedger(
             base_dir=ledger_dir,
             session_id=session_id,
@@ -112,6 +126,40 @@ class Orchestrator:
         self._last_coordination_result: CoordinationResult | None = None
         self._last_coordination_summary: dict[str, Any] = self._empty_coordination_summary()
         self._last_coordination_signature = ""
+
+    def _shared_dir(self) -> Path | None:
+        state_dir = getattr(self, "_state_dir", None)
+        if state_dir is None:
+            return None
+        return state_dir / "shared"
+
+    def _algedonic_log_path(self) -> Path | None:
+        state_dir = getattr(self, "_state_dir", None)
+        if state_dir is None:
+            return None
+        return state_dir / "algedonic_signals.jsonl"
+
+    def _get_telic_seam(self):
+        if not hasattr(self, "_ontology_path"):
+            from dharma_swarm import telic_seam as telic_seam_module
+            from dharma_swarm.ontology import OntologyRegistry
+            from dharma_swarm.telic_seam import TelicSeam
+
+            seam = telic_seam_module._SEAM
+            if seam is not None:
+                return seam
+
+            seam = getattr(self, "_legacy_telic_seam", None)
+            if seam is None:
+                seam = TelicSeam(registry=OntologyRegistry.create_dharma_registry())
+                self._legacy_telic_seam = seam
+            return seam
+
+        if self._ontology_path is None:
+            return None
+        from dharma_swarm.telic_seam import get_seam
+
+        return get_seam(self._ontology_path)
 
     async def dispatch(
         self,
@@ -213,22 +261,6 @@ class Orchestrator:
                         )
                     continue  # skip this task, try next
 
-            # Organism model routing — suggest optimal provider/model
-            try:
-                from dharma_swarm.organism import get_organism
-                org = get_organism()
-                if org is not None and hasattr(task, 'description'):
-                    route = org.router.route(task.description or task.title or "")
-                    if route and hasattr(route, 'model'):
-                        if task.metadata is None:
-                            task.metadata = {}
-                        if isinstance(task.metadata, dict):
-                            task.metadata["organism_routed_model"] = route.model
-                            task.metadata["organism_routed_provider"] = getattr(route, 'provider', '')
-                            task.metadata["organism_complexity"] = getattr(route, 'complexity', '')
-            except Exception:
-                pass  # Never-fatal
-
             td = TaskDispatch(
                 task_id=task.id,
                 agent_id=agent.id,
@@ -299,9 +331,18 @@ class Orchestrator:
                     if inspect.isawaitable(result):
                         await result
             except Exception:
-                pass  # Tick event emission is non-fatal
+                logger.debug("Tick event emission failed", exc_info=True)
 
         return summary
+
+    async def tick_settle_only(self) -> dict[str, int]:
+        """Settle completed tasks without dispatching new ones.
+
+        Used when the Gnani says HOLD — let in-flight work finish,
+        but don't create more.
+        """
+        settled, recovered = await self._collect_completed()
+        return {"settled": settled, "recovered": recovered, "dispatched": 0}
 
     async def run(self, interval: float = 1.0) -> None:
         """Continuous loop calling tick() until stop() is called."""
@@ -757,18 +798,13 @@ class Orchestrator:
         # Feature flag: ENABLE_FITNESS_ROUTING (default off until enough data)
         import os
         if os.getenv("ENABLE_FITNESS_ROUTING", "").lower() not in ("1", "true", "yes"):
-            # Also enable if organism is booted (organism presence = advanced mode)
-            try:
-                from dharma_swarm.organism import get_organism
-                if get_organism() is None:
-                    return None  # Falls through to FIFO
-            except Exception:
-                return None  # Falls through to FIFO
+            return None  # Falls through to FIFO
 
         try:
             import random
-            from dharma_swarm.telic_seam import get_seam
-            seam = get_seam()
+            seam = self._get_telic_seam()
+            if seam is None:
+                return None
 
             # Exploration: 10% of the time, pick randomly
             if random.random() < self._EXPLORATION_RATE:
@@ -1461,6 +1497,40 @@ class Orchestrator:
                 "max_retries": max_retries,
             },
         )
+        # ── Algedonic signal: task exhausted all retries → pain to S5 ──
+        try:
+            from dharma_swarm.signal_bus import SignalBus
+            task_title = task.title[:100] if task else td.task_id
+            SignalBus.get().emit({
+                "type": "ALGEDONIC_TASK_DEAD",
+                "severity": "warning",
+                "task_id": td.task_id,
+                "task_title": task_title,
+                "agent_id": td.agent_id,
+                "failure_class": failure_class,
+                "retry_count": retry_count,
+                "max_retries": max_retries,
+                "error": error[:300],
+                "timestamp": datetime.now(timezone.utc).isoformat(),
+            })
+            # Also persist to algedonic log (S5 bypass)
+            _alg_path = self._algedonic_log_path()
+            if _alg_path is not None:
+                _alg_path.parent.mkdir(parents=True, exist_ok=True)
+                with _alg_path.open("a", encoding="utf-8") as _af:
+                    _af.write(json.dumps({
+                        "kind": "task_retries_exhausted",
+                        "severity": "warning",
+                        "value": retry_count,
+                        "action": f"dead-letter: {task_title}",
+                        "timestamp": time.time(),
+                    }) + "\n")
+                logger.warning(
+                    "ALGEDONIC: task %s exhausted %d retries — dead-lettered",
+                    td.task_id, max_retries,
+                )
+        except Exception:
+            logger.debug("Algedonic signal emission failed", exc_info=True)
 
     async def _assign_dispatch(self, td: TaskDispatch) -> None:
         """Record dispatch, update board + pool, kick off execution, notify via bus."""
@@ -1471,14 +1541,15 @@ class Orchestrator:
         proposal_id: str | None = None
         if task_for_gate is not None:
             try:
-                from dharma_swarm.telic_seam import get_seam
-                proposal_id = get_seam().record_dispatch(
-                    task_for_gate, td.agent_id,
-                    topology=td.topology.value if td.topology else "dispatch",
-                )
-                td.metadata["telic_proposal_id"] = proposal_id or ""
+                seam = self._get_telic_seam()
+                if seam is not None:
+                    proposal_id = seam.record_dispatch(
+                        task_for_gate, td.agent_id,
+                        topology=td.topology.value if td.topology else "dispatch",
+                    )
+                    td.metadata["telic_proposal_id"] = proposal_id or ""
             except Exception:
-                pass  # Seam recording is never fatal
+                logger.debug("Telic seam dispatch recording failed", exc_info=True)
 
         action_ref = (
             f"dispatch task {task_for_gate.title} -> {td.agent_id}"
@@ -1502,13 +1573,14 @@ class Orchestrator:
         # ── Telic Seam: record GateDecision in ontology ──
         if proposal_id is not None:
             try:
-                from dharma_swarm.telic_seam import get_seam
-                get_seam().record_gate_decision(
-                    proposal_id, gate.result,
-                    witness_reroutes=gate.attempts,
-                )
+                seam = self._get_telic_seam()
+                if seam is not None:
+                    seam.record_gate_decision(
+                        proposal_id, gate.result,
+                        witness_reroutes=gate.attempts,
+                    )
             except Exception:
-                pass  # Seam recording is never fatal
+                logger.debug("Telic seam gate decision recording failed", exc_info=True)
 
         if gate.result.decision.value == "block":
             await self._safe_update_task(
@@ -1668,15 +1740,6 @@ class Orchestrator:
             0.01,
             self._coerce_float(td.timeout_seconds, self._default_timeout_seconds),
         )
-        # Organism model routing — apply routed model if available
-        try:
-            task_meta = task.metadata if isinstance(task.metadata, dict) else {}
-            routed_model = task_meta.get("organism_routed_model")
-            if routed_model and hasattr(runner, '_config'):
-                runner._config.model = routed_model
-                logger.debug("Organism routed task %s to model %s", task.id[:8], routed_model)
-        except Exception:
-            pass  # Never-fatal
         try:
             result = await asyncio.wait_for(
                 runner.run_task(task),
@@ -1775,7 +1838,9 @@ class Orchestrator:
         from pathlib import Path
         from datetime import datetime, timezone
 
-        shared_dir = Path.home() / ".dharma" / "shared"
+        shared_dir = self._shared_dir()
+        if shared_dir is None:
+            return
         shared_dir.mkdir(parents=True, exist_ok=True)
 
         # Write shared notes (append, not overwrite)

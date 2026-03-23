@@ -5,13 +5,25 @@ ROOT="${HOME}/dharma_swarm"
 SESSION="${SESSION_NAME:-dgc_allout}"
 HOURS="${1:-6}"
 POLL_SECONDS="${POLL_SECONDS:-300}"
-FILES_PER_CYCLE="${FILES_PER_CYCLE:-10}"
-TODO_MIN="${TODO_MIN:-3}"
-TODO_MAX="${TODO_MAX:-5}"
 USE_CAFFEINATE="${USE_CAFFEINATE:-1}"
 AUTONOMY_PROFILE="${AUTONOMY_PROFILE:-workspace_auto}"
 MISSION_PROFILE="${MISSION_PROFILE:-${AUTONOMY_PROFILE}}"
 NVIDIA_ENV_FILE="${DGC_NVIDIA_ENV_FILE:-${HOME}/.dharma/env/nvidia_remote.env}"
+DIRECTOR_MODE="${DIRECTOR_MODE:-direct}"
+DIRECTOR_SIGNAL_LIMIT="${DIRECTOR_SIGNAL_LIMIT:-16}"
+DIRECTOR_MAX_CANDIDATES="${DIRECTOR_MAX_CANDIDATES:-180}"
+DIRECTOR_MAX_ACTIVE_TASKS="${DIRECTOR_MAX_ACTIVE_TASKS:-12}"
+DIRECTOR_MAX_CONCURRENT_TASKS="${DIRECTOR_MAX_CONCURRENT_TASKS:-0}"
+DIRECTOR_MODEL="${DIRECTOR_MODEL:-sonnet}"
+DIRECTOR_MISSION_FILE="${DIRECTOR_MISSION_FILE:-}"
+
+# Backward-compatible aliases from the older launcher contract.
+if [[ -z "${DGC_DIRECTOR_SIGNAL_LIMIT+x}" && -n "${FILES_PER_CYCLE:-}" ]]; then
+  DIRECTOR_SIGNAL_LIMIT="${FILES_PER_CYCLE}"
+fi
+if [[ -z "${DGC_DIRECTOR_MAX_CONCURRENT_TASKS+x}" && -n "${TODO_MAX:-}" ]]; then
+  DIRECTOR_MAX_CONCURRENT_TASKS="${TODO_MAX}"
+fi
 
 if [[ -f "${NVIDIA_ENV_FILE}" ]]; then
   incoming_rag="${DGC_NVIDIA_RAG_URL-}"
@@ -95,7 +107,10 @@ if [[ "${HOURS}" == "forever" ]]; then
   HOURS="0"
 fi
 
-runner="python3 scripts/thinkodynamic_director.py --hours '${HOURS}' --poll-seconds '${POLL_SECONDS}' --files-per-cycle '${FILES_PER_CYCLE}' --todo-min '${TODO_MIN}' --todo-max '${TODO_MAX}'"
+runner="python3 scripts/thinkodynamic_director.py --hours '${HOURS}' --poll-seconds '${POLL_SECONDS}' --mode '${DIRECTOR_MODE}' --signal-limit '${DIRECTOR_SIGNAL_LIMIT}' --max-candidates '${DIRECTOR_MAX_CANDIDATES}' --max-active-tasks '${DIRECTOR_MAX_ACTIVE_TASKS}' --max-concurrent-tasks '${DIRECTOR_MAX_CONCURRENT_TASKS}' --model '${DIRECTOR_MODEL}'"
+if [[ -n "${DIRECTOR_MISSION_FILE}" ]]; then
+  runner="${runner} --mission-file '${DIRECTOR_MISSION_FILE}'"
+fi
 if [[ "${USE_CAFFEINATE}" == "1" ]] && command -v caffeinate >/dev/null 2>&1; then
   runner="caffeinate -i ${runner}"
 fi
@@ -117,8 +132,15 @@ if [[ "${HOURS}" == "0" ]]; then
   echo "Mode: continuous (no wall-clock stop)"
 fi
 echo "Poll seconds: ${POLL_SECONDS}"
-echo "Files per cycle: ${FILES_PER_CYCLE}"
-echo "TODO steps per cycle: ${TODO_MIN}-${TODO_MAX}"
+echo "Director mode: ${DIRECTOR_MODE}"
+echo "Signal limit: ${DIRECTOR_SIGNAL_LIMIT}"
+echo "Max candidates: ${DIRECTOR_MAX_CANDIDATES}"
+echo "Max active tasks: ${DIRECTOR_MAX_ACTIVE_TASKS}"
+echo "Max concurrent tasks: ${DIRECTOR_MAX_CONCURRENT_TASKS}"
+echo "Model: ${DIRECTOR_MODEL}"
+if [[ -n "${DIRECTOR_MISSION_FILE}" ]]; then
+  echo "Mission file: ${DIRECTOR_MISSION_FILE}"
+fi
 echo "Use caffeinate: ${USE_CAFFEINATE}"
 echo "Autonomy profile: ${MISSION_PROFILE}"
 echo "Trust mode: ${DGC_TRUST_MODE}"

@@ -398,7 +398,13 @@ def test_surgeon_gets_less_vision():
 def test_context_includes_ops_layer():
     """All roles should include operational context."""
     result = build_agent_context(role="surgeon")
-    assert "Operations Layer" in result or "Trishula" in result or "Memory" in result
+    assert (
+        "Operations Layer" in result
+        or "Trishula" in result
+        or "Memory" in result
+        or "Engineering Layer" in result
+        or "Stigmergy" in result
+    )
 
 
 def test_build_agent_context_includes_recent_memories_when_budget_allows(

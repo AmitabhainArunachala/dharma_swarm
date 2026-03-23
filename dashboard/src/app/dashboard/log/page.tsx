@@ -8,6 +8,7 @@
 
 import { useEffect, useState, useCallback } from "react";
 import { motion } from "framer-motion";
+import { apiFetch } from "@/lib/api";
 
 interface LogEntry {
   timestamp: string;
@@ -35,8 +36,6 @@ interface LogStats {
   hours_covered: number;
 }
 
-const BASE = process.env.NEXT_PUBLIC_API_URL ?? "http://localhost:8420";
-
 function timeAgo(ts: string): string {
   const diff = Date.now() - new Date(ts).getTime();
   const mins = Math.floor(diff / 60000);
@@ -56,26 +55,52 @@ export default function ConversationLogPage() {
   const [loading, setLoading] = useState(true);
   const [roleFilter, setRoleFilter] = useState<string>("all");
 
+  const loadData = useCallback(async () => {
+    const [logRes, promRes, statRes] = await Promise.all([
+      apiFetch<LogEntry[]>(`/api/conversation-log/recent?hours=${hours}`),
+      apiFetch<PromiseEntry[]>(`/api/conversation-log/promises?hours=${hours}`),
+      apiFetch<LogStats | null>(`/api/conversation-log/stats?hours=${hours}`),
+    ]);
+    return {
+      entries: logRes ?? [],
+      promises: promRes ?? [],
+      stats: statRes ?? null,
+    };
+  }, [hours]);
+
   const fetchData = useCallback(async () => {
     setLoading(true);
     try {
-      const unwrap = (json: Record<string, unknown>) =>
-        json && typeof json === "object" && "data" in json ? json.data : json;
-      const [logRes, promRes, statRes] = await Promise.all([
-        fetch(`${BASE}/api/conversation-log/recent?hours=${hours}`).then(r => r.ok ? r.json() : {data:[]}).then(unwrap),
-        fetch(`${BASE}/api/conversation-log/promises?hours=${hours}`).then(r => r.ok ? r.json() : {data:[]}).then(unwrap),
-        fetch(`${BASE}/api/conversation-log/stats?hours=${hours}`).then(r => r.ok ? r.json() : {data:null}).then(unwrap),
-      ]);
-      setEntries((logRes as LogEntry[]) ?? []);
-      setPromises((promRes as PromiseEntry[]) ?? []);
-      setStats((statRes as LogStats) ?? null);
+      const next = await loadData();
+      setEntries(next.entries);
+      setPromises(next.promises);
+      setStats(next.stats);
     } catch {
       // API not available — show empty state
+    } finally {
+      setLoading(false);
     }
-    setLoading(false);
-  }, [hours]);
+  }, [loadData]);
 
-  useEffect(() => { fetchData(); }, [fetchData]);
+  useEffect(() => {
+    let active = true;
+    void (async () => {
+      try {
+        const next = await loadData();
+        if (!active) return;
+        setEntries(next.entries);
+        setPromises(next.promises);
+        setStats(next.stats);
+      } catch {
+        // API not available — show empty state
+      } finally {
+        if (active) setLoading(false);
+      }
+    })();
+    return () => {
+      active = false;
+    };
+  }, [loadData]);
 
   // Auto-refresh every 30s
   useEffect(() => {
@@ -175,7 +200,7 @@ export default function ConversationLogPage() {
 
           {filteredEntries.length === 0 ? (
             <div className="py-12 text-center text-sumi-500">
-              No conversation entries yet. Start talking and they'll appear here.
+              No conversation entries yet. Start talking and they&apos;ll appear here.
             </div>
           ) : (
             <div className="max-h-[600px] overflow-y-auto space-y-1">

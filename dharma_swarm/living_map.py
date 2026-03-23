@@ -13,12 +13,15 @@ from __future__ import annotations
 
 import asyncio
 import json
+import logging
 import os
 import sqlite3
 import time
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
+
+logger = logging.getLogger(__name__)
 
 DHARMA_DIR = Path.home() / ".dharma"
 SWARM_DIR = Path.home() / "dharma_swarm"
@@ -76,7 +79,7 @@ def _read_stigmergy() -> dict:
                     "ts": m.get("timestamp", ""),
                 })
             except Exception:
-                pass
+                logger.debug("Stigmergy mark read failed", exc_info=True)
         return {"count": count, "recent": recent}
     except Exception:
         return {"count": 0, "recent": []}
@@ -137,7 +140,7 @@ def _read_evolution() -> dict:
                 content = f.read_text()
                 total += content.count('\n{"') + (1 if content.startswith('{') else 0)
             except Exception:
-                pass
+                logger.debug("Mark file count failed", exc_info=True)
         # also check the now.json evolution count which is more reliable
         return {"entries": total}
     except Exception:
@@ -191,7 +194,7 @@ def _read_swarm_rv() -> dict:
                 if tags:
                     topics.append(tags)
             except Exception:
-                pass
+                logger.debug("Topic extraction failed", exc_info=True)
         if len(topics) < 2:
             return {"level": "UNKNOWN", "pr": None}
         # compute avg Jaccard similarity between consecutive pairs

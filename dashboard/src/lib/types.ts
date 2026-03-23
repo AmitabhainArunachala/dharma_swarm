@@ -19,6 +19,8 @@ export interface ApiResponse<T> {
 // ---------------------------------------------------------------------------
 
 export interface ChatStatusOut {
+  chat_contract_version?: string;
+  chat_ws_path_template?: string;
   ready: boolean;
   model: string;
   provider: string;
@@ -29,6 +31,7 @@ export interface ChatStatusOut {
   tool_result_max_chars: number;
   history_message_limit: number;
   temperature: number;
+  persistent_sessions?: boolean;
   default_profile_id?: string;
   profiles?: ChatProfileOut[];
 }
@@ -40,6 +43,9 @@ export interface ChatProfileOut {
   model: string;
   accent: string;
   summary: string;
+  available?: boolean;
+  availability_kind?: string;
+  status_note?: string;
 }
 
 // ---------------------------------------------------------------------------
@@ -127,6 +133,8 @@ export interface ModuleTruthOut {
 export interface AgentOut {
   id: string;
   name: string;
+  agent_slug: string;
+  display_name: string;
   role: string;
   status: string;
   current_task: string | null;
@@ -136,7 +144,106 @@ export interface AgentOut {
   tasks_completed: number;
   provider: string;
   model: string;
+  model_label: string;
+  model_key: string;
   error: string | null;
+}
+
+export interface AgentConfigOut {
+  display_name?: string | null;
+  role?: string | null;
+  provider?: string | null;
+  model?: string | null;
+  thread?: string | null;
+  tier?: string | null;
+  strengths?: string[];
+  [key: string]: unknown;
+}
+
+export interface AgentCostOut {
+  daily_spent: number;
+  weekly_spent: number;
+  budget_status: string;
+  [key: string]: unknown;
+}
+
+export interface FleetAgentConfig {
+  name: string;
+  display_name?: string | null;
+  role: string;
+  model: string;
+  tool_name?: string | null;
+  thread?: string | null;
+}
+
+export interface CoreFileOut {
+  file_path: string;
+  salience: number;
+  count: number;
+  last_touch?: string | null;
+}
+
+export interface AvailableModelOut {
+  model_id: string;
+  label: string;
+  tier?: string | null;
+}
+
+export interface FitnessHistoryEntry {
+  composite_fitness: number;
+  success_rate: number;
+  avg_quality: number;
+  speed_score: number;
+  total_cost_usd: number;
+  total_tokens: number;
+  avg_latency: number;
+  total_calls: number;
+  computed_at: string;
+}
+
+export interface TaskLogEntry {
+  timestamp: string;
+  task: string;
+  success: boolean;
+  latency_ms: number;
+  cost_usd: number;
+  response_preview?: string | null;
+}
+
+export interface ModelVerificationOut {
+  status: string;
+  verified_at?: string | null;
+  response_preview?: string | null;
+  error?: string | null;
+}
+
+export interface TopModelOut {
+  id: string;
+  rank: number;
+  provider: string;
+  display_name: string;
+  ui_label: string;
+  custom_label?: string | null;
+  short_name?: string | null;
+  max_context: number;
+  strengths: string[];
+  available: boolean;
+  available_routes?: string[];
+  routes?: string[];
+  notes?: string | null;
+  docs_url?: string;
+  provider_url?: string;
+  verification?: ModelVerificationOut | null;
+}
+
+export interface ModelProfileOut {
+  custom_label?: string | null;
+  short_name?: string | null;
+}
+
+export interface VerifyTop10Out {
+  verified_at: string;
+  ok_count: number;
 }
 
 // ---------------------------------------------------------------------------

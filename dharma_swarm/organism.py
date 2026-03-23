@@ -1,30 +1,15 @@
-"""Organism — the integration layer that makes DHARMA SWARM breathe.
+"""Organism integration surfaces.
 
-This module wires together all subsystems into a single living cycle:
+This module intentionally exports two organism APIs:
 
-    ontology ←→ agents ←→ gates ←→ evolution ←→ cascade
-         ↕            ↕            ↕
-     zeitgeist    message_bus    lineage
-         ↕            ↕            ↕
-      identity    stigmergy    amiros
-              ↘      ↓      ↙
-           vsm_channels (nervous system)
-                    ↓
-            algedonic → operator
+1. ``Organism`` and ``OrganismPulse``: the legacy integration layer that wires
+   together VSM, AMIROS, memory, routing, and phase 3-6 lifecycle hooks.
+2. ``OrganismRuntime`` and ``HeartbeatResult``: the newer heartbeat runtime
+   focused on Gnani/Samvara hold-processing.
 
-The organism runs a heartbeat loop that:
-1. Checks fleet viability (agent-internal VSM)
-2. Runs zeitgeist scan (S4 intelligence)
-3. Feeds gate patterns to zeitgeist (S3→S4)
-4. Feeds zeitgeist signals back to gates (S4→S3)
-5. Harvests agent outputs into AMIROS registries
-6. Checks algedonic conditions (any→S5)
-7. Updates identity coherence (S5)
-8. Emits a pulse for observability
-
-Ground: Varela (autopoiesis — cognition IS self-maintenance),
-        Beer (VSM — recursive viability at every scale),
-        Kauffman (autocatalytic closure — mutual enablement).
+The merge branch needs both. ``origin/main`` still relies on the legacy
+organism surface across a large integration-test slice, while the newer swarm
+runtime imports ``OrganismRuntime`` directly.
 """
 
 from __future__ import annotations
@@ -32,26 +17,28 @@ from __future__ import annotations
 import asyncio
 import logging
 import time
+from collections import deque
+from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any
+from typing import Any, Callable, Optional
 
 from dharma_swarm.amiros import AMIROSRegistry
-from dharma_swarm.identity import IdentityMonitor
+from dharma_swarm.identity import IdentityMonitor, LiveCoherenceSensor
 from dharma_swarm.memory_palace import MemoryPalace
 from dharma_swarm.model_routing import OrganismRouter
+from dharma_swarm.samvara import DiagnosticResult, SamvaraEngine
 from dharma_swarm.traces import TraceEntry, TraceStore
-from dharma_swarm.vsm_channels import (
-    AgentViability,
-    AlgedonicChannel,
-    GatePattern,
-    VSMCoordinator,
-)
+from dharma_swarm.vsm_channels import AgentViability, GatePattern, VSMCoordinator
 from dharma_swarm.zeitgeist import ZeitgeistScanner
 
 logger = logging.getLogger(__name__)
 
-# ── Singleton access ──────────────────────────────────────────────
+
+# ---------------------------------------------------------------------------
+# Legacy organism surface
+# ---------------------------------------------------------------------------
+
 _global_organism: Organism | None = None
 
 
@@ -60,18 +47,14 @@ def get_organism() -> Organism | None:
     return _global_organism
 
 
-def set_organism(org: Organism) -> None:
-    """Register the global organism instance (call once at startup)."""
+def set_organism(org: Organism | None) -> None:
+    """Register or clear the global organism instance."""
     global _global_organism
     _global_organism = org
 
 
 class OrganismPulse:
-    """A single heartbeat of the organism.
-
-    Captures the state of all subsystems at a point in time.
-    Written to traces for full observability.
-    """
+    """A single heartbeat of the legacy organism integration layer."""
 
     def __init__(self) -> None:
         self.timestamp = datetime.now(timezone.utc)
@@ -109,22 +92,7 @@ class OrganismPulse:
 
 
 class Organism:
-    """The living integration layer.
-
-    Composes all subsystems and runs the heartbeat that keeps
-    the organism alive. This is the computational autopoiesis:
-    the system maintaining itself through continuous self-monitoring.
-
-    Usage:
-        organism = Organism()
-        await organism.boot()
-
-        # Run a single heartbeat cycle
-        pulse = await organism.heartbeat()
-
-        # Or run continuous heartbeat
-        await organism.run(interval_seconds=60)
-    """
+    """The legacy organism integration layer."""
 
     def __init__(self, state_dir: Path | None = None) -> None:
         self._state_dir = state_dir or (Path.home() / ".dharma")
@@ -132,7 +100,6 @@ class Organism:
         self._running = False
         self._pulses: list[OrganismPulse] = []
 
-        # === Subsystems ===
         self.vsm = VSMCoordinator(self._state_dir)
         self.amiros = AMIROSRegistry(self._state_dir)
         self.zeitgeist = ZeitgeistScanner(self._state_dir)
@@ -141,147 +108,115 @@ class Organism:
         self.router = OrganismRouter(state_dir=self._state_dir)
         self.traces: TraceStore | None = None
 
-        # Dynamic scaling state
         self._stigmergy_seen: set[str] = set()
-
-        # Phase 5: Gnani verdict — last verdict from on_evolution_cycle
         self._last_gnani_verdict: bool | None = None
 
-        # Phase 4: Organism developmental memory
         try:
             from dharma_swarm.organism_memory import OrganismMemory
+
             self.memory = OrganismMemory(state_dir=self._state_dir)
         except Exception:
             self.memory = None
             logger.debug("OrganismMemory init failed (non-fatal)")
 
-        # Phase 4: Algedonic activation (pain → behavioral change)
         try:
             from dharma_swarm.algedonic_activation import AlgedonicActivation
+
             self.algedonic_activation = AlgedonicActivation(self)
         except Exception:
             self.algedonic_activation = None
             logger.debug("AlgedonicActivation init failed (non-fatal)")
 
-        # Phase 4: Gnani field
         try:
             from dharma_swarm.dharma_attractor import DharmaAttractor
+
             self.attractor = DharmaAttractor(state_dir=self._state_dir)
         except Exception:
             self.attractor = None
             logger.debug("DharmaAttractor init failed (non-fatal)")
 
-        # Phase 5: Strange loop — recursive self-modification
         try:
             from dharma_swarm.strange_loop import StrangeLoop
+
             self.strange_loop = StrangeLoop(self)
         except Exception:
             self.strange_loop = None
             logger.debug("StrangeLoop init failed (non-fatal)")
 
-        # Phase 6: Sleep-time memory refinement agent
         try:
             from dharma_swarm.sleep_time_agent import SleepTimeAgent
+
             self.sleep_time_agent = SleepTimeAgent(tick_interval=5)
         except Exception:
             self.sleep_time_agent = None
             logger.debug("SleepTimeAgent init failed (non-fatal)")
 
-        # Wiring: algedonic callbacks
         self.vsm.algedonic.register_callback(self._on_algedonic)
 
     async def boot(self) -> dict[str, Any]:
-        """Initialize the organism — wake up all subsystems.
-
-        Returns boot diagnostics.
-        """
+        """Initialize the organism and return boot diagnostics."""
         diagnostics: dict[str, Any] = {"booted_at": datetime.now(timezone.utc).isoformat()}
 
-        # Initialize trace store
         self.traces = TraceStore()
         await self.traces.init()
         diagnostics["traces"] = "initialized"
 
-        # Run initial zeitgeist scan
         try:
             signals = await self.zeitgeist.scan()
             diagnostics["zeitgeist_signals"] = len(signals)
         except Exception as exc:
             diagnostics["zeitgeist_error"] = str(exc)
 
-        # Check AMIROS state
         diagnostics["amiros"] = self.amiros.stats()
 
-        # Log boot to traces
         if self.traces:
-            await self.traces.log_entry(TraceEntry(
-                agent="organism",
-                action="boot",
-                metadata=diagnostics,
-            ))
+            await self.traces.log_entry(
+                TraceEntry(agent="organism", action="boot", metadata=diagnostics)
+            )
 
         logger.info("Organism booted: %s", diagnostics)
         return diagnostics
 
     async def heartbeat(self) -> OrganismPulse:
-        """Run a single heartbeat cycle.
-
-        This is the autopoietic loop — the organism checking its own
-        viability and adjusting.
-        """
+        """Run a single heartbeat cycle for the legacy organism layer."""
         t0 = time.monotonic()
         self._cycle += 1
         pulse = OrganismPulse()
         pulse.cycle_number = self._cycle
 
-        # 1. Check fleet viability (agent-internal VSM)
-        non_viable = await self.vsm.viability.check_all()
+        await self.vsm.viability.check_all()
         pulse.fleet_health = self.vsm.viability.fleet_health()
 
-        # 2. Run zeitgeist scan (S4)
         try:
             signals = await self.zeitgeist.scan()
             pulse.zeitgeist_signals = len(signals)
-
-            # 3. Feed zeitgeist signals to gates (S4→S3)
             await self.vsm.run_zeitgeist_feedback(signals)
         except Exception as exc:
             logger.debug("Zeitgeist scan error: %s", exc)
 
-        # 4. Check gate patterns (S3→S4)
         patterns = self.vsm.gate_patterns.get_all_patterns()
         pulse.anomalous_gate_patterns = sum(1 for p in patterns if p.is_anomalous)
-
-        # 5. Check algedonic state
         pulse.algedonic_active = len(self.vsm.algedonic.active_signals)
 
-        # 5b. Harvest high-salience stigmergy → task recommendations
-        stigmergy_tasks = await self._harvest_stigmergy_tasks()
+        await self._harvest_stigmergy_tasks()
 
-        # 6. Check AMIROS state
         amiros_stats = self.amiros.stats()
         running = amiros_stats.get("experiments", {}).get("by_status", {})
         pulse.amiros_experiments_running = running.get("running", 0)
 
-        # 7. Update identity coherence (S5)
         try:
             state = await self.identity.measure()
             pulse.identity_coherence = state.tcs
         except Exception:
             pulse.identity_coherence = -1.0
 
-        # 8. Audit stats
         pulse.audit_failure_rate = self.vsm.auditor.failure_rate()
 
-        # Record pulse
         pulse.duration_ms = (time.monotonic() - t0) * 1000
         self._pulses.append(pulse)
-
-        # Keep last 1000 pulses in memory
         if len(self._pulses) > 1000:
             self._pulses = self._pulses[-1000:]
 
-        # Phase 4: Algedonic activation — pain causes behavioral change
         pulse_extra: dict[str, Any] = {}
         try:
             if self.algedonic_activation is not None:
@@ -293,7 +228,6 @@ class Organism:
         except Exception as exc:
             logger.debug("Algedonic activation failed (non-fatal): %s", exc)
 
-        # C3 fix: Act on algedonic signals — wire action strings to real behavioral changes
         if pulse_extra.get("algedonic_actions"):
             try:
                 if self.algedonic_activation is not None:
@@ -301,16 +235,15 @@ class Organism:
                     for act in all_actions:
                         try:
                             if act.action == "recalibrate_routing" and self.router is not None:
-                                # Increase routing conservatism: bias toward higher tiers
                                 self.router._routing_bias = min(
-                                    getattr(self.router, '_routing_bias', 0.0) + 0.1, 0.5
+                                    getattr(self.router, "_routing_bias", 0.0) + 0.1,
+                                    0.5,
                                 )
                                 logger.info(
                                     "ALGEDONIC→ROUTING: bias increased to %.2f",
                                     self.router._routing_bias,
                                 )
                             elif act.action == "gnani_checkpoint" and self.attractor is not None:
-                                # Telos drift detected — run full Gnani evaluation
                                 verdict = self.attractor.gnani_checkpoint(
                                     f"Algedonic telos drift: {act.description}",
                                     {"pulse_cycle": pulse.cycle_number},
@@ -333,24 +266,21 @@ class Organism:
                                 )
                         except Exception as exc:
                             logger.debug(
-                                "Algedonic action %s failed (non-fatal): %s", act.action, exc
+                                "Algedonic action %s failed (non-fatal): %s",
+                                act.action,
+                                exc,
                             )
             except Exception as exc:
                 logger.debug("Algedonic action wiring failed (non-fatal): %s", exc)
 
-        # Phase 5: Strange loop tick — recursive self-modification
-        strange_loop_status = ""
         try:
             if self.strange_loop is not None:
-                strange_loop_status = self.strange_loop.tick(
-                    self._cycle, self._pulses
-                )
+                strange_loop_status = self.strange_loop.tick(self._cycle, self._pulses)
                 if strange_loop_status not in ("idle", "testing", ""):
                     logger.info("STRANGE LOOP: %s (cycle %d)", strange_loop_status, self._cycle)
         except Exception as exc:
             logger.debug("Strange loop tick failed (non-fatal): %s", exc)
 
-        # Phase 6: Sleep-time memory refinement
         try:
             if self.sleep_time_agent is not None:
                 sleep_stats = self.sleep_time_agent.tick(self._cycle, self)
@@ -363,25 +293,20 @@ class Organism:
         except Exception as exc:
             logger.debug("SleepTimeAgent tick failed (non-fatal): %s", exc)
 
-        # Dynamic crew scaling check
         scaling_rec = self._check_scaling_needs(pulse)
 
-        # S1 fix: Only record to memory on state changes, not routine pulses
         try:
             should_record = False
             if len(self._pulses) >= 2:
                 prev = self._pulses[-2]
-                # Record on health state transitions
                 if prev.is_healthy != pulse.is_healthy:
                     should_record = True
-                # Record on algedonic activation
                 if pulse_extra.get("algedonic_actions"):
                     should_record = True
-                # Record on scaling recommendation
                 if scaling_rec is not None:
                     should_record = True
             else:
-                should_record = True  # Always record first pulse
+                should_record = True
 
             if should_record and self.memory is not None:
                 self.memory.record_event(
@@ -395,20 +320,23 @@ class Organism:
                 )
         except Exception as exc:
             logger.debug("Organism memory record failed (non-fatal): %s", exc)
+
         if scaling_rec is not None:
             logger.warning(
                 "SCALING: %s — %s (urgency=%s)",
-                scaling_rec["action"], scaling_rec["reason"], scaling_rec["urgency"],
+                scaling_rec["action"],
+                scaling_rec["reason"],
+                scaling_rec["urgency"],
             )
 
-        # Log to traces
         if self.traces:
-            await self.traces.log_entry(TraceEntry(
-                agent="organism",
-                action="heartbeat",
-                metadata={**pulse.to_dict(), **({
-                    "scaling": scaling_rec} if scaling_rec else {})},
-            ))
+            await self.traces.log_entry(
+                TraceEntry(
+                    agent="organism",
+                    action="heartbeat",
+                    metadata={**pulse.to_dict(), **({"scaling": scaling_rec} if scaling_rec else {})},
+                )
+            )
 
         level = logging.INFO if pulse.is_healthy else logging.WARNING
         logger.log(
@@ -420,27 +348,20 @@ class Organism:
             pulse.algedonic_active,
             pulse.duration_ms,
         )
-
         return pulse
 
     async def run(self, interval_seconds: float = 60.0) -> None:
-        """Run continuous heartbeat loop.
-
-        This is the daemon mode — the organism stays alive.
-        """
+        """Run a continuous legacy heartbeat loop."""
         self._running = True
         logger.info("Organism heartbeat starting (interval=%ds)", interval_seconds)
 
         while self._running:
             try:
                 pulse = await self.heartbeat()
-
-                # Emergency: shorten interval if algedonic signals active
                 if pulse.algedonic_active > 0:
                     await asyncio.sleep(min(interval_seconds, 10.0))
                 else:
                     await asyncio.sleep(interval_seconds)
-
             except asyncio.CancelledError:
                 break
             except Exception as exc:
@@ -453,8 +374,6 @@ class Organism:
         """Request graceful shutdown."""
         self._running = False
 
-    # === Integration hooks — call these from agent_runner, evolution, etc. ===
-
     def on_gate_check(
         self,
         gate_name: str,
@@ -464,10 +383,9 @@ class Organism:
     ) -> GatePattern | None:
         """Wire into telos_gates.py after every gate evaluation."""
         from dharma_swarm.models import GateResult
+
         gate_result = GateResult(result) if isinstance(result, str) else result
-        return self.vsm.on_gate_check(
-            gate_name, gate_result, action_description, agent_id,
-        )
+        return self.vsm.on_gate_check(gate_name, gate_result, action_description, agent_id)
 
     async def on_agent_output(
         self,
@@ -477,19 +395,9 @@ class Organism:
         gate_results: dict[str, str] | None = None,
     ) -> None:
         """Wire into agent_runner.py after agent produces output."""
-        # VSM audit
-        await self.vsm.on_agent_output(
-            agent_id, task_description, output, gate_results,
-        )
+        await self.vsm.on_agent_output(agent_id, task_description, output, gate_results)
+        self.amiros.harvest(source="agent_output", agent_id=agent_id, raw_text=output[:2000])
 
-        # AMIROS harvest
-        self.amiros.harvest(
-            source="agent_output",
-            agent_id=agent_id,
-            raw_text=output[:2000],
-        )
-
-        # Memory Palace ingestion — index output for future recall
         try:
             await self.palace.ingest(
                 content=output[:2000],
@@ -514,14 +422,16 @@ class Organism:
         s5: float = 1.0,
     ) -> None:
         """Wire into agent_runner.py for periodic self-assessment."""
-        self.vsm.viability.update(AgentViability(
-            agent_id=agent_id,
-            s1_operations=s1,
-            s2_coordination=s2,
-            s3_control=s3,
-            s4_intelligence=s4,
-            s5_identity=s5,
-        ))
+        self.vsm.viability.update(
+            AgentViability(
+                agent_id=agent_id,
+                s1_operations=s1,
+                s2_coordination=s2,
+                s3_control=s3,
+                s4_intelligence=s4,
+                s5_identity=s5,
+            )
+        )
 
     async def on_evolution_cycle(
         self,
@@ -531,14 +441,12 @@ class Organism:
         cost: float = 0.0,
     ) -> None:
         """Wire into evolution.py after each cycle."""
-        # Check stagnation
         await self.vsm.algedonic.check_evolution_stagnation(
-            cycles_without_improvement, best_fitness,
+            cycles_without_improvement, best_fitness
         )
 
-        # Check cost spike against recent evolution costs (S5 fix: pulse.to_dict() has no "cost" field)
         if cost > 0:
-            if not hasattr(self, '_evolution_costs'):
+            if not hasattr(self, "_evolution_costs"):
                 self._evolution_costs: list[float] = []
             self._evolution_costs.append(cost)
             if len(self._evolution_costs) > 20:
@@ -548,7 +456,6 @@ class Organism:
                 if avg > 0:
                     await self.vsm.algedonic.check_cost_spike(cost, avg)
 
-        # Phase 4: Gnani checkpoint on evolution events
         try:
             if self.attractor is not None and cycles_without_improvement > 5:
                 proposal = (
@@ -559,7 +466,6 @@ class Organism:
                     proposal,
                     {"fitness": best_fitness, "stagnation": cycles_without_improvement},
                 )
-                # C2 fix: store verdict so evolution.py callers can read it
                 self._last_gnani_verdict = verdict.proceed
                 if self.memory is not None:
                     self.memory.record_event(
@@ -568,32 +474,24 @@ class Organism:
                             f"{'PROCEED' if verdict.proceed else 'HOLD'} on evolution cycle "
                             f"{cycle_number}"
                         ),
-                        metadata={
-                            "proposal": proposal,
-                            "proceed": verdict.proceed,
-                        },
+                        metadata={"proposal": proposal, "proceed": verdict.proceed},
                     )
         except Exception as exc:
             logger.debug("Gnani checkpoint failed (non-fatal): %s", exc)
 
     @property
     def last_gnani_verdict(self) -> bool | None:
-        """Most recent Gnani checkpoint verdict (True=PROCEED, False=HOLD, None=not run)."""
+        """Most recent Gnani checkpoint verdict."""
         return self._last_gnani_verdict
 
     def _on_algedonic(self, signal: Any) -> None:
-        """Callback when an algedonic signal fires.
-
-        This is where we'd integrate with the operator bridge,
-        notification system, or TUI alert.
-        """
+        """Record and surface algedonic notifications."""
         logger.warning(
             "ALGEDONIC [%s]: %s — %s",
             signal.severity,
             signal.title,
             signal.recommended_action,
         )
-        # M1 fix: Record to organism developmental memory
         try:
             if self.memory is not None:
                 self.memory.record_event(
@@ -605,68 +503,60 @@ class Organism:
             pass
 
     def _check_scaling_needs(self, pulse: OrganismPulse) -> dict[str, Any] | None:
-        """Check if dynamic crew scaling is needed.
-
-        Returns a scaling recommendation, or None.
-        Triggers on:
-        - 3+ consecutive unhealthy pulses
-        - Algedonic signals active for 2+ cycles
-        - Fleet health below 0.3
-        """
+        """Check whether the legacy organism should recommend crew scaling."""
         if len(self._pulses) < 3:
             return None
 
         recent = self._pulses[-3:]
-
-        # Check consecutive unhealthy
         all_unhealthy = all(not p.is_healthy for p in recent)
-
-        # Check persistent algedonic
         persistent_algedonic = sum(1 for p in recent if p.algedonic_active > 0) >= 2
-
-        # Check critical fleet health
         critical_health = pulse.fleet_health < 0.3
 
         if not (all_unhealthy or persistent_algedonic or critical_health):
             return None
 
-        # Determine what kind of specialist to recommend
         if pulse.audit_failure_rate > 0.5:
             return {
                 "action": "spawn_specialist",
                 "role": "validator",
-                "reason": f"Audit failure rate {pulse.audit_failure_rate:.0%} — need validation specialist",
+                "reason": (
+                    f"Audit failure rate {pulse.audit_failure_rate:.0%} — "
+                    "need validation specialist"
+                ),
                 "urgency": "high",
             }
-        elif pulse.algedonic_active > 0:
+        if pulse.algedonic_active > 0:
             return {
                 "action": "spawn_specialist",
                 "role": "surgeon",
-                "reason": f"{pulse.algedonic_active} algedonic signals active — need surgical intervention",
+                "reason": (
+                    f"{pulse.algedonic_active} algedonic signals active — "
+                    "need surgical intervention"
+                ),
                 "urgency": "high",
             }
-        elif pulse.identity_coherence < 0.3:
+        if pulse.identity_coherence < 0.3:
             return {
                 "action": "spawn_specialist",
                 "role": "architect",
-                "reason": f"Identity coherence at {pulse.identity_coherence:.2f} — need architectural review",
+                "reason": (
+                    f"Identity coherence at {pulse.identity_coherence:.2f} — "
+                    "need architectural review"
+                ),
                 "urgency": "medium",
             }
-        else:
-            return {
-                "action": "spawn_specialist",
-                "role": "cartographer",
-                "reason": "Sustained unhealthy state — need ecosystem scan",
-                "urgency": "medium",
-            }
+        return {
+            "action": "spawn_specialist",
+            "role": "cartographer",
+            "reason": "Sustained unhealthy state — need ecosystem scan",
+            "urgency": "medium",
+        }
 
     async def _harvest_stigmergy_tasks(self) -> int:
-        """Read high-salience stigmergy marks and create tasks from them.
-
-        Returns number of tasks created.
-        """
+        """Read high-salience stigmergy marks and create tasks from them."""
         try:
             from dharma_swarm.stigmergy import StigmergyStore
+
             store = StigmergyStore(base_path=self._state_dir / "stigmergy")
             marks = await store.read_marks(limit=20)
 
@@ -674,9 +564,8 @@ class Organism:
             if not high_salience:
                 return 0
 
-            # Check which marks have already been converted to tasks
             created = 0
-            for mark in high_salience[:3]:  # Cap at 3 per heartbeat
+            for mark in high_salience[:3]:
                 mark_key = f"stig:{mark.id}"
                 if mark_key in self._stigmergy_seen:
                     continue
@@ -684,11 +573,13 @@ class Organism:
 
                 logger.info(
                     "STIGMERGY→TASK: [%s] %s (salience=%.2f, agent=%s)",
-                    mark.action, mark.observation, mark.salience, mark.agent,
+                    mark.action,
+                    mark.observation,
+                    mark.salience,
+                    mark.agent,
                 )
                 created += 1
 
-            # Trim seen set
             if len(self._stigmergy_seen) > 500:
                 self._stigmergy_seen = set(list(self._stigmergy_seen)[-200:])
 
@@ -707,8 +598,6 @@ class Organism:
                 recs.append(rec)
         return recs
 
-    # === Status ===
-
     def status(self) -> dict[str, Any]:
         """Full organism status."""
         last_pulse = self._pulses[-1] if self._pulses else None
@@ -721,7 +610,6 @@ class Organism:
             "palace": self.palace.stats(),
             "router": self.router.stats(),
         }
-        # Phase 4: memory, attractor, algedonic stats
         try:
             result["memory"] = self.memory.stats() if self.memory else {}
             result["attractor"] = "active" if self.attractor else "inactive"
@@ -732,17 +620,12 @@ class Organism:
             )
         except Exception:
             pass
-        # Phase 5: strange loop stats
         try:
             result["strange_loop"] = self.strange_loop.stats if self.strange_loop else {}
         except Exception:
             pass
-        # Phase 6: sleep-time agent stats
         try:
-            result["sleep_time"] = (
-                self.sleep_time_agent.stats()
-                if self.sleep_time_agent else {}
-            )
+            result["sleep_time"] = self.sleep_time_agent.stats() if self.sleep_time_agent else {}
         except Exception:
             pass
         return result
@@ -750,3 +633,260 @@ class Organism:
     @property
     def latest_pulse(self) -> OrganismPulse | None:
         return self._pulses[-1] if self._pulses else None
+
+
+# ---------------------------------------------------------------------------
+# Algedonic signals
+# ---------------------------------------------------------------------------
+
+@dataclass
+class AlgedonicSignal:
+    """A pain/pleasure signal that bypasses S1-S4 and reaches S5 directly."""
+    kind: str          # telos_drift, omega_divergence, failure_rate, ontological_drift
+    severity: str      # info, medium, critical
+    action: str        # what the system should do
+    value: float = 0.0
+    timestamp: float = field(default_factory=time.time)
+
+
+# ---------------------------------------------------------------------------
+# Gnani verdict
+# ---------------------------------------------------------------------------
+
+@dataclass
+class GnaniVerdict:
+    """The witness's binary decision: HOLD or PROCEED."""
+    decision: str  # "HOLD" or "PROCEED"
+    reason: str
+    coherence: float
+    hold_count: int
+    timestamp: float = field(default_factory=time.time)
+
+
+# ---------------------------------------------------------------------------
+# Heartbeat result
+# ---------------------------------------------------------------------------
+
+@dataclass
+class HeartbeatResult:
+    """Everything that happened in one heartbeat cycle."""
+    cycle: int
+    tcs: float
+    live_score: float
+    blended: float
+    regime: str
+    algedonic_signals: list[AlgedonicSignal] = field(default_factory=list)
+    gnani_verdict: Optional[GnaniVerdict] = None
+    samvara_diagnostic: Optional[DiagnosticResult] = None
+    elapsed_ms: float = 0.0
+
+
+# ---------------------------------------------------------------------------
+# OrganismRuntime
+# ---------------------------------------------------------------------------
+
+class OrganismRuntime:
+    """The living heartbeat loop.
+
+    Ties together IdentityMonitor (trailing), LiveCoherenceSensor
+    (present-moment), algedonic channel (pain signals), Gnani (witness
+    verdict), and SamvaraEngine (transformation on HOLD).
+
+    Usage:
+        org = OrganismRuntime(state_dir)
+        result = await org.heartbeat()
+        # or
+        results = await org.run(n_cycles=15)
+    """
+
+    # Algedonic thresholds
+    TELOS_DRIFT_THRESHOLD: float = 0.4
+    OMEGA_DIVERGENCE_THRESHOLD: float = 0.4
+
+    # Blend weights: present-moment vs trailing
+    LIVE_WEIGHT: float = 0.4
+    TRAILING_WEIGHT: float = 0.6
+
+    def __init__(
+        self,
+        state_dir: Optional[Path] = None,
+        on_algedonic: Optional[Callable[[AlgedonicSignal], None]] = None,
+        on_gnani: Optional[Callable[[GnaniVerdict], None]] = None,
+    ) -> None:
+        self._state_dir = state_dir or (Path.home() / ".dharma")
+        self._identity = IdentityMonitor(self._state_dir)
+        self._live_sensor = LiveCoherenceSensor(self._state_dir)
+        self._samvara = SamvaraEngine(self._state_dir)
+        self._on_algedonic = on_algedonic
+        self._on_gnani = on_gnani
+        self._cycle = 0
+        self._consecutive_holds = 0
+        self._history: deque[HeartbeatResult] = deque(maxlen=1000)
+
+    @property
+    def cycle(self) -> int:
+        return self._cycle
+
+    @property
+    def samvara(self) -> SamvaraEngine:
+        return self._samvara
+
+    @property
+    def history(self) -> list[HeartbeatResult]:
+        return list(self._history)
+
+    async def heartbeat(self) -> HeartbeatResult:
+        """Execute one heartbeat cycle. The organism processes itself."""
+        t0 = time.monotonic()
+        self._cycle += 1
+
+        # 1. Trailing measurement (TCS from filesystem artifacts)
+        identity_state = await self._identity.measure()
+        tcs = identity_state.tcs
+
+        # 2. Present-moment measurement
+        live = self._live_sensor.measure()
+        live_score = live["score"]
+
+        # 3. Blend
+        blended = self.LIVE_WEIGHT * live_score + self.TRAILING_WEIGHT * tcs
+
+        # 4. Algedonic channel — fire pain signals if thresholds crossed
+        signals = self._check_algedonic(blended, live_score, tcs)
+
+        # 5. Gnani verdict
+        verdict = self._gnani_verdict(blended, signals)
+
+        # 6. Samvara engine — transform on HOLD
+        diagnostic = None
+        if verdict.decision == "HOLD":
+            self._consecutive_holds += 1
+            diagnostic = await self._samvara.on_hold(
+                coherence=blended,
+                live_metrics={
+                    "daemon_alive": live.get("daemon_alive", False),
+                    "freshness_ratio": live.get("freshness_ratio", 0.0),
+                    "tcs": tcs,
+                    "live_score": live_score,
+                },
+            )
+        else:
+            if self._consecutive_holds > 0:
+                self._samvara.on_proceed()
+            self._consecutive_holds = 0
+
+        elapsed = (time.monotonic() - t0) * 1000
+
+        result = HeartbeatResult(
+            cycle=self._cycle,
+            tcs=round(tcs, 4),
+            live_score=round(live_score, 4),
+            blended=round(blended, 4),
+            regime=identity_state.regime,
+            algedonic_signals=signals,
+            gnani_verdict=verdict,
+            samvara_diagnostic=diagnostic,
+            elapsed_ms=round(elapsed, 2),
+        )
+        self._history.append(result)
+
+        logger.info(
+            "♥ Cycle %d | tcs=%.2f live=%.2f blended=%.2f | %s | %s | %.0fms",
+            self._cycle, tcs, live_score, blended,
+            verdict.decision,
+            self._samvara.current_power.value if self._samvara.active else "—",
+            elapsed,
+        )
+
+        return result
+
+    async def run(self, n_cycles: int = 15) -> list[HeartbeatResult]:
+        """Run n heartbeat cycles and return all results."""
+        results = []
+        for _ in range(n_cycles):
+            results.append(await self.heartbeat())
+        return results
+
+    # -- Algedonic channel --------------------------------------------------
+
+    def _check_algedonic(
+        self, blended: float, live_score: float, tcs: float,
+    ) -> list[AlgedonicSignal]:
+        """Fire pain signals when the organism is incoherent."""
+        signals: list[AlgedonicSignal] = []
+
+        # Telos drift: blended coherence below threshold
+        if blended < self.TELOS_DRIFT_THRESHOLD:
+            sig = AlgedonicSignal(
+                kind="telos_drift",
+                severity="critical",
+                action="gnani_checkpoint",
+                value=blended,
+            )
+            signals.append(sig)
+            if self._on_algedonic:
+                self._on_algedonic(sig)
+
+        # Omega divergence: live and trailing disagree strongly
+        divergence = abs(live_score - tcs)
+        if divergence > self.OMEGA_DIVERGENCE_THRESHOLD:
+            sig = AlgedonicSignal(
+                kind="omega_divergence",
+                severity="medium",
+                action="rebalance_priorities",
+                value=divergence,
+            )
+            signals.append(sig)
+            if self._on_algedonic:
+                self._on_algedonic(sig)
+
+        return signals
+
+    # -- Gnani (witness) ----------------------------------------------------
+
+    def _gnani_verdict(
+        self, blended: float, signals: list[AlgedonicSignal],
+    ) -> GnaniVerdict:
+        """The witness observes and issues a binary verdict."""
+        has_critical = any(s.severity == "critical" for s in signals)
+
+        if has_critical or blended < self.TELOS_DRIFT_THRESHOLD:
+            verdict = GnaniVerdict(
+                decision="HOLD",
+                reason=(
+                    f"blended coherence {blended:.3f} below drift threshold "
+                    f"{self.TELOS_DRIFT_THRESHOLD}"
+                ),
+                coherence=blended,
+                hold_count=self._consecutive_holds + 1,
+            )
+        else:
+            verdict = GnaniVerdict(
+                decision="PROCEED",
+                reason=f"blended coherence {blended:.3f} is stable",
+                coherence=blended,
+                hold_count=0,
+            )
+
+        if self._on_gnani:
+            self._on_gnani(verdict)
+
+        return verdict
+
+    # -- Status -------------------------------------------------------------
+
+    def status(self) -> dict[str, Any]:
+        """Full organism status snapshot."""
+        return {
+            "cycle": self._cycle,
+            "consecutive_holds": self._consecutive_holds,
+            "samvara_active": self._samvara.active,
+            "samvara_power": self._samvara.current_power.value,
+            "total_heartbeats": len(self._history),
+            "last_blended": self._history[-1].blended if self._history else None,
+            "last_verdict": (
+                self._history[-1].gnani_verdict.decision
+                if self._history and self._history[-1].gnani_verdict
+                else None
+            ),
+        }

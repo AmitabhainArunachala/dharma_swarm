@@ -28,15 +28,16 @@ DEFAULT_OPENROUTER_MODEL = "anthropic/claude-opus-4-6"
 DEFAULT_NIM_MODEL = "meta/llama-3.3-70b-instruct"
 DEFAULT_PROVIDER_TIMEOUT_SECONDS = 300
 
+# FREE FIRST — Ollama Cloud, NVIDIA NIM, OpenRouter Free before paid providers.
 DEFAULT_RUNTIME_PROVIDERS: tuple[ProviderType, ...] = (
-    ProviderType.ANTHROPIC,
-    ProviderType.OPENAI,
-    ProviderType.OPENROUTER,
+    ProviderType.OLLAMA,
     ProviderType.NVIDIA_NIM,
+    ProviderType.OPENROUTER_FREE,
+    ProviderType.OPENROUTER,
+    ProviderType.OPENAI,
+    ProviderType.ANTHROPIC,
     ProviderType.CLAUDE_CODE,
     ProviderType.CODEX,
-    ProviderType.OPENROUTER_FREE,
-    ProviderType.OLLAMA,
 )
 
 
@@ -161,7 +162,13 @@ def resolve_runtime_provider_config(
         )
 
     if provider == ProviderType.CLAUDE_CODE:
-        binary = shutil.which("claude")
+        binary = shutil.which("claude") or str(next(
+            (p for p in [
+                Path.home() / ".npm-global" / "bin" / "claude",
+                Path("/usr/local/bin/claude"),
+            ] if p.exists()),
+            None,
+        ))
         return RuntimeProviderConfig(
             provider=provider,
             default_model=model or DEFAULT_CLAUDE_MODEL,

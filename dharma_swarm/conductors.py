@@ -72,7 +72,7 @@ CONDUCTOR_CLAUDE_CONFIG = {
 CONDUCTOR_CODEX_CONFIG = {
     "name": "conductor_codex",
     "role": AgentRole.CONDUCTOR,
-    "provider_type": ProviderType.CODEX,
+    "provider_type": ProviderType.ANTHROPIC,
     "model": "claude-sonnet-4-20250514",
     "wake_interval_seconds": 1800.0,
     "system_prompt": _CONDUCTOR_CODEX_PROMPT,

@@ -3,10 +3,18 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+import os
+from pathlib import Path
+import time
 from typing import Any, Iterable
 
 from dharma_swarm.decision_router import DecisionInput, DecisionRouter, RoutePath
 from dharma_swarm.models import ProviderType
+from dharma_swarm.telemetry_optimizer import (
+    ProviderOptimizationRecommendation,
+    TelemetryOptimizer,
+)
+from dharma_swarm.telemetry_plane import TelemetryPlaneStore
 
 
 def _dedupe_keep_order(items: Iterable[ProviderType]) -> list[ProviderType]:
@@ -39,25 +47,27 @@ class ProviderRouteRequest:
 
 @dataclass(frozen=True)
 class ProviderRoutingConfig:
+    # FREE FIRST — hard constraint. Ollama Cloud, NVIDIA NIM, OpenRouter Free
+    # MUST precede paid providers. Only escalation overrides this.
     reflex_candidates: tuple[ProviderType, ...] = (
+        ProviderType.OLLAMA,
+        ProviderType.NVIDIA_NIM,
         ProviderType.OPENROUTER_FREE,
         ProviderType.OPENROUTER,
         ProviderType.OPENAI,
         ProviderType.CODEX,
         ProviderType.ANTHROPIC,
         ProviderType.CLAUDE_CODE,
-        ProviderType.NVIDIA_NIM,
-        ProviderType.OLLAMA,
     )
     deliberative_candidates: tuple[ProviderType, ...] = (
-        ProviderType.OPENAI,
-        ProviderType.ANTHROPIC,
-        ProviderType.OPENROUTER,
-        ProviderType.CODEX,
-        ProviderType.CLAUDE_CODE,
+        ProviderType.OLLAMA,
         ProviderType.NVIDIA_NIM,
         ProviderType.OPENROUTER_FREE,
-        ProviderType.OLLAMA,
+        ProviderType.OPENROUTER,
+        ProviderType.OPENAI,
+        ProviderType.ANTHROPIC,
+        ProviderType.CODEX,
+        ProviderType.CLAUDE_CODE,
     )
     escalate_candidates: tuple[ProviderType, ...] = (
         ProviderType.ANTHROPIC,
@@ -65,20 +75,20 @@ class ProviderRoutingConfig:
         ProviderType.CLAUDE_CODE,
         ProviderType.CODEX,
         ProviderType.OPENROUTER,
+        ProviderType.OLLAMA,
         ProviderType.NVIDIA_NIM,
         ProviderType.OPENROUTER_FREE,
-        ProviderType.OLLAMA,
     )
     tooling_candidates: tuple[ProviderType, ...] = (
         ProviderType.CODEX,
         ProviderType.CLAUDE_CODE,
     )
     low_cost_priority: tuple[ProviderType, ...] = (
+        ProviderType.OLLAMA,
+        ProviderType.NVIDIA_NIM,
         ProviderType.OPENROUTER_FREE,
         ProviderType.OPENROUTER,
         ProviderType.OPENAI,
-        ProviderType.NVIDIA_NIM,
-        ProviderType.OLLAMA,
         ProviderType.ANTHROPIC,
         ProviderType.CODEX,
         ProviderType.CLAUDE_CODE,
@@ -115,6 +125,11 @@ class ProviderRoutingConfig:
             ProviderType.OLLAMA: "llama3.2",
         }
     )
+    telemetry_optimization_enabled: bool | None = None
+    telemetry_db_path: str | Path | None = None
+    telemetry_cache_ttl_seconds: float = 30.0
+    telemetry_min_route_count: int = 2
+    telemetry_path_bonus: float = 0.03
     force_escalate_when_frontier_required: bool = True
 
 
@@ -141,6 +156,18 @@ class ProviderPolicyRouter:
     ) -> None:
         self.config = config or ProviderRoutingConfig()
         self.decision_router = decision_router or DecisionRouter()
+        self._telemetry_enabled = self._resolve_telemetry_enabled()
+        self._telemetry_cache: dict[ProviderType, ProviderOptimizationRecommendation] = {}
+        self._telemetry_cache_loaded_at = 0.0
+        self._telemetry_optimizer: TelemetryOptimizer | None = None
+        if self._telemetry_enabled:
+            telemetry_db_path = self._resolve_telemetry_db_path()
+            telemetry = (
+                TelemetryPlaneStore(Path(telemetry_db_path))
+                if telemetry_db_path is not None
+                else TelemetryPlaneStore()
+            )
+            self._telemetry_optimizer = TelemetryOptimizer(telemetry)
 
     def route(
         self,
@@ -186,6 +213,12 @@ class ProviderPolicyRouter:
                 filtered = available
         else:
             filtered = candidates
+        filtered, telemetry_reasons = self._apply_telemetry_overlay(
+            candidates=filtered,
+            path=path,
+            request=request,
+        )
+        reasons.extend(telemetry_reasons)
 
         selected = filtered[0] if filtered else ProviderType.CLAUDE_CODE
         fallbacks = [item for item in filtered[1:] if item != selected]
@@ -202,6 +235,129 @@ class ProviderPolicyRouter:
             confidence=decision.confidence,
             requires_human=decision.requires_human,
             reasons=reasons,
+        )
+
+    def _resolve_telemetry_enabled(self) -> bool:
+        if self.config.telemetry_optimization_enabled is not None:
+            return bool(self.config.telemetry_optimization_enabled)
+        raw = os.environ.get("DGC_ROUTER_TELEMETRY_ENABLE", "").strip().lower()
+        if raw in {"1", "true", "yes", "on"}:
+            return True
+        if raw in {"0", "false", "no", "off"}:
+            return False
+        return self.config.telemetry_db_path is not None
+
+    def _resolve_telemetry_db_path(self) -> str | Path | None:
+        configured = self.config.telemetry_db_path
+        if configured not in (None, ""):
+            return configured
+        raw = os.environ.get("DGC_ROUTER_TELEMETRY_DB", "").strip()
+        return raw or None
+
+    def _telemetry_recommendation_map(
+        self,
+    ) -> dict[ProviderType, ProviderOptimizationRecommendation]:
+        if not self._telemetry_enabled or self._telemetry_optimizer is None:
+            return {}
+
+        ttl_seconds = max(0.0, float(self.config.telemetry_cache_ttl_seconds))
+        now = time.monotonic()
+        if (
+            ttl_seconds > 0
+            and self._telemetry_cache
+            and now - self._telemetry_cache_loaded_at < ttl_seconds
+        ):
+            return self._telemetry_cache
+
+        try:
+            recommendations = self._telemetry_optimizer.provider_recommendations_sync(
+                limit=len(tuple(ProviderType))
+            )
+        except Exception:
+            self._telemetry_cache = {}
+            self._telemetry_cache_loaded_at = now
+            return {}
+
+        minimum_routes = max(1, int(self.config.telemetry_min_route_count))
+        mapped: dict[ProviderType, ProviderOptimizationRecommendation] = {}
+        for item in recommendations:
+            try:
+                provider = ProviderType(item.provider)
+            except ValueError:
+                continue
+            if item.route_count < minimum_routes:
+                continue
+            mapped[provider] = item
+
+        self._telemetry_cache = mapped
+        self._telemetry_cache_loaded_at = now
+        return mapped
+
+    def _apply_telemetry_overlay(
+        self,
+        *,
+        candidates: list[ProviderType],
+        path: RoutePath,
+        request: ProviderRouteRequest,
+    ) -> tuple[list[ProviderType], list[str]]:
+        if not candidates:
+            return (candidates, [])
+        if path == RoutePath.ESCALATE or request.requires_frontier_precision:
+            return (candidates, [])
+
+        recommendations = self._telemetry_recommendation_map()
+        if not recommendations:
+            return (candidates, [])
+
+        requires_tooling = bool(request.context.get("requires_tooling"))
+        complexity_tier = str(request.context.get("complexity_tier", "")).upper()
+        ranked_entries: list[
+            tuple[int, int, float, int, ProviderType, ProviderOptimizationRecommendation | None]
+        ] = []
+        for index, provider in enumerate(candidates):
+            recommendation = recommendations.get(provider)
+            score = float(recommendation.optimization_score) if recommendation else 0.0
+            if recommendation and recommendation.dominant_path == path.value:
+                score += max(0.0, float(self.config.telemetry_path_bonus))
+            if recommendation and request.preferred_low_cost and "cost_efficient" in recommendation.reasons:
+                score += 0.01
+            if (
+                recommendation
+                and complexity_tier in {"COMPLEX", "REASONING"}
+                and recommendation.dominant_path
+                in {RoutePath.DELIBERATIVE.value, RoutePath.ESCALATE.value}
+            ):
+                score += 0.01
+            tooling_group = 0
+            if requires_tooling and provider not in self.config.tooling_candidates:
+                tooling_group = 1
+            ranked_entries.append(
+                (
+                    tooling_group,
+                    0 if recommendation is not None else 1,
+                    -score if recommendation is not None else 0.0,
+                    index,
+                    provider,
+                    recommendation,
+                )
+            )
+
+        ranked_entries.sort()
+        ranked = [entry[4] for entry in ranked_entries]
+        if ranked == candidates:
+            return (ranked, [])
+
+        selected = ranked[0]
+        recommendation = recommendations.get(selected)
+        if recommendation is None:
+            return (candidates, [])
+        return (
+            ranked,
+            [
+                "telemetry_optimization_applied",
+                f"telemetry_preferred:{selected.value}",
+                f"telemetry_score:{selected.value}:{recommendation.optimization_score:.3f}",
+            ],
         )
 
     def plan_swarm(

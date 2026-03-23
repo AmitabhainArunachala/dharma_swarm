@@ -18,10 +18,12 @@ from abc import abstractmethod
 from collections.abc import AsyncIterator
 from pathlib import Path
 from typing import Any
+from uuid import uuid4
 
 import httpx
 
 from dharma_swarm.base_provider import BaseProvider, ProviderCapabilities
+from dharma_swarm.cost_tracker import _estimate_cost
 from dharma_swarm.models import LLMRequest, LLMResponse, ProviderType
 from dharma_swarm.jikoku_instrumentation import jikoku_traced_provider  # type: ignore
 from dharma_swarm.ollama_config import (
@@ -53,6 +55,13 @@ from dharma_swarm.router_v1 import (
     model_hint_for_provider,
 )
 from dharma_swarm.routing_memory import RoutingMemoryStore, build_task_signature
+from dharma_swarm.telemetry_plane import (
+    EconomicEventRecord,
+    ExternalOutcomeRecord,
+    PolicyDecisionRecord,
+    RoutingDecisionRecord,
+    TelemetryPlaneStore,
+)
 
 
 class LLMProvider(BaseProvider):
@@ -518,10 +527,11 @@ class CodexProvider(_SubprocessProvider):
 
 
 class OpenRouterFreeProvider(LLMProvider):
-    """OpenRouter with free-tier models only.
+    """OpenRouter with free-tier models — auto-discovered at runtime.
 
-    Pre-configured with a rotation of free models for cost-zero support tasks.
-    Falls back through the list if a model is unavailable.
+    Queries the OpenRouter /api/v1/models endpoint to find currently available
+    free models, ranked by context length.  Falls through the live roster on
+    failure instead of a stale hardcoded list.
     """
 
     capabilities = ProviderCapabilities(
@@ -529,28 +539,82 @@ class OpenRouterFreeProvider(LLMProvider):
         max_context_tokens=32_000, provider_family="openrouter_free",
     )
 
-    # Free models on OpenRouter (updated 2026-03-16 — verify availability before use)
-    FREE_MODELS = [
-        "meta-llama/llama-3.3-70b-instruct:free",
-        "deepseek/deepseek-r1:free",
-        "qwen/qwen3-235b-a22b:free",
-        "google/gemini-2.5-flash-preview:free",
-        "google/gemma-3-27b-it:free",
-        "mistralai/mistral-small-3.1-24b-instruct:free",
-        "microsoft/phi-4-reasoning:free",
+    # Class-level cache: populated once per process by _discover_free_models().
+    _discovered_models: list[str] = []
+    _discovery_lock: asyncio.Lock | None = None
+    _discovery_done: bool = False
+
+    # Minimum context length to consider a model useful for council work.
+    _MIN_CTX = 32_000
+
+    # Preferred families — sorted to the top of the discovered list when present.
+    _PREFERRED_PREFIXES = [
+        "nvidia/nemotron",
+        "qwen/",
+        "meta-llama/",
+        "mistralai/",
+        "google/gemma",
+        "openai/gpt-oss",
+        "nousresearch/",
     ]
 
-    # Tiered fleet organisation
-    FREE_FLEET_TIERS: dict[int, list[str]] = {
-        1: ["deepseek/deepseek-r1:free", "meta-llama/llama-3.3-70b-instruct:free", "qwen/qwen3-235b-a22b:free"],
-        2: ["google/gemini-2.5-flash-preview:free", "google/gemma-3-27b-it:free"],
-        3: ["mistralai/mistral-small-3.1-24b-instruct:free", "microsoft/phi-4-reasoning:free"],
-    }
-    FREE_FLEET_ALL: list[str] = [m for tier in FREE_FLEET_TIERS.values() for m in tier]
+    @classmethod
+    async def _discover_free_models(cls) -> list[str]:
+        """Hit OpenRouter /api/v1/models and return IDs with $0 pricing, sorted by quality."""
+        if cls._discovery_lock is None:
+            cls._discovery_lock = asyncio.Lock()
+        async with cls._discovery_lock:
+            if cls._discovered_models:
+                return cls._discovered_models
+            try:
+                async with httpx.AsyncClient(timeout=15.0) as client:
+                    resp = await client.get("https://openrouter.ai/api/v1/models")
+                    resp.raise_for_status()
+                    data = resp.json()
+
+                free: list[tuple[str, int, int]] = []
+                for m in data.get("data", []):
+                    mid = m.get("id", "")
+                    pricing = m.get("pricing", {})
+                    prompt_cost = float(pricing.get("prompt", "1") or "1")
+                    completion_cost = float(pricing.get("completion", "1") or "1")
+                    if prompt_cost == 0 and completion_cost == 0:
+                        ctx = int(m.get("context_length", 0))
+                        if ctx >= cls._MIN_CTX and mid.endswith(":free"):
+                            # Score preferred families higher
+                            pref = 0
+                            for i, prefix in enumerate(cls._PREFERRED_PREFIXES):
+                                if mid.startswith(prefix):
+                                    pref = len(cls._PREFERRED_PREFIXES) - i
+                                    break
+                            free.append((mid, ctx, pref))
+
+                # Sort: preferred families first, then by context length descending
+                free.sort(key=lambda x: (-x[2], -x[1]))
+                cls._discovered_models = [mid for mid, _, _ in free]
+                cls._discovery_done = True
+            except Exception:
+                # If discovery fails, use a minimal known-good fallback
+                cls._discovered_models = [
+                    "meta-llama/llama-3.3-70b-instruct:free",
+                    "google/gemma-3-27b-it:free",
+                    "mistralai/mistral-small-3.1-24b-instruct:free",
+                ]
+            return cls._discovered_models
+
+    # Kept for backwards compatibility — but now populated from live data.
+    FREE_MODELS: list[str] = []
+
+    @classmethod
+    async def get_free_models(cls) -> list[str]:
+        """Return the live free model roster (auto-discovers on first call)."""
+        if not cls._discovered_models:
+            await cls._discover_free_models()
+        return list(cls._discovered_models)
 
     def __init__(self, api_key: str | None = None, model: str | None = None) -> None:
         self._api_key = api_key or os.environ.get("OPENROUTER_API_KEY")
-        self._preferred_model = model or self.FREE_MODELS[0]
+        self._preferred_model = model  # May be None — resolved at call time
         self._client: Any = None
 
     def _client_or_raise(self) -> Any:
@@ -576,43 +640,54 @@ class OpenRouterFreeProvider(LLMProvider):
             messages.append({"role": "system", "content": request.system})
         messages.extend(request.messages)
 
-        # Use the free model, ignore request.model
+        # Auto-discover if needed
+        roster = await self.get_free_models()
+        if not roster:
+            return LLMResponse(
+                content="ERROR: No free models discovered on OpenRouter",
+                model="none",
+            )
+
+        # Resolve preferred model — validate it's in the live roster
         model = self._preferred_model
+        if model and model not in roster:
+            # Requested model isn't available — fall through to roster
+            model = None
+        if not model:
+            model = roster[0]
 
         kwargs: dict[str, Any] = dict(
             model=model, messages=messages,
-            max_tokens=min(request.max_tokens, 4096),
+            max_tokens=request.max_tokens,
             temperature=request.temperature,
         )
 
-        try:
-            resp = await client.chat.completions.create(**kwargs)
-        except Exception as exc:
-            # Try fallback models
-            for fallback in self.FREE_MODELS:
-                if fallback == model:
-                    continue
-                try:
-                    kwargs["model"] = fallback
-                    resp = await client.chat.completions.create(**kwargs)
-                    model = fallback
-                    break
-                except Exception:
-                    continue
-            else:
+        # Try preferred, then fall through the entire live roster
+        tried: set[str] = set()
+        last_exc: Exception | None = None
+        for candidate in [model] + roster:
+            if candidate in tried:
+                continue
+            tried.add(candidate)
+            kwargs["model"] = candidate
+            try:
+                resp = await client.chat.completions.create(**kwargs)
+                choice = resp.choices[0]
+                msg = choice.message
                 return LLMResponse(
-                    content=f"ERROR: All free models failed: {exc}",
-                    model=model,
+                    content=msg.content or "", model=resp.model or candidate,
+                    usage={"prompt_tokens": resp.usage.prompt_tokens,
+                           "completion_tokens": resp.usage.completion_tokens,
+                           "total_tokens": resp.usage.total_tokens} if resp.usage else {},
+                    tool_calls=[], stop_reason=choice.finish_reason,
                 )
+            except Exception as exc:
+                last_exc = exc
+                continue
 
-        choice = resp.choices[0]
-        msg = choice.message
         return LLMResponse(
-            content=msg.content or "", model=resp.model or model,
-            usage={"prompt_tokens": resp.usage.prompt_tokens,
-                   "completion_tokens": resp.usage.completion_tokens,
-                   "total_tokens": resp.usage.total_tokens} if resp.usage else {},
-            tool_calls=[], stop_reason=choice.finish_reason,
+            content=f"ERROR: All {len(tried)} free models failed. Last error: {last_exc}",
+            model=model,
         )
 
     async def stream(self, request: LLMRequest) -> AsyncIterator[str]:
@@ -621,9 +696,15 @@ class OpenRouterFreeProvider(LLMProvider):
         if request.system:
             messages.append({"role": "system", "content": request.system})
         messages.extend(request.messages)
+        roster = await self.get_free_models()
+        model = self._preferred_model
+        if model and model not in roster:
+            model = roster[0] if roster else "meta-llama/llama-3.3-70b-instruct:free"
+        elif not model:
+            model = roster[0] if roster else "meta-llama/llama-3.3-70b-instruct:free"
         resp = await client.chat.completions.create(
-            model=self._preferred_model, stream=True, messages=messages,
-            max_tokens=min(request.max_tokens, 4096),
+            model=model, stream=True, messages=messages,
+            max_tokens=request.max_tokens,
             temperature=request.temperature,
         )
         async for chunk in resp:
@@ -705,6 +786,63 @@ class OllamaProvider(LLMProvider):
     async def complete(self, request: LLMRequest) -> LLMResponse:
         model = request.model or self._model
         messages = self._build_messages(request)
+
+        # Cloud models use the OpenAI-compatible /v1/chat/completions endpoint
+        # because the native /api/chat mishandles thinking models (e.g.
+        # kimi-k2.5:cloud returns empty content with output in "thinking").
+        if self._transport_mode == "cloud_api":
+            return await self._complete_openai_compat(model, messages, request)
+
+        return await self._complete_native(model, messages, request)
+
+    async def _complete_openai_compat(
+        self, model: str, messages: list[dict[str, str]], request: LLMRequest,
+    ) -> LLMResponse:
+        """Cloud path: OpenAI-compatible /v1/chat/completions endpoint."""
+        payload = {
+            "model": model,
+            "messages": messages,
+            "max_tokens": request.max_tokens,
+            "temperature": request.temperature,
+            "stream": False,
+        }
+        client = self._get_client()
+        headers = self._headers_or_raise()
+        headers["Content-Type"] = "application/json"
+        resp = await client.post(
+            f"{self._base_url}/v1/chat/completions",
+            json=payload,
+            headers=headers,
+        )
+        if resp.status_code != 200:
+            raise RuntimeError(
+                f"Ollama cloud error {resp.status_code}: {resp.text[:300]}"
+            )
+        data = resp.json()
+        choice = (data.get("choices") or [{}])[0]
+        msg = choice.get("message") or {}
+        content = (msg.get("content") or "").strip()
+        # Thinking models (kimi-k2.5:cloud, etc.) put output in "reasoning"
+        # with empty "content" on the OpenAI-compat endpoint.
+        if not content:
+            content = (msg.get("reasoning") or "").strip()
+        usage_data = data.get("usage") or {}
+        return LLMResponse(
+            content=content,
+            model=data.get("model") or model,
+            usage={
+                "prompt_tokens": int(usage_data.get("prompt_tokens") or 0),
+                "completion_tokens": int(usage_data.get("completion_tokens") or 0),
+                "total_tokens": int(usage_data.get("total_tokens") or 0),
+            },
+            tool_calls=[],
+            stop_reason=str(choice.get("finish_reason") or "stop"),
+        )
+
+    async def _complete_native(
+        self, model: str, messages: list[dict[str, str]], request: LLMRequest,
+    ) -> LLMResponse:
+        """Local path: native Ollama /api/chat endpoint."""
         payload = {
             "model": model,
             "messages": messages,
@@ -739,7 +877,11 @@ class OllamaProvider(LLMProvider):
         data = resp.json()
 
         if "message" in data:
-            content = ((data.get("message") or {}).get("content") or "").strip()
+            msg_data = data.get("message") or {}
+            content = (msg_data.get("content") or "").strip()
+            # Thinking models put output in "thinking" with empty "content".
+            if not content:
+                content = (msg_data.get("thinking") or "").strip()
         else:
             content = str(data.get("response") or "").strip()
         usage = {
@@ -814,6 +956,9 @@ class ModelRouter:
         canary_model_hint: str | None = None,
         learning_enabled: bool | None = None,
         learning_alpha: float = 0.15,
+        telemetry: TelemetryPlaneStore | None = None,
+        telemetry_enabled: bool | None = None,
+        telemetry_db_path: Path | None = None,
     ) -> None:
         self._providers = providers
         self._policy_router = policy_router or ProviderPolicyRouter()
@@ -910,6 +1055,33 @@ class ModelRouter:
         self._routing_retrospective_enabled = os.environ.get(
             "DGC_ROUTER_RETROSPECTIVE_DISABLE", "0"
         ) not in {"1", "true", "yes"}
+        telemetry_enabled_env = os.environ.get("DGC_ROUTER_TELEMETRY_ENABLE", "").strip()
+        env_telemetry_db = os.environ.get("DGC_ROUTER_TELEMETRY_DB", "").strip()
+        telemetry_requested = telemetry_db_path is not None or bool(env_telemetry_db)
+        if telemetry is not None:
+            self._telemetry = telemetry
+            self._telemetry_enabled = (
+                bool(telemetry_enabled) if telemetry_enabled is not None else True
+            )
+        else:
+            if telemetry_enabled is None:
+                self._telemetry_enabled = (
+                    telemetry_enabled_env.lower() in {"1", "true", "yes", "on"}
+                    or telemetry_requested
+                )
+            else:
+                self._telemetry_enabled = bool(telemetry_enabled)
+            if self._telemetry_enabled:
+                configured_telemetry_path = telemetry_db_path
+                if configured_telemetry_path is None and env_telemetry_db:
+                    configured_telemetry_path = Path(env_telemetry_db)
+                self._telemetry = (
+                    TelemetryPlaneStore(configured_telemetry_path)
+                    if configured_telemetry_path is not None
+                    else TelemetryPlaneStore()
+                )
+            else:
+                self._telemetry = None
 
     @staticmethod
     def _parse_provider_type(raw: str) -> ProviderType | None:
@@ -1008,6 +1180,221 @@ class ModelRouter:
             return None
         text = str(raw).strip()
         return text or None
+
+    @staticmethod
+    def _telemetry_scope(route_request: ProviderRouteRequest) -> dict[str, str]:
+        context = route_request.context
+
+        def _coerce(key: str) -> str:
+            raw = context.get(key)
+            if raw is None:
+                return ""
+            return str(raw).strip()
+
+        return {
+            "session_id": _coerce("session_id"),
+            "task_id": _coerce("task_id"),
+            "run_id": _coerce("run_id"),
+        }
+
+    @staticmethod
+    def _telemetry_id(prefix: str) -> str:
+        return f"{prefix}_{uuid4().hex[:16]}"
+
+    @staticmethod
+    def _token_usage(response: LLMResponse) -> tuple[int, int, int]:
+        usage = dict(response.usage or {})
+        prompt_tokens = int(usage.get("prompt_tokens") or usage.get("input_tokens") or 0)
+        completion_tokens = int(
+            usage.get("completion_tokens") or usage.get("output_tokens") or 0
+        )
+        total_tokens = int(usage.get("total_tokens") or (prompt_tokens + completion_tokens) or 0)
+        if total_tokens > 0 and prompt_tokens == 0 and completion_tokens == 0:
+            prompt_tokens = total_tokens
+        return (prompt_tokens, completion_tokens, total_tokens)
+
+    async def _record_policy_telemetry(
+        self,
+        *,
+        route_request: ProviderRouteRequest,
+        decision: ProviderRouteDecision,
+        planned_provider: ProviderType,
+        planned_model: str,
+        chain: list[ProviderType],
+        task_signature: str,
+    ) -> None:
+        if self._telemetry is None:
+            return
+        scope = self._telemetry_scope(route_request)
+        record = PolicyDecisionRecord(
+            decision_id=self._telemetry_id("policy"),
+            policy_name="provider_policy",
+            decision="review" if decision.requires_human else "approved",
+            status_before="preflight",
+            status_after=decision.path.value,
+            confidence=decision.confidence,
+            reason="; ".join(decision.reasons),
+            session_id=scope["session_id"],
+            task_id=scope["task_id"],
+            run_id=scope["run_id"],
+            evidence=[{"reason": reason} for reason in decision.reasons[:12]],
+            metadata={
+                "task_signature": task_signature,
+                "planned_provider": planned_provider.value,
+                "planned_model": planned_model,
+                "candidate_chain": [provider.value for provider in chain],
+            },
+        )
+        try:
+            await self._telemetry.record_policy_decision(record)
+        except Exception:
+            return
+
+    async def _record_provider_attempt_outcome(
+        self,
+        *,
+        route_request: ProviderRouteRequest,
+        provider: ProviderType,
+        model: str,
+        route_path: str,
+        task_signature: str,
+        success: bool,
+        latency_ms: float,
+        total_tokens: int,
+        error: str | None = None,
+    ) -> None:
+        if self._telemetry is None:
+            return
+        scope = self._telemetry_scope(route_request)
+        record = ExternalOutcomeRecord(
+            outcome_id=self._telemetry_id("outcome"),
+            outcome_kind="provider_attempt",
+            value=1.0 if success else 0.0,
+            unit="success_ratio",
+            confidence=1.0,
+            status="succeeded" if success else "failed",
+            subject_id=provider.value,
+            summary=f"{route_request.action_name} via {provider.value}",
+            session_id=scope["session_id"],
+            task_id=scope["task_id"],
+            run_id=scope["run_id"],
+            metadata={
+                "provider": provider.value,
+                "model": model,
+                "route_path": route_path,
+                "task_signature": task_signature,
+                "latency_ms": round(float(latency_ms), 3),
+                "total_tokens": int(total_tokens),
+                "error": error or "",
+            },
+        )
+        try:
+            await self._telemetry.record_external_outcome(record)
+        except Exception:
+            return
+
+    async def _record_route_execution_telemetry(
+        self,
+        *,
+        route_request: ProviderRouteRequest,
+        decision: ProviderRouteDecision,
+        selected_provider: ProviderType,
+        selected_model: str,
+        chain: list[ProviderType],
+        task_signature: str,
+        result: str,
+        latency_ms: float,
+        total_tokens: int,
+        prompt_tokens: int,
+        completion_tokens: int,
+        failure_trace: list[dict[str, Any]],
+        initial_provider: ProviderType,
+        initial_model: str,
+        response_model: str | None = None,
+    ) -> None:
+        if self._telemetry is None:
+            return
+        scope = self._telemetry_scope(route_request)
+        estimated_cost_usd = _estimate_cost(selected_model, prompt_tokens, completion_tokens)
+        routing_record = RoutingDecisionRecord(
+            decision_id=self._telemetry_id("route"),
+            action_name=route_request.action_name,
+            route_path=decision.path.value,
+            selected_provider=selected_provider.value,
+            selected_model_hint=selected_model,
+            confidence=decision.confidence,
+            requires_human=decision.requires_human,
+            session_id=scope["session_id"],
+            task_id=scope["task_id"],
+            run_id=scope["run_id"],
+            reasons=list(decision.reasons),
+            metadata={
+                "result": result,
+                "task_signature": task_signature,
+                "candidate_chain": [provider.value for provider in chain],
+                "initial_selected_provider": initial_provider.value,
+                "initial_selected_model": initial_model,
+                "fallback_selected": selected_provider != initial_provider,
+                "latency_ms": round(float(latency_ms), 3),
+                "prompt_tokens": int(prompt_tokens),
+                "completion_tokens": int(completion_tokens),
+                "total_tokens": int(total_tokens),
+                "estimated_cost_usd": estimated_cost_usd,
+                "response_model": response_model or "",
+                "failure_trace": list(failure_trace),
+            },
+        )
+        completion_outcome = ExternalOutcomeRecord(
+            outcome_id=self._telemetry_id("outcome"),
+            outcome_kind="provider_completion",
+            value=1.0 if result == "success" else 0.0,
+            unit="success_ratio",
+            confidence=decision.confidence,
+            status="observed" if result == "success" else "failed",
+            subject_id=selected_provider.value,
+            summary=f"{route_request.action_name} via {selected_provider.value} {result}",
+            session_id=scope["session_id"],
+            task_id=scope["task_id"],
+            run_id=scope["run_id"],
+            metadata={
+                "provider": selected_provider.value,
+                "model": selected_model,
+                "route_path": decision.path.value,
+                "task_signature": task_signature,
+                "latency_ms": round(float(latency_ms), 3),
+                "total_tokens": int(total_tokens),
+                "estimated_cost_usd": estimated_cost_usd,
+                "response_model": response_model or "",
+            },
+        )
+        try:
+            await self._telemetry.record_routing_decision(routing_record)
+            await self._telemetry.record_external_outcome(completion_outcome)
+            if total_tokens > 0 or estimated_cost_usd > 0.0:
+                await self._telemetry.record_economic_event(
+                    EconomicEventRecord(
+                        event_id=self._telemetry_id("economic"),
+                        event_kind="cost",
+                        amount=estimated_cost_usd,
+                        currency="USD",
+                        counterparty=selected_provider.value,
+                        summary=f"{route_request.action_name} via {selected_provider.value}",
+                        session_id=scope["session_id"],
+                        task_id=scope["task_id"],
+                        run_id=scope["run_id"],
+                        metadata={
+                            "provider": selected_provider.value,
+                            "model": selected_model,
+                            "task_signature": task_signature,
+                            "prompt_tokens": int(prompt_tokens),
+                            "completion_tokens": int(completion_tokens),
+                            "total_tokens": int(total_tokens),
+                            "latency_ms": round(float(latency_ms), 3),
+                        },
+                    )
+                )
+        except Exception:
+            return
 
     def _apply_session_affinity(
         self,
@@ -1404,6 +1791,16 @@ class ModelRouter:
         failure_trace: list[dict[str, Any]] = []
         selected_provider = decision.selected_provider
         selected_model = model_hints.get(selected_provider) or request.model
+        planned_provider = chain[0]
+        planned_model = model_hints.get(planned_provider) or request.model
+        await self._record_policy_telemetry(
+            route_request=enriched_request,
+            decision=decision,
+            planned_provider=planned_provider,
+            planned_model=planned_model,
+            chain=chain,
+            task_signature=task_signature,
+        )
 
         for provider_type in chain:
             request_for_provider = self._request_with_model_hint(
@@ -1434,6 +1831,17 @@ class ModelRouter:
                         "error": "circuit_open",
                         "state": breaker.state.value,
                     }
+                )
+                await self._record_provider_attempt_outcome(
+                    route_request=enriched_request,
+                    provider=provider_type,
+                    model=reward_model,
+                    route_path=decision.path.value,
+                    task_signature=task_signature,
+                    success=False,
+                    latency_ms=0.0,
+                    total_tokens=0,
+                    error="circuit_open",
                 )
                 continue
 
@@ -1481,16 +1889,20 @@ class ModelRouter:
                             "state": breaker.state.value,
                         }
                     )
+                    await self._record_provider_attempt_outcome(
+                        route_request=enriched_request,
+                        provider=provider_type,
+                        model=reward_model,
+                        route_path=decision.path.value,
+                        task_signature=task_signature,
+                        success=False,
+                        latency_ms=latency_ms,
+                        total_tokens=0,
+                        error=response_error,
+                    )
                     continue
                 breaker.record_success()
-                total_tokens = int(
-                    response.usage.get("total_tokens")
-                    or (
-                        response.usage.get("prompt_tokens", 0)
-                        + response.usage.get("completion_tokens", 0)
-                    )
-                    or 0
-                )
+                prompt_tokens, completion_tokens, total_tokens = self._token_usage(response)
                 self._record_routing_memory_outcome(
                     provider=provider_type,
                     model=reward_model,
@@ -1507,6 +1919,16 @@ class ModelRouter:
                 )
                 reward = max(0.0, 1.0 - min(total_tokens, 200_000) / 200_000)
                 self._update_reward(provider_type, reward_model, reward)
+                await self._record_provider_attempt_outcome(
+                    route_request=enriched_request,
+                    provider=provider_type,
+                    model=reward_model,
+                    route_path=decision.path.value,
+                    task_signature=task_signature,
+                    success=True,
+                    latency_ms=latency_ms,
+                    total_tokens=total_tokens,
+                )
                 selected_provider = provider_type
                 selected_model = request_for_provider.model
                 self._record_session_affinity(
@@ -1558,6 +1980,23 @@ class ModelRouter:
                         "result": "success",
                     }
                 )
+                await self._record_route_execution_telemetry(
+                    route_request=enriched_request,
+                    decision=routed_decision,
+                    selected_provider=selected_provider,
+                    selected_model=selected_model,
+                    chain=chain,
+                    task_signature=task_signature,
+                    result="success",
+                    latency_ms=latency_ms,
+                    total_tokens=total_tokens,
+                    prompt_tokens=prompt_tokens,
+                    completion_tokens=completion_tokens,
+                    failure_trace=failure_trace,
+                    initial_provider=planned_provider,
+                    initial_model=planned_model,
+                    response_model=response.model,
+                )
                 return (routed_decision, response)
             except Exception as exc:
                 latency_ms = (
@@ -1585,6 +2024,17 @@ class ModelRouter:
                         "state": breaker.state.value,
                     }
                 )
+                await self._record_provider_attempt_outcome(
+                    route_request=enriched_request,
+                    provider=provider_type,
+                    model=reward_model,
+                    route_path=decision.path.value,
+                    task_signature=task_signature,
+                    success=False,
+                    latency_ms=latency_ms,
+                    total_tokens=0,
+                    error=str(exc)[:120],
+                )
 
         self._append_routing_audit(
             {
@@ -1610,6 +2060,22 @@ class ModelRouter:
                 "failures": failure_trace,
                 "result": "failed",
             }
+        )
+        await self._record_route_execution_telemetry(
+            route_request=enriched_request,
+            decision=decision,
+            selected_provider=planned_provider,
+            selected_model=planned_model,
+            chain=chain,
+            task_signature=task_signature,
+            result="failed",
+            latency_ms=0.0,
+            total_tokens=0,
+            prompt_tokens=0,
+            completion_tokens=0,
+            failure_trace=failure_trace,
+            initial_provider=planned_provider,
+            initial_model=planned_model,
         )
         trace_preview = "; ".join(
             f"{item.get('provider')}:{item.get('error')}" for item in failure_trace[-6:]

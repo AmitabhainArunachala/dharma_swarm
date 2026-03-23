@@ -10,8 +10,6 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Iterable
 
-logger = logging.getLogger(__name__)
-
 from dharma_swarm.memory_lattice import MemoryLattice, MemoryRecallHit
 from dharma_swarm.provider_policy import ProviderPolicyRouter, ProviderRouteRequest
 from dharma_swarm.runtime_state import (
@@ -23,6 +21,8 @@ from dharma_swarm.runtime_state import (
     SessionState,
     WorkspaceLease,
 )
+
+logger = logging.getLogger(__name__)
 
 
 def _canonical_json(data: dict[str, Any]) -> str:
@@ -94,7 +94,7 @@ class ContextCompiler:
     _SECTION_WEIGHTS = {
         "Governance": 0.10,
         "Operator Intent": 0.12,
-        "Task State": 0.16,
+        "Task State": 0.12,
         "Always-On Memory": 0.14,
         "Recent Session": 0.10,
         "Retrieved Recall": 0.10,
@@ -197,22 +197,13 @@ class ContextCompiler:
             else []
         )
         always_on = await self.memory_lattice.always_on_context(max_chars=_approx_char_budget(token_budget) // 4)
-
-        # Memory Palace hybrid search
         palace_hits: list[dict[str, Any]] = []
         if self.memory_palace is not None:
             try:
-                palace_query = self._compose_recall_query(
-                    operator_intent=operator_intent,
-                    task_description=task_description,
-                    query=query,
-                    task_id=task_id,
-                )
-                if palace_query:
-                    palace_hits = self.memory_palace.search(palace_query, top_k=5)
+                if recall_query:
+                    palace_hits = self.memory_palace.search(recall_query, top_k=5)
             except Exception as exc:
                 logger.debug("Memory Palace search failed: %s", exc)
-
         sections = self._build_sections(
             session=session,
             task_id=task_id,
@@ -440,7 +431,7 @@ class ContextCompiler:
             sections.append(
                 ContextSection(
                     name="Memory Palace",
-                    priority=6,  # Same priority tier as Retrieved Recall
+                    priority=6,
                     content="\n".join(palace_lines),
                     source_refs=[],
                 )

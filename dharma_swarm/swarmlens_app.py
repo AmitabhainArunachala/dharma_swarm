@@ -89,7 +89,15 @@ class BearerAuthMiddleware(BaseHTTPMiddleware):
 
 app = FastAPI(title="SwarmLens", version="0.2.0")
 app.add_middleware(BearerAuthMiddleware)
-app.add_middleware(CORSMiddleware, allow_origins=["*"], allow_methods=["*"], allow_headers=["*"])
+_SWARMLENS_ORIGINS = [
+    origin.strip()
+    for origin in os.environ.get(
+        "SWARMLENS_CORS_ORIGINS",
+        "http://localhost:3000,http://localhost:3001,http://localhost:8080",
+    ).split(",")
+    if origin.strip()
+]
+app.add_middleware(CORSMiddleware, allow_origins=_SWARMLENS_ORIGINS, allow_methods=["*"], allow_headers=["*"])
 
 
 @app.on_event("startup")
@@ -348,7 +356,7 @@ def api_fund():
                 state = json.loads(state_file.read_text())
                 regime = state.get("current_regime", "unknown")
             except Exception:
-                pass
+                logger.debug("Ginko state read failed", exc_info=True)
         return {**stats, "positions": positions, "regime": regime}
     except Exception as e:
         return {"error": str(e), "total_value": 100000, "cash": 100000, "positions": [], "total_pnl": 0, "total_pnl_pct": 0, "sharpe_ratio": 0, "max_drawdown": 0, "win_rate": 0, "trade_count": 0, "regime": "unknown"}

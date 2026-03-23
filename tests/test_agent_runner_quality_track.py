@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from datetime import timedelta
+from pathlib import Path
 from unittest.mock import AsyncMock
 import pytest
 
@@ -16,6 +17,20 @@ from dharma_swarm.models import (
     Task,
     TaskPriority,
 )
+
+
+def _with_state_dir(config: AgentConfig, tmp_path: Path) -> AgentConfig:
+    state_dir = tmp_path / ".dharma"
+    state_dir.mkdir(exist_ok=True)
+    return config.model_copy(
+        update={
+            "metadata": {
+                **config.metadata,
+                "state_dir": str(state_dir),
+                "memory_state_dir": str(state_dir),
+            }
+        }
+    )
 
 
 def test_build_system_prompt_non_claude_explicit_is_final(monkeypatch):
@@ -85,8 +100,8 @@ def test_build_prompt_formats_title_and_description(monkeypatch):
     assert "Desc" in req.messages[0]["content"]
 
 
-def test_build_prompt_appends_memory_recall(monkeypatch):
-    cfg = AgentConfig(name="a", role=AgentRole.CODER)
+def test_build_prompt_appends_memory_recall(monkeypatch, tmp_path: Path):
+    cfg = _with_state_dir(AgentConfig(name="a", role=AgentRole.CODER), tmp_path)
     task = Task(title="Title", description="Desc")
     monkeypatch.setattr(ar, "_build_system_prompt", lambda _cfg: "SYS")
     monkeypatch.setattr(
@@ -106,8 +121,8 @@ def test_build_prompt_appends_memory_recall(monkeypatch):
     assert "prior memory" in req.messages[0]["content"]
 
 
-def test_build_prompt_appends_latent_gold(monkeypatch):
-    cfg = AgentConfig(name="a", role=AgentRole.CODER)
+def test_build_prompt_appends_latent_gold(monkeypatch, tmp_path: Path):
+    cfg = _with_state_dir(AgentConfig(name="a", role=AgentRole.CODER), tmp_path)
     task = Task(title="Title", description="Desc")
     monkeypatch.setattr(ar, "_build_system_prompt", lambda _cfg: "SYS")
     monkeypatch.setattr(
@@ -128,8 +143,8 @@ def test_build_prompt_appends_latent_gold(monkeypatch):
 
 
 @pytest.mark.asyncio
-async def test_run_task_records_retrieval_success_outcome(monkeypatch, fast_gate):
-    cfg = AgentConfig(name="a", role=AgentRole.CODER)
+async def test_run_task_records_retrieval_success_outcome(monkeypatch, fast_gate, tmp_path: Path):
+    cfg = _with_state_dir(AgentConfig(name="a", role=AgentRole.CODER), tmp_path)
     provider = AsyncMock()
     provider.complete = AsyncMock(return_value=LLMResponse(content="done", model="m"))
     monkeypatch.setattr(
@@ -208,8 +223,8 @@ async def test_run_task_records_retrieval_success_outcome(monkeypatch, fast_gate
 
 
 @pytest.mark.asyncio
-async def test_run_task_records_retrieval_failure_outcome(monkeypatch, fast_gate):
-    cfg = AgentConfig(name="a", role=AgentRole.CODER)
+async def test_run_task_records_retrieval_failure_outcome(monkeypatch, fast_gate, tmp_path: Path):
+    cfg = _with_state_dir(AgentConfig(name="a", role=AgentRole.CODER), tmp_path)
     provider = AsyncMock()
     provider.complete = AsyncMock(return_value=LLMResponse(content="", model="m"))
     monkeypatch.setattr(
@@ -333,7 +348,7 @@ async def test_leave_task_mark_best_effort(monkeypatch):
             captured["mark"] = mark
             return "id"
 
-    monkeypatch.setattr("dharma_swarm.stigmergy.StigmergyStore", _FakeStore, raising=True)
+    monkeypatch.setattr("dharma_swarm.stigmergy._get_default_store", lambda: _FakeStore(), raising=True)
 
     task = Task(
         title="Write patch",

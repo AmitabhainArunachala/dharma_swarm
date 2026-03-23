@@ -111,7 +111,7 @@ def build_state_context_snapshot(
             ts = json.loads(thread_file.read_text(encoding="utf-8"))
             parts.append(f"Active thread: {ts.get('current_thread', 'unknown')}")
         except Exception:
-            pass
+            logger.debug("Thread state read failed", exc_info=True)
 
     try:
         from dharma_swarm.context import read_latent_gold_overview, read_memory_context
@@ -138,7 +138,7 @@ def build_state_context_snapshot(
                     )
                 )
     except Exception:
-        pass
+        logger.debug("Memory/latent-gold context read failed", exc_info=True)
 
     manifest = home_dir / ".dharma_manifest.json"
     if manifest.exists():
@@ -149,7 +149,7 @@ def build_state_context_snapshot(
                 alive = sum(1 for value in ecosystem.values() if value.get("exists"))
                 parts.append(f"Ecosystem: {alive}/{len(ecosystem)} alive")
         except Exception:
-            pass
+            logger.debug("Ecosystem manifest read failed", exc_info=True)
 
     snapshot = "\n".join(parts).strip()
     if not snapshot:

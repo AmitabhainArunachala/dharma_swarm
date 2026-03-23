@@ -1,0 +1,20 @@
+{
+  "$schema": "https://schema.tauri.app/config/2",
+  "productName": "DHARMA COMMAND",
+  "version": "0.1.0",
+  "identifier": "ai.dharma.command",
+  "build": {
+    "frontendDist": "../static"
+  },
+  "app": {
+    "security": {
+      "csp": null
+    },
+    "windows": []
+  },
+  "bundle": {
+    "active": false,
+    "targets": "all",
+    "icon": []
+  }
+}

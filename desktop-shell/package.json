@@ -1,0 +1,15 @@
+{
+  "name": "dharma-command-desktop-shell",
+  "version": "0.1.0",
+  "private": true,
+  "scripts": {
+    "dev": "tauri dev",
+    "build": "tauri build",
+    "tauri": "tauri",
+    "runtime:start": "bash ../scripts/dashboard_ctl.sh start",
+    "runtime:status": "bash ../scripts/dashboard_ctl.sh status"
+  },
+  "devDependencies": {
+    "@tauri-apps/cli": "^2.1.1"
+  }
+}

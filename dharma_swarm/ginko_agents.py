@@ -258,6 +258,31 @@ FLEET_SPEC: list[dict[str, str]] = [
 
 
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+# DOMAIN CREW CLASSIFICATION
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+# Ginko fleet is a domain crew under the Strategist (constitutional agent).
+# Health rolls up to Strategist; not in organism-level health check.
+DOMAIN_CREW = "ginko"
+PARENT_AGENT = "strategist"
+
+
+def get_parent_agent() -> str:
+    """Return the constitutional agent that owns this domain crew."""
+    return PARENT_AGENT
+
+
+def is_domain_crew() -> bool:
+    """True: Ginko fleet is a domain crew, not an organism-level roster."""
+    return True
+
+
+def get_fleet_agent_names() -> list[str]:
+    """Return names of all agents in the Ginko fleet."""
+    return [spec["name"] for spec in FLEET_SPEC]
+
+
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 # PERSISTENCE HELPERS
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 

@@ -253,6 +253,16 @@ class MessageBus:
             "metadata": json.loads(row["metadata"]) if row["metadata"] else {},
         }
 
+    async def list_subscriptions(self, agent_id: str) -> list[str]:
+        """Return ordered topic subscriptions for one agent."""
+        async with aiosqlite.connect(self.db_path) as db:
+            cursor = await db.execute(
+                "SELECT topic FROM subscriptions WHERE agent_id=? ORDER BY topic",
+                (agent_id,),
+            )
+            rows = await cursor.fetchall()
+        return [str(row[0]) for row in rows]
+
     async def get_stats(self) -> dict[str, Any]:
         """Message counts, unread counts per agent, and known agent count."""
         async with aiosqlite.connect(self.db_path) as db:

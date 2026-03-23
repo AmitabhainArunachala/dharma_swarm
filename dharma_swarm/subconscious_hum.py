@@ -11,11 +11,14 @@ Based on 4-agent analysis of THE_HUM_FILES:
 
 from __future__ import annotations
 
+import logging
 from datetime import datetime
 from pathlib import Path
 from typing import Any, Optional
 
 from pydantic import BaseModel, Field
+
+logger = logging.getLogger(__name__)
 
 from dharma_swarm.models import _new_id, _utc_now
 from dharma_swarm.stigmergy import StigmergicMark, StigmergyStore
@@ -291,7 +294,7 @@ async def dream_cycle(
         try:
             contents[str(path)] = path.read_text()
         except Exception:
-            pass
+            logger.debug("Subconscious file read failed", exc_info=True)
 
     if len(contents) < 2:
         return {"error": "Need at least 2 files"}

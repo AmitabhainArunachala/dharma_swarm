@@ -781,7 +781,7 @@ class AutonomousAgent:
                     for m in messages
                 ]
         except Exception:
-            pass
+            logger.debug("Message bus read failed", exc_info=True)
         return []
 
     async def _get_message_bus(self) -> Any:
@@ -792,7 +792,7 @@ class AutonomousAgent:
                 self._message_bus = MessageBus(db_path)
                 await self._message_bus.init_db()
             except Exception:
-                pass
+                logger.debug("Message bus init failed", exc_info=True)
         return self._message_bus
 
     async def _get_stigmergy(self) -> Any:
@@ -801,7 +801,7 @@ class AutonomousAgent:
                 from dharma_swarm.stigmergy import StigmergyStore
                 self._stigmergy = StigmergyStore()
             except Exception:
-                pass
+                logger.debug("Stigmergy store init failed", exc_info=True)
         return self._stigmergy
 
     async def _save_run_report(self, task: str, result: AgentResult) -> None:

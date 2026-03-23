@@ -203,7 +203,7 @@ class RecognitionEngine:
             try:
                 result["witness_logs"] = len(list(witness_dir.glob("*.json")))
             except Exception:
-                pass
+                logger.debug("Witness log count failed", exc_info=True)
 
         # TCS from mycelium (bidirectional stigmergy)
         tcs_data = self._read_json(

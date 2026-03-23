@@ -221,6 +221,83 @@ class ZeitgeistScanner:
                 except Exception:
                     continue
 
+        # S3→S4 channel: scan witness logs for gate failure patterns
+        witness_dir = self._state_dir / "witness"
+        if witness_dir.exists():
+            try:
+                today = datetime.now(timezone.utc).strftime("%Y%m%d")
+                log_file = witness_dir / f"witness_{today}.jsonl"
+                if log_file.exists():
+                    lines = log_file.read_text().strip().split("\n")
+                    outcomes = {"BLOCKED": 0, "WARN": 0, "PASS": 0}
+                    for line in lines[-200:]:
+                        try:
+                            entry = json.loads(line)
+                            outcome = entry.get("outcome", "")
+                            if outcome in outcomes:
+                                outcomes[outcome] += 1
+                        except (json.JSONDecodeError, KeyError):
+                            continue
+                    total = sum(outcomes.values())
+                    block_count = outcomes["BLOCKED"]
+                    if total > 0 and block_count >= 3:
+                        signals.append(
+                            ZeitgeistSignal(
+                                source="local_scan",
+                                category="threat",
+                                title="High gate block rate (S3→S4 channel)",
+                                relevance_score=min(1.0, block_count / 10.0),
+                                keywords=["gate_block", "witness", "telos_gates"],
+                                description=(
+                                    f"{block_count}/{total} gate checks blocked today. "
+                                    f"Indicates governance pressure or agent drift."
+                                ),
+                            )
+                        )
+                    elif total > 10 and outcomes["WARN"] > total * 0.3:
+                        signals.append(
+                            ZeitgeistSignal(
+                                source="local_scan",
+                                category="opportunity",
+                                title="Elevated gate warnings (S3→S4 channel)",
+                                relevance_score=0.4,
+                                keywords=["gate_warn", "witness"],
+                                description=(
+                                    f"{outcomes['WARN']}/{total} gate checks warned today."
+                                ),
+                            )
+                        )
+            except Exception:
+                logger.debug("Witness log scan failed", exc_info=True)
+
+            # ── S4→S3 feedback: write gate pressure signal ──
+            # When threat signals detected, advise gates to tighten.
+            # TelosGatekeeper reads this file to adjust trust_mode.
+            try:
+                pressure_path = self._state_dir / "meta" / "gate_pressure.json"
+                pressure_path.parent.mkdir(parents=True, exist_ok=True)
+                gate_signals = [s for s in signals if "gate_block" in s.keywords]
+                if gate_signals:
+                    import time as _time
+                    pressure_path.write_text(json.dumps({
+                        "trust_mode_override": "external_strict",
+                        "reason": gate_signals[0].description,
+                        "set_at": _time.time(),
+                        "expires": _time.time() + 3600,  # 1 hour
+                    }), encoding="utf-8")
+                    logger.info("S4→S3 gate pressure: external_strict (high block rate)")
+                elif pressure_path.exists():
+                    # Clear stale pressure if no gate threat
+                    try:
+                        data = json.loads(pressure_path.read_text())
+                        import time as _time
+                        if data.get("expires", 0) < _time.time():
+                            pressure_path.unlink(missing_ok=True)
+                    except Exception:
+                        logger.debug("Gate pressure cleanup failed", exc_info=True)
+            except Exception:
+                logger.debug("Gate pressure write failed", exc_info=True)
+
         # Check stigmergy marks for density signals
         marks_path = self._state_dir / "stigmergy" / "marks.jsonl"
         if marks_path.exists():
@@ -239,7 +316,7 @@ class ZeitgeistScanner:
                             )
                         )
             except Exception:
-                pass
+                logger.debug("Stigmergy density scan failed", exc_info=True)
 
         return signals
 

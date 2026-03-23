@@ -278,7 +278,7 @@ class OuroborosObserver:
             with open(self._log_path, "a", encoding="utf-8") as f:
                 f.write(json.dumps(record, default=str) + "\n")
         except Exception:
-            pass
+            logger.debug("Ouroboros JSONL persist failed", exc_info=True)
 
 
 # ── Connection Maker ─────────────────────────────────────────────────────

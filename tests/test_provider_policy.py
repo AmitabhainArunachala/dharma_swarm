@@ -1,13 +1,24 @@
 from __future__ import annotations
 
+import asyncio
+
 import pytest
 
 from dharma_swarm.decision_router import CollaborationMode, RoutePath
 from dharma_swarm.models import LLMRequest, LLMResponse, ProviderType
-from dharma_swarm.provider_policy import ProviderPolicyRouter, ProviderRouteRequest
+from dharma_swarm.provider_policy import (
+    ProviderPolicyRouter,
+    ProviderRouteRequest,
+    ProviderRoutingConfig,
+)
 from dharma_swarm.providers import ModelRouter
 from dharma_swarm.resilience import RetryPolicy
 from dharma_swarm.swarm_router import SwarmRole
+from dharma_swarm.telemetry_plane import (
+    EconomicEventRecord,
+    RoutingDecisionRecord,
+    TelemetryPlaneStore,
+)
 
 
 def test_provider_policy_prefers_low_cost_provider_for_reflex_path() -> None:
@@ -108,6 +119,143 @@ def test_provider_policy_prefers_japanese_quality_lanes() -> None:
         ],
     )
     assert decision.selected_provider == ProviderType.OPENROUTER
+
+
+def test_provider_policy_can_promote_provider_from_telemetry_signal(tmp_path) -> None:
+    telemetry_db = tmp_path / "telemetry.db"
+
+    async def _seed() -> None:
+        store = TelemetryPlaneStore(telemetry_db)
+        await store.init_db()
+        await store.record_routing_decision(
+            RoutingDecisionRecord(
+                decision_id="route-anthropic-1",
+                action_name="summarize_logs",
+                route_path="reflex",
+                selected_provider="anthropic",
+                confidence=0.94,
+                requires_human=False,
+                task_id="task-1",
+                run_id="run-1",
+            )
+        )
+        await store.record_routing_decision(
+            RoutingDecisionRecord(
+                decision_id="route-anthropic-2",
+                action_name="triage",
+                route_path="reflex",
+                selected_provider="anthropic",
+                confidence=0.91,
+                requires_human=False,
+                task_id="task-2",
+                run_id="run-2",
+            )
+        )
+        await store.record_economic_event(
+            EconomicEventRecord(
+                event_id="econ-anthropic-revenue",
+                event_kind="revenue",
+                amount=5.0,
+                currency="USD",
+                counterparty="anthropic",
+                task_id="task-1",
+                run_id="run-1",
+            )
+        )
+
+    asyncio.run(_seed())
+
+    router = ProviderPolicyRouter(
+        config=ProviderRoutingConfig(
+            telemetry_optimization_enabled=True,
+            telemetry_db_path=telemetry_db,
+            telemetry_min_route_count=1,
+        )
+    )
+    decision = router.route(
+        ProviderRouteRequest(
+            action_name="summarize_logs",
+            risk_score=0.08,
+            uncertainty=0.10,
+            novelty=0.12,
+            urgency=0.5,
+            expected_impact=0.2,
+            estimated_latency_ms=200,
+            estimated_tokens=300,
+            preferred_low_cost=True,
+        ),
+        available_providers=[
+            ProviderType.OPENROUTER_FREE,
+            ProviderType.ANTHROPIC,
+        ],
+    )
+
+    assert decision.path == RoutePath.REFLEX
+    assert decision.selected_provider == ProviderType.ANTHROPIC
+    assert "telemetry_optimization_applied" in decision.reasons
+
+
+def test_provider_policy_telemetry_overlay_does_not_override_escalation(tmp_path) -> None:
+    telemetry_db = tmp_path / "telemetry.db"
+
+    async def _seed() -> None:
+        store = TelemetryPlaneStore(telemetry_db)
+        await store.init_db()
+        await store.record_routing_decision(
+            RoutingDecisionRecord(
+                decision_id="route-openrouter-free-1",
+                action_name="triage",
+                route_path="reflex",
+                selected_provider="openrouter_free",
+                confidence=0.99,
+                requires_human=False,
+                task_id="task-1",
+                run_id="run-1",
+            )
+        )
+        await store.record_routing_decision(
+            RoutingDecisionRecord(
+                decision_id="route-openrouter-free-2",
+                action_name="triage",
+                route_path="reflex",
+                selected_provider="openrouter_free",
+                confidence=0.97,
+                requires_human=False,
+                task_id="task-2",
+                run_id="run-2",
+            )
+        )
+    asyncio.run(_seed())
+
+    router = ProviderPolicyRouter(
+        config=ProviderRoutingConfig(
+            telemetry_optimization_enabled=True,
+            telemetry_db_path=telemetry_db,
+            telemetry_min_route_count=1,
+        )
+    )
+    decision = router.route(
+        ProviderRouteRequest(
+            action_name="security_hotfix",
+            risk_score=0.30,
+            uncertainty=0.25,
+            novelty=0.20,
+            urgency=0.95,
+            expected_impact=0.92,
+            requires_frontier_precision=True,
+            privileged_action=True,
+            requires_human_consent=True,
+        ),
+        available_providers=[
+            ProviderType.OPENROUTER_FREE,
+            ProviderType.ANTHROPIC,
+            ProviderType.OPENAI,
+        ],
+    )
+
+    assert decision.path == RoutePath.ESCALATE
+    assert decision.selected_provider == ProviderType.ANTHROPIC
+    assert "telemetry_optimization_applied" not in decision.reasons
 
 
 def test_provider_policy_swarm_plan_keeps_simple_task_single_agent() -> None:

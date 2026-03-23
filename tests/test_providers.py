@@ -34,7 +34,8 @@ def test_openai_provider_init():
     assert p._api_key == "test-key"
 
 
-def test_openai_provider_no_key():
+def test_openai_provider_no_key(monkeypatch):
+    monkeypatch.delenv("OPENAI_API_KEY", raising=False)
     p = OpenAIProvider(api_key=None)
     with pytest.raises(RuntimeError, match="OPENAI_API_KEY"):
         p._client_or_raise()
@@ -268,7 +269,11 @@ async def test_codex_provider_complete():
 def test_openrouter_free_provider_init():
     p = OpenRouterFreeProvider(api_key="test-key")
     assert p._api_key == "test-key"
-    assert "free" in p._preferred_model
+    # Without explicit model, _preferred_model is None (resolved at call time)
+    assert p._preferred_model is None
+    # With explicit model, it's stored
+    p2 = OpenRouterFreeProvider(api_key="test-key", model="meta-llama/llama-3.3-70b-instruct:free")
+    assert p2._preferred_model == "meta-llama/llama-3.3-70b-instruct:free"
 
 
 def test_openrouter_free_no_key():
@@ -280,10 +285,17 @@ def test_openrouter_free_no_key():
             p._client_or_raise()
 
 
-def test_openrouter_free_models_list():
-    assert len(OpenRouterFreeProvider.FREE_MODELS) >= 3
-    for model in OpenRouterFreeProvider.FREE_MODELS:
-        assert ":free" in model
+def test_openrouter_free_auto_discovery():
+    """OpenRouterFreeProvider should auto-discover free models at runtime."""
+    import asyncio
+
+    async def _discover():
+        return await OpenRouterFreeProvider.get_free_models()
+
+    models = asyncio.run(_discover())
+    assert len(models) >= 3, f"Expected >=3 free models, got {len(models)}"
+    for model in models:
+        assert model.endswith(":free"), f"Non-free model: {model}"
 
 
 # --- Memory Survival Directive Tests (IMPL-SAFETY) ---
