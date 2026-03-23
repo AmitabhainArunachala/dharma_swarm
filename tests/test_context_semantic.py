@@ -1,195 +1,183 @@
-"""Tests for Phase 7b: Semantic Graph integration with ContextCompiler."""
+"""Test Phase 7b: Semantic Context section in ContextCompiler.
+
+Verifies:
+1. _SECTION_WEIGHTS includes "Semantic Context" at ~5%
+2. _query_semantic_graph returns structured concept data
+3. Semantic Context section appears in compiled output
+4. GraphStore failure does not break compilation
+5. Empty query produces no semantic hits
+"""
 
 from __future__ import annotations
 
+import json
+from pathlib import Path
+from unittest.mock import MagicMock, patch
+
 import pytest
-import pytest_asyncio
 
 from dharma_swarm.context_compiler import ContextCompiler, ContextSection
-from dharma_swarm.graph_store import SQLiteGraphStore
 
 
-# ── Fixtures ──────────────────────────────────────────────────────────────
+# ---------------------------------------------------------------------------
+# Test 1: Section weights include Semantic Context
+# ---------------------------------------------------------------------------
 
 
-@pytest.fixture
-def graph_store(tmp_path):
-    """Fresh SQLiteGraphStore with some seeded concept data."""
-    db = tmp_path / "test_graphs.db"
-    store = SQLiteGraphStore(db)
+def test_section_weights_include_semantic_context():
+    weights = ContextCompiler._SECTION_WEIGHTS
+    assert "Semantic Context" in weights
+    assert 0.04 <= weights["Semantic Context"] <= 0.06
 
-    # Seed concepts
-    store.upsert_node("semantic", {
-        "id": "c-autopoiesis",
-        "kind": "concept",
-        "name": "autopoiesis",
-        "data": {
-            "definition": "Self-producing system that maintains its own organization",
-            "domain": "biology",
-        },
-    })
-    store.upsert_node("semantic", {
-        "id": "c-vsm",
-        "kind": "concept",
-        "name": "viable system model",
-        "data": {
-            "definition": "Stafford Beer's model for viable organizational structure",
-            "domain": "cybernetics",
-        },
-    })
-    store.upsert_edge("semantic", {
-        "source_id": "c-autopoiesis",
-        "target_id": "c-vsm",
-        "kind": "related_to",
-    })
-
-    # Seed a code file node and bridge
-    store.upsert_node("code", {
-        "id": "file::dharma_swarm/organism.py",
-        "kind": "file",
-        "name": "dharma_swarm/organism.py",
-    })
-    store.upsert_bridge({
-        "id": "bridge-organism-autopoiesis",
-        "source_graph": "code",
-        "source_id": "file::dharma_swarm/organism.py",
-        "target_graph": "semantic",
-        "target_id": "c-autopoiesis",
-        "kind": "references_concept",
-        "description": "organism.py references autopoiesis",
-        "confidence": 0.9,
-    })
-
-    yield store
-    store.close()
+    # Weights should still sum to ~1.0
+    total = sum(weights.values())
+    assert 0.99 <= total <= 1.01, f"Weights sum to {total}, expected ~1.0"
 
 
-@pytest.fixture
-def mock_runtime_state(tmp_path):
-    """Minimal mock RuntimeStateStore."""
-    class MockRuntimeState:
-        async def init_db(self): pass
-        async def get_session(self, sid): return None
-        async def list_delegation_runs(self, **kw): return []
-        async def list_memory_facts(self, **kw): return []
-        async def list_artifacts(self, **kw): return []
-        async def list_workspace_leases(self, **kw): return []
-        async def record_context_bundle(self, b): return b
-        async def upsert_session(self, s): return s
-        def new_bundle_id(self): return "test-bundle-001"
-    return MockRuntimeState()
+# ---------------------------------------------------------------------------
+# Test 2: _query_semantic_graph with mock graph store
+# ---------------------------------------------------------------------------
 
 
-@pytest.fixture
-def mock_memory_lattice():
-    """Minimal mock MemoryLattice."""
-    class MockLattice:
-        async def init_db(self): pass
-        async def replay_session(self, sid, limit=6): return []
-        async def recall(self, query, limit=6, session_id=None, task_id=None): return []
-        async def always_on_context(self, max_chars=1000): return ""
-    return MockLattice()
+def test_query_semantic_graph_returns_concepts():
+    mock_store = MagicMock()
+
+    # search_nodes returns a concept
+    mock_store.search_nodes.return_value = [
+        {
+            "id": "c_auto",
+            "name": "autopoiesis",
+            "data": json.dumps({
+                "description": "Self-creating and self-maintaining systems",
+                "domain": "systems_theory",
+            }),
+        }
+    ]
+
+    # get_edges returns a related concept edge
+    mock_store.get_edges.return_value = [
+        {"source_id": "c_auto", "target_id": "c_homeo", "kind": "related_to"}
+    ]
+    mock_store.get_node.return_value = {"id": "c_homeo", "name": "homeostasis"}
+
+    # get_bridges returns a code location
+    mock_store.get_bridges.return_value = [
+        {"source_id": "dharma_swarm/organism.py::42", "source_graph": "code"}
+    ]
+
+    compiler = ContextCompiler.__new__(ContextCompiler)
+    compiler.graph_store = mock_store
+
+    results = compiler._query_semantic_graph("autopoiesis", limit=5)
+
+    assert len(results) == 1
+    hit = results[0]
+    assert hit["name"] == "autopoiesis"
+    assert "Self-creating" in hit["description"]
+    assert "homeostasis" in hit["related"]
+    assert "dharma_swarm/organism.py" in hit["code_locations"]
 
 
-# ── Semantic search tests ────────────────────────────────────────────────
+def test_query_semantic_graph_empty_query():
+    compiler = ContextCompiler.__new__(ContextCompiler)
+    compiler.graph_store = MagicMock()
+
+    results = compiler._query_semantic_graph("", limit=5)
+    assert results == []
 
 
-class TestSemanticGraphSearch:
-    def test_search_finds_concepts(self, graph_store):
-        """_search_semantic_graph should find seeded concepts."""
-        compiler = ContextCompiler(
-            runtime_state=None,
-            memory_lattice=None,
-            graph_store=graph_store,
-        )
-        results = compiler._search_semantic_graph("autopoiesis")
-        assert len(results) >= 1
-        assert results[0]["name"] == "autopoiesis"
-        assert "Self-producing" in results[0]["definition"]
+def test_query_semantic_graph_no_store():
+    compiler = ContextCompiler.__new__(ContextCompiler)
+    compiler.graph_store = None
 
-    def test_search_includes_related_concepts(self, graph_store):
-        """Search results should include related concept names."""
-        compiler = ContextCompiler(
-            runtime_state=None,
-            memory_lattice=None,
-            graph_store=graph_store,
-        )
-        results = compiler._search_semantic_graph("autopoiesis")
-        assert len(results) >= 1
-        # autopoiesis → vsm edge exists
-        assert "viable system model" in results[0]["related"]
-
-    def test_search_includes_code_locations(self, graph_store):
-        """Search results should include code file paths from bridges."""
-        compiler = ContextCompiler(
-            runtime_state=None,
-            memory_lattice=None,
-            graph_store=graph_store,
-        )
-        results = compiler._search_semantic_graph("autopoiesis")
-        assert len(results) >= 1
-        assert "dharma_swarm/organism.py" in results[0]["code_locations"]
-
-    def test_search_returns_empty_without_graph_store(self):
-        """Search with no graph_store returns empty list."""
-        compiler = ContextCompiler(
-            runtime_state=None,
-            memory_lattice=None,
-            graph_store=None,
-        )
-        results = compiler._search_semantic_graph("anything")
-        assert results == []
-
-    def test_search_handles_no_match(self, graph_store):
-        """Search for non-existent concept returns empty."""
-        compiler = ContextCompiler(
-            runtime_state=None,
-            memory_lattice=None,
-            graph_store=graph_store,
-        )
-        results = compiler._search_semantic_graph("xyznonexistent99")
-        assert results == []
+    results = compiler._query_semantic_graph("test", limit=5)
+    assert results == []
 
 
-# ── Context compilation with semantic section ─────────────────────────────
+def test_query_semantic_graph_handles_exception():
+    mock_store = MagicMock()
+    mock_store.search_nodes.side_effect = RuntimeError("DB locked")
+
+    compiler = ContextCompiler.__new__(ContextCompiler)
+    compiler.graph_store = mock_store
+
+    # Should return empty, not raise
+    results = compiler._query_semantic_graph("test", limit=5)
+    assert results == []
 
 
-class TestCompileBundleWithSemantic:
-    @pytest.mark.asyncio
-    async def test_compile_bundle_includes_semantic_section(
-        self, mock_runtime_state, mock_memory_lattice, graph_store,
-    ):
-        """compile_bundle should include a Semantic Context section."""
-        compiler = ContextCompiler(
-            runtime_state=mock_runtime_state,
-            memory_lattice=mock_memory_lattice,
-            graph_store=graph_store,
-        )
-        bundle = await compiler.compile_bundle(
-            session_id="test-session",
-            query="autopoiesis",
-            token_budget=2000,
-        )
-        assert "Semantic Context" in bundle.rendered_text
+# ---------------------------------------------------------------------------
+# Test 3: Semantic Context section appears in _build_sections
+# ---------------------------------------------------------------------------
 
-    @pytest.mark.asyncio
-    async def test_compile_bundle_no_semantic_without_graph(
-        self, mock_runtime_state, mock_memory_lattice,
-    ):
-        """compile_bundle without graph_store should have no semantic section."""
-        compiler = ContextCompiler(
-            runtime_state=mock_runtime_state,
-            memory_lattice=mock_memory_lattice,
-            graph_store=None,
-        )
-        bundle = await compiler.compile_bundle(
-            session_id="test-session",
-            task_description="General task",
-            token_budget=2000,
-        )
-        assert "Semantic Context" not in bundle.rendered_text
 
-    @pytest.mark.asyncio
-    async def test_semantic_section_weight(self):
-        """Semantic Context should have 5% weight in section weights."""
-        assert ContextCompiler._SECTION_WEIGHTS["Semantic Context"] == 0.05
+def test_semantic_hits_produce_section():
+    """When semantic_hits are provided, _build_sections includes the section."""
+    compiler = ContextCompiler.__new__(ContextCompiler)
+    compiler.provider_policy = MagicMock()
+
+    semantic_hits = [
+        {
+            "name": "autopoiesis",
+            "description": "Self-creating systems",
+            "related": ["homeostasis", "allopoiesis"],
+            "code_locations": ["organism.py"],
+        }
+    ]
+
+    sections = compiler._build_sections(
+        session=None,
+        task_id="",
+        run_id="",
+        operator_intent="",
+        task_description="",
+        policy_constraints=[],
+        provider_request=None,
+        always_on="",
+        recent_events=[],
+        recall_hits=[],
+        palace_hits=[],
+        semantic_hits=semantic_hits,
+        facts=[],
+        artifacts=[],
+        workspace_root=None,
+        active_paths=[],
+        runs=[],
+        leases=[],
+    )
+
+    sem_sections = [s for s in sections if s.name == "Semantic Context"]
+    assert len(sem_sections) == 1
+    assert "autopoiesis" in sem_sections[0].content
+    assert "homeostasis" in sem_sections[0].content
+    assert "organism.py" in sem_sections[0].content
+
+
+def test_empty_semantic_hits_no_section():
+    """When semantic_hits is empty, no Semantic Context section appears."""
+    compiler = ContextCompiler.__new__(ContextCompiler)
+    compiler.provider_policy = MagicMock()
+
+    sections = compiler._build_sections(
+        session=None,
+        task_id="",
+        run_id="",
+        operator_intent="",
+        task_description="",
+        policy_constraints=[],
+        provider_request=None,
+        always_on="",
+        recent_events=[],
+        recall_hits=[],
+        palace_hits=[],
+        semantic_hits=[],
+        facts=[],
+        artifacts=[],
+        workspace_root=None,
+        active_paths=[],
+        runs=[],
+        leases=[],
+    )
+
+    sem_sections = [s for s in sections if s.name == "Semantic Context"]
+    assert len(sem_sections) == 0

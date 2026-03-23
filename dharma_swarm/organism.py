@@ -40,7 +40,7 @@ logger = logging.getLogger(__name__)
 # ---------------------------------------------------------------------------
 
 _global_organism: Organism | None = None
-_global_graph_store: Any = None
+_global_graph_store: Any = None  # GraphStore | None
 
 
 def get_organism() -> Organism | None:
@@ -48,10 +48,16 @@ def get_organism() -> Organism | None:
     return _global_organism
 
 
+def get_graph_store() -> Any:
+    """Return the global GraphStore instance, or None if not initialized."""
+    return _global_graph_store
+
+
 def set_organism(org: Organism | None) -> None:
     """Register or clear the global organism instance."""
-    global _global_organism
+    global _global_organism, _global_graph_store
     _global_organism = org
+    _global_graph_store = getattr(org, "graph_store", None) if org else None
 
 
 def get_graph_store() -> Any:
@@ -79,10 +85,8 @@ class OrganismPulse:
         self.identity_coherence: float = 1.0
         self.audit_failure_rate: float = 0.0
         self.duration_ms: float = 0.0
-        # Phase 7b: concept indexing stats
-        self.concept_nodes: int = 0
-        self.concept_edges: int = 0
-        self.last_index_time: str = ""
+        # Phase 7b: concept graph stats
+        self.concept_stats: dict[str, Any] = {}
         self.top_fragile_concepts: list[dict[str, Any]] = []
 
     def to_dict(self) -> dict[str, Any]:
@@ -98,11 +102,8 @@ class OrganismPulse:
             "audit_failure_rate": self.audit_failure_rate,
             "duration_ms": self.duration_ms,
         }
-        # Phase 7b: concept indexing stats
-        if self.concept_nodes > 0 or self.concept_edges > 0:
-            d["concept_nodes"] = self.concept_nodes
-            d["concept_edges"] = self.concept_edges
-            d["last_index_time"] = self.last_index_time
+        if self.concept_stats:
+            d["concept_stats"] = self.concept_stats
         if self.top_fragile_concepts:
             d["top_fragile_concepts"] = self.top_fragile_concepts
         return d
@@ -176,51 +177,43 @@ class Organism:
             self.sleep_time_agent = None
             logger.debug("SleepTimeAgent init failed (non-fatal)")
 
-        # Phase 7b: GraphStore for the Four-Graph Architecture
-        self.graph_store: Any = None
+        # ── Phase 7b: Semantic Graph integration ──────────────────────
+        self.graph_store = None
+        self._concept_registry = None
+        self._concept_parser = None
+        self._concept_indexer = None
+        self._last_index_cycle: int = 0
+        self._indexed_files: dict[str, float] = {}  # path -> mtime
+        self._concept_stats: dict[str, Any] = {}
+
         try:
             from dharma_swarm.graph_store import SQLiteGraphStore
 
-            graph_db = self._state_dir / "data" / "dharma_graphs.db"
-            graph_db.parent.mkdir(parents=True, exist_ok=True)
-            self.graph_store = SQLiteGraphStore(graph_db)
-            _set_graph_store(self.graph_store)
-        except Exception:
-            self.graph_store = None
-            logger.debug("GraphStore init failed (non-fatal)")
+            db_path = self._state_dir / "data" / "dharma_graphs.db"
+            db_path.parent.mkdir(parents=True, exist_ok=True)
+            self.graph_store = SQLiteGraphStore(str(db_path))
+            logger.info("GraphStore initialized: %s", db_path)
+        except Exception as exc:
+            logger.debug("GraphStore init failed (non-fatal): %s", exc)
 
-        # Phase 7b: ConceptIndexer state for periodic concept extraction
-        self._concept_registry: Any = None
-        self._concept_indexer: Any = None
-        self._concept_parser: Any = None
-        self._indexed_mtimes: dict[str, float] = {}
-        self._last_index_time: str = ""
-        self._indexing_due = False
         try:
+            from dharma_swarm.concept_parser import (
+                ConceptIndexer,
+                ConceptParser,
+                ConceptRegistry,
+            )
+
+            self._concept_registry = ConceptRegistry()
+            self._concept_parser = ConceptParser(self._concept_registry)
             if self.graph_store is not None:
-                from dharma_swarm.concept_parser import (
-                    ConceptIndexer,
-                    ConceptParser,
-                    ConceptRegistry,
+                self._concept_indexer = ConceptIndexer(
+                    self.graph_store, self._concept_registry
                 )
-
-                self._concept_registry = ConceptRegistry()
-                self._concept_parser = ConceptParser(self._concept_registry)
-                self._concept_indexer = ConceptIndexer(self.graph_store, self._concept_registry)
-                # Seed the semantic graph with concept nodes on first boot
+                # Pre-populate semantic graph with known concepts on first boot
                 self._concept_indexer.index_concepts()
-        except Exception:
-            logger.debug("ConceptIndexer init failed (non-fatal)")
-
-        # Phase 7b: ConceptBlastRadius for health monitoring
-        self._blast_radius: Any = None
-        self._top_fragile_concepts: list[dict[str, Any]] = []
-        try:
-            from dharma_swarm.concept_blast_radius import ConceptBlastRadius
-
-            self._blast_radius = ConceptBlastRadius(state_dir=self._state_dir)
-        except Exception:
-            logger.debug("ConceptBlastRadius init failed (non-fatal)")
+        except Exception as exc:
+            self._concept_parser = None
+            logger.debug("ConceptParser init failed (non-fatal): %s", exc)
 
         self.vsm.algedonic.register_callback(self._on_algedonic)
 
@@ -364,25 +357,43 @@ class Organism:
         except Exception as exc:
             logger.debug("SleepTimeAgent tick failed (non-fatal): %s", exc)
 
-        # Phase 7b: Periodic concept indexing (every 10 cycles)
+        # ── Phase 7b: Semantic Graph heartbeat integration ────────────
         try:
             if self._concept_indexer is not None and self.graph_store is not None:
-                if self._cycle % 10 == 0 or self._indexing_due:
-                    self._indexing_due = False
-                    self._run_concept_indexing()
-                # Always populate pulse stats from graph store
-                pulse.concept_nodes = self.graph_store.count_nodes("semantic")
-                pulse.concept_edges = self.graph_store.count_edges("semantic")
-                pulse.last_index_time = self._last_index_time
+                indexing_interval = 10  # run every 10th heartbeat cycle
+                if self._cycle - self._last_index_cycle >= indexing_interval:
+                    self._last_index_cycle = self._cycle
+                    indexed = self._run_incremental_indexing()
+                    if indexed > 0:
+                        logger.info(
+                            "CONCEPT-INDEX: indexed %d files (cycle %d)",
+                            indexed,
+                            self._cycle,
+                        )
+                # Always collect stats for the pulse
+                try:
+                    node_count = self.graph_store.count_nodes("semantic")
+                    edge_count = self.graph_store.count_edges("semantic")
+                except Exception:
+                    node_count, edge_count = 0, 0
+                self._concept_stats = {
+                    "concept_nodes": node_count,
+                    "concept_edges": edge_count,
+                    "last_index_cycle": self._last_index_cycle,
+                    "indexed_files": len(self._indexed_files),
+                }
+                pulse.concept_stats = dict(self._concept_stats)
         except Exception as exc:
-            logger.debug("Concept indexing failed (non-fatal): %s", exc)
+            logger.debug("Concept indexing heartbeat failed (non-fatal): %s", exc)
 
-        # Phase 7b: Blast radius for health monitoring (every 20 cycles)
+        # ── Phase 7b: Blast radius for top concepts ──────────────────
         try:
-            if self._blast_radius is not None and self._cycle % 20 == 0:
-                pulse.top_fragile_concepts = self._top_fragile_concepts
+            if self.graph_store is not None:
+                fragile = await self._compute_top_fragile_concepts(limit=3)
+                if fragile:
+                    pulse.top_fragile_concepts = fragile
         except Exception as exc:
-            logger.debug("Blast radius monitoring failed (non-fatal): %s", exc)
+            logger.debug("Blast radius heartbeat failed (non-fatal): %s", exc)
 
         scaling_rec = self._check_scaling_needs(pulse)
 
@@ -464,6 +475,103 @@ class Organism:
     def stop(self) -> None:
         """Request graceful shutdown."""
         self._running = False
+
+    # ── Phase 7b: Semantic Graph helpers ──────────────────────────────
+
+    def _run_incremental_indexing(self) -> int:
+        """Scan for changed files and index new concept references.
+
+        Returns the number of files indexed in this pass.
+        Uses mtime tracking to avoid re-scanning unchanged files.
+        The flow: ConceptParser.parse_file() → extractions → ConceptIndexer.index_extractions()
+        """
+        if (
+            self._concept_indexer is None
+            or self.graph_store is None
+            or getattr(self, "_concept_parser", None) is None
+        ):
+            return 0
+
+        import os
+
+        scan_root = Path.cwd()
+        indexed_count = 0
+        all_extractions: list = []
+        try:
+            for py_file in scan_root.rglob("*.py"):
+                if "__pycache__" in str(py_file) or ".git" in str(py_file):
+                    continue
+                try:
+                    fpath = str(py_file)
+                    mtime = os.path.getmtime(fpath)
+                    prev_mtime = self._indexed_files.get(fpath, 0.0)
+                    if mtime <= prev_mtime:
+                        continue
+                    extractions = self._concept_parser.parse_file(
+                        fpath, repo_root=scan_root
+                    )
+                    all_extractions.extend(extractions)
+                    self._indexed_files[fpath] = mtime
+                    indexed_count += 1
+                except Exception:
+                    continue  # individual file failures are silently skipped
+
+            if all_extractions:
+                self._concept_indexer.index_extractions(all_extractions)
+        except Exception as exc:
+            logger.debug("Incremental indexing scan failed: %s", exc)
+
+        return indexed_count
+
+    async def _compute_top_fragile_concepts(
+        self, limit: int = 3
+    ) -> list[dict[str, Any]]:
+        """Compute blast radius for the most-connected semantic concepts.
+
+        Returns a list of dicts with concept name and total_impact for
+        the top N most-fragile concepts (highest blast radius).
+        """
+        if self.graph_store is None:
+            return []
+
+        try:
+            from dharma_swarm.concept_blast_radius import ConceptBlastRadius
+
+            br = ConceptBlastRadius(state_dir=self._state_dir)
+
+            # Get the most-connected concepts from the semantic graph
+            # by querying for nodes with the highest edge count.
+            top_nodes = self.graph_store.search_nodes(
+                "semantic", "*", limit=limit * 2
+            )
+            if not top_nodes:
+                return []
+
+            fragile: list[dict[str, Any]] = []
+            for node in top_nodes[:limit * 2]:
+                node_id = node.get("id", "")
+                node_name = node.get("name", "")
+                if not node_id:
+                    continue
+                try:
+                    report = await br.compute(node_id)
+                    fragile.append({
+                        "concept": report.concept_name or node_name,
+                        "total_impact": report.total_impact,
+                        "affected_files": len(report.affected_code_files),
+                        "affected_concepts": len(report.affected_concepts),
+                    })
+                except Exception:
+                    continue
+
+            # Sort by total_impact descending, return top N
+            fragile.sort(key=lambda x: x["total_impact"], reverse=True)
+            return fragile[:limit]
+        except ImportError:
+            return []
+        except Exception as exc:
+            logger.debug("Top fragile concepts failed: %s", exc)
+            return []
 
     def on_gate_check(
         self,

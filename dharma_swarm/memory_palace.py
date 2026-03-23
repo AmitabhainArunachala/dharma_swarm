@@ -95,10 +95,10 @@ class MemoryPalace:
         self,
         memory_lattice: Any = None,
         state_dir: Path | None = None,
-        graph_store: Any = None,
+        graph_nexus: Any = None,
     ) -> None:
         self._lattice = memory_lattice
-        self._graph_store = graph_store
+        self._graph_nexus = graph_nexus  # Phase 7b: GraphNexus bridge
         self._query_history: list[dict[str, Any]] = []
 
         # Phase 6: VectorStore for real semantic similarity.
@@ -194,13 +194,45 @@ class MemoryPalace:
             except Exception as exc:
                 logger.debug("VectorStore recall failed (non-fatal): %s", exc)
 
-        # Phase 7b: Graph-aware search via GraphStore semantic graph
+        # Phase 2b: GraphNexus query — cross-graph concept hits
         graph_results: list[PalaceResult] = []
-        if self._graph_store is not None:
+        if self._graph_nexus is not None:
             try:
-                graph_results = self._search_graph(query.text)
+                nexus_result = await self._graph_nexus.query_about(query.text)
+                for hit in getattr(nexus_result, "semantic_hits", []):
+                    relevance = getattr(hit, "relevance", 0.5)
+                    name = getattr(hit, "name", "")
+                    node_type = getattr(hit, "node_type", "")
+                    meta = getattr(hit, "metadata", {})
+                    if isinstance(meta, dict):
+                        meta = dict(meta)
+                    else:
+                        meta = {}
+                    # Boost by graph centrality heuristic
+                    centrality_bonus = min(0.2, len(getattr(hit, "metadata", {}).get("edges", [])) * 0.02)
+                    graph_results.append(PalaceResult(
+                        content=f"[{node_type}] {name}: {meta.get('description', '')}".strip()[:2000],
+                        source=f"graph:{getattr(hit, 'graph', 'nexus')}",
+                        score=relevance + centrality_bonus,
+                        layer="semantic_graph",
+                        metadata={**meta, "graph_origin": getattr(hit, "graph", "")},
+                    ))
+                # Also include temporal and telos hits at lower priority
+                for hit_list in (
+                    getattr(nexus_result, "temporal_hits", []),
+                    getattr(nexus_result, "telos_hits", []),
+                ):
+                    for hit in hit_list[:2]:
+                        name = getattr(hit, "name", "")
+                        graph_results.append(PalaceResult(
+                            content=f"[{getattr(hit, 'node_type', '')}] {name}".strip()[:2000],
+                            source=f"graph:{getattr(hit, 'graph', 'nexus')}",
+                            score=getattr(hit, "relevance", 0.3) * 0.7,
+                            layer="semantic_graph",
+                            metadata={"graph_origin": getattr(hit, "graph", "")},
+                        ))
             except Exception as exc:
-                logger.debug("Graph search in recall failed (non-fatal): %s", exc)
+                logger.debug("GraphNexus recall failed (non-fatal): %s", exc)
 
         # Merge: start with lattice results, augment with vector scores
         results = list(lattice_results)

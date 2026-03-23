@@ -1,249 +1,105 @@
-"""Geometry-aware subspace tracking for the DHARMA SWARM 7-layer architecture.
+"""geometry.py — Subspace geometry primitives for the Dharma Swarm.
 
-This module implements the geometric substrate described in the Dharma Swarm
-blueprint: each agent's knowledge lives in a low-dimensional gradient subspace,
-and forgetting / drift / interference are governed by the principal angles
-between these subspaces.
+STANDALONE MODULE — no dharma_swarm imports. numpy only.
 
-Key components:
-    - SubspaceRegistry: per-agent data structure tracking representational
-      subspaces for each task or capability.
-    - batched_principal_angles(): Björck-Golub algorithm (numpy) for computing
-      principal angles between pairs of subspaces.
-    - subspace_overlap_score(): multi-metric overlap quantification.
-    - forgetting_risk(): geometric forgetting bound from Steele (2026).
-    - classify_drift_phase(): three-phase classifier per Ratzon et al. (2024).
+This is the geometry seed from the Dharma Swarm: Geometry-Aware Cognitive
+Architecture Blueprint. It provides the measurement layer for tracking
+representational subspaces across agents and tasks.
 
-This module is **standalone** — it depends only on numpy and the Python
-standard library.  No dharma_swarm imports.
+Core insight: forgetting = subspace interference governed by principal
+angles. Intelligence = geometry of representations evolving over time.
 
-References:
-    - Steele (2026), arXiv:2603.02224 — geometric forgetting bound
-    - Saha et al. (2021), arXiv:2103.09762 — GPM subspace registry
-    - Ratzon et al. (2024) — three-phase drift model
+These primitives will be wired into the organism's monitoring loop once
+real agents are running tasks end-to-end (Phase 9+). For now they exist
+as self-contained, tested utilities.
+
+Key functions:
+    batched_principal_angles  — Björck-Golub via SVD of cross-Gram matrix
+    subspace_overlap_score    — Multi-metric overlap quantification
+    forgetting_risk           — Geometric forgetting bound (Steele 2026)
+    classify_drift_phase      — Three-phase model (Ratzon et al. 2024)
+
+Key class:
+    SubspaceRegistry          — Per-layer subspace tracking with GPM-style
+                                incremental updates
+
+Ground: Saha et al. (GPM), Steele 2026 (geometric forgetting bound,
+r=0.994), Ratzon et al. 2024 (three-phase drift model), Björck & Golub
+1973 (principal angles).
 """
 
 from __future__ import annotations
 
 import math
 from dataclasses import dataclass, field
+from datetime import datetime, timezone
 from typing import Any
 
 import numpy as np
 from numpy.typing import NDArray
 
 
-# ---------------------------------------------------------------------------
-# SubspaceRegistry
-# ---------------------------------------------------------------------------
-
-
-@dataclass
-class SubspaceEntry:
-    """A single subspace snapshot for one task at one layer."""
-
-    task_id: str
-    layer_id: str
-    basis: NDArray  # (d, k) orthonormal columns
-    singular_values: NDArray  # (k,)
-    participation_ratio: float
-    timestamp: int  # training step when snapshot was taken
-
-
-@dataclass
-class SubspaceRegistry:
-    """Per-agent registry of representational subspaces.
-
-    Tracks the orthonormal bases learned for each task at each layer,
-    following the GPM incremental update protocol.  The registry is the
-    agent's geometric memory — it records *where* knowledge lives in
-    parameter space.
-
-    The accumulated basis ``M`` for a layer is the column-wise
-    concatenation of all stored bases for that layer.  New tasks append
-    only the *residual* directions not already spanned by ``M``.
-    """
-
-    agent_id: str = ""
-    entries: list[SubspaceEntry] = field(default_factory=list)
-
-    # -- query helpers -------------------------------------------------------
-
-    def get_basis(self, layer_id: str, task_id: str) -> NDArray | None:
-        """Return the stored basis for a (layer, task) pair, or None."""
-        for e in self.entries:
-            if e.layer_id == layer_id and e.task_id == task_id:
-                return e.basis
-        return None
-
-    def accumulated_basis(self, layer_id: str) -> NDArray | None:
-        """Return the column-concatenated accumulated basis for *layer_id*.
-
-        If no entries exist for the layer, returns None.
-        """
-        bases = [e.basis for e in self.entries if e.layer_id == layer_id]
-        if not bases:
-            return None
-        return np.hstack(bases)
-
-    def capacity_ratio(self, layer_id: str, d: int) -> float:
-        """Fraction of total capacity used: rank(M) / d.
-
-        Args:
-            layer_id: The layer to check.
-            d: The full parameter-space dimensionality for this layer.
-
-        Returns:
-            A float in [0, 1].  Values above 0.8 indicate approaching
-            subspace saturation.
-        """
-        M = self.accumulated_basis(layer_id)
-        if M is None:
-            return 0.0
-        return min(M.shape[1] / max(d, 1), 1.0)
-
-    # -- update protocol -----------------------------------------------------
-
-    def register(
-        self,
-        task_id: str,
-        layer_id: str,
-        activation_matrix: NDArray,
-        variance_threshold: float = 0.99,
-        timestamp: int = 0,
-    ) -> SubspaceEntry:
-        """GPM-style incremental basis update.
-
-        1. Project out existing basis directions.
-        2. SVD of residual.
-        3. Keep top-k directions that capture *variance_threshold* of
-           residual variance.
-        4. Append to registry.
-
-        Args:
-            task_id: Identifier for the new task.
-            layer_id: Layer this snapshot belongs to.
-            activation_matrix: (d, n_samples) activation matrix.
-            variance_threshold: Fraction of residual variance to retain.
-            timestamp: Training step counter.
-
-        Returns:
-            The newly created SubspaceEntry.
-        """
-        R = activation_matrix.astype(np.float64)
-        M = self.accumulated_basis(layer_id)
-        if M is not None:
-            # Remove existing basis directions
-            R = R - M @ (M.T @ R)
-
-        U, S, _ = np.linalg.svd(R, full_matrices=False)
-        # Select top-k by cumulative energy
-        total_var = np.sum(S ** 2)
-        if total_var < 1e-12:
-            k = 1
-        else:
-            cumvar = np.cumsum(S ** 2) / total_var
-            k = int(np.searchsorted(cumvar, variance_threshold)) + 1
-        k = max(1, min(k, len(S)))
-
-        basis = U[:, :k]
-        svs = S[:k]
-
-        # Participation ratio of the full activation covariance
-        cov_diag = S ** 2
-        trace = np.sum(cov_diag)
-        trace_sq = np.sum(cov_diag ** 2)
-        pr = (trace ** 2) / (trace_sq + 1e-12)
-
-        entry = SubspaceEntry(
-            task_id=task_id,
-            layer_id=layer_id,
-            basis=basis,
-            singular_values=svs,
-            participation_ratio=float(pr),
-            timestamp=timestamp,
-        )
-        self.entries.append(entry)
-        return entry
+def _utc_now_iso() -> str:
+    return datetime.now(timezone.utc).isoformat()
 
 
 # ---------------------------------------------------------------------------
-# Principal angle computation
+# Principal angle computation (Björck-Golub algorithm)
 # ---------------------------------------------------------------------------
 
 
 def batched_principal_angles(
-    Q_i: NDArray,
-    Q_j: NDArray,
+    q_i: NDArray,
+    q_j: NDArray,
     eps: float = 1e-7,
 ) -> NDArray:
-    """Compute principal angles between batched pairs of subspaces.
+    """Compute principal angles between two subspaces.
 
-    Uses the Björck-Golub algorithm: SVD of the cross-Gram matrix yields
-    cos(θ) as singular values.
+    Uses the Björck-Golub algorithm: SVD of cross-Gram matrix Q_i^T Q_j.
 
     Args:
-        Q_i: Orthonormal bases, shape ``(batch, d, p)`` or ``(d, p)`` for
-            a single pair.
-        Q_j: Orthonormal bases, shape ``(batch, d, q)`` or ``(d, q)``.
-        eps: Clamping epsilon for numerical stability.
+        q_i: (d, p) orthonormal basis for subspace i
+        q_j: (d, q) orthonormal basis for subspace j
+        eps: numerical clamp epsilon
 
     Returns:
-        Principal angles in [0, π/2], shape ``(batch, min(p,q))`` or
-        ``(min(p,q),)`` for unbatched input.
+        (min(p, q),) array of principal angles in [0, π/2]
     """
-    single = Q_i.ndim == 2
-    if single:
-        Q_i = Q_i[np.newaxis, ...]
-        Q_j = Q_j[np.newaxis, ...]
-
-    # Cross-Gram: (batch, p, q)
-    M = np.einsum("bdp,bdq->bpq", Q_i, Q_j)
-
-    batch_size = M.shape[0]
-    k = min(M.shape[1], M.shape[2])
-    angles = np.empty((batch_size, k), dtype=np.float64)
-
-    for b in range(batch_size):
-        _, s, _ = np.linalg.svd(M[b], full_matrices=False)
-        cos_theta = np.clip(s[:k], -1.0 + eps, 1.0 - eps)
-        angles[b] = np.arccos(cos_theta)
-
-    if single:
-        return angles[0]
-    return angles
-
-
-# ---------------------------------------------------------------------------
-# Subspace overlap score
-# ---------------------------------------------------------------------------
+    # Cross-Gram matrix: (p, q)
+    m = q_i.T @ q_j
+    _, cos_theta, _ = np.linalg.svd(m, full_matrices=False)
+    cos_theta = np.clip(cos_theta, -1.0 + eps, 1.0 - eps)
+    theta = np.arccos(cos_theta)
+    return theta
 
 
 def subspace_overlap_score(
     basis_a: NDArray,
     basis_b: NDArray,
 ) -> dict[str, Any]:
-    """Quantify overlap between two subspaces using multiple metrics.
+    """Quantify overlap between two subspaces via multiple metrics.
 
     Args:
-        basis_a: (d, k_a) orthonormal columns.
-        basis_b: (d, k_b) orthonormal columns.
+        basis_a: (d, k_a) orthonormal basis
+        basis_b: (d, k_b) orthonormal basis
 
     Returns:
-        Dict with theta_min, theta_max, grassmann_distance,
-        chordal_distance, overlap_fraction, and all_angles.
+        dict with theta_min, theta_max, grassmann_distance,
+        chordal_distance, overlap_fraction, all_angles
     """
-    M = basis_a.T @ basis_b
-    _, s, _ = np.linalg.svd(M, full_matrices=False)
-    cos_theta = np.clip(s, 0.0, 1.0)
-    theta = np.arccos(cos_theta)
+    theta = batched_principal_angles(basis_a, basis_b)
 
-    theta_min = float(theta[0]) if len(theta) > 0 else 0.0
-    theta_max = float(theta[-1]) if len(theta) > 0 else 0.0
+    theta_min = float(theta[0]) if len(theta) > 0 else math.pi / 2
+    theta_max = float(theta[-1]) if len(theta) > 0 else math.pi / 2
 
+    # Grassmann geodesic distance
     grassmann_dist = float(np.linalg.norm(theta))
+
+    # Chordal distance: sqrt(sum(sin²(θ_i)))
     chordal_dist = float(np.sqrt(np.sum(np.sin(theta) ** 2)))
-    overlap_frac = float(np.mean(theta < (np.pi / 4))) if len(theta) > 0 else 0.0
+
+    # Overlap fraction: proportion of dimensions with θ < 45°
+    overlap_frac = float(np.mean(theta < (math.pi / 4))) if len(theta) > 0 else 0.0
 
     return {
         "theta_min": theta_min,
@@ -262,45 +118,44 @@ def subspace_overlap_score(
 
 def forgetting_risk(
     theta_min: float,
-    learning_rate: float,
-    update_norm: float,
-    smoothness_L: float = 1.0,
+    learning_rate: float = 0.001,
+    update_norm: float = 1.0,
+    smoothness_l: float = 1.0,
     curvature_mu: float = 1.0,
     beta: float = 0.01,
 ) -> dict[str, Any]:
     """Estimate forgetting risk using the geometric forgetting bound.
 
-    The bound is::
+    F_{i,t} ≤ α * sin²(θ_min) + β
+    where α = η * L * ||Δ_t||² / μ.
 
-        F_{i,t} ≤ α · sin²(θ_min) + β
-
-    where α = η · L · ‖Δ_t‖² / μ.
-
-    Based on Steele (2026), arXiv:2603.02224.
+    Based on Steele (2026), arXiv:2603.02224 — validated at r=0.994
+    correlation between predicted and measured forgetting.
 
     Args:
-        theta_min: Minimum principal angle (radians) between current
-            gradient subspace and nearest stored subspace.
-        learning_rate: η — optimizer learning rate.
-        update_norm: ‖Δ_t‖ — L2 norm of the parameter update.
-        smoothness_L: Lipschitz smoothness constant of the loss.
-        curvature_mu: Strong convexity / curvature constant.
-        beta: Baseline forgetting term.
+        theta_min: minimum principal angle between task subspaces (radians)
+        learning_rate: η
+        update_norm: ||Δ_t||
+        smoothness_l: Lipschitz smoothness constant L
+        curvature_mu: strong convexity parameter μ
+        beta: baseline forgetting term
 
     Returns:
-        Dict with forgetting_bound, alpha, zone classification, and
-        actionable recommendation.
+        dict with forgetting_bound, alpha, sin2_theta_min,
+        rank_sensitivity, zone, recommendation
     """
-    alpha = learning_rate * smoothness_L * (update_norm ** 2) / max(curvature_mu, 1e-12)
+    alpha = learning_rate * smoothness_l * (update_norm ** 2) / curvature_mu
     sin2_theta = math.sin(theta_min) ** 2
     forgetting_bound = alpha * sin2_theta + beta
 
+    # Effective rank interaction: r_eff = min(r, c / (1 - cos(θ)))
     cos_theta = math.cos(theta_min)
     if cos_theta < 0.999:
         rank_sensitivity = 1.0 / (1.0 - cos_theta)
     else:
         rank_sensitivity = float("inf")
 
+    # Classify zone by cos²(θ_min)
     cos2 = cos_theta ** 2
     if cos2 > 0.75:
         zone = "RED"
@@ -326,7 +181,7 @@ def forgetting_risk(
 
 
 # ---------------------------------------------------------------------------
-# Drift phase classifier
+# Drift phase classifier (Ratzon et al. 2024 three-phase model)
 # ---------------------------------------------------------------------------
 
 
@@ -336,40 +191,36 @@ def classify_drift_phase(
     cka_history: list[float],
     window: int = 50,
 ) -> str:
-    """Classify current learning phase per the three-phase drift model.
+    """Classify current learning phase per Ratzon et al. 2024.
 
-    Based on Ratzon et al. (2024):
-
-    - **Phase 1 (Convergence)**: loss changing, PR changing, CKA changing.
-    - **Phase 2 (Directed drift)**: loss stable, PR falling (sparsifying),
-      CKA changing.
-    - **Phase 3 (Null drift)**: loss stable, PR stable, CKA may change
-      (geometry preserved within zero-loss manifold).
+    Phase 1 (Convergence): loss changing, PR changing, CKA changing
+    Phase 2 (Directed drift): loss stable, PR falling (sparsifying), CKA changing
+    Phase 3 (Null drift): loss stable, PR stable, CKA may change (geometry preserved)
 
     Args:
-        pr_history: Participation ratio over time.
-        loss_history: Training loss over time.
-        cka_history: CKA similarity to reference snapshot over time.
-        window: Sliding window size for analysis.
+        pr_history: participation ratio over time
+        loss_history: training loss over time
+        cka_history: CKA to reference snapshot over time
+        window: sliding window size for statistics
 
     Returns:
-        One of ``"convergence"``, ``"directed_drift"``, or ``"null_drift"``.
+        "convergence", "directed_drift", or "null_drift"
     """
     if len(pr_history) < window or len(loss_history) < window:
         return "convergence"
 
-    recent_loss = np.array(loss_history[-window:], dtype=np.float64)
-    recent_pr = np.array(pr_history[-window:], dtype=np.float64)
+    recent_loss = np.array(loss_history[-window:])
+    recent_pr = np.array(pr_history[-window:])
 
-    mean_loss = np.mean(recent_loss)
-    loss_var = float(np.var(recent_loss) / (mean_loss ** 2 + 1e-8))
+    mean_loss = float(np.mean(recent_loss))
+    loss_var = float(np.var(recent_loss)) / (mean_loss ** 2 + 1e-8)
 
-    # Linear fit for PR trend
+    # Linear fit for PR slope
     x = np.arange(window, dtype=np.float64)
     pr_slope = float(np.polyfit(x, recent_pr, 1)[0])
 
-    mean_pr = np.mean(recent_pr)
-    pr_var = float(np.var(recent_pr) / (mean_pr ** 2 + 1e-8))
+    mean_pr = float(np.mean(recent_pr))
+    pr_var = float(np.var(recent_pr)) / (mean_pr ** 2 + 1e-8)
 
     LOSS_STABLE_THRESH = 0.001
     PR_SLOPE_THRESH = -0.01
@@ -387,3 +238,185 @@ def classify_drift_phase(
         return "null_drift"
     else:
         return "directed_drift"
+
+
+# ---------------------------------------------------------------------------
+# Participation ratio
+# ---------------------------------------------------------------------------
+
+
+def participation_ratio(covariance: NDArray) -> float:
+    """Compute participation ratio: Tr(C)² / Tr(C²).
+
+    Measures effective dimensionality. Returns 1.0 for a rank-1 matrix,
+    d for a d×d identity matrix.
+
+    Args:
+        covariance: (d, d) symmetric positive semi-definite matrix
+
+    Returns:
+        Participation ratio (float >= 1.0)
+    """
+    trace_c = float(np.trace(covariance))
+    trace_c2 = float(np.trace(covariance @ covariance))
+    if trace_c2 < 1e-12:
+        return 1.0
+    return (trace_c ** 2) / trace_c2
+
+
+# ---------------------------------------------------------------------------
+# Subspace Registry
+# ---------------------------------------------------------------------------
+
+
+@dataclass
+class SubspaceEntry:
+    """A single task/agent subspace entry in the registry."""
+    basis: NDArray                  # (d, k) orthonormal
+    singular_values: NDArray        # (k,)
+    participation_ratio: float
+    timestamp: str = field(default_factory=_utc_now_iso)
+    task_id: str = ""
+    agent_id: str = ""
+
+
+class SubspaceRegistry:
+    """Per-layer subspace registry with GPM-style incremental updates.
+
+    Tracks representational subspaces for each task, supports interference
+    queries via principal angles, and monitors subspace saturation.
+
+    This is the geometry-aware memory of an agent — analogous to GPM's
+    gradient projection memory but extended for multi-agent coordination.
+    """
+
+    def __init__(self, hidden_dim: int, max_rank: int = 256) -> None:
+        self.hidden_dim = hidden_dim
+        self.max_rank = max_rank
+
+        self.entries: dict[str, SubspaceEntry] = {}    # task_id -> entry
+        self._merged_basis: NDArray | None = None       # accumulated basis
+
+    def add_task(
+        self,
+        task_id: str,
+        activations: NDArray,
+        threshold: float = 0.95,
+        agent_id: str = "",
+    ) -> SubspaceEntry:
+        """GPM-style incremental subspace update.
+
+        1. Project out existing basis directions
+        2. SVD of residual
+        3. Keep top-k directions by variance threshold
+        4. Append to merged basis
+
+        Args:
+            task_id: unique identifier for this task
+            activations: (d, n_samples) activation matrix
+            threshold: cumulative variance threshold for rank selection
+            agent_id: which agent produced these activations
+
+        Returns:
+            SubspaceEntry for the new task
+        """
+        if self._merged_basis is not None:
+            # Remove existing directions
+            m = self._merged_basis
+            residual = activations - m @ (m.T @ activations)
+        else:
+            residual = activations
+
+        u, s, _ = np.linalg.svd(residual, full_matrices=False)
+
+        # Select top-k by variance threshold
+        total_var = float(np.sum(s ** 2))
+        if total_var < 1e-12:
+            k = 1
+        else:
+            cumvar = np.cumsum(s ** 2) / total_var
+            k = int(np.searchsorted(cumvar, threshold)) + 1
+
+        # Respect max rank budget
+        current_rank = self._merged_basis.shape[1] if self._merged_basis is not None else 0
+        k = min(k, self.max_rank - current_rank)
+        k = max(k, 1)  # at least 1 direction
+
+        new_basis = u[:, :k]
+        new_sv = s[:k]
+
+        # Compute participation ratio
+        cov = new_basis @ np.diag(new_sv ** 2) @ new_basis.T
+        pr = participation_ratio(cov) if k > 1 else 1.0
+
+        entry = SubspaceEntry(
+            basis=new_basis,
+            singular_values=new_sv,
+            participation_ratio=pr,
+            task_id=task_id,
+            agent_id=agent_id,
+        )
+        self.entries[task_id] = entry
+
+        # Update merged basis
+        if self._merged_basis is not None:
+            self._merged_basis = np.hstack([self._merged_basis, new_basis])
+        else:
+            self._merged_basis = new_basis
+
+        return entry
+
+    def project_gradient(self, grad: NDArray) -> NDArray:
+        """Project gradient onto residual gradient space.
+
+        Removes components that would interfere with stored subspaces.
+        g_hat = g - M @ M^T @ g
+
+        Args:
+            grad: gradient matrix (d, d) or (d,) vector
+
+        Returns:
+            Projected gradient, same shape as input
+        """
+        if self._merged_basis is None:
+            return grad
+        m = self._merged_basis
+        if grad.ndim == 1:
+            return grad - m @ (m.T @ grad)
+        else:
+            return grad - (grad @ m) @ m.T
+
+    def interference(self, task_a: str, task_b: str) -> dict[str, Any]:
+        """Compute interference between two tasks via principal angles.
+
+        Returns subspace_overlap_score dict, or error dict if task not found.
+        """
+        ea = self.entries.get(task_a)
+        eb = self.entries.get(task_b)
+        if ea is None or eb is None:
+            return {"error": f"task not found: {task_a if ea is None else task_b}"}
+        return subspace_overlap_score(ea.basis, eb.basis)
+
+    def saturation_ratio(self) -> float:
+        """Fraction of total subspace capacity consumed."""
+        if self._merged_basis is None:
+            return 0.0
+        return self._merged_basis.shape[1] / self.hidden_dim
+
+    def summary(self) -> dict[str, Any]:
+        """Return a summary of the registry state."""
+        return {
+            "hidden_dim": self.hidden_dim,
+            "max_rank": self.max_rank,
+            "num_tasks": len(self.entries),
+            "total_rank": self._merged_basis.shape[1] if self._merged_basis is not None else 0,
+            "saturation": self.saturation_ratio(),
+            "tasks": {
+                tid: {
+                    "rank": int(e.basis.shape[1]),
+                    "pr": e.participation_ratio,
+                    "agent": e.agent_id,
+                }
+                for tid, e in self.entries.items()
+            },
+        }
