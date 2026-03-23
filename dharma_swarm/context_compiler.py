@@ -99,9 +99,10 @@ class ContextCompiler:
         "Recent Session": 0.10,
         "Retrieved Recall": 0.10,
         "Memory Palace": 0.10,
-        "Durable Facts": 0.10,
-        "Artifacts": 0.06,
-        "Workspace": 0.06,
+        "Semantic Context": 0.05,
+        "Durable Facts": 0.08,
+        "Artifacts": 0.05,
+        "Workspace": 0.04,
     }
 
     def __init__(
@@ -111,11 +112,13 @@ class ContextCompiler:
         memory_lattice: MemoryLattice,
         provider_policy: ProviderPolicyRouter | None = None,
         memory_palace: Any = None,
+        graph_store: Any = None,
     ) -> None:
         self.runtime_state = runtime_state
         self.memory_lattice = memory_lattice
         self.provider_policy = provider_policy or ProviderPolicyRouter()
         self.memory_palace = memory_palace
+        self.graph_store = graph_store
         # Frozen snapshot cache: session_id -> ContextBundleRecord
         self._frozen_bundles: dict[str, ContextBundleRecord] = {}
 
@@ -204,6 +207,13 @@ class ContextCompiler:
                     palace_hits = self.memory_palace.search(recall_query, top_k=5)
             except Exception as exc:
                 logger.debug("Memory Palace search failed: %s", exc)
+        # Phase 7b: Semantic Graph concept search
+        semantic_hits: list[dict[str, Any]] = []
+        if self.graph_store is not None and recall_query:
+            try:
+                semantic_hits = self._search_semantic_graph(recall_query)
+            except Exception as exc:
+                logger.debug("Semantic graph search failed: %s", exc)
         sections = self._build_sections(
             session=session,
             task_id=task_id,
@@ -216,6 +226,7 @@ class ContextCompiler:
             recent_events=recent_events,
             recall_hits=recall_hits,
             palace_hits=palace_hits,
+            semantic_hits=semantic_hits,
             facts=facts,
             artifacts=artifacts,
             workspace_root=Path(workspace_root).expanduser() if workspace_root else None,
@@ -299,13 +310,19 @@ class ContextCompiler:
         recent_events: list[dict[str, Any]],
         recall_hits: list[MemoryRecallHit],
         palace_hits: list[dict[str, Any]],
-        facts: list[MemoryFact],
-        artifacts: list[ArtifactRecord],
-        workspace_root: Path | None,
-        active_paths: list[Path],
-        runs: list[DelegationRun],
-        leases: list[WorkspaceLease],
+        semantic_hits: list[dict[str, Any]] | None = None,
+        facts: list[MemoryFact] | None = None,
+        artifacts: list[ArtifactRecord] | None = None,
+        workspace_root: Path | None = None,
+        active_paths: list[Path] | None = None,
+        runs: list[DelegationRun] | None = None,
+        leases: list[WorkspaceLease] | None = None,
     ) -> list[ContextSection]:
+        facts = facts or []
+        artifacts = artifacts or []
+        active_paths = active_paths or []
+        runs = runs or []
+        leases = leases or []
         sections: list[ContextSection] = []
 
         governance_lines = [f"- {item}" for item in policy_constraints if str(item).strip()]
@@ -437,6 +454,32 @@ class ContextCompiler:
                 )
             )
 
+        # Phase 7b: Semantic Context section
+        if semantic_hits:
+            sem_lines = []
+            for hit in semantic_hits[:5]:
+                name = hit.get("name", "")
+                defn = hit.get("definition", "")[:120]
+                related = hit.get("related", [])
+                code_locs = hit.get("code_locations", [])
+                line = f"- {name}"
+                if defn:
+                    line += f": {defn}"
+                sem_lines.append(line)
+                if related:
+                    sem_lines.append(f"  Related: {', '.join(related[:5])}")
+                if code_locs:
+                    sem_lines.append(f"  Code: {', '.join(code_locs[:3])}")
+            sections.append(
+                ContextSection(
+                    name="Semantic Context",
+                    priority=7,
+                    content="\n".join(sem_lines),
+                    source_refs=[],
+                    metadata={"source": "graph_store"},
+                )
+            )
+
         if facts:
             fact_lines = []
             refs = []
@@ -539,6 +582,59 @@ class ContextCompiler:
         for section in sections:
             parts.append(f"\n## {section.name}\n{section.content}")
         return "\n".join(parts).strip()
+
+    def _search_semantic_graph(self, query: str, limit: int = 5) -> list[dict[str, Any]]:
+        """Search the GraphStore's semantic graph for concepts related to query.
+
+        Returns list of dicts with name, definition, related concepts,
+        and code locations from bridges.
+        """
+        if self.graph_store is None:
+            return []
+
+        results: list[dict[str, Any]] = []
+        try:
+            nodes = self.graph_store.search_nodes("semantic", query, limit=limit)
+        except Exception:
+            return []
+
+        for node in nodes[:limit]:
+            entry: dict[str, Any] = {
+                "name": node.get("name", ""),
+                "definition": "",
+                "related": [],
+                "code_locations": [],
+            }
+            data = node.get("data", {})
+            if isinstance(data, dict):
+                entry["definition"] = data.get("definition", "")[:200]
+
+            # Get related concepts via edges
+            try:
+                edges = self.graph_store.get_edges(
+                    "semantic", node["id"], direction="out"
+                )
+                for edge in edges[:5]:
+                    target = self.graph_store.get_node("semantic", edge["target_id"])
+                    if target:
+                        entry["related"].append(target.get("name", edge["target_id"]))
+            except Exception:
+                pass
+
+            # Get code locations via bridges
+            try:
+                bridges = self.graph_store.get_bridges(
+                    target_graph="semantic", target_id=node["id"]
+                )
+                for bridge in bridges[:3]:
+                    src_id = bridge.get("source_id", "")
+                    if src_id.startswith("file::"):
+                        entry["code_locations"].append(src_id.removeprefix("file::"))
+            except Exception:
+                pass
+
+            results.append(entry)
+        return results
 
     def _workspace_section(
         self,

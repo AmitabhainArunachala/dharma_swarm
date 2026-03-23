@@ -81,6 +81,10 @@ class MemoryPalace:
     scoring. The _fusion_rerank() method now receives actual vector scores
     instead of the placeholder base_score from the lattice.
 
+    Phase 7b: optionally integrates GraphNexus for concept-graph-aware
+    search. When a graph_store is provided, recall() also queries the
+    semantic graph and merges concept hits into results.
+
     Usage:
         from dharma_swarm.memory_palace import MemoryPalace
         palace = MemoryPalace(memory_lattice=lattice)
@@ -91,8 +95,10 @@ class MemoryPalace:
         self,
         memory_lattice: Any = None,
         state_dir: Path | None = None,
+        graph_store: Any = None,
     ) -> None:
         self._lattice = memory_lattice
+        self._graph_store = graph_store
         self._query_history: list[dict[str, Any]] = []
 
         # Phase 6: VectorStore for real semantic similarity.
@@ -188,6 +194,14 @@ class MemoryPalace:
             except Exception as exc:
                 logger.debug("VectorStore recall failed (non-fatal): %s", exc)
 
+        # Phase 7b: Graph-aware search via GraphStore semantic graph
+        graph_results: list[PalaceResult] = []
+        if self._graph_store is not None:
+            try:
+                graph_results = self._search_graph(query.text)
+            except Exception as exc:
+                logger.debug("Graph search in recall failed (non-fatal): %s", exc)
+
         # Merge: start with lattice results, augment with vector scores
         results = list(lattice_results)
 
@@ -197,6 +211,12 @@ class MemoryPalace:
             if vr.content[:200] not in existing_contents:
                 results.append(vr)
                 existing_contents.add(vr.content[:200])
+
+        # Add graph results not already present
+        for gr in graph_results:
+            if gr.content[:200] not in existing_contents:
+                results.append(gr)
+                existing_contents.add(gr.content[:200])
 
         # Phase 3: Re-rank using fusion scoring with real vector scores
         results = self._fusion_rerank(results, query, vector_score_map)
@@ -366,6 +386,64 @@ class MemoryPalace:
 
         scored.sort(key=lambda x: x[0], reverse=True)
         return [r for _, r in scored]
+
+    def _search_graph(self, query_text: str, limit: int = 5) -> list[PalaceResult]:
+        """Search the GraphStore semantic graph for concept matches.
+
+        Scores hits by: FTS5 relevance + edge count (centrality) + bridge
+        count (cross-graph connections).  Returns PalaceResult items.
+        """
+        if self._graph_store is None:
+            return []
+
+        results: list[PalaceResult] = []
+        try:
+            nodes = self._graph_store.search_nodes("semantic", query_text, limit=limit)
+        except Exception:
+            return []
+
+        for node in nodes[:limit]:
+            node_id = node.get("id", "")
+            name = node.get("name", "")
+            data = node.get("data", {})
+            definition = ""
+            if isinstance(data, dict):
+                definition = data.get("definition", "")
+
+            content = f"[Concept] {name}"
+            if definition:
+                content += f": {definition[:300]}"
+
+            # Score components
+            try:
+                edge_count = len(self._graph_store.get_edges("semantic", node_id))
+            except Exception:
+                edge_count = 0
+
+            try:
+                bridge_count = len(self._graph_store.get_bridges(
+                    target_graph="semantic", target_id=node_id
+                ))
+            except Exception:
+                bridge_count = 0
+
+            # Composite score: base relevance + centrality bonus + bridge bonus
+            score = 0.5 + min(edge_count * 0.05, 0.3) + min(bridge_count * 0.03, 0.2)
+
+            results.append(PalaceResult(
+                content=content[:2000],
+                source=f"graph:semantic:{node_id}",
+                score=round(score, 4),
+                layer="semantic",
+                metadata={
+                    "node_id": node_id,
+                    "edge_count": edge_count,
+                    "bridge_count": bridge_count,
+                    "origin": "graph_nexus",
+                },
+            ))
+
+        return results
 
     def search(self, query: str, top_k: int = 5) -> list[dict[str, Any]]:
         """Synchronous search for context_compiler integration.
