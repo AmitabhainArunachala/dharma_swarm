@@ -21,16 +21,27 @@ from dharma_swarm.ollama_config import (
     resolve_ollama_model,
 )
 
+OPENAI_BASE_URL = "https://api.openai.com/v1"
 OPENROUTER_BASE_URL = "https://openrouter.ai/api/v1"
 NVIDIA_NIM_BASE_URL = "https://integrate.api.nvidia.com/v1"
+GROQ_BASE_URL = "https://api.groq.com/openai/v1"
+CEREBRAS_BASE_URL = "https://api.cerebras.ai/v1"
+SILICONFLOW_BASE_URL = "https://api.siliconflow.cn/v1"
+GOOGLE_AI_BASE_URL = "https://generativelanguage.googleapis.com/v1beta/openai/"
 DEFAULT_CLAUDE_MODEL = "claude-opus-4-6"
 DEFAULT_OPENAI_MODEL = "gpt-5.4"
 DEFAULT_OPENROUTER_MODEL = "anthropic/claude-opus-4-6"
+DEFAULT_GROQ_MODEL = "qwen/qwen3-32b"
+DEFAULT_SILICONFLOW_MODEL = "Qwen/Qwen3-Coder-480B-A35B-Instruct"
 DEFAULT_NIM_MODEL = "meta/llama-3.3-70b-instruct"
 DEFAULT_PROVIDER_TIMEOUT_SECONDS = 300
 
-# FREE FIRST — Ollama Cloud, NVIDIA NIM, OpenRouter Free before paid providers.
+# FREE FIRST — Groq/Cerebras/SiliconFlow fastest, then Ollama Cloud, NVIDIA NIM,
+# OpenRouter Free before paid providers.
 DEFAULT_RUNTIME_PROVIDERS: tuple[ProviderType, ...] = (
+    ProviderType.GROQ,
+    ProviderType.CEREBRAS,
+    ProviderType.SILICONFLOW,
     ProviderType.OLLAMA,
     ProviderType.NVIDIA_NIM,
     ProviderType.OPENROUTER_FREE,
@@ -39,14 +50,19 @@ DEFAULT_RUNTIME_PROVIDERS: tuple[ProviderType, ...] = (
     ProviderType.ANTHROPIC,
     ProviderType.CLAUDE_CODE,
     ProviderType.CODEX,
+    ProviderType.GOOGLE_AI,
 )
 
 # Hardcoded low-cost preference for autonomous/runtime call sites that would
-# otherwise talk to OpenRouter directly. Keep local/NIM ahead of OpenRouter.
+# otherwise talk to OpenRouter directly. Keep local/NIM ahead of OpenRouter;
+# Groq/Cerebras/SiliconFlow slotted after free tiers.
 PREFERRED_LOW_COST_RUNTIME_PROVIDERS: tuple[ProviderType, ...] = (
     ProviderType.OLLAMA,
     ProviderType.NVIDIA_NIM,
     ProviderType.OPENROUTER_FREE,
+    ProviderType.GROQ,
+    ProviderType.CEREBRAS,
+    ProviderType.SILICONFLOW,
     ProviderType.OPENROUTER,
 )
 
@@ -109,6 +125,7 @@ def resolve_runtime_provider_config(
         return RuntimeProviderConfig(
             provider=provider,
             api_key=token,
+            base_url=(base_url or OPENAI_BASE_URL).rstrip("/"),
             default_model=model or DEFAULT_OPENAI_MODEL,
             available=bool(token),
         )
@@ -209,6 +226,66 @@ def resolve_runtime_provider_config(
             source="binary",
         )
 
+    if provider == ProviderType.GROQ:
+        token = api_key or _env_value(env_map, "GROQ_API_KEY")
+        resolved_base = (
+            base_url
+            or _env_value(env_map, "GROQ_BASE_URL")
+            or GROQ_BASE_URL
+        ).rstrip("/")
+        return RuntimeProviderConfig(
+            provider=provider,
+            api_key=token,
+            base_url=resolved_base,
+            default_model=model or DEFAULT_GROQ_MODEL,
+            available=bool(token),
+        )
+
+    if provider == ProviderType.CEREBRAS:
+        token = api_key or _env_value(env_map, "CEREBRAS_API_KEY")
+        resolved_base = (
+            base_url
+            or _env_value(env_map, "CEREBRAS_BASE_URL")
+            or CEREBRAS_BASE_URL
+        ).rstrip("/")
+        return RuntimeProviderConfig(
+            provider=provider,
+            api_key=token,
+            base_url=resolved_base,
+            default_model=model or "llama-3.3-70b",
+            available=bool(token),
+        )
+
+    if provider == ProviderType.SILICONFLOW:
+        token = api_key or _env_value(env_map, "SILICONFLOW_API_KEY")
+        resolved_base = (
+            base_url
+            or _env_value(env_map, "SILICONFLOW_BASE_URL")
+            or SILICONFLOW_BASE_URL
+        ).rstrip("/")
+        return RuntimeProviderConfig(
+            provider=provider,
+            api_key=token,
+            base_url=resolved_base,
+            default_model=model or DEFAULT_SILICONFLOW_MODEL,
+            available=bool(token),
+        )
+
+    if provider == ProviderType.GOOGLE_AI:
+        token = api_key or _env_value(env_map, "GOOGLE_AI_API_KEY")
+        resolved_base = (
+            base_url
+            or _env_value(env_map, "GOOGLE_AI_BASE_URL")
+            or GOOGLE_AI_BASE_URL
+        ).rstrip("/")
+        return RuntimeProviderConfig(
+            provider=provider,
+            api_key=token,
+            base_url=resolved_base,
+            default_model=model or "gemini-2.5-flash",
+            available=bool(token),
+        )
+
     raise ValueError(f"Unsupported runtime provider: {provider.value}")
 
 
@@ -217,13 +294,17 @@ def create_runtime_provider(config: RuntimeProviderConfig) -> Any:
 
     from dharma_swarm.providers import (
         AnthropicProvider,
+        CerebrasProvider,
         ClaudeCodeProvider,
         CodexProvider,
+        GoogleAIProvider,
+        GroqProvider,
         NVIDIANIMProvider,
         OllamaProvider,
         OpenAIProvider,
         OpenRouterFreeProvider,
         OpenRouterProvider,
+        SiliconFlowProvider,
     )
 
     if config.provider == ProviderType.ANTHROPIC:
@@ -274,6 +355,26 @@ def create_runtime_provider(config: RuntimeProviderConfig) -> Any:
         if config.working_dir is not None:
             kwargs["working_dir"] = config.working_dir
         return CodexProvider(**kwargs)
+    if config.provider == ProviderType.GROQ:
+        kwargs = {}
+        if config.api_key is not None:
+            kwargs["api_key"] = config.api_key
+        return GroqProvider(**kwargs)
+    if config.provider == ProviderType.CEREBRAS:
+        kwargs = {}
+        if config.api_key is not None:
+            kwargs["api_key"] = config.api_key
+        return CerebrasProvider(**kwargs)
+    if config.provider == ProviderType.SILICONFLOW:
+        kwargs = {}
+        if config.api_key is not None:
+            kwargs["api_key"] = config.api_key
+        return SiliconFlowProvider(**kwargs)
+    if config.provider == ProviderType.GOOGLE_AI:
+        kwargs = {}
+        if config.api_key is not None:
+            kwargs["api_key"] = config.api_key
+        return GoogleAIProvider(**kwargs)
     raise ValueError(f"Unsupported runtime provider: {config.provider.value}")
 
 
@@ -394,17 +495,24 @@ async def complete_via_preferred_runtime_providers(
 
 
 __all__ = [
+    "CEREBRAS_BASE_URL",
     "DEFAULT_CLAUDE_MODEL",
+    "DEFAULT_GROQ_MODEL",
     "DEFAULT_NIM_MODEL",
     "DEFAULT_OPENAI_MODEL",
     "DEFAULT_OPENROUTER_MODEL",
     "DEFAULT_PROVIDER_TIMEOUT_SECONDS",
     "DEFAULT_RUNTIME_PROVIDERS",
+    "DEFAULT_SILICONFLOW_MODEL",
+    "GOOGLE_AI_BASE_URL",
+    "GROQ_BASE_URL",
     "NVIDIA_NIM_BASE_URL",
+    "OPENAI_BASE_URL",
     "OPENROUTER_BASE_URL",
     "PREFERRED_LOW_COST_RUNTIME_PROVIDERS",
     "PREFERRED_LOW_COST_WITH_ANTHROPIC_RUNTIME_PROVIDERS",
     "RuntimeProviderConfig",
+    "SILICONFLOW_BASE_URL",
     "complete_via_preferred_runtime_providers",
     "create_default_provider_map",
     "create_runtime_provider",

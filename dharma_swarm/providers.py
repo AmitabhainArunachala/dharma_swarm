@@ -936,6 +936,302 @@ class OllamaProvider(LLMProvider):
                         yield str(content)
 
 
+class GroqProvider(LLMProvider):
+    """Groq -- fastest inference (800-2600 t/s). GPT-OSS 120B, Kimi K2, Llama 4 Scout."""
+
+    capabilities = ProviderCapabilities(
+        supports_streaming=True, supports_tools=True,
+        max_context_tokens=131_072, provider_family="groq",
+    )
+
+    def __init__(self, api_key: str | None = None) -> None:
+        self._api_key = api_key or os.environ.get("GROQ_API_KEY")
+        self._client: Any = None
+
+    def _client_or_raise(self) -> Any:
+        if self._client is not None:
+            return self._client
+        if not self._api_key:
+            raise RuntimeError("GROQ_API_KEY not set")
+        try:
+            from openai import AsyncOpenAI
+        except ImportError as exc:
+            raise ImportError("pip install openai") from exc
+        self._client = AsyncOpenAI(
+            api_key=self._api_key,
+            base_url="https://api.groq.com/openai/v1",
+        )
+        return self._client
+
+    @staticmethod
+    def _build_messages(msgs: list[dict[str, str]], system: str) -> list[dict[str, str]]:
+        out: list[dict[str, str]] = []
+        if system:
+            out.append({"role": "system", "content": system})
+        out.extend(msgs)
+        return out
+
+    @jikoku_traced_provider
+    async def complete(self, request: LLMRequest) -> LLMResponse:
+        client = self._client_or_raise()
+        messages = self._build_messages(request.messages, request.system)
+        kwargs: dict[str, Any] = dict(
+            model=request.model, messages=messages,
+            max_tokens=request.max_tokens, temperature=request.temperature,
+        )
+        if request.tools:
+            kwargs["tools"] = request.tools
+        resp = await client.chat.completions.create(**kwargs)
+        choice = resp.choices[0]
+        msg = choice.message
+        tool_calls: list[dict[str, Any]] = [
+            {"id": tc.id, "name": tc.function.name,
+             "arguments": tc.function.arguments}
+            for tc in (msg.tool_calls or [])
+        ]
+        return LLMResponse(
+            content=msg.content or "", model=resp.model,
+            usage={"prompt_tokens": resp.usage.prompt_tokens,
+                   "completion_tokens": resp.usage.completion_tokens,
+                   "total_tokens": resp.usage.total_tokens} if resp.usage else {},
+            tool_calls=tool_calls, stop_reason=choice.finish_reason,
+        )
+
+    async def stream(self, request: LLMRequest) -> AsyncIterator[str]:
+        client = self._client_or_raise()
+        resp = await client.chat.completions.create(
+            model=request.model, stream=True,
+            messages=self._build_messages(request.messages, request.system),
+            max_tokens=request.max_tokens, temperature=request.temperature,
+        )
+        async for chunk in resp:
+            delta = chunk.choices[0].delta if chunk.choices else None
+            if delta and delta.content:
+                yield delta.content
+
+
+class CerebrasProvider(LLMProvider):
+    """Cerebras -- 2600 t/s inference. Qwen3 235B, GPT-OSS 120B, Llama 70B."""
+
+    capabilities = ProviderCapabilities(
+        supports_streaming=True, supports_tools=True,
+        max_context_tokens=131_072, provider_family="cerebras",
+    )
+
+    def __init__(self, api_key: str | None = None) -> None:
+        self._api_key = api_key or os.environ.get("CEREBRAS_API_KEY")
+        self._client: Any = None
+
+    def _client_or_raise(self) -> Any:
+        if self._client is not None:
+            return self._client
+        if not self._api_key:
+            raise RuntimeError("CEREBRAS_API_KEY not set")
+        try:
+            from openai import AsyncOpenAI
+        except ImportError as exc:
+            raise ImportError("pip install openai") from exc
+        self._client = AsyncOpenAI(
+            api_key=self._api_key,
+            base_url="https://api.cerebras.ai/v1",
+        )
+        return self._client
+
+    @staticmethod
+    def _build_messages(msgs: list[dict[str, str]], system: str) -> list[dict[str, str]]:
+        out: list[dict[str, str]] = []
+        if system:
+            out.append({"role": "system", "content": system})
+        out.extend(msgs)
+        return out
+
+    @jikoku_traced_provider
+    async def complete(self, request: LLMRequest) -> LLMResponse:
+        client = self._client_or_raise()
+        messages = self._build_messages(request.messages, request.system)
+        kwargs: dict[str, Any] = dict(
+            model=request.model, messages=messages,
+            max_tokens=request.max_tokens, temperature=request.temperature,
+        )
+        if request.tools:
+            kwargs["tools"] = request.tools
+        resp = await client.chat.completions.create(**kwargs)
+        choice = resp.choices[0]
+        msg = choice.message
+        tool_calls: list[dict[str, Any]] = [
+            {"id": tc.id, "name": tc.function.name,
+             "arguments": tc.function.arguments}
+            for tc in (msg.tool_calls or [])
+        ]
+        return LLMResponse(
+            content=msg.content or "", model=resp.model,
+            usage={"prompt_tokens": resp.usage.prompt_tokens,
+                   "completion_tokens": resp.usage.completion_tokens,
+                   "total_tokens": resp.usage.total_tokens} if resp.usage else {},
+            tool_calls=tool_calls, stop_reason=choice.finish_reason,
+        )
+
+    async def stream(self, request: LLMRequest) -> AsyncIterator[str]:
+        client = self._client_or_raise()
+        resp = await client.chat.completions.create(
+            model=request.model, stream=True,
+            messages=self._build_messages(request.messages, request.system),
+            max_tokens=request.max_tokens, temperature=request.temperature,
+        )
+        async for chunk in resp:
+            delta = chunk.choices[0].delta if chunk.choices else None
+            if delta and delta.content:
+                yield delta.content
+
+
+class SiliconFlowProvider(LLMProvider):
+    """Silicon Flow -- Chinese frontier models: GLM-5, MiniMax, Qwen 3.5 Coder, Kimi K2.5."""
+
+    capabilities = ProviderCapabilities(
+        supports_streaming=True, supports_tools=True,
+        max_context_tokens=262_144, provider_family="siliconflow",
+    )
+
+    def __init__(self, api_key: str | None = None) -> None:
+        self._api_key = api_key or os.environ.get("SILICONFLOW_API_KEY")
+        self._client: Any = None
+
+    def _client_or_raise(self) -> Any:
+        if self._client is not None:
+            return self._client
+        if not self._api_key:
+            raise RuntimeError("SILICONFLOW_API_KEY not set")
+        try:
+            from openai import AsyncOpenAI
+        except ImportError as exc:
+            raise ImportError("pip install openai") from exc
+        self._client = AsyncOpenAI(
+            api_key=self._api_key,
+            base_url="https://api.siliconflow.cn/v1",
+        )
+        return self._client
+
+    @staticmethod
+    def _build_messages(msgs: list[dict[str, str]], system: str) -> list[dict[str, str]]:
+        out: list[dict[str, str]] = []
+        if system:
+            out.append({"role": "system", "content": system})
+        out.extend(msgs)
+        return out
+
+    @jikoku_traced_provider
+    async def complete(self, request: LLMRequest) -> LLMResponse:
+        client = self._client_or_raise()
+        messages = self._build_messages(request.messages, request.system)
+        kwargs: dict[str, Any] = dict(
+            model=request.model, messages=messages,
+            max_tokens=request.max_tokens, temperature=request.temperature,
+        )
+        if request.tools:
+            kwargs["tools"] = request.tools
+        resp = await client.chat.completions.create(**kwargs)
+        choice = resp.choices[0]
+        msg = choice.message
+        tool_calls: list[dict[str, Any]] = [
+            {"id": tc.id, "name": tc.function.name,
+             "arguments": tc.function.arguments}
+            for tc in (msg.tool_calls or [])
+        ]
+        return LLMResponse(
+            content=msg.content or "", model=resp.model,
+            usage={"prompt_tokens": resp.usage.prompt_tokens,
+                   "completion_tokens": resp.usage.completion_tokens,
+                   "total_tokens": resp.usage.total_tokens} if resp.usage else {},
+            tool_calls=tool_calls, stop_reason=choice.finish_reason,
+        )
+
+    async def stream(self, request: LLMRequest) -> AsyncIterator[str]:
+        client = self._client_or_raise()
+        resp = await client.chat.completions.create(
+            model=request.model, stream=True,
+            messages=self._build_messages(request.messages, request.system),
+            max_tokens=request.max_tokens, temperature=request.temperature,
+        )
+        async for chunk in resp:
+            delta = chunk.choices[0].delta if chunk.choices else None
+            if delta and delta.content:
+                yield delta.content
+
+
+class GoogleAIProvider(LLMProvider):
+    """Google AI Studio -- Gemini 2.5 Flash with 1M context. Backup provider."""
+
+    capabilities = ProviderCapabilities(
+        supports_streaming=True, supports_tools=True,
+        max_context_tokens=1_000_000, provider_family="google_ai",
+    )
+
+    def __init__(self, api_key: str | None = None) -> None:
+        self._api_key = api_key or os.environ.get("GOOGLE_AI_API_KEY")
+        self._client: Any = None
+
+    def _client_or_raise(self) -> Any:
+        if self._client is not None:
+            return self._client
+        if not self._api_key:
+            raise RuntimeError("GOOGLE_AI_API_KEY not set")
+        try:
+            from openai import AsyncOpenAI
+        except ImportError as exc:
+            raise ImportError("pip install openai") from exc
+        self._client = AsyncOpenAI(
+            api_key=self._api_key,
+            base_url="https://generativelanguage.googleapis.com/v1beta/openai/",
+        )
+        return self._client
+
+    @staticmethod
+    def _build_messages(msgs: list[dict[str, str]], system: str) -> list[dict[str, str]]:
+        out: list[dict[str, str]] = []
+        if system:
+            out.append({"role": "system", "content": system})
+        out.extend(msgs)
+        return out
+
+    @jikoku_traced_provider
+    async def complete(self, request: LLMRequest) -> LLMResponse:
+        client = self._client_or_raise()
+        messages = self._build_messages(request.messages, request.system)
+        kwargs: dict[str, Any] = dict(
+            model=request.model, messages=messages,
+            max_tokens=request.max_tokens, temperature=request.temperature,
+        )
+        if request.tools:
+            kwargs["tools"] = request.tools
+        resp = await client.chat.completions.create(**kwargs)
+        choice = resp.choices[0]
+        msg = choice.message
+        tool_calls: list[dict[str, Any]] = [
+            {"id": tc.id, "name": tc.function.name,
+             "arguments": tc.function.arguments}
+            for tc in (msg.tool_calls or [])
+        ]
+        return LLMResponse(
+            content=msg.content or "", model=resp.model,
+            usage={"prompt_tokens": resp.usage.prompt_tokens,
+                   "completion_tokens": resp.usage.completion_tokens,
+                   "total_tokens": resp.usage.total_tokens} if resp.usage else {},
+            tool_calls=tool_calls, stop_reason=choice.finish_reason,
+        )
+
+    async def stream(self, request: LLMRequest) -> AsyncIterator[str]:
+        client = self._client_or_raise()
+        resp = await client.chat.completions.create(
+            model=request.model, stream=True,
+            messages=self._build_messages(request.messages, request.system),
+            max_tokens=request.max_tokens, temperature=request.temperature,
+        )
+        async for chunk in resp:
+            delta = chunk.choices[0].delta if chunk.choices else None
+            if delta and delta.content:
+                yield delta.content
+
+
 class ModelRouter:
     """Routes LLM requests to the appropriate provider."""
 

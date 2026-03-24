@@ -121,6 +121,10 @@ class ProviderType(str, Enum):
     CODEX = "codex"
     OPENROUTER_FREE = "openrouter_free"
     OLLAMA = "ollama"
+    GROQ = "groq"
+    CEREBRAS = "cerebras"
+    SILICONFLOW = "siliconflow"
+    GOOGLE_AI = "google_ai"
 
 
 # === Utility ===

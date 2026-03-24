@@ -363,6 +363,8 @@ def model_hint_for_provider(
             return "moonshotai/kimi-k2.5"
         if provider == ProviderType.OLLAMA and ollama_cloud:
             return "kimi-k2.5:cloud"
+        if provider == ProviderType.GOOGLE_AI:
+            return "gemini-2.5-flash"
 
     if signals.language_code in {"ja", "en_ja_mixed"}:
         if provider == ProviderType.OPENROUTER:
@@ -387,5 +389,13 @@ def model_hint_for_provider(
             return "nvidia/llama-3.1-nemotron-ultra-253b-v1"
         if provider == ProviderType.OLLAMA and ollama_cloud:
             return "glm-5:cloud"
+        if provider == ProviderType.GROQ:
+            return "llama-3.3-70b-versatile"
+        if provider == ProviderType.CEREBRAS:
+            return "llama-3.3-70b"
+        if provider == ProviderType.SILICONFLOW:
+            return "Qwen/Qwen3-Coder-480B-A35B-Instruct"
+        if provider == ProviderType.GOOGLE_AI:
+            return "gemini-2.5-flash"
 
     return effective_default_hint
