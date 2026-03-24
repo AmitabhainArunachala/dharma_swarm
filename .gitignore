@@ -17,8 +17,10 @@ build/
 .swarm/
 .dharma_baseline/
 .dharma_test/
+.hive-mind/
 .mcp.json
 .worktrees/
+tools/ascii_studio/
 
 # Temporary analysis outputs
 *.bak

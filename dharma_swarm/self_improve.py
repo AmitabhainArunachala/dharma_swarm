@@ -103,6 +103,59 @@ def is_enabled() -> bool:
     return os.environ.get("DHARMA_SELF_IMPROVE", "0").strip() in ("1", "true", "yes")
 
 
+# ---------------------------------------------------------------------------
+# Overnight activation — staged autonomy
+# ---------------------------------------------------------------------------
+
+# Autonomy levels for overnight self-improvement
+AUTONOMY_LEVEL_0 = 0  # Read-only analysis, report generation
+AUTONOMY_LEVEL_1 = 1  # Test additions and improvements (auto-apply if passing)
+AUTONOMY_LEVEL_2 = 2  # Non-identity code changes (darwin branch, verify)
+AUTONOMY_LEVEL_3 = 3  # Identity-layer proposals (generate only, morning review)
+
+_overnight_autonomy_level: int = AUTONOMY_LEVEL_1
+_overnight_active: bool = False
+
+
+def enable_for_overnight(autonomy_level: int = AUTONOMY_LEVEL_1) -> None:
+    """Enable self-improvement for overnight mode with staged autonomy.
+
+    Levels:
+        0: read-only analysis and report generation
+        1: test additions and improvements (auto-apply if passing)
+        2: non-identity code changes (apply on darwin branch, verify)
+        3: identity-layer proposals (generate only, morning review)
+
+    PROTECTED_FILES guard remains active at all levels.
+    """
+    global _overnight_autonomy_level, _overnight_active
+    _overnight_autonomy_level = max(0, min(autonomy_level, AUTONOMY_LEVEL_3))
+    _overnight_active = True
+    os.environ["DHARMA_SELF_IMPROVE"] = "1"
+    logger.info(
+        "Self-improvement enabled for overnight (autonomy_level=%d)",
+        _overnight_autonomy_level,
+    )
+
+
+def disable_overnight() -> None:
+    """Disable overnight self-improvement mode."""
+    global _overnight_active
+    _overnight_active = False
+    os.environ.pop("DHARMA_SELF_IMPROVE", None)
+    logger.info("Self-improvement overnight mode disabled")
+
+
+def overnight_autonomy_level() -> int:
+    """Return the current overnight autonomy level."""
+    return _overnight_autonomy_level if _overnight_active else -1
+
+
+def is_overnight_active() -> bool:
+    """Check if overnight self-improvement mode is active."""
+    return _overnight_active
+
+
 def _touches_protected(proposals: list[Any]) -> list[Any]:
     """Return proposals that touch identity-layer files."""
     protected = []
@@ -180,16 +233,84 @@ class SelfImprovementCycle:
                 self._save_report(report)
                 return report
 
-            # Phase 4: Create branch
+            # Phase 4: EVAL-GATE — check system health before applying diffs
             branch_name = f"darwin/cycle-{cycle_id}"
             report.branch_name = branch_name
 
-            # Phase 5: TEST — verify nothing breaks
+            # Check overnight verdict: if ROLLBACK was issued, skip application
+            eval_gate_passed = True
+            try:
+                from dharma_swarm.overnight_evaluator import OperatorVerdict
+                verdict_path = CYCLE_DIR.parent / "overnight" / (
+                    datetime.now(timezone.utc).strftime("%Y-%m-%d")
+                ) / "verdict.json"
+                if verdict_path.exists():
+                    import json as _json
+                    verdict_data = _json.loads(verdict_path.read_text())
+                    if verdict_data.get("verdict") == OperatorVerdict.ROLLBACK.value:
+                        eval_gate_passed = False
+                        report.lesson_learned = (
+                            f"Cycle {cycle_id}: BLOCKED by overnight ROLLBACK verdict — "
+                            "system in degraded state, diffs not applied"
+                        )
+                        logger.warning("Self-improvement blocked: overnight ROLLBACK verdict active")
+            except Exception:
+                pass  # verdict check failure doesn't block SI
+
+            # Check eval pass rate from benchmark registry
+            if eval_gate_passed:
+                try:
+                    from dharma_swarm.ecc_eval_harness import load_latest as _load_eval
+                    latest_eval = _load_eval()
+                    if latest_eval and latest_eval.get("pass_at_1", 1.0) < 0.5:
+                        eval_gate_passed = False
+                        report.lesson_learned = (
+                            f"Cycle {cycle_id}: BLOCKED by low eval pass rate "
+                            f"({latest_eval['pass_at_1']:.0%} < 50%) — "
+                            "system must stabilize before self-modification"
+                        )
+                        logger.warning(
+                            "Self-improvement blocked: eval pass rate %.0f%% < 50%%",
+                            latest_eval["pass_at_1"] * 100,
+                        )
+                except Exception:
+                    pass
+
+            if not eval_gate_passed:
+                report.duration_seconds = time.monotonic() - t0
+                self._save_report(report)
+                return report
+
+            # Apply proposal diffs to the actual codebase
+            _applied = 0
+            try:
+                from dharma_swarm.diff_applier import DiffApplier
+                applier = DiffApplier(workspace=DHARMA_SWARM_DIR)
+                for p in gated:
+                    diff_text = getattr(p, "diff", "")
+                    if diff_text and diff_text.strip():
+                        apply_result = await applier.apply(diff_text)
+                        if apply_result.success:
+                            _applied += 1
+                            logger.info(
+                                "Applied diff for %s: %s",
+                                getattr(p, "component", "?"),
+                                apply_result.files_changed,
+                            )
+                        else:
+                            logger.warning(
+                                "Failed to apply diff for %s: %s",
+                                getattr(p, "component", "?"),
+                                apply_result.error,
+                            )
+            except Exception as exc:
+                logger.warning("DiffApplier integration failed: %s", exc)
+
+            # Phase 5: TEST — verify nothing breaks after applying diffs
             tests_ok = self._run_tests()
             report.tests_passed = tests_ok
 
-            # Phase 6: RE-EVAL — measure after (on same code for now; proposals
-            # are informational until we implement actual code patching)
+            # Phase 6: RE-EVAL — measure after with diffs applied
             eval_after = await self._run_eval()
             report.eval_after = eval_after
 
@@ -211,6 +332,18 @@ class SelfImprovementCycle:
                     f"Cycle {cycle_id}: eval degraded "
                     f"({before_rate:.1%} → {after_rate:.1%}), rolled back"
                 )
+                # Rollback applied diffs via git checkout
+                if _applied > 0:
+                    try:
+                        subprocess.run(
+                            ["git", "checkout", "--", "."],
+                            cwd=str(DHARMA_SWARM_DIR),
+                            capture_output=True,
+                            timeout=30,
+                        )
+                        logger.info("Rolled back %d applied diffs", _applied)
+                    except Exception as rb_err:
+                        logger.warning("Rollback failed: %s", rb_err)
 
             # Phase 8: SUPERVISE — check if cycle itself is healthy
             report.supervisor_alerts = self._check_supervisor()

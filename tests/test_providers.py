@@ -10,10 +10,14 @@ from dharma_swarm.providers import (
     AnthropicProvider,
     ClaudeCodeProvider,
     CodexProvider,
+    FireworksProvider,
+    GroqProvider,
     ModelRouter,
     NVIDIANIMProvider,
     OpenAIProvider,
     OpenRouterFreeProvider,
+    SiliconFlowProvider,
+    TogetherProvider,
     create_default_router,
 )
 
@@ -74,10 +78,34 @@ def test_create_default_router():
     router = create_default_router()
     assert router.get_provider(ProviderType.ANTHROPIC) is not None
     assert router.get_provider(ProviderType.OPENAI) is not None
+    assert router.get_provider(ProviderType.GROQ) is not None
+    assert router.get_provider(ProviderType.SILICONFLOW) is not None
+    assert router.get_provider(ProviderType.TOGETHER) is not None
+    assert router.get_provider(ProviderType.FIREWORKS) is not None
     assert router.get_provider(ProviderType.NVIDIA_NIM) is not None
     assert router.get_provider(ProviderType.CLAUDE_CODE) is not None
     assert router.get_provider(ProviderType.CODEX) is not None
     assert router.get_provider(ProviderType.OPENROUTER_FREE) is not None
+
+
+def test_groq_provider_init():
+    p = GroqProvider(api_key="test-key")
+    assert p._api_key == "test-key"
+
+
+def test_siliconflow_provider_init():
+    p = SiliconFlowProvider(api_key="test-key")
+    assert p._api_key == "test-key"
+
+
+def test_together_provider_init():
+    p = TogetherProvider(api_key="test-key")
+    assert p._api_key == "test-key"
+
+
+def test_fireworks_provider_init():
+    p = FireworksProvider(api_key="test-key")
+    assert p._api_key == "test-key"
 
 
 def test_nvidia_nim_provider_no_key():

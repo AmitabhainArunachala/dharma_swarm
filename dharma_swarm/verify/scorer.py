@@ -15,7 +15,7 @@ Dimensions:
 from __future__ import annotations
 
 import re
-from dataclasses import dataclass, field
+from dataclasses import asdict, dataclass, field
 from typing import Any, Callable
 
 
@@ -29,6 +29,30 @@ _PROTECTED_FILES = frozenset({
 
 
 @dataclass
+class FileScore:
+    """Per-file thinkodynamic score payload used by the verify API."""
+
+    path: str = ""
+    semantic_density: float = 0.0
+    recursive_depth: float = 0.0
+    witness_quality: float = 0.0
+    swabhaav_ratio: float = 0.0
+    holographic_efficiency: float = 0.0
+    telos_alignment: float = 0.0
+    composite: float = 0.0
+    risk_level: str = "low"
+    issues: list[str] = field(default_factory=list)
+    suggestions: list[str] = field(default_factory=list)
+
+    def model_dump(self) -> dict[str, Any]:
+        """Pydantic-style compatibility helper used by API tests."""
+        return asdict(self)
+
+
+FileDiff = FileScore
+
+
+@dataclass
 class DiffScore:
     """Aggregate score for a code diff.
 
@@ -39,10 +63,48 @@ class DiffScore:
         suggestions: Actionable improvement recommendations.
     """
 
+    files: list[FileScore] = field(default_factory=list)
+    overall_composite: float = 0.0
+    overall_risk: str = ""
+    total_files: int = 0
+    high_risk_files: int = 0
+    summary: str = ""
+    comprehension_debt: float | None = None
     overall: float = 0.0
     dimensions: dict[str, float] = field(default_factory=dict)
     issues: list[str] = field(default_factory=list)
     suggestions: list[str] = field(default_factory=list)
+
+    def __post_init__(self) -> None:
+        """Keep legacy and current score fields in sync."""
+        if self.overall == 0.0 and self.overall_composite != 0.0:
+            self.overall = self.overall_composite
+        else:
+            self.overall_composite = self.overall
+
+        if not self.overall_risk:
+            self.overall_risk = _risk_level_from_issues(self.overall, self.issues)
+
+        if self.total_files == 0:
+            self.total_files = len(self.files)
+
+        if self.high_risk_files == 0 and self.files:
+            self.high_risk_files = sum(
+                1 for file_score in self.files if file_score.risk_level in {"high", "critical"}
+            )
+
+        if self.summary == "":
+            self.summary = (
+                f"{self.total_files} files scored. "
+                f"Avg quality: {self.overall:.2f}. Risk: {self.overall_risk or 'low'}."
+            )
+
+        if self.comprehension_debt is None:
+            self.comprehension_debt = round(1.0 - self.overall, 4)
+
+    def model_dump(self) -> dict[str, Any]:
+        """Pydantic-style compatibility helper used by API tests."""
+        return asdict(self)
 
 
 # ---------------------------------------------------------------------------
@@ -57,6 +119,16 @@ _DIMENSION_WEIGHTS: dict[str, float] = {
     "efficiency": 0.10,
     "governance": 0.15,
 }
+
+
+def _risk_level_from_issues(overall: float, issues: list[str]) -> str:
+    """Classify overall diff risk for the API-facing compatibility payload."""
+    joined = " ".join(issues).upper()
+    if "CRITICAL" in joined:
+        return "high"
+    if "WARNING" in joined or overall < 0.5:
+        return "medium"
+    return "low"
 
 
 # ---------------------------------------------------------------------------
@@ -408,7 +480,37 @@ def score_diff(diff_text: str, context: str = "") -> DiffScore:
     )
     overall = round(min(max(overall, 0.0), 1.0), 4)
 
+    overall_risk = _risk_level_from_issues(overall, all_issues)
+    file_scores = [
+        FileScore(
+            path=path,
+            semantic_density=dimensions.get("clarity", 0.0),
+            recursive_depth=dimensions.get("correctness", 0.0),
+            witness_quality=dimensions.get("safety", 0.0),
+            swabhaav_ratio=dimensions.get("completeness", 0.0),
+            holographic_efficiency=dimensions.get("efficiency", 0.0),
+            telos_alignment=dimensions.get("governance", 0.0),
+            composite=overall,
+            risk_level=overall_risk,
+            issues=list(all_issues),
+            suggestions=list(all_suggestions),
+        )
+        for path in parsed["files_changed"]
+    ]
+
     return DiffScore(
+        files=file_scores,
+        overall_composite=overall,
+        overall_risk=overall_risk,
+        total_files=len(file_scores),
+        high_risk_files=sum(
+            1 for file_score in file_scores if file_score.risk_level in {"high", "critical"}
+        ),
+        summary=(
+            f"{len(file_scores)} files scored. "
+            f"Avg quality: {overall:.2f}. Risk: {overall_risk}."
+        ),
+        comprehension_debt=round(1.0 - overall, 4),
         overall=overall,
         dimensions=dimensions,
         issues=all_issues,

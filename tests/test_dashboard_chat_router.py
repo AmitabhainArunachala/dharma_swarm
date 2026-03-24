@@ -46,6 +46,7 @@ def test_chat_status_reports_runtime_settings(monkeypatch: pytest.MonkeyPatch) -
     assert claude["availability_kind"] == "api_key"
     assert "OpenRouter" in claude["status_note"]
     qwen = next(profile for profile in body["profiles"] if profile["id"] == "qwen35_surgeon")
+    assert qwen["label"] == "Qwen3.5 Surgical Coder"
     assert qwen["model"] == "qwen/qwen3-coder:free"
     assert qwen["available"] is True
     glm = next(profile for profile in body["profiles"] if profile["id"] == "glm5_researcher")
@@ -54,6 +55,7 @@ def test_chat_status_reports_runtime_settings(monkeypatch: pytest.MonkeyPatch) -
 
 
 def test_chat_status_uses_configured_default_profile(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.delenv("OPENAI_API_KEY", raising=False)
     monkeypatch.setenv("OPENROUTER_API_KEY", "test-key")
     monkeypatch.setenv("DASHBOARD_DEFAULT_PROFILE_ID", "codex_operator")
 
@@ -67,22 +69,93 @@ def test_chat_status_uses_configured_default_profile(monkeypatch: pytest.MonkeyP
 
 
 def test_qwen_profile_clamps_max_tool_rounds(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.delenv("GROQ_API_KEY", raising=False)
+    monkeypatch.delenv("SILICONFLOW_API_KEY", raising=False)
     monkeypatch.setenv("OPENROUTER_API_KEY", "test-key")
     monkeypatch.setenv("DASHBOARD_CHAT_MAX_TOOL_ROUNDS", "64")
 
     settings = chat_router._get_chat_settings("qwen35_surgeon")
 
     assert settings.max_tool_rounds == chat_router.QWEN_MAX_TOOL_ROUNDS
-    assert settings.model == "qwen/qwen3-coder"
+    assert settings.model == "qwen/qwen3-coder:free"
+
+
+def test_qwen_profile_prefers_groq_when_configured(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("GROQ_API_KEY", "groq-key")
+    monkeypatch.setenv("OPENROUTER_API_KEY", "or-key")
+    monkeypatch.setenv("DASHBOARD_QWEN_PROVIDER_ORDER", "groq,openrouter")
+    monkeypatch.setenv("DASHBOARD_QWEN_GROQ_MODEL", "qwen/qwen3-32b")
+
+    settings = chat_router._get_chat_settings("qwen35_surgeon")
+
+    assert settings.provider == chat_router.ProviderType.GROQ
+    assert settings.model == "qwen/qwen3-32b"
+
+
+def test_qwen_profile_prefers_together_when_configured(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("TOGETHER_API_KEY", "together-key")
+    monkeypatch.setenv("DASHBOARD_QWEN_PROVIDER_ORDER", "together,openrouter")
+    monkeypatch.setenv(
+        "DASHBOARD_QWEN_TOGETHER_MODEL",
+        "Qwen/Qwen3-Coder-480B-A35B-Instruct-FP8",
+    )
+
+    settings = chat_router._get_chat_settings("qwen35_surgeon")
+
+    assert settings.provider == chat_router.ProviderType.TOGETHER
+    assert settings.model == "Qwen/Qwen3-Coder-480B-A35B-Instruct-FP8"
+
+
+def test_qwen_profile_prefers_fireworks_when_configured(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("FIREWORKS_API_KEY", "fireworks-key")
+    monkeypatch.setenv("DASHBOARD_QWEN_PROVIDER_ORDER", "fireworks,openrouter")
+    monkeypatch.setenv(
+        "DASHBOARD_QWEN_FIREWORKS_MODEL",
+        "accounts/fireworks/models/qwen3-coder-480b-a35b-instruct",
+    )
+
+    settings = chat_router._get_chat_settings("qwen35_surgeon")
+
+    assert settings.provider == chat_router.ProviderType.FIREWORKS
+    assert settings.model == "accounts/fireworks/models/qwen3-coder-480b-a35b-instruct"
+
+
+def test_qwen_profile_alias_resolves_new_canonical_name(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.delenv("GROQ_API_KEY", raising=False)
+    monkeypatch.delenv("SILICONFLOW_API_KEY", raising=False)
+    monkeypatch.setenv("OPENROUTER_API_KEY", "or-key")
+
+    settings = chat_router._get_chat_settings("qwen35_surgical_coder")
+
+    assert settings.model == "qwen/qwen3-coder:free"
+    assert chat_router._get_profile_spec("qwen35_surgical_coder").profile_id == "qwen35_surgeon"
+
+
+def test_qwen_profile_fallback_tracks_requested_provider_order(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.delenv("GROQ_API_KEY", raising=False)
+    monkeypatch.delenv("SILICONFLOW_API_KEY", raising=False)
+    monkeypatch.setenv("DASHBOARD_QWEN_PROVIDER_ORDER", "siliconflow")
+
+    settings = chat_router._get_chat_settings("qwen35_surgeon")
+
+    assert settings.provider == chat_router.ProviderType.SILICONFLOW
 
 
 @pytest.mark.asyncio
 async def test_agentic_stream_reports_missing_visible_qwen_output() -> None:
+    monkeypatch = pytest.MonkeyPatch()
+    monkeypatch.delenv("GROQ_API_KEY", raising=False)
+    monkeypatch.delenv("SILICONFLOW_API_KEY", raising=False)
+    monkeypatch.setenv("OPENROUTER_API_KEY", "test-key")
     settings = chat_router._get_chat_settings("qwen35_surgeon")
 
     async def fake_call_openrouter(messages, runtime_settings):
         del messages
-        assert runtime_settings.model == "qwen/qwen3-coder"
+        assert runtime_settings.model == "qwen/qwen3-coder:free"
         return {
             "choices": [
                 {
@@ -96,7 +169,6 @@ async def test_agentic_stream_reports_missing_visible_qwen_output() -> None:
             ]
         }
 
-    monkeypatch = pytest.MonkeyPatch()
     monkeypatch.setattr(chat_router, "_call_openrouter", fake_call_openrouter)
     try:
         chunks = [

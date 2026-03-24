@@ -1,8 +1,8 @@
-"""DHARMA COMMAND — Agentic chat endpoint with full tool access.
+"""DHARMA COMMAND — agentic chat endpoint with full tool access.
 
-Claude Opus 4.6 via OpenRouter, with tool-use loop that gives it
-real system power: filesystem, shell, search, swarm control,
-evolution, stigmergy, traces.
+Profiles resolve through a provider-aware, OpenAI-compatible backend layer so
+the dashboard can move between OpenRouter, OpenAI, Groq, SiliconFlow, and
+other compatible lanes without changing the UI contract.
 """
 
 from __future__ import annotations
@@ -23,6 +23,8 @@ from pydantic import BaseModel
 
 from api.chat_tools import TOOL_DEFINITIONS, execute_tool
 from api.ws import manager
+from dharma_swarm.models import ProviderType
+from dharma_swarm.runtime_provider import resolve_runtime_provider_config
 
 CONVERSATIONS_DIR = Path.home() / ".dharma" / "conversations"
 
@@ -31,7 +33,6 @@ logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/api", tags=["chat"])
 ws_router = APIRouter(tags=["chat"])
 
-OPENROUTER_URL = "https://openrouter.ai/api/v1/chat/completions"
 DEFAULT_MODEL = "anthropic/claude-opus-4-6"
 DEFAULT_MAX_TOOL_ROUNDS = 40
 DEFAULT_MAX_TOKENS = 8192
@@ -48,23 +49,54 @@ MAX_CHAT_SESSION_COUNT = 128
 
 _chat_session_events: OrderedDict[str, deque[dict[str, Any]]] = OrderedDict()
 _chat_session_lock = Lock()
+PROFILE_ID_ALIASES: dict[str, str] = {
+    "qwen35-surgical-coder": "qwen35_surgeon",
+    "qwen35_surgical_coder": "qwen35_surgeon",
+    "qwen3.5_surgical_coder": "qwen35_surgeon",
+    "qwen3_5_surgical_coder": "qwen35_surgeon",
+}
+PROVIDER_LABELS: dict[ProviderType, str] = {
+    ProviderType.OPENROUTER: "OpenRouter",
+    ProviderType.OPENROUTER_FREE: "OpenRouter Free",
+    ProviderType.OPENAI: "OpenAI",
+    ProviderType.GROQ: "Groq",
+    ProviderType.SILICONFLOW: "SiliconFlow",
+    ProviderType.TOGETHER: "Together AI",
+    ProviderType.FIREWORKS: "Fireworks AI",
+    ProviderType.NVIDIA_NIM: "NVIDIA NIM",
+}
+PROVIDER_ENV_KEYS: dict[ProviderType, str] = {
+    ProviderType.OPENROUTER: "OPENROUTER_API_KEY",
+    ProviderType.OPENROUTER_FREE: "OPENROUTER_API_KEY",
+    ProviderType.OPENAI: "OPENAI_API_KEY",
+    ProviderType.GROQ: "GROQ_API_KEY",
+    ProviderType.SILICONFLOW: "SILICONFLOW_API_KEY",
+    ProviderType.TOGETHER: "TOGETHER_API_KEY",
+    ProviderType.FIREWORKS: "FIREWORKS_API_KEY",
+    ProviderType.NVIDIA_NIM: "NVIDIA_NIM_API_KEY",
+}
 
 
 @dataclass(frozen=True)
 class ChatProfileSpec:
     profile_id: str
     label: str
-    default_model: str
-    model_env: str
     accent: str
     summary: str
     system_prompt: str
+    provider_order_env: str
+    default_provider_order: tuple[ProviderType, ...]
+    default_models: dict[ProviderType, str]
+    model_envs: dict[ProviderType, str]
 
 
 @dataclass(frozen=True)
 class ChatRuntimeSettings:
-    openrouter_api_key: str
+    provider: ProviderType
+    api_key: str
+    base_url: str
     model: str
+    available: bool
     max_tool_rounds: int
     max_tokens: int
     timeout_seconds: float
@@ -74,7 +106,7 @@ class ChatRuntimeSettings:
 
 
 def _default_profile_id() -> str:
-    configured = os.getenv("DASHBOARD_DEFAULT_PROFILE_ID", "").strip()
+    configured = _normalize_profile_id(os.getenv("DASHBOARD_DEFAULT_PROFILE_ID", "").strip())
     if configured and configured in CHAT_PROFILE_SPECS:
         return configured
     return DEFAULT_PROFILE_ID
@@ -141,7 +173,7 @@ inside the UI. Bias toward engineering leverage, clean diffs, and exactness."""
 
 
 QWEN_SYSTEM_PROMPT = """\
-You are Qwen3 Coder operating as the surgical reconnaissance and repair lane \
+You are Qwen3.5 Surgical Coder operating as the surgical reconnaissance and repair lane \
 inside the DHARMA COMMAND control plane.
 
 You are here for fast technical execution: inspect code, trace interfaces, edit \
@@ -199,38 +231,81 @@ CHAT_PROFILE_SPECS: dict[str, ChatProfileSpec] = {
     "claude_opus": ChatProfileSpec(
         profile_id="claude_opus",
         label="Claude Opus 4.6",
-        default_model=DEFAULT_MODEL,
-        model_env="DASHBOARD_CHAT_MODEL",
         accent="aozora",
         summary="Strategic operator with broad system awareness and full swarm tooling.",
         system_prompt=COMMAND_SYSTEM_PROMPT,
+        provider_order_env="DASHBOARD_CHAT_PROVIDER_ORDER",
+        default_provider_order=(ProviderType.OPENROUTER,),
+        default_models={
+            ProviderType.OPENROUTER: DEFAULT_MODEL,
+        },
+        model_envs={
+            ProviderType.OPENROUTER: "DASHBOARD_CHAT_MODEL",
+        },
     ),
     "codex_operator": ChatProfileSpec(
         profile_id="codex_operator",
         label="Codex 5.4",
-        default_model="openai/gpt-5-codex",
-        model_env="DASHBOARD_CODEX_MODEL",
         accent="kinpaku",
         summary="Implementation-focused control agent for edits, diagnostics, and fast wiring.",
         system_prompt=CODEX_SYSTEM_PROMPT,
+        provider_order_env="DASHBOARD_CODEX_PROVIDER_ORDER",
+        default_provider_order=(ProviderType.OPENAI, ProviderType.OPENROUTER),
+        default_models={
+            ProviderType.OPENAI: "gpt-5-codex",
+            ProviderType.OPENROUTER: "openai/gpt-5-codex",
+        },
+        model_envs={
+            ProviderType.OPENAI: "DASHBOARD_CODEX_MODEL",
+            ProviderType.OPENROUTER: "DASHBOARD_CODEX_OPENROUTER_MODEL",
+        },
     ),
     "qwen35_surgeon": ChatProfileSpec(
         profile_id="qwen35_surgeon",
-        label="Qwen3 Coder",
-        default_model="qwen/qwen3-coder",
-        model_env="DASHBOARD_QWEN_MODEL",
+        label="Qwen3.5 Surgical Coder",
         accent="rokusho",
         summary="Fast surgical coding lane for bounded repo scans, edits, and validation.",
         system_prompt=QWEN_SYSTEM_PROMPT,
+        provider_order_env="DASHBOARD_QWEN_PROVIDER_ORDER",
+        default_provider_order=(
+            ProviderType.GROQ,
+            ProviderType.SILICONFLOW,
+            ProviderType.TOGETHER,
+            ProviderType.FIREWORKS,
+            ProviderType.OPENROUTER_FREE,
+            ProviderType.OPENROUTER,
+        ),
+        default_models={
+            ProviderType.GROQ: "qwen/qwen3-32b",
+            ProviderType.SILICONFLOW: "Qwen/Qwen3-Coder-480B-A35B-Instruct",
+            ProviderType.TOGETHER: "Qwen/Qwen3-Coder-480B-A35B-Instruct-FP8",
+            ProviderType.FIREWORKS: "accounts/fireworks/models/qwen3-coder-480b-a35b-instruct",
+            ProviderType.OPENROUTER_FREE: "qwen/qwen3-coder:free",
+            ProviderType.OPENROUTER: "qwen/qwen3-coder",
+        },
+        model_envs={
+            ProviderType.GROQ: "DASHBOARD_QWEN_GROQ_MODEL",
+            ProviderType.SILICONFLOW: "DASHBOARD_QWEN_SILICONFLOW_MODEL",
+            ProviderType.TOGETHER: "DASHBOARD_QWEN_TOGETHER_MODEL",
+            ProviderType.FIREWORKS: "DASHBOARD_QWEN_FIREWORKS_MODEL",
+            ProviderType.OPENROUTER_FREE: "DASHBOARD_QWEN_OPENROUTER_FREE_MODEL",
+            ProviderType.OPENROUTER: "DASHBOARD_QWEN_MODEL",
+        },
     ),
     "glm5_researcher": ChatProfileSpec(
         profile_id="glm5_researcher",
         label="GLM-5 Research",
-        default_model="z-ai/glm-5",
-        model_env="DASHBOARD_GLM_MODEL",
         accent="botan",
         summary="Research synthesis lane for ecosystem mapping, pattern extraction, and deep analysis.",
         system_prompt=GLM_SYSTEM_PROMPT,
+        provider_order_env="DASHBOARD_GLM_PROVIDER_ORDER",
+        default_provider_order=(ProviderType.OPENROUTER,),
+        default_models={
+            ProviderType.OPENROUTER: "z-ai/glm-5",
+        },
+        model_envs={
+            ProviderType.OPENROUTER: "DASHBOARD_GLM_MODEL",
+        },
     ),
 }
 
@@ -257,16 +332,70 @@ def _parse_float_env(name: str, default: float, *, minimum: float) -> float:
         return default
 
 
+def _normalize_profile_id(profile_id: str | None) -> str:
+    if not profile_id:
+        return ""
+    normalized = str(profile_id).strip()
+    return PROFILE_ID_ALIASES.get(normalized, normalized)
+
+
 def _get_profile_spec(profile_id: str | None) -> ChatProfileSpec:
-    return CHAT_PROFILE_SPECS.get(profile_id or "", CHAT_PROFILE_SPECS[_default_profile_id()])
+    normalized = _normalize_profile_id(profile_id)
+    return CHAT_PROFILE_SPECS.get(normalized or "", CHAT_PROFILE_SPECS[_default_profile_id()])
 
 
-def _get_chat_settings(profile_id: str | None = None) -> ChatRuntimeSettings:
-    profile = _get_profile_spec(profile_id)
-    model = os.getenv(profile.model_env, "").strip() or profile.default_model
+def _parse_provider_order(raw: str, *, fallback: tuple[ProviderType, ...]) -> tuple[ProviderType, ...]:
+    if not raw.strip():
+        return fallback
+    resolved: list[ProviderType] = []
+    seen: set[ProviderType] = set()
+    for token in raw.split(","):
+        value = token.strip().lower()
+        if not value:
+            continue
+        try:
+            provider = ProviderType(value)
+        except ValueError:
+            logger.warning("Ignoring unknown dashboard provider token %r", value)
+            continue
+        if provider in seen:
+            continue
+        seen.add(provider)
+        resolved.append(provider)
+    return tuple(resolved) or fallback
+
+
+def _provider_order_for_profile(profile: ChatProfileSpec) -> tuple[ProviderType, ...]:
+    return _parse_provider_order(
+        os.getenv(profile.provider_order_env, ""),
+        fallback=profile.default_provider_order,
+    )
+
+
+def _model_for_profile_provider(profile: ChatProfileSpec, provider: ProviderType) -> str | None:
+    env_name = profile.model_envs.get(provider)
+    if env_name:
+        configured = os.getenv(env_name, "").strip()
+        if configured:
+            return configured
+    return profile.default_models.get(provider)
+
+
+def _build_chat_runtime_settings(
+    profile: ChatProfileSpec,
+    provider: ProviderType,
+    *,
+    api_key: str,
+    base_url: str,
+    model: str,
+    available: bool,
+) -> ChatRuntimeSettings:
     settings = ChatRuntimeSettings(
-        openrouter_api_key=os.getenv("OPENROUTER_API_KEY", "").strip(),
+        provider=provider,
+        api_key=api_key,
+        base_url=base_url,
         model=model,
+        available=available,
         max_tool_rounds=_parse_int_env(
             "DASHBOARD_CHAT_MAX_TOOL_ROUNDS",
             DEFAULT_MAX_TOOL_ROUNDS,
@@ -306,14 +435,51 @@ def _get_chat_settings(profile_id: str | None = None) -> ChatRuntimeSettings:
     return settings
 
 
+def _get_chat_settings(profile_id: str | None = None) -> ChatRuntimeSettings:
+    profile = _get_profile_spec(profile_id)
+    provider_order = _provider_order_for_profile(profile)
+    fallback_provider = provider_order[0]
+    fallback_model = _model_for_profile_provider(profile, fallback_provider) or ""
+    fallback_config = resolve_runtime_provider_config(fallback_provider, model=fallback_model)
+    fallback = _build_chat_runtime_settings(
+        profile,
+        fallback_config.provider,
+        api_key=fallback_config.api_key or "",
+        base_url=fallback_config.base_url or "",
+        model=fallback_config.default_model or fallback_model,
+        available=bool(
+            fallback_config.available and fallback_config.api_key and fallback_config.base_url
+        ),
+    )
+
+    for provider in provider_order:
+        model = _model_for_profile_provider(profile, provider)
+        if not model:
+            continue
+        config = resolve_runtime_provider_config(provider, model=model)
+        if not (config.available and config.api_key and config.base_url):
+            continue
+        return _build_chat_runtime_settings(
+            profile,
+            config.provider,
+            api_key=config.api_key,
+            base_url=config.base_url,
+            model=config.default_model or model,
+            available=True,
+        )
+    return fallback
+
+
 def _profile_available(settings: ChatRuntimeSettings) -> bool:
-    return bool(settings.openrouter_api_key)
+    return settings.available
 
 
 def _profile_status_note(settings: ChatRuntimeSettings) -> str:
-    if settings.openrouter_api_key:
-        return "Served by the dashboard backend via OpenRouter."
-    return "Requires OPENROUTER_API_KEY on the backend."
+    provider_label = PROVIDER_LABELS.get(settings.provider, settings.provider.value)
+    if settings.available:
+        return f"Served by the dashboard backend via {provider_label}."
+    env_key = PROVIDER_ENV_KEYS.get(settings.provider, "provider credentials")
+    return f"Requires {env_key} on the backend."
 
 
 def _new_session_id() -> str:
@@ -453,15 +619,16 @@ async def _call_openrouter(
     messages: list[dict],
     settings: ChatRuntimeSettings,
 ) -> dict | None:
-    """Make a (non-streaming) call to OpenRouter with tools."""
+    """Make a non-streaming call to the selected OpenAI-compatible provider."""
     import httpx
 
     headers = {
-        "Authorization": f"Bearer {settings.openrouter_api_key}",
+        "Authorization": f"Bearer {settings.api_key}",
         "Content-Type": "application/json",
-        "HTTP-Referer": "http://localhost:3000",
-        "X-Title": "DHARMA COMMAND",
     }
+    if settings.provider in {ProviderType.OPENROUTER, ProviderType.OPENROUTER_FREE}:
+        headers["HTTP-Referer"] = "http://localhost:3000"
+        headers["X-Title"] = "DHARMA COMMAND"
     payload = {
         "model": settings.model,
         "messages": messages,
@@ -471,7 +638,11 @@ async def _call_openrouter(
     }
 
     async with httpx.AsyncClient(timeout=httpx.Timeout(settings.timeout_seconds)) as client:
-        resp = await client.post(OPENROUTER_URL, headers=headers, json=payload)
+        resp = await client.post(
+            f"{settings.base_url.rstrip('/')}/chat/completions",
+            headers=headers,
+            json=payload,
+        )
         if resp.status_code != 200:
             detail = resp.text[:500]
             try:
@@ -482,21 +653,23 @@ async def _call_openrouter(
             except json.JSONDecodeError:
                 pass
             detail = " ".join(detail.split())
-            logger.error("OpenRouter error %d: %s", resp.status_code, detail)
-            raise RuntimeError(f"OpenRouter {resp.status_code}: {detail[:240]}")
+            provider_label = PROVIDER_LABELS.get(settings.provider, settings.provider.value)
+            logger.error("%s error %d: %s", provider_label, resp.status_code, detail)
+            raise RuntimeError(f"{provider_label} {resp.status_code}: {detail[:240]}")
         return resp.json()
 
 
 async def _call_openrouter_stream(messages: list[dict], settings: ChatRuntimeSettings):
-    """Streaming call to OpenRouter (no tools — final response only)."""
+    """Streaming call to the selected OpenAI-compatible provider."""
     import httpx
 
     headers = {
-        "Authorization": f"Bearer {settings.openrouter_api_key}",
+        "Authorization": f"Bearer {settings.api_key}",
         "Content-Type": "application/json",
-        "HTTP-Referer": "http://localhost:3000",
-        "X-Title": "DHARMA COMMAND",
     }
+    if settings.provider in {ProviderType.OPENROUTER, ProviderType.OPENROUTER_FREE}:
+        headers["HTTP-Referer"] = "http://localhost:3000"
+        headers["X-Title"] = "DHARMA COMMAND"
     payload = {
         "model": settings.model,
         "messages": messages,
@@ -506,10 +679,16 @@ async def _call_openrouter_stream(messages: list[dict], settings: ChatRuntimeSet
     }
 
     async with httpx.AsyncClient(timeout=httpx.Timeout(settings.timeout_seconds)) as client:
-        async with client.stream("POST", OPENROUTER_URL, headers=headers, json=payload) as response:
+        async with client.stream(
+            "POST",
+            f"{settings.base_url.rstrip('/')}/chat/completions",
+            headers=headers,
+            json=payload,
+        ) as response:
             if response.status_code != 200:
                 body = await response.aread()
-                yield f"data: {json.dumps({'error': f'OpenRouter {response.status_code}: {body.decode()[:200]}'})}\n\n"
+                provider_label = PROVIDER_LABELS.get(settings.provider, settings.provider.value)
+                yield f"data: {json.dumps({'error': f'{provider_label} {response.status_code}: {body.decode()[:200]}'})}\n\n"
                 return
 
             async for line in response.aiter_lines():
@@ -743,7 +922,7 @@ async def _agentic_stream(
                 "chat_done",
                 profile_id=profile_id,
                 stopped="complete",
-                provider="openrouter",
+                provider=settings.provider.value,
             )
         yield "data: [DONE]\n\n"
         return
@@ -761,7 +940,7 @@ async def _agentic_stream(
             "chat_done",
             profile_id=profile_id,
             stopped="max_tool_rounds",
-            provider="openrouter",
+            provider=settings.provider.value,
         )
     yield _sse_data({"content": "\n\n[Reached maximum tool rounds. Stopping.]"})
     yield "data: [DONE]\n\n"
@@ -798,9 +977,10 @@ async def chat_stream(req: ChatRequest):
     profile = _get_profile_spec(req.profile_id)
     settings = _get_chat_settings(profile.profile_id)
 
-    if not settings.openrouter_api_key:
+    if not settings.available:
+        env_key = PROVIDER_ENV_KEYS.get(settings.provider, "provider credentials")
         return StreamingResponse(
-            iter(['data: {"error": "OPENROUTER_API_KEY not set"}\n\n']),
+            iter([f'data: {json.dumps({"error": f"{env_key} not set"})}\n\n']),
             media_type="text/event-stream",
         )
 
@@ -848,7 +1028,7 @@ async def chat_stream(req: ChatRequest):
             session_id,
             "chat_session_ready",
             profile_id=profile.profile_id,
-            provider="openrouter",
+            provider=settings.provider.value,
             model=settings.model,
         )
         if latest_user_message:
@@ -897,7 +1077,7 @@ async def chat_status():
             {
                 "id": profile.profile_id,
                 "label": profile.label,
-                "provider": "openrouter",
+                "provider": resolved.provider.value,
                 "model": resolved.model,
                 "accent": profile.accent,
                 "summary": profile.summary,
@@ -909,9 +1089,9 @@ async def chat_status():
     return {
         "chat_contract_version": CHAT_CONTRACT_VERSION,
         "chat_ws_path_template": CHAT_WS_PATH_TEMPLATE,
-        "ready": bool(settings.openrouter_api_key),
+        "ready": settings.available,
         "model": settings.model,
-        "provider": "openrouter",
+        "provider": settings.provider.value,
         "tools": len(TOOL_DEFINITIONS),
         "max_tool_rounds": settings.max_tool_rounds,
         "max_tokens": settings.max_tokens,

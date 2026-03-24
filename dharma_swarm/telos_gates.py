@@ -620,25 +620,32 @@ class TelosGatekeeper:
         )
 
         if tier_a_fail:
-            reason = next(
-                results[g][1]
+            failing_gate = next(
+                g
                 for g in self.GATES
                 if self.GATES[g] == GateTier.A and results[g][0] == GateResult.FAIL
             )
+            reason = results[failing_gate][1]
             return GateCheckResult(
                 decision=GateDecision.BLOCK,
+                gate=failing_gate,
                 reason=f"AHIMSA violation: {reason}",
                 gate_results=results,
             )
 
         if tier_b_fail:
-            reasons = [
-                results[g][1]
+            failing_gates = [
+                g
                 for g in self.GATES
                 if self.GATES[g] == GateTier.B and results[g][0] == GateResult.FAIL
             ]
+            reasons = [
+                results[g][1]
+                for g in failing_gates
+            ]
             return GateCheckResult(
                 decision=GateDecision.BLOCK,
+                gate=failing_gates[0] if failing_gates else "",
                 reason=f"Tier B violation: {'; '.join(reasons)}",
                 gate_results=results,
             )
@@ -652,6 +659,7 @@ class TelosGatekeeper:
         ):
             return GateCheckResult(
                 decision=GateDecision.BLOCK,
+                gate="WITNESS",
                 reason=f"Mandatory think-point violation: {witness_result[1]}",
                 gate_results=results,
             )
@@ -663,22 +671,47 @@ class TelosGatekeeper:
             if self.GATES[g] == GateTier.C
         )
         if tier_c_fail:
-            reasons = [
-                results[g][1]
+            advisory_gates = [
+                g
                 for g in self.GATES
                 if self.GATES[g] == GateTier.C
                 and results[g][0] in (GateResult.FAIL, GateResult.WARN)
             ]
+            reasons = [
+                results[g][1]
+                for g in advisory_gates
+            ]
             return GateCheckResult(
                 decision=GateDecision.REVIEW,
+                gate=advisory_gates[0] if advisory_gates else "",
                 reason=f"Advisory: {'; '.join(reasons)}",
                 gate_results=results,
             )
 
         return GateCheckResult(
             decision=GateDecision.ALLOW,
+            gate="",
             reason="All gates passed",
             gate_results=results,
+        )
+
+    def evaluate(
+        self,
+        action: str,
+        content: str = "",
+        tool_name: str = "",
+        trust_mode: str | None = None,
+        think_phase: str | None = None,
+        reflection: str = "",
+    ) -> GateCheckResult:
+        """Backward-compatible alias for ``check`` used by older callers/tests."""
+        return self.check(
+            action=action,
+            content=content,
+            tool_name=tool_name,
+            trust_mode=trust_mode,
+            think_phase=think_phase,
+            reflection=reflection,
         )
 
     @staticmethod

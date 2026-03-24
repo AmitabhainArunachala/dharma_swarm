@@ -22,6 +22,11 @@ from typing import Any
 
 logger = logging.getLogger(__name__)
 
+try:
+    from tools.loop_templates.progress_protocol import LoopProgressTracker, ProgressSnapshot
+except ImportError:  # pragma: no cover - direct script fallback
+    from progress_protocol import LoopProgressTracker, ProgressSnapshot
+
 STATE_DIR = Path.home() / ".dharma"
 OVERNIGHT_DIR = STATE_DIR / "overnight"
 LOG_FILE = OVERNIGHT_DIR / "conductor_efficiency.jsonl"
@@ -46,6 +51,8 @@ class LoopConfig:
     initial_wake_interval: float = INITIAL_WAKE_INTERVAL
     min_wake_interval: float = 5.0   # floor: never poll faster than 5s
     max_wake_interval: float = 600.0  # ceiling: never sleep longer than 10min
+    max_avg_latency: float = 120.0
+    max_missed_work: int = 0
     log_dir: Path = field(default_factory=lambda: OVERNIGHT_DIR)
     work_arrival_seed: int = 42
 
@@ -225,6 +232,37 @@ def _log_jsonl(path: Path, record: dict[str, Any]) -> None:
         f.write(json.dumps(record, default=str) + "\n")
 
 
+def _composite_loss(sim: SimulationResult, cfg: LoopConfig) -> float:
+    """Combine waste, misses, and latency into a single optimization target."""
+    miss_penalty = sim.work_items_missed * 2.0
+    latency_penalty = sim.avg_response_latency / max(cfg.max_avg_latency, 1.0)
+    return round(sim.waste_ratio + miss_penalty + latency_penalty, 6)
+
+
+def _service_level_met(sim: SimulationResult, cfg: LoopConfig) -> bool:
+    """True when wake tuning does not sacrifice responsiveness."""
+    return (
+        sim.work_items_missed <= cfg.max_missed_work
+        and sim.avg_response_latency <= cfg.max_avg_latency
+    )
+
+
+def _next_best_task(sim: SimulationResult, cfg: LoopConfig) -> tuple[str, list[str]]:
+    """Bounded next step recommendation for the operator."""
+    notes: list[str] = []
+    if sim.work_items_missed > cfg.max_missed_work:
+        notes.append("Service-level failure: work items were missed.")
+        return "Shorten the wake interval until missed work returns to zero.", notes
+    if sim.avg_response_latency > cfg.max_avg_latency:
+        notes.append("Average pickup latency exceeded the service-level target.")
+        return "Shorten the wake interval and replay the same schedule.", notes
+    if sim.waste_ratio >= cfg.convergence_threshold:
+        notes.append("Idle wake ratio is still above target.")
+        return "Keep shortening the wake interval until idle wakes fall below the threshold.", notes
+    notes.append("Current interval satisfies both waste and service constraints.")
+    return "Try a slightly longer interval and verify service levels remain intact.", notes
+
+
 # ---------------------------------------------------------------------------
 # Core loop -- binary search on wake_interval
 # ---------------------------------------------------------------------------
@@ -261,6 +299,9 @@ async def run(
     results: list[IterationResult] = []
     best_waste_ratio = 1.0
     best_interval = cfg.initial_wake_interval
+    best_loss = float("inf")
+    best_converged = False
+    tracker = LoopProgressTracker("conductor_efficiency", cfg.log_dir)
 
     # Binary search bounds
     search_low = cfg.min_wake_interval
@@ -273,6 +314,10 @@ async def run(
         "work_items_total": len(work_schedule),
         "timestamp": datetime.now(timezone.utc).isoformat(),
     })
+    tracker.start(
+        objective="Minimize wasted conductor wakes without missing work or violating latency targets.",
+        config=cfg.to_dict(),
+    )
 
     logger.info(
         "Conductor efficiency loop starting: max_iter=%d, threshold=%.3f, "
@@ -300,21 +345,24 @@ async def run(
         )
 
         waste = sim.waste_ratio
-        converged = waste < cfg.convergence_threshold
+        service_ok = _service_level_met(sim, cfg)
+        converged = waste < cfg.convergence_threshold and service_ok
+        loss = _composite_loss(sim, cfg)
 
         # Update best
-        if waste < best_waste_ratio:
+        if loss < best_loss:
+            best_loss = loss
+        if service_ok and waste < best_waste_ratio:
             best_waste_ratio = waste
             best_interval = test_interval
+        if converged:
+            best_converged = True
 
         # Binary search logic:
-        # If waste is too high, we need a SHORTER interval (more frequent wakes)
-        # If waste is acceptable, try a LONGER interval (less resource usage)
-        if waste >= cfg.convergence_threshold:
-            # Too much waste -- wake more frequently
+        # We only accept longer sleeps when service levels are intact and waste is acceptable.
+        if not service_ok or waste >= cfg.convergence_threshold:
             search_high = test_interval
         else:
-            # Waste acceptable -- try sleeping longer
             search_low = test_interval
 
         elapsed = time.monotonic() - t0
@@ -334,6 +382,40 @@ async def run(
         )
         results.append(iter_result)
         _log_jsonl(log_path, {"event": "iteration", **iter_result.to_dict()})
+        next_best_task, notes = _next_best_task(sim, cfg)
+        tracker.record(ProgressSnapshot(
+            loop_name="conductor_efficiency",
+            objective="Tune conductor wake intervals for low waste and acceptable responsiveness.",
+            status="converged" if converged else ("service_violation" if not service_ok else "running"),
+            iteration=iteration,
+            target_metric={
+                "waste_ratio": cfg.convergence_threshold,
+                "max_avg_latency": cfg.max_avg_latency,
+                "max_missed_work": cfg.max_missed_work,
+            },
+            current_metric={
+                "waste_ratio": sim.waste_ratio,
+                "avg_response_latency": sim.avg_response_latency,
+                "work_items_missed": sim.work_items_missed,
+                "composite_loss": loss,
+            },
+            best_metric={
+                "best_waste_ratio": round(best_waste_ratio, 4),
+                "best_interval": round(best_interval, 2),
+                "best_loss": best_loss,
+            },
+            verifier={
+                "passed": converged,
+                "service_level_met": service_ok,
+            },
+            artifact_delta={
+                "metrics_updated": 3,
+                "interval_tested": round(test_interval, 2),
+            },
+            next_best_task=next_best_task,
+            progress_delta=round(max(1.0 - loss, 0.0), 6),
+            notes=notes,
+        ))
 
         logger.info(
             "Iteration %d/%d: interval=%.1fs, waste=%.4f (best=%.4f @ %.1fs), "
@@ -358,11 +440,13 @@ async def run(
         "total_iterations": len(results),
         "best_waste_ratio": round(best_waste_ratio, 4),
         "best_interval": round(best_interval, 2),
-        "converged": best_waste_ratio < cfg.convergence_threshold,
+        "converged": best_converged,
+        "best_loss": best_loss,
         "final_search_range": [round(search_low, 2), round(search_high, 2)],
         "timestamp": datetime.now(timezone.utc).isoformat(),
     }
     _log_jsonl(log_path, summary)
+    tracker.finish(summary)
     logger.info("Loop complete: %s", json.dumps(summary, indent=2))
 
     return results

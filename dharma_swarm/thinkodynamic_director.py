@@ -1946,7 +1946,7 @@ class ThinkodynamicDirector:
                 name="qwen-builder",
                 role="general",
                 provider=ProviderType.OPENROUTER.value,
-                model=os.getenv("DGC_DIRECTOR_QWEN_MODEL", "").strip() or "qwen/qwen2.5-coder-32b-instruct",
+                model=os.getenv("DGC_DIRECTOR_QWEN_MODEL", "").strip() or "qwen/qwen3-coder",
                 backend="provider-fallback",
                 purpose="Commodity implementation, mechanical coding, and parallel draft execution.",
                 focus=("surgeon", "general"),

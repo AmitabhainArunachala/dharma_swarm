@@ -1,6 +1,14 @@
 from __future__ import annotations
 
-from dharma_swarm.provider_smoke import run_provider_smoke, strongest_ollama_model
+import asyncio
+
+from api.routers import chat as chat_router
+from dharma_swarm.models import ProviderType
+from dharma_swarm.provider_smoke import (
+    _probe_qwen_dashboard,
+    run_provider_smoke,
+    strongest_ollama_model,
+)
 
 
 def test_strongest_ollama_model_prefers_largest_model_size() -> None:
@@ -53,3 +61,87 @@ def test_run_provider_smoke_reports_success_with_monkeypatched_probes(monkeypatc
     assert payload["nvidia_nim"]["strongest_verified"]
     assert payload["openrouter"]["status"] == "ok"
     assert payload["openrouter"]["strongest_verified"]
+
+
+def test_run_provider_smoke_includes_qwen_dashboard_when_requested(monkeypatch) -> None:
+    async def _fake_ollama(model: str):
+        return {"status": "ok", "model": model, "response_preview": "OK", "usage": {}}
+
+    async def _fake_nim(model: str):
+        return {"status": "ok", "model": model, "response_preview": "OK", "usage": {}}
+
+    async def _fake_openrouter(model: str):
+        return {"status": "ok", "model": model, "response_preview": "OK", "usage": {}}
+
+    async def _fake_qwen(provider_name: str, task: str):
+        return {
+            "status": "ok",
+            "requested_provider": provider_name,
+            "resolved_provider": provider_name,
+            "task": task,
+            "tool_names": ["read_file", "grep_search"],
+        }
+
+    monkeypatch.setattr("dharma_swarm.provider_smoke._probe_ollama", _fake_ollama)
+    monkeypatch.setattr("dharma_swarm.provider_smoke._probe_nim", _fake_nim)
+    monkeypatch.setattr("dharma_swarm.provider_smoke._probe_openrouter", _fake_openrouter)
+    monkeypatch.setattr("dharma_swarm.provider_smoke._probe_qwen_dashboard", _fake_qwen)
+
+    payload = run_provider_smoke(qwen_provider="together")
+
+    assert payload["qwen_dashboard"]["status"] == "ok"
+    assert payload["qwen_dashboard"]["requested_provider"] == "together"
+    assert payload["qwen_dashboard"]["tool_names"] == ["read_file", "grep_search"]
+
+
+def test_probe_qwen_dashboard_reports_missing_config(monkeypatch) -> None:
+    monkeypatch.delenv("TOGETHER_API_KEY", raising=False)
+    monkeypatch.setenv("DASHBOARD_QWEN_PROVIDER_ORDER", "together")
+
+    result = asyncio.run(_probe_qwen_dashboard("together", "inspect wiring"))
+
+    assert result["status"] == "missing_config"
+    assert result["requested_provider"] == "together"
+    assert result["required_env_key"] == "TOGETHER_API_KEY"
+
+
+def test_probe_qwen_dashboard_collects_tool_calls_and_content(
+    monkeypatch,
+) -> None:
+    settings = chat_router.ChatRuntimeSettings(
+        provider=ProviderType.TOGETHER,
+        api_key="together-key",
+        base_url="https://api.together.xyz/v1",
+        model="Qwen/Qwen3-Coder-480B-A35B-Instruct-FP8",
+        available=True,
+        max_tool_rounds=4,
+        max_tokens=1024,
+        timeout_seconds=30.0,
+        tool_result_max_chars=2000,
+        history_message_limit=20,
+        temperature=0.0,
+    )
+
+    monkeypatch.setenv("TOGETHER_API_KEY", "together-key")
+    monkeypatch.setattr(chat_router, "_get_chat_settings", lambda profile_id=None: settings)
+
+    async def _fake_agentic_stream(messages, runtime_settings, *, session_id="", profile_id=""):
+        del messages
+        del runtime_settings
+        del session_id
+        del profile_id
+        yield 'data: {"tool_call":{"name":"read_file","args":{"path":"dharma_swarm/runtime_provider.py"}}}\n\n'
+        yield 'data: {"tool_result":{"name":"read_file","summary":"runtime provider loaded"}}\n\n'
+        yield 'data: {"content":"Resolved provider and tool path confirmed."}\n\n'
+        yield "data: [DONE]\n\n"
+
+    monkeypatch.setattr(chat_router, "_agentic_stream", _fake_agentic_stream)
+
+    result = asyncio.run(_probe_qwen_dashboard("together", "inspect wiring"))
+
+    assert result["status"] == "ok"
+    assert result["resolved_provider"] == "together"
+    assert result["tool_call_count"] == 1
+    assert result["tool_result_count"] == 1
+    assert result["tool_names"] == ["read_file"]
+    assert "Resolved provider" in result["response_preview"]

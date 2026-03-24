@@ -24,6 +24,11 @@ from typing import Any, Callable, Protocol
 
 logger = logging.getLogger(__name__)
 
+try:
+    from tools.loop_templates.progress_protocol import LoopProgressTracker, ProgressSnapshot
+except ImportError:  # pragma: no cover - direct script fallback
+    from progress_protocol import LoopProgressTracker, ProgressSnapshot
+
 STATE_DIR = Path.home() / ".dharma"
 OVERNIGHT_DIR = STATE_DIR / "overnight"
 LOG_FILE = OVERNIGHT_DIR / "rv_optimization.jsonl"
@@ -158,6 +163,30 @@ def _log_jsonl(path: Path, record: dict[str, Any]) -> None:
         f.write(json.dumps(record, default=str) + "\n")
 
 
+def _next_best_task(
+    *,
+    converged: bool,
+    progress_delta: float,
+    sample_count: int,
+    seed_count: int,
+) -> tuple[str, list[str]]:
+    """Return the next bounded action and operator-facing notes."""
+    notes: list[str] = []
+    if converged:
+        return (
+            "Freeze the current seed bank and export it as the stable overnight benchmark subset.",
+            ["Convergence threshold reached."],
+        )
+    if sample_count < (2 * seed_count):
+        notes.append("Evidence is still thin; the loop needs at least two full seed batches.")
+        return "Run another seed batch before changing prompt or layer settings.", notes
+    if progress_delta <= 0.0005:
+        notes.append("Best standard deviation did not improve this iteration.")
+        return "Inspect outlier seeds or stratify prompt families before spending more inference.", notes
+    notes.append("Standard deviation improved on this iteration.")
+    return "Sample another seed batch and keep the current measurement backend fixed.", notes
+
+
 async def run(
     config: LoopConfig | None = None,
     shutdown_event: asyncio.Event | None = None,
@@ -184,7 +213,9 @@ async def run(
     results: list[IterationResult] = []
     all_cohens_d: list[float] = []
     best_std = float("inf")
+    plateau_streak = 0
     rng = random.Random(42)
+    tracker = LoopProgressTracker("rv_pipeline_optimization", cfg.log_dir)
 
     # Log config at start
     _log_jsonl(log_path, {
@@ -192,6 +223,10 @@ async def run(
         "config": cfg.to_dict(),
         "timestamp": datetime.now(timezone.utc).isoformat(),
     })
+    tracker.start(
+        objective="Reduce std(Cohen's d) across seeds below the convergence threshold.",
+        config=cfg.to_dict(),
+    )
 
     logger.info(
         "R_V optimization loop starting: max_iter=%d, threshold=%.3f, seeds_per_iter=%d",
@@ -231,9 +266,12 @@ async def run(
             continue
 
         # Compute convergence metrics over ALL accumulated values
+        previous_best_std = best_std
         current_std = _std(all_cohens_d)
         current_var = _variance(all_cohens_d)
         best_std = min(best_std, current_std)
+        progress_delta = 0.0 if previous_best_std == float("inf") else max(previous_best_std - best_std, 0.0)
+        plateau_streak = 0 if progress_delta > 0.0005 else plateau_streak + 1
         converged = current_std < cfg.convergence_threshold
 
         elapsed = time.monotonic() - t0
@@ -256,6 +294,42 @@ async def run(
             "event": "iteration",
             **iter_result.to_dict(),
         })
+
+        next_best_task, notes = _next_best_task(
+            converged=converged,
+            progress_delta=progress_delta,
+            sample_count=len(all_cohens_d),
+            seed_count=cfg.seed_count,
+        )
+        tracker.record(ProgressSnapshot(
+            loop_name="rv_pipeline_optimization",
+            objective="Stabilize R_V measurements across random seeds.",
+            status="converged" if converged else ("plateau" if plateau_streak >= 2 else "running"),
+            iteration=iteration,
+            target_metric={
+                "name": "std_cohens_d",
+                "threshold": round(cfg.convergence_threshold, 6),
+            },
+            current_metric={
+                "std_cohens_d": round(current_std, 6),
+                "variance": round(current_var, 6),
+                "sample_count": len(all_cohens_d),
+            },
+            best_metric={"best_std_cohens_d": round(best_std, 6)},
+            verifier={
+                "passed": converged,
+                "progress_delta": round(progress_delta, 6),
+                "plateau_streak": plateau_streak,
+            },
+            artifact_delta={
+                "metrics_updated": len(iteration_d_values),
+                "seeds_tested": seeds,
+            },
+            next_best_task=next_best_task,
+            progress_delta=round(progress_delta, 6),
+            plateau_streak=plateau_streak,
+            notes=notes,
+        ))
 
         logger.info(
             "Iteration %d/%d: std=%.4f (best=%.4f, threshold=%.4f), "
@@ -285,6 +359,7 @@ async def run(
         "timestamp": datetime.now(timezone.utc).isoformat(),
     }
     _log_jsonl(log_path, summary)
+    tracker.finish(summary)
     logger.info("Loop complete: %s", json.dumps(summary, indent=2))
 
     return results

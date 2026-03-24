@@ -48,6 +48,11 @@ DEFAULT_CONSOLIDATION_INTERVAL = int(
     os.environ.get("DGC_CONSOLIDATION_INTERVAL", "86400")
 )  # 24h default
 
+# Overnight mode: consolidate every 4 hours instead of 24
+OVERNIGHT_CONSOLIDATION_INTERVAL = int(
+    os.environ.get("DGC_OVERNIGHT_CONSOLIDATION_INTERVAL", "14400")
+)  # 4h default
+
 # Models for the two sides of the debate — different families for genuine diversity
 DEFAULT_ALPHA_MODEL = os.environ.get(
     "DGC_CONSOLIDATION_ALPHA_MODEL",
@@ -235,11 +240,56 @@ class SystemObserver:
         return snapshot
 
     def compress_for_llm(self, report: SystemStateReport, max_chars: int = 4000) -> str:
-        """Compress a SystemStateReport into text for LLM context."""
+        """Compress a SystemStateReport into text for LLM context.
+
+        Includes overnight eval verdict and metrics when available, so the
+        consolidation debate has the full picture of system health.
+        """
         parts = [f"# System State ({report.consolidator_id})\n"]
         parts.append(f"Timestamp: {report.timestamp.isoformat()}\n")
         parts.append(f"Stigmergy marks: {report.stigmergy_density}\n")
         parts.append(f"Dream associations: {report.dream_count}\n\n")
+
+        # --- Eval control plane context ---
+        try:
+            eval_dir = self._state_dir / "overnight"
+            if eval_dir.exists():
+                # Find most recent verdict
+                verdict_dirs = sorted(eval_dir.iterdir(), reverse=True)
+                for vd in verdict_dirs[:3]:
+                    verdict_file = vd / "verdict.json"
+                    if verdict_file.exists():
+                        vdata = json.loads(verdict_file.read_text(encoding="utf-8"))
+                        parts.append("## Overnight Eval Verdict\n")
+                        parts.append(f"  Date: {vdata.get('date', '?')}\n")
+                        parts.append(f"  Verdict: **{vdata.get('verdict', '?').upper()}**\n")
+                        for reason in vdata.get("reasons", [])[:5]:
+                            parts.append(f"  - {reason}\n")
+                        scores = vdata.get("scores", {})
+                        if scores:
+                            parts.append(
+                                f"  Scores: test_delta={scores.get('test_delta', 0)}, "
+                                f"dead_ratio={scores.get('dead_loop_ratio', 0):.1%}, "
+                                f"capability={scores.get('capability_delta', 0):.2f}\n"
+                            )
+                        parts.append("\n")
+                        break
+        except Exception:
+            pass
+
+        # --- Latest eval pass rate ---
+        try:
+            from dharma_swarm.ecc_eval_harness import load_latest as _load_eval_latest
+            latest_eval = _load_eval_latest()
+            if latest_eval:
+                parts.append("## Eval Harness\n")
+                parts.append(
+                    f"  pass@1: {latest_eval.get('pass_at_1', 0):.0%} "
+                    f"({latest_eval.get('passed', 0)}/{latest_eval.get('total', 0)})\n"
+                )
+                parts.append(f"  Last run: {latest_eval.get('timestamp', '?')[:19]}\n\n")
+        except Exception:
+            pass
 
         for snap in report.agent_snapshots:
             parts.append(f"## Agent: {snap.name}\n")
@@ -952,3 +1002,47 @@ class ConsolidationCycle:
             })
         except Exception:
             pass  # Signal bus may not be available in test contexts
+
+    def export_evolution_proposals(self, outcome: ConsolidationOutcome) -> int:
+        """Convert consolidation corrections into evolution proposals.
+
+        Corrections with severity >= SEVERITY_FLAG_REVIEW and category
+        in (capability_gap, fitness_gap) are exported as Proposal-compatible
+        dicts to ``~/.dharma/evolution/pending_proposals.jsonl``.  The
+        evolution loop's ``load_pending_proposals()`` consumes them.
+
+        Returns the number of proposals exported.
+        """
+        if not outcome.loss_report.agreed_issues:
+            return 0
+
+        proposals_path = self._state_dir / "evolution" / "pending_proposals.jsonl"
+        proposals_path.parent.mkdir(parents=True, exist_ok=True)
+
+        exported = 0
+        for issue in outcome.loss_report.agreed_issues:
+            if issue.severity < SEVERITY_FLAG_REVIEW:
+                continue
+            if issue.category not in ("capability_gap", "fitness_gap", "coordination_failure"):
+                continue
+
+            proposal_data = {
+                "component": issue.affected_agents[0] if issue.affected_agents else "system",
+                "change_type": "consolidation_correction",
+                "description": f"[consolidation] {issue.description}",
+                "diff": "",  # No diff yet — evolution engine will generate one
+                "spec_ref": f"consolidation_cycle_{outcome.cycle_number}",
+            }
+            try:
+                with open(proposals_path, "a", encoding="utf-8") as f:
+                    f.write(json.dumps(proposal_data) + "\n")
+                exported += 1
+            except Exception as exc:
+                logger.warning("Failed to export evolution proposal: %s", exc)
+
+        if exported:
+            logger.info(
+                "Exported %d evolution proposals from consolidation cycle %d",
+                exported, outcome.cycle_number,
+            )
+        return exported

@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import asyncio
+from contextlib import contextmanager
+import json
 import os
 import re
 from pathlib import Path
@@ -42,6 +44,23 @@ _OPENROUTER_FRONTIER_MODELS = (
     "openai/gpt-5-codex",
     "deepseek/deepseek-r1",
     "qwen/qwen3-235b-a22b",
+)
+_QWEN_DASHBOARD_SMOKE_PROVIDERS = {
+    ProviderType.GROQ,
+    ProviderType.SILICONFLOW,
+    ProviderType.TOGETHER,
+    ProviderType.FIREWORKS,
+    ProviderType.OPENROUTER_FREE,
+    ProviderType.OPENROUTER,
+}
+_DEFAULT_QWEN_DASHBOARD_TASK = (
+    "Use tools only. Do a read-only inspection of the Qwen surgical lane in this repo. "
+    "Read dharma_swarm/runtime_provider.py and api/routers/chat.py, grep for "
+    "ProviderType and DASHBOARD_QWEN settings, then report: "
+    "1) which provider/model you are actually running on right now, "
+    "2) which files own provider resolution versus dashboard routing, and "
+    "3) one concrete mismatch or risk you see. "
+    "Use at least two tools. Do not edit files."
 )
 
 
@@ -273,6 +292,159 @@ def _dedupe_models(models: list[str]) -> list[str]:
     return out
 
 
+@contextmanager
+def _temporary_env(overrides: dict[str, str | None]):
+    sentinel = object()
+    previous: dict[str, object] = {}
+    for key, value in overrides.items():
+        previous[key] = os.environ.get(key, sentinel)
+        if value is None:
+            os.environ.pop(key, None)
+        else:
+            os.environ[key] = value
+    try:
+        yield
+    finally:
+        for key, value in previous.items():
+            if value is sentinel:
+                os.environ.pop(key, None)
+            else:
+                os.environ[key] = str(value)
+
+
+async def _probe_qwen_dashboard(provider_name: str, task: str) -> dict[str, Any]:
+    from api.routers import chat as chat_router
+
+    requested = str(provider_name or "").strip().lower()
+    if not requested:
+        return {
+            "status": "missing_config",
+            "requested_provider": "",
+            "error": "No Qwen provider requested.",
+            "task": task,
+        }
+    try:
+        provider = ProviderType(requested)
+    except ValueError:
+        return {
+            "status": "unsupported_provider",
+            "requested_provider": requested,
+            "error": f"Unknown provider: {requested}",
+            "task": task,
+        }
+    if provider not in _QWEN_DASHBOARD_SMOKE_PROVIDERS:
+        return {
+            "status": "unsupported_provider",
+            "requested_provider": provider.value,
+            "error": f"{provider.value} is not enabled for the Qwen dashboard smoke lane.",
+            "task": task,
+        }
+
+    profile = chat_router._get_profile_spec("qwen35_surgeon")
+    env_key = chat_router.PROVIDER_ENV_KEYS.get(provider, "")
+    with _temporary_env({profile.provider_order_env: provider.value}):
+        settings = chat_router._get_chat_settings(profile.profile_id)
+
+    if settings.provider != provider:
+        return {
+            "status": "provider_mismatch",
+            "requested_provider": provider.value,
+            "resolved_provider": settings.provider.value,
+            "model": settings.model,
+            "required_env_key": env_key,
+            "task": task,
+            "error": (
+                f"Requested {provider.value} but dashboard resolved "
+                f"{settings.provider.value}."
+            ),
+        }
+
+    if not settings.available:
+        return {
+            "status": "missing_config",
+            "requested_provider": provider.value,
+            "resolved_provider": settings.provider.value,
+            "model": settings.model,
+            "required_env_key": env_key,
+            "task": task,
+            "error": f"{env_key or 'provider credentials'} not set",
+        }
+
+    api_messages = [
+        {
+            "role": "system",
+            "content": (
+                profile.system_prompt
+                + "\n\n[Live smoke task. Read-only verification. Use tools.]"
+            ),
+        },
+        {"role": "user", "content": task},
+    ]
+
+    tool_calls: list[dict[str, Any]] = []
+    tool_results: list[dict[str, Any]] = []
+    content_parts: list[str] = []
+    errors: list[str] = []
+    raw_events: list[dict[str, Any]] = []
+    try:
+        async for chunk in chat_router._agentic_stream(
+            api_messages,
+            settings,
+            profile_id=profile.profile_id,
+        ):
+            if not chunk.startswith("data: "):
+                continue
+            payload_raw = chunk[6:].strip()
+            if payload_raw == "[DONE]":
+                continue
+            try:
+                payload = json.loads(payload_raw)
+            except json.JSONDecodeError:
+                continue
+            raw_events.append(payload)
+            if "tool_call" in payload:
+                tool_calls.append(payload["tool_call"])
+            if "tool_result" in payload:
+                tool_results.append(payload["tool_result"])
+            if "content" in payload:
+                content_parts.append(str(payload["content"]))
+            if "error" in payload:
+                errors.append(str(payload["error"]))
+    except Exception as exc:
+        return {
+            "status": _classify_error(exc),
+            "requested_provider": provider.value,
+            "resolved_provider": settings.provider.value,
+            "model": settings.model,
+            "required_env_key": env_key,
+            "task": task,
+            "error": str(exc),
+        }
+
+    status = "ok"
+    if errors:
+        status = "error"
+    elif not content_parts and not tool_calls:
+        status = "empty"
+    elif tool_calls and not content_parts:
+        status = "tool_only"
+
+    return {
+        "status": status,
+        "requested_provider": provider.value,
+        "resolved_provider": settings.provider.value,
+        "model": settings.model,
+        "required_env_key": env_key,
+        "task": task,
+        "tool_call_count": len(tool_calls),
+        "tool_result_count": len(tool_results),
+        "tool_names": [str(item.get("name", "")) for item in tool_calls if item.get("name")],
+        "response_preview": "".join(content_parts)[:600],
+        "events_seen": len(raw_events),
+        "errors": errors,
+    }
+
+
 async def _probe_model_pack(
     probe_fn,
     models: list[str],
@@ -313,6 +485,8 @@ def run_provider_smoke(
     *,
     ollama_model: str | None = None,
     nim_model: str | None = None,
+    qwen_provider: str | None = None,
+    qwen_task: str | None = None,
 ) -> dict[str, Any]:
     """Run best-effort smoke tests for cloud and external provider lanes."""
     ollama_config = resolve_runtime_provider_config(ProviderType.OLLAMA)
@@ -365,7 +539,7 @@ def run_provider_smoke(
     nim = asyncio.run(_probe_model_pack(_probe_nim, resolved_nim))
     openrouter = asyncio.run(_probe_model_pack(_probe_openrouter, resolved_openrouter))
 
-    return {
+    payload = {
         "ollama": {
             "configured_base_url": ollama_base_url,
             "transport_mode": ollama_mode,
@@ -393,6 +567,14 @@ def run_provider_smoke(
             **openrouter,
         },
     }
+    if qwen_provider:
+        payload["qwen_dashboard"] = asyncio.run(
+            _probe_qwen_dashboard(
+                qwen_provider,
+                qwen_task or _DEFAULT_QWEN_DASHBOARD_TASK,
+            )
+        )
+    return payload
 
 
 __all__ = [

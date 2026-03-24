@@ -22,6 +22,11 @@ from typing import Any
 
 logger = logging.getLogger(__name__)
 
+try:
+    from tools.loop_templates.progress_protocol import LoopProgressTracker, ProgressSnapshot
+except ImportError:  # pragma: no cover - direct script fallback
+    from progress_protocol import LoopProgressTracker, ProgressSnapshot
+
 STATE_DIR = Path.home() / ".dharma"
 OVERNIGHT_DIR = STATE_DIR / "overnight"
 LOG_FILE = OVERNIGHT_DIR / "gate_coverage.jsonl"
@@ -77,7 +82,9 @@ class GateCoverageStatus:
     """Coverage status for a single gate."""
 
     gate_name: str
-    covered: bool
+    referenced: bool
+    dedicated_test_exists: bool
+    verified: bool
     test_files: list[str] = field(default_factory=list)
 
 
@@ -111,8 +118,8 @@ def scan_gate_coverage(tests_dir: Path, gate_names: list[str]) -> dict[str, Gate
     """Scan test files for references to each gate name.
 
     Searches for the gate name (case-insensitive) in test file names
-    and test file contents. A gate is considered covered if at least
-    one test file references it.
+    and test file contents. This is only a discovery pass. Verified
+    coverage requires a dedicated gate test file that passes under pytest.
     """
     coverage: dict[str, GateCoverageStatus] = {}
 
@@ -138,9 +145,13 @@ def scan_gate_coverage(tests_dir: Path, gate_names: list[str]) -> dict[str, Gate
             except OSError:
                 continue
 
+        dedicated = (tests_dir / f"test_gate_{gate_lower}.py").exists()
+
         coverage[gate_name] = GateCoverageStatus(
             gate_name=gate_name,
-            covered=len(matching_files) > 0,
+            referenced=len(matching_files) > 0,
+            dedicated_test_exists=dedicated,
+            verified=False,
             test_files=matching_files,
         )
 
@@ -149,7 +160,25 @@ def scan_gate_coverage(tests_dir: Path, gate_names: list[str]) -> dict[str, Gate
 
 def uncovered_gates(coverage: dict[str, GateCoverageStatus]) -> list[str]:
     """Return names of gates without test coverage."""
-    return [name for name, status in coverage.items() if not status.covered]
+    return [name for name, status in coverage.items() if not status.verified]
+
+
+def verify_existing_gate_tests(
+    tests_dir: Path,
+    gate_names: list[str],
+    timeout: float,
+) -> set[str]:
+    """Return the subset of gates with dedicated test files that actually pass."""
+    verified: set[str] = set()
+    for gate_name in gate_names:
+        gate_lower = gate_name.lower()
+        test_path = tests_dir / f"test_gate_{gate_lower}.py"
+        if not test_path.exists():
+            continue
+        passed, _ = run_test_file(test_path, timeout=timeout)
+        if passed:
+            verified.add(gate_name)
+    return verified
 
 
 # ---------------------------------------------------------------------------
@@ -277,6 +306,7 @@ async def run(
     cfg.log_dir.mkdir(parents=True, exist_ok=True)
 
     results: list[IterationResult] = []
+    tracker = LoopProgressTracker("telos_gate_coverage", cfg.log_dir)
 
     # Log config at start
     _log_jsonl(log_path, {
@@ -284,6 +314,16 @@ async def run(
         "config": cfg.to_dict(),
         "timestamp": datetime.now(timezone.utc).isoformat(),
     })
+    tracker.start(
+        objective="Reach passing dedicated pytest coverage for all 11 core telos gates.",
+        config=cfg.to_dict(),
+    )
+
+    verified_gates = verify_existing_gate_tests(
+        cfg.tests_dir,
+        cfg.gate_names,
+        cfg.test_timeout,
+    )
 
     logger.info(
         "Gate coverage loop starting: max_iter=%d, gates=%d",
@@ -299,10 +339,12 @@ async def run(
 
         # Scan current coverage
         coverage = scan_gate_coverage(cfg.tests_dir, cfg.gate_names)
+        for gate_name, status in coverage.items():
+            status.verified = gate_name in verified_gates
         missing = uncovered_gates(coverage)
-        gates_covered = len(cfg.gate_names) - len(missing)
+        gates_covered = len(verified_gates)
 
-        coverage_map = {name: status.covered for name, status in coverage.items()}
+        coverage_map = {name: status.verified for name, status in coverage.items()}
 
         # Check convergence
         if not missing:
@@ -322,6 +364,23 @@ async def run(
             )
             results.append(iter_result)
             _log_jsonl(log_path, {"event": "iteration", **iter_result.to_dict()})
+            tracker.record(ProgressSnapshot(
+                loop_name="telos_gate_coverage",
+                objective="Verify every core telos gate with a passing dedicated pytest file.",
+                status="converged",
+                iteration=iteration,
+                target_metric={"verified_gates": len(cfg.gate_names)},
+                current_metric={
+                    "verified_gates": gates_covered,
+                    "referenced_gates": sum(1 for s in coverage.values() if s.referenced),
+                },
+                best_metric={"verified_gates": gates_covered},
+                verifier={"passed": True},
+                artifact_delta={"tests_generated": 0},
+                next_best_task="Freeze the gate coverage set and run mutation checks next.",
+                progress_delta=0.0,
+                notes=["All core gates have passing dedicated tests."],
+            ))
             logger.info("All %d gates covered -- converged", len(cfg.gate_names))
             break
 
@@ -341,6 +400,8 @@ async def run(
         passed, output = await asyncio.to_thread(
             run_test_file, test_path, cfg.test_timeout,
         )
+        if passed:
+            verified_gates.add(target_gate)
 
         error_msg: str | None = None
         if not passed:
@@ -365,6 +426,43 @@ async def run(
         )
         results.append(iter_result)
         _log_jsonl(log_path, {"event": "iteration", **iter_result.to_dict()})
+        tracker.record(ProgressSnapshot(
+            loop_name="telos_gate_coverage",
+            objective="Verify every core telos gate with a passing dedicated pytest file.",
+            status="running" if passed else "blocked",
+            iteration=iteration,
+            target_metric={"verified_gates": len(cfg.gate_names)},
+            current_metric={
+                "verified_gates": len(verified_gates),
+                "referenced_gates": sum(1 for s in coverage.values() if s.referenced),
+            },
+            best_metric={"verified_gates": len(verified_gates)},
+            verifier={
+                "passed": passed,
+                "target_gate": target_gate,
+                "dedicated_test_required": True,
+            },
+            artifact_delta={
+                "tests_generated": 1 if test_generated else 0,
+                "test_file": str(test_path.relative_to(DHARMA_SWARM_ROOT)),
+            },
+            next_best_task=(
+                f"Generate or repair a dedicated passing gate test for {missing[1]}"
+                if passed and len(missing) > 1
+                else (
+                    f"Debug the generated test for {target_gate} until it passes mechanically."
+                    if not passed
+                    else "Re-scan gate coverage and continue with the next uncovered gate."
+                )
+            ),
+            progress_delta=1.0 if passed else 0.0,
+            plateau_streak=0 if passed else 1,
+            notes=(
+                ["Dedicated gate test passed and is now counted as verified."]
+                if passed
+                else ["A passing dedicated pytest file is required before a gate counts as covered."]
+            ),
+        ))
 
         logger.info(
             "Iteration %d: gate=%s, generated=%s, passed=%s, "
@@ -375,7 +473,9 @@ async def run(
 
     # Log summary
     final_coverage = scan_gate_coverage(cfg.tests_dir, cfg.gate_names)
-    final_covered = sum(1 for s in final_coverage.values() if s.covered)
+    for gate_name, status in final_coverage.items():
+        status.verified = gate_name in verified_gates
+    final_covered = sum(1 for s in final_coverage.values() if s.verified)
 
     summary = {
         "event": "loop_end",
@@ -387,6 +487,7 @@ async def run(
         "timestamp": datetime.now(timezone.utc).isoformat(),
     }
     _log_jsonl(log_path, summary)
+    tracker.finish(summary)
     logger.info("Loop complete: %s", json.dumps(summary, indent=2))
 
     return results

@@ -91,6 +91,22 @@ class TestProviderHasKey:
         assert _provider_has_key(ProviderType.OPENROUTER) is True
         assert _provider_has_key(ProviderType.OPENROUTER_FREE) is True
 
+    def test_groq_with_key(self, monkeypatch):
+        monkeypatch.setenv("GROQ_API_KEY", "test-key")
+        assert _provider_has_key(ProviderType.GROQ) is True
+
+    def test_siliconflow_with_key(self, monkeypatch):
+        monkeypatch.setenv("SILICONFLOW_API_KEY", "test-key")
+        assert _provider_has_key(ProviderType.SILICONFLOW) is True
+
+    def test_together_with_key(self, monkeypatch):
+        monkeypatch.setenv("TOGETHER_API_KEY", "test-key")
+        assert _provider_has_key(ProviderType.TOGETHER) is True
+
+    def test_fireworks_with_key(self, monkeypatch):
+        monkeypatch.setenv("FIREWORKS_API_KEY", "test-key")
+        assert _provider_has_key(ProviderType.FIREWORKS) is True
+
     def test_ollama_no_key_needed(self):
         # Ollama not in _ENV_KEYS_FOR_PROVIDER — returns True
         assert _provider_has_key(ProviderType.OLLAMA) is True

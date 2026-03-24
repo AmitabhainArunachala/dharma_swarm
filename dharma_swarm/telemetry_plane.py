@@ -172,6 +172,16 @@ CREATE TABLE IF NOT EXISTS external_outcomes (
     created_at TEXT NOT NULL
 )"""
 
+_OVERNIGHT_METRICS_DDL = """
+CREATE TABLE IF NOT EXISTS overnight_metrics (
+    metric_id TEXT PRIMARY KEY,
+    date TEXT NOT NULL,
+    metric_name TEXT NOT NULL,
+    value REAL NOT NULL DEFAULT 0.0,
+    context_json TEXT NOT NULL DEFAULT '{}',
+    created_at TEXT NOT NULL
+)"""
+
 _INDEXES = [
     "CREATE INDEX IF NOT EXISTS idx_agent_identity_status_updated ON agent_identity(status, updated_at)",
     "CREATE INDEX IF NOT EXISTS idx_reward_agent_created ON agent_reward_ledger(agent_id, created_at)",
@@ -185,6 +195,7 @@ _INDEXES = [
     "CREATE INDEX IF NOT EXISTS idx_intervention_task_created ON intervention_outcomes(task_id, created_at)",
     "CREATE INDEX IF NOT EXISTS idx_economic_kind_created ON economic_events(event_kind, created_at)",
     "CREATE INDEX IF NOT EXISTS idx_external_kind_created ON external_outcomes(outcome_kind, created_at)",
+    "CREATE INDEX IF NOT EXISTS idx_overnight_date_metric ON overnight_metrics(date, metric_name)",
 ]
 
 
@@ -267,6 +278,7 @@ async def ensure_telemetry_schema_async(db: aiosqlite.Connection) -> None:
         _INTERVENTION_OUTCOMES_DDL,
         _ECONOMIC_EVENTS_DDL,
         _EXTERNAL_OUTCOMES_DDL,
+        _OVERNIGHT_METRICS_DDL,
     ):
         await db.execute(ddl)
     for idx in _INDEXES:

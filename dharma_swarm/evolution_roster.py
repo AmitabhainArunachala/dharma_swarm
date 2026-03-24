@@ -306,6 +306,10 @@ _ENV_KEYS_FOR_PROVIDER: dict[ProviderType, str] = {
     ProviderType.OPENROUTER: "OPENROUTER_API_KEY",
     ProviderType.OPENROUTER_FREE: "OPENROUTER_API_KEY",  # same key
     ProviderType.NVIDIA_NIM: "NVIDIA_NIM_API_KEY",
+    ProviderType.GROQ: "GROQ_API_KEY",
+    ProviderType.SILICONFLOW: "SILICONFLOW_API_KEY",
+    ProviderType.TOGETHER: "TOGETHER_API_KEY",
+    ProviderType.FIREWORKS: "FIREWORKS_API_KEY",
 }
 
 

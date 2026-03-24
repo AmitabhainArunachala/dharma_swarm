@@ -31,6 +31,8 @@ class ReviewRequest(BaseModel):
     diff: str = Field(..., description="Unified diff text to review")
     title: str = Field("", description="PR title (optional)")
     body: str = Field("", description="PR description (optional)")
+    pr_number: int = Field(0, description="PR number (optional)")
+    repo: str = Field("", description="Repository full name (optional)")
     context: str = Field("", description="Extra context for scoring (optional)")
 
 

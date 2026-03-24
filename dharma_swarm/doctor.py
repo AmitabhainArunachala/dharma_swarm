@@ -596,6 +596,10 @@ def _check_provider_env(checks: list[DoctorCheck]) -> None:
         "ANTHROPIC_API_KEY",
         "OPENAI_API_KEY",
         "OPENROUTER_API_KEY",
+        "GROQ_API_KEY",
+        "SILICONFLOW_API_KEY",
+        "TOGETHER_API_KEY",
+        "FIREWORKS_API_KEY",
         "NVIDIA_NIM_API_KEY",
         "OLLAMA_API_KEY",
     )

@@ -3890,6 +3890,8 @@ def cmd_provider_smoke(
     *,
     ollama_model: str | None = None,
     nim_model: str | None = None,
+    qwen_provider: str | None = None,
+    qwen_task: str | None = None,
     as_json: bool = False,
 ) -> int:
     """Run best-effort smoke tests for local and external provider lanes."""
@@ -3898,6 +3900,8 @@ def cmd_provider_smoke(
     payload = run_provider_smoke(
         ollama_model=ollama_model,
         nim_model=nim_model,
+        qwen_provider=qwen_provider,
+        qwen_task=qwen_task,
     )
     if as_json:
         print(json.dumps(payload, indent=2, sort_keys=True))
@@ -3924,6 +3928,13 @@ def cmd_provider_smoke(
                 f"{item.get('model')}:{item.get('status')}" for item in verified[:6]
             )
             print(f"  verified={summary}")
+        if label == "qwen_dashboard":
+            if block.get("resolved_provider"):
+                print(f"  resolved_provider={block['resolved_provider']}")
+            if block.get("tool_names"):
+                print(f"  tool_names={', '.join(block['tool_names'])}")
+            if block.get("required_env_key") and block.get("status") == "missing_config":
+                print(f"  required_env_key={block['required_env_key']}")
         if block.get("configured_base_url"):
             print(f"  base_url={block['configured_base_url']}")
         if block.get("response_preview"):
@@ -4739,6 +4750,16 @@ def _build_parser() -> argparse.ArgumentParser:
     p_provider.add_argument("--json", action="store_true", help="Emit machine-readable JSON")
     p_provider.add_argument("--ollama-model", default=None, help="Override Ollama model")
     p_provider.add_argument("--nim-model", default=None, help="Override NVIDIA NIM model")
+    p_provider.add_argument(
+        "--qwen-provider",
+        default=None,
+        help="Force a Qwen3.5 Surgical Coder dashboard smoke against a specific provider",
+    )
+    p_provider.add_argument(
+        "--qwen-task",
+        default=None,
+        help="Override the read-only Qwen dashboard smoke task",
+    )
 
     # -- context --
     p_ctx = sub.add_parser("context", help="Load context for a domain")
@@ -5117,6 +5138,7 @@ def _build_parser() -> argparse.ArgumentParser:
     eval_sub.add_parser("run", help="Run all evals and print scorecard")
     eval_sub.add_parser("report", help="Print latest eval report")
     eval_sub.add_parser("trend", help="Show historical pass rates")
+    eval_sub.add_parser("dashboard", help="Single-screen eval dashboard")
 
     # -- self-improve --
     p_si = sub.add_parser("self-improve", help="Self-improvement cycle — strange loop")
@@ -5179,6 +5201,14 @@ def _build_parser() -> argparse.ArgumentParser:
     # -- execute-compose (v0.4.2) --
     p_exec_comp = sub.add_parser("execute-compose", help="Compose and execute a task DAG end-to-end")
     p_exec_comp.add_argument("exec_comp_desc", nargs="+", help="Task description")
+
+    # -- overnight (autonomous overnight loop) --
+    p_overnight = sub.add_parser("overnight", help="Run overnight autonomous loop")
+    p_overnight.add_argument("--hours", type=float, default=8.0, help="Duration in hours")
+    p_overnight.add_argument("--dry-run", action="store_true", help="Simulate without real execution")
+    p_overnight.add_argument("--autonomy", type=int, default=1, help="Autonomy level (0-3)")
+    p_overnight.add_argument("--max-tokens", type=int, default=500_000, help="Token budget")
+    p_overnight.add_argument("--cycle-timeout", type=float, default=900.0, help="Seconds per cycle")
 
     # -- handoff (v0.4.1) --
     p_ho = sub.add_parser("handoff", help="Create a structured agent handoff (v0.4.1)")
@@ -5608,6 +5638,17 @@ def main() -> None:
             cmd_pulse()
         case "orchestrate-live":
             cmd_orchestrate_live(background=args.background)
+        case "overnight":
+            import asyncio as _aio
+            from dharma_swarm.overnight_director import run_overnight as _run_overnight
+            _result = _aio.run(_run_overnight(
+                hours=args.hours,
+                dry_run=args.dry_run,
+                autonomy_level=args.autonomy,
+                max_tokens=args.max_tokens,
+                cycle_timeout=args.cycle_timeout,
+            ))
+            print(json.dumps(_result, indent=2))
         case "swarm":
             cmd_swarm(args.swarm_args)
         case "stress":
@@ -5639,6 +5680,8 @@ def main() -> None:
             rc = cmd_provider_smoke(
                 ollama_model=args.ollama_model,
                 nim_model=args.nim_model,
+                qwen_provider=args.qwen_provider,
+                qwen_task=args.qwen_task,
                 as_json=args.json,
             )
             if rc != 0:
@@ -5913,6 +5956,7 @@ def main() -> None:
         case "eval":
             from dharma_swarm.ecc_eval_harness import (
                 cmd_eval_run, cmd_eval_report, cmd_eval_trend,
+                cmd_eval_dashboard,
             )
             match args.eval_cmd:
                 case "run":
@@ -5926,6 +5970,10 @@ def main() -> None:
                         raise SystemExit(rc)
                 case "trend":
                     rc = cmd_eval_trend()
+                    if rc != 0:
+                        raise SystemExit(rc)
+                case "dashboard":
+                    rc = cmd_eval_dashboard()
                     if rc != 0:
                         raise SystemExit(rc)
                 case _:

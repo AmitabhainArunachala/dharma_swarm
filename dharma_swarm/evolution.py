@@ -2298,6 +2298,38 @@ class DarwinEngine:
         )
         return proposal
 
+    # -- pending proposals (from consolidation / skill bridge) ----------------
+
+    _PENDING_PROPOSALS_PATH = Path.home() / ".dharma" / "evolution" / "pending_proposals.jsonl"
+
+    def load_pending_proposals(self) -> list[Proposal]:
+        """Load and clear pending proposals written by consolidation or skill bridge.
+
+        Returns a list of Proposal objects.  The file is truncated after reading
+        so proposals are consumed exactly once.
+        """
+        path = self._PENDING_PROPOSALS_PATH
+        if not path.exists():
+            return []
+        proposals: list[Proposal] = []
+        try:
+            import json as _pp_json
+            lines = path.read_text().splitlines()
+            for line in lines:
+                line = line.strip()
+                if not line:
+                    continue
+                try:
+                    data = _pp_json.loads(line)
+                    proposals.append(Proposal(**data))
+                except Exception as exc:
+                    logger.warning("Skipping malformed pending proposal: %s", exc)
+            # Truncate after successful read
+            path.write_text("")
+        except Exception as exc:
+            logger.warning("Failed to load pending proposals: %s", exc)
+        return proposals
+
     async def auto_evolve(
         self,
         provider: Any,

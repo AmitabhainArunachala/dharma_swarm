@@ -10,6 +10,10 @@ AGENT_ALIASES: dict[str, str] = {
     "agent_identity_ecosystem_synthesizer": "glm-researcher",
     "qwen35-surgeon": "qwen-builder",
     "qwen35_surgeon": "qwen-builder",
+    "qwen35-surgical-coder": "qwen-builder",
+    "qwen35_surgical_coder": "qwen-builder",
+    "qwen3.5_surgical_coder": "qwen-builder",
+    "qwen3_5_surgical_coder": "qwen-builder",
     "qwen-surgeon": "qwen-builder",
 }
 

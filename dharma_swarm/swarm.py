@@ -1367,6 +1367,142 @@ class SwarmManager:
             return "timeout"
         return "execution_error"
 
+    async def reap_orphaned_tasks(self, *, stale_minutes: int = 30) -> list[Task]:
+        """Requeue ASSIGNED/RUNNING tasks whose agents no longer exist in the pool.
+
+        After a daemon restart, agent UUIDs change. Tasks assigned to the old
+        UUIDs sit forever as 'assigned' or 'running' because no agent will
+        claim them.  This sweep detects them by checking whether the assigned
+        agent ID is still present in the current agent pool and by applying a
+        staleness threshold on updated_at.
+
+        Also propagates failure through dependency chains: if a pending task's
+        *only* blocking dependency is permanently failed (exhausted retries),
+        that pending task is marked failed too so it doesn't block the chain
+        forever.
+        """
+        if self._task_board is None or self._agent_pool is None:
+            return []
+
+        # Current live agent IDs
+        live_agents = await self._agent_pool.list_agents()
+        live_ids = {a.id for a in live_agents}
+
+        now = datetime.now(timezone.utc)
+        cutoff = now - timedelta(minutes=stale_minutes)
+        reaped: list[Task] = []
+
+        for status in (TaskStatus.ASSIGNED, TaskStatus.RUNNING):
+            tasks = await self._task_board.list_tasks(status=status, limit=500)
+            for task in tasks:
+                agent_id = task.assigned_to or ""
+                # Orphaned: agent not in current pool AND task is stale
+                if agent_id in live_ids:
+                    continue
+                if task.updated_at > cutoff:
+                    continue  # recently touched, give it time
+
+                meta = dict(task.metadata or {})
+                meta["orphan_reaped_at"] = now.isoformat()
+                meta["orphan_original_agent"] = agent_id
+                meta["orphan_original_status"] = status.value
+                meta.pop("active_claim", None)
+                meta.pop("retry_not_before_epoch", None)
+
+                try:
+                    await self._task_board.requeue(
+                        task.id,
+                        reason=f"Orphan reaper: agent {agent_id[:12]} no longer in pool",
+                        metadata=meta,
+                    )
+                    refreshed = await self._task_board.get(task.id)
+                    if refreshed is not None:
+                        reaped.append(refreshed)
+                        logger.info(
+                            "Reaped orphaned task %s (%s) from dead agent %s",
+                            task.id[:12], status.value, agent_id[:12],
+                        )
+                except Exception as exc:
+                    logger.debug("Failed to reap task %s: %s", task.id[:12], exc)
+
+        # Propagate failure through dependency chains
+        dep_failed = await self._propagate_dependency_failures()
+        if dep_failed:
+            logger.info("Dependency propagation failed %d blocked tasks", len(dep_failed))
+
+        if reaped and self._memory is not None:
+            await self._memory.remember(
+                f"Orphan reaper recovered {len(reaped)} stuck task(s)",
+                layer=MemoryLayer.SESSION,
+                source="swarm.orphan_reaper",
+            )
+        return reaped
+
+    async def _propagate_dependency_failures(self) -> list[Task]:
+        """Fail PENDING tasks whose blocking dependencies are permanently failed."""
+        if self._task_board is None:
+            return []
+
+        pending = await self._task_board.list_tasks(status=TaskStatus.PENDING, limit=500)
+        propagated: list[Task] = []
+
+        for task in pending:
+            # Check dependencies via the task_dependencies table
+            try:
+                async with self._task_board._open() as db:
+                    cur = await db.execute(
+                        "SELECT d.depends_on_id, dep.status, dep.metadata "
+                        "FROM task_dependencies d "
+                        "JOIN tasks dep ON dep.id = d.depends_on_id "
+                        "WHERE d.task_id = ?",
+                        (task.id,),
+                    )
+                    deps = await cur.fetchall()
+            except Exception:
+                continue
+
+            if not deps:
+                continue  # No dependencies, should be ready
+
+            # Check if ALL blocking deps are permanently failed
+            all_blocking_failed = True
+            has_blocking = False
+            for _dep_id, dep_status, dep_meta_raw in deps:
+                if dep_status == TaskStatus.COMPLETED.value:
+                    continue  # This dep is satisfied
+                has_blocking = True
+                if dep_status != TaskStatus.FAILED.value:
+                    all_blocking_failed = False
+                    break
+                # Check if the failed dep has exhausted retries
+                try:
+                    dep_meta = __import__("json").loads(dep_meta_raw) if dep_meta_raw else {}
+                except Exception:
+                    dep_meta = {}
+                rescue_count = int(dep_meta.get("auto_rescue_count", 0) or 0)
+                if rescue_count < 2:  # Still has rescue attempts left
+                    all_blocking_failed = False
+                    break
+
+            if has_blocking and all_blocking_failed:
+                try:
+                    await self._task_board.update_task(
+                        task.id,
+                        status=TaskStatus.FAILED,
+                        result="Dependency chain permanently failed — blocking tasks exhausted retries",
+                    )
+                    refreshed = await self._task_board.get(task.id)
+                    if refreshed is not None:
+                        propagated.append(refreshed)
+                        logger.info(
+                            "Dependency propagation: failed task %s (%s)",
+                            task.id[:12], task.title[:60],
+                        )
+                except Exception as exc:
+                    logger.debug("Dependency propagation failed for %s: %s", task.id[:12], exc)
+
+        return propagated
+
     async def rescue_recent_failures(
         self,
         *,
@@ -1690,6 +1826,21 @@ class SwarmManager:
                 logger.warning("rescue_recent_failures timed out after 10s")
             self._last_auto_rescue_scan = now
         result["rescued"] = len(rescued)
+
+        # Orphan reaper: recover tasks stuck on dead agents (runs with rescue scan)
+        if (self._last_auto_rescue_scan is not None
+                and self._last_auto_rescue_scan == now):
+            try:
+                orphans = await asyncio.wait_for(
+                    self.reap_orphaned_tasks(), timeout=10.0
+                )
+                result["orphans_reaped"] = len(orphans)
+                if orphans:
+                    logger.info("Orphan reaper recovered %d task(s)", len(orphans))
+            except asyncio.TimeoutError:
+                logger.warning("reap_orphaned_tasks timed out after 10s")
+            except Exception:
+                logger.debug("Orphan reaper error", exc_info=True)
 
         reopened: list[Any] = []
         if allow_autonomous_generation:

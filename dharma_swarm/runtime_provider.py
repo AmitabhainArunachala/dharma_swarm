@@ -27,42 +27,70 @@ NVIDIA_NIM_BASE_URL = "https://integrate.api.nvidia.com/v1"
 GROQ_BASE_URL = "https://api.groq.com/openai/v1"
 CEREBRAS_BASE_URL = "https://api.cerebras.ai/v1"
 SILICONFLOW_BASE_URL = "https://api.siliconflow.cn/v1"
+TOGETHER_BASE_URL = "https://api.together.xyz/v1"
+FIREWORKS_BASE_URL = "https://api.fireworks.ai/inference/v1"
 GOOGLE_AI_BASE_URL = "https://generativelanguage.googleapis.com/v1beta/openai/"
+SAMBANOVA_BASE_URL = "https://api.sambanova.ai/v1"
+MISTRAL_BASE_URL = "https://api.mistral.ai/v1"
+CHUTES_BASE_URL = "https://api.chutes.ai/v1"
 DEFAULT_CLAUDE_MODEL = "claude-opus-4-6"
 DEFAULT_OPENAI_MODEL = "gpt-5.4"
 DEFAULT_OPENROUTER_MODEL = "anthropic/claude-opus-4-6"
 DEFAULT_GROQ_MODEL = "qwen/qwen3-32b"
 DEFAULT_SILICONFLOW_MODEL = "Qwen/Qwen3-Coder-480B-A35B-Instruct"
+DEFAULT_TOGETHER_MODEL = "Qwen/Qwen3-Coder-480B-A35B-Instruct-FP8"
+DEFAULT_FIREWORKS_MODEL = "accounts/fireworks/models/qwen3-coder-480b-a35b-instruct"
 DEFAULT_NIM_MODEL = "meta/llama-3.3-70b-instruct"
+DEFAULT_SAMBANOVA_MODEL = "Meta-Llama-3.3-70B-Instruct"
+DEFAULT_MISTRAL_MODEL = "mistral-large-latest"
+DEFAULT_CHUTES_MODEL = "deepseek-ai/DeepSeek-R1"
 DEFAULT_PROVIDER_TIMEOUT_SECONDS = 300
 
-# FREE FIRST — Groq/Cerebras/SiliconFlow fastest, then Ollama Cloud, NVIDIA NIM,
-# OpenRouter Free before paid providers.
+# FREE FIRST — ultra-fast (Groq/Cerebras 3000 tok/s), then fast free
+# (SiliconFlow/SambaNova 100-200 tok/s), then generous free (Mistral 1B tok/mo,
+# Google AI 1M ctx), community (Chutes/Ollama Cloud), credits-based (NIM),
+# aggregated free (OpenRouter Free), paid fallback last.
 DEFAULT_RUNTIME_PROVIDERS: tuple[ProviderType, ...] = (
+    # Ultra-fast free (3000 tok/s)
     ProviderType.GROQ,
     ProviderType.CEREBRAS,
+    # Fast free (100+ tok/s)
     ProviderType.SILICONFLOW,
+    ProviderType.SAMBANOVA,
+    ProviderType.TOGETHER,
+    ProviderType.FIREWORKS,
+    # Generous free (high quota)
+    ProviderType.MISTRAL,
+    ProviderType.GOOGLE_AI,
+    # Community / variable availability
     ProviderType.OLLAMA,
+    ProviderType.CHUTES,
     ProviderType.NVIDIA_NIM,
     ProviderType.OPENROUTER_FREE,
+    # Paid fallback
     ProviderType.OPENROUTER,
     ProviderType.OPENAI,
     ProviderType.ANTHROPIC,
     ProviderType.CLAUDE_CODE,
     ProviderType.CODEX,
-    ProviderType.GOOGLE_AI,
 )
 
 # Hardcoded low-cost preference for autonomous/runtime call sites that would
 # otherwise talk to OpenRouter directly. Keep local/NIM ahead of OpenRouter;
 # Groq/Cerebras/SiliconFlow slotted after free tiers.
 PREFERRED_LOW_COST_RUNTIME_PROVIDERS: tuple[ProviderType, ...] = (
-    ProviderType.OLLAMA,
-    ProviderType.NVIDIA_NIM,
-    ProviderType.OPENROUTER_FREE,
     ProviderType.GROQ,
     ProviderType.CEREBRAS,
     ProviderType.SILICONFLOW,
+    ProviderType.SAMBANOVA,
+    ProviderType.MISTRAL,
+    ProviderType.GOOGLE_AI,
+    ProviderType.OLLAMA,
+    ProviderType.CHUTES,
+    ProviderType.NVIDIA_NIM,
+    ProviderType.OPENROUTER_FREE,
+    ProviderType.TOGETHER,
+    ProviderType.FIREWORKS,
     ProviderType.OPENROUTER,
 )
 
@@ -70,6 +98,8 @@ PREFERRED_LOW_COST_WITH_ANTHROPIC_RUNTIME_PROVIDERS: tuple[ProviderType, ...] = 
     ProviderType.OLLAMA,
     ProviderType.NVIDIA_NIM,
     ProviderType.OPENROUTER_FREE,
+    ProviderType.TOGETHER,
+    ProviderType.FIREWORKS,
     ProviderType.OPENROUTER,
     ProviderType.ANTHROPIC,
 )
@@ -271,6 +301,36 @@ def resolve_runtime_provider_config(
             available=bool(token),
         )
 
+    if provider == ProviderType.TOGETHER:
+        token = api_key or _env_value(env_map, "TOGETHER_API_KEY")
+        resolved_base = (
+            base_url
+            or _env_value(env_map, "TOGETHER_BASE_URL")
+            or TOGETHER_BASE_URL
+        ).rstrip("/")
+        return RuntimeProviderConfig(
+            provider=provider,
+            api_key=token,
+            base_url=resolved_base,
+            default_model=model or DEFAULT_TOGETHER_MODEL,
+            available=bool(token),
+        )
+
+    if provider == ProviderType.FIREWORKS:
+        token = api_key or _env_value(env_map, "FIREWORKS_API_KEY")
+        resolved_base = (
+            base_url
+            or _env_value(env_map, "FIREWORKS_BASE_URL")
+            or FIREWORKS_BASE_URL
+        ).rstrip("/")
+        return RuntimeProviderConfig(
+            provider=provider,
+            api_key=token,
+            base_url=resolved_base,
+            default_model=model or DEFAULT_FIREWORKS_MODEL,
+            available=bool(token),
+        )
+
     if provider == ProviderType.GOOGLE_AI:
         token = api_key or _env_value(env_map, "GOOGLE_AI_API_KEY")
         resolved_base = (
@@ -286,6 +346,51 @@ def resolve_runtime_provider_config(
             available=bool(token),
         )
 
+    if provider == ProviderType.SAMBANOVA:
+        token = api_key or _env_value(env_map, "SAMBANOVA_API_KEY")
+        resolved_base = (
+            base_url
+            or _env_value(env_map, "SAMBANOVA_BASE_URL")
+            or SAMBANOVA_BASE_URL
+        ).rstrip("/")
+        return RuntimeProviderConfig(
+            provider=provider,
+            api_key=token,
+            base_url=resolved_base,
+            default_model=model or DEFAULT_SAMBANOVA_MODEL,
+            available=bool(token),
+        )
+
+    if provider == ProviderType.MISTRAL:
+        token = api_key or _env_value(env_map, "MISTRAL_API_KEY")
+        resolved_base = (
+            base_url
+            or _env_value(env_map, "MISTRAL_BASE_URL")
+            or MISTRAL_BASE_URL
+        ).rstrip("/")
+        return RuntimeProviderConfig(
+            provider=provider,
+            api_key=token,
+            base_url=resolved_base,
+            default_model=model or DEFAULT_MISTRAL_MODEL,
+            available=bool(token),
+        )
+
+    if provider == ProviderType.CHUTES:
+        token = api_key or _env_value(env_map, "CHUTES_API_KEY")
+        resolved_base = (
+            base_url
+            or _env_value(env_map, "CHUTES_BASE_URL")
+            or CHUTES_BASE_URL
+        ).rstrip("/")
+        return RuntimeProviderConfig(
+            provider=provider,
+            api_key=token,
+            base_url=resolved_base,
+            default_model=model or DEFAULT_CHUTES_MODEL,
+            available=bool(token),
+        )
+
     raise ValueError(f"Unsupported runtime provider: {provider.value}")
 
 
@@ -295,16 +400,21 @@ def create_runtime_provider(config: RuntimeProviderConfig) -> Any:
     from dharma_swarm.providers import (
         AnthropicProvider,
         CerebrasProvider,
+        ChutesProvider,
         ClaudeCodeProvider,
         CodexProvider,
+        FireworksProvider,
         GoogleAIProvider,
         GroqProvider,
+        MistralProvider,
         NVIDIANIMProvider,
         OllamaProvider,
         OpenAIProvider,
         OpenRouterFreeProvider,
         OpenRouterProvider,
+        SambaNovaProvider,
         SiliconFlowProvider,
+        TogetherProvider,
     )
 
     if config.provider == ProviderType.ANTHROPIC:
@@ -370,11 +480,36 @@ def create_runtime_provider(config: RuntimeProviderConfig) -> Any:
         if config.api_key is not None:
             kwargs["api_key"] = config.api_key
         return SiliconFlowProvider(**kwargs)
+    if config.provider == ProviderType.TOGETHER:
+        kwargs = {}
+        if config.api_key is not None:
+            kwargs["api_key"] = config.api_key
+        return TogetherProvider(**kwargs)
+    if config.provider == ProviderType.FIREWORKS:
+        kwargs = {}
+        if config.api_key is not None:
+            kwargs["api_key"] = config.api_key
+        return FireworksProvider(**kwargs)
     if config.provider == ProviderType.GOOGLE_AI:
         kwargs = {}
         if config.api_key is not None:
             kwargs["api_key"] = config.api_key
         return GoogleAIProvider(**kwargs)
+    if config.provider == ProviderType.SAMBANOVA:
+        kwargs = {}
+        if config.api_key is not None:
+            kwargs["api_key"] = config.api_key
+        return SambaNovaProvider(**kwargs)
+    if config.provider == ProviderType.MISTRAL:
+        kwargs = {}
+        if config.api_key is not None:
+            kwargs["api_key"] = config.api_key
+        return MistralProvider(**kwargs)
+    if config.provider == ProviderType.CHUTES:
+        kwargs = {}
+        if config.api_key is not None:
+            kwargs["api_key"] = config.api_key
+        return ChutesProvider(**kwargs)
     raise ValueError(f"Unsupported runtime provider: {config.provider.value}")
 
 
@@ -498,12 +633,15 @@ __all__ = [
     "CEREBRAS_BASE_URL",
     "DEFAULT_CLAUDE_MODEL",
     "DEFAULT_GROQ_MODEL",
+    "DEFAULT_FIREWORKS_MODEL",
     "DEFAULT_NIM_MODEL",
     "DEFAULT_OPENAI_MODEL",
     "DEFAULT_OPENROUTER_MODEL",
     "DEFAULT_PROVIDER_TIMEOUT_SECONDS",
     "DEFAULT_RUNTIME_PROVIDERS",
     "DEFAULT_SILICONFLOW_MODEL",
+    "DEFAULT_TOGETHER_MODEL",
+    "FIREWORKS_BASE_URL",
     "GOOGLE_AI_BASE_URL",
     "GROQ_BASE_URL",
     "NVIDIA_NIM_BASE_URL",
@@ -513,6 +651,7 @@ __all__ = [
     "PREFERRED_LOW_COST_WITH_ANTHROPIC_RUNTIME_PROVIDERS",
     "RuntimeProviderConfig",
     "SILICONFLOW_BASE_URL",
+    "TOGETHER_BASE_URL",
     "complete_via_preferred_runtime_providers",
     "create_default_provider_map",
     "create_runtime_provider",

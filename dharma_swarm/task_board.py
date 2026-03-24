@@ -16,7 +16,7 @@ from dharma_swarm.models import Task, TaskPriority, TaskStatus, _new_id, _utc_no
 from dharma_swarm.telos_gates import check_with_reflective_reroute
 
 _TRANSITIONS: dict[TaskStatus, set[TaskStatus]] = {
-    TaskStatus.PENDING: {TaskStatus.ASSIGNED, TaskStatus.CANCELLED},
+    TaskStatus.PENDING: {TaskStatus.ASSIGNED, TaskStatus.CANCELLED, TaskStatus.FAILED},
     TaskStatus.ASSIGNED: {TaskStatus.RUNNING, TaskStatus.CANCELLED, TaskStatus.PENDING},
     TaskStatus.RUNNING: {TaskStatus.COMPLETED, TaskStatus.FAILED, TaskStatus.CANCELLED},
     TaskStatus.COMPLETED: set(),

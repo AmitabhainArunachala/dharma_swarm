@@ -287,8 +287,26 @@ async def run_training_flywheel_loop(shutdown_event: asyncio.Event) -> None:
         tick += 1
         now = time.time()
 
+        # --- Eval verdict gate: check system health before reinforcing ---
+        _fw_gate_ok = True
+        try:
+            import json as _fwj
+            from datetime import datetime as _fwdt, timezone as _fwtz
+            _fw_verdict_path = (
+                STATE_DIR / "overnight"
+                / _fwdt.now(_fwtz.utc).strftime("%Y-%m-%d")
+                / "verdict.json"
+            )
+            if _fw_verdict_path.exists():
+                _fw_vdata = _fwj.loads(_fw_verdict_path.read_text())
+                if _fw_vdata.get("verdict") == "rollback":
+                    _fw_gate_ok = False
+                    _log("flywheel", "PAUSED: overnight ROLLBACK — skipping reinforcement")
+        except Exception:
+            pass
+
         # --- Sub-cycle 1: Strategy reinforcement ---
-        if now - state.last_reinforce >= REINFORCE_INTERVAL:
+        if now - state.last_reinforce >= REINFORCE_INTERVAL and _fw_gate_ok:
             try:
                 result = _run_reinforcement(state)
                 if result.get("skipped"):

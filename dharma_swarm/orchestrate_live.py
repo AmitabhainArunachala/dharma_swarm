@@ -93,6 +93,17 @@ async def run_swarm_loop(
                     if anomaly_signals:
                         _log("swarm", f"Signal bus: {len(anomaly_signals)} anomaly signal(s)")
 
+                # Drain skill bridge inbox — route Claude Code skill outputs to swarm
+                try:
+                    from dharma_swarm.skill_bridge import SkillBridge
+                    _bridge = SkillBridge()
+                    _bridge_entries = _bridge.drain_inbox()
+                    if _bridge_entries:
+                        _bridge_counts = _bridge.process_entries(_bridge_entries)
+                        _log("swarm", f"Skill bridge: processed {sum(_bridge_counts.values())} entries ({_bridge_counts})")
+                except Exception:
+                    pass  # Skill bridge is best-effort
+
                 # Drain instinct signals — negative patterns inform task quality
                 try:
                     instinct_events = await _instinct_bus.consume_events(
@@ -310,9 +321,52 @@ async def run_evolution_loop(shutdown_event: asyncio.Event) -> None:
                             f"(meta_fitness={meta_result.meta_fitness:.3f})",
                         )
 
+            # Drain active inference prediction errors — bias evolution toward high-error areas
+            try:
+                from dharma_swarm.signal_bus import SignalBus as _EvSB
+                _ev_bus = _EvSB.get()
+                pe_signals = _ev_bus.drain(["ACTIVE_INFERENCE_PREDICTION_ERROR"])
+                if pe_signals:
+                    high_error = sorted(pe_signals, key=lambda s: abs(s.get("error", 0)), reverse=True)[:3]
+                    error_summary = ", ".join(f"{s.get('agent', '?')}:{s.get('error', 0):.3f}" for s in high_error)
+                    _log("evolution", f"Prediction errors from {len(pe_signals)} observations: {error_summary}")
+            except Exception:
+                pass
+
+            # Read health anomalies from file (written by health loop, avoids signal bus contention)
+            try:
+                import json as _ej
+                _anomaly_file = STATE_DIR / "health" / "latest_anomalies.json"
+                if _anomaly_file.exists():
+                    _anomaly_data = _ej.loads(_anomaly_file.read_text())
+                    if _anomaly_data:
+                        _anomaly_types = [a.get("type", "?") for a in _anomaly_data]
+                        _log("evolution", f"Health context: {', '.join(_anomaly_types)}")
+            except Exception:
+                pass
+
+            # --- EVAL VERDICT GATE: check overnight verdict before evolving ---
+            _evo_allowed = True
+            try:
+                import json as _vj
+                _verdict_dir = STATE_DIR / "overnight" / datetime.now(timezone.utc).strftime("%Y-%m-%d")
+                _verdict_file = _verdict_dir / "verdict.json"
+                if _verdict_file.exists():
+                    _vdata = _vj.loads(_verdict_file.read_text())
+                    _v = _vdata.get("verdict", "")
+                    if _v == "rollback":
+                        _evo_allowed = False
+                        _log("evolution", "PAUSED: overnight ROLLBACK verdict — skipping auto_evolve")
+                    elif _v == "hold":
+                        # On HOLD, only allow shadow mode
+                        _log("evolution", "CONSTRAINED: overnight HOLD verdict — forcing shadow mode")
+            except Exception:
+                pass
+
             # Auto-evolve: propose improvements via LLM every 3rd cycle
-            # Uses shadow mode (no real code changes) for safety
-            if cycle_count % 3 == 0:
+            # Shadow mode controlled by env var (default: ON for safety)
+            # Set DHARMA_EVOLUTION_SHADOW=0 + DGC_AUTONOMY_LEVEL>=2 for real mutation
+            if cycle_count % 3 == 0 and _evo_allowed:
                 try:
                     from dharma_swarm.providers import OpenRouterProvider
                     import os as _evo_os
@@ -326,20 +380,102 @@ async def run_evolution_loop(shutdown_event: asyncio.Event) -> None:
                         ]
                         if targets:
                             selected = _evo_rng.sample(targets, min(2, len(targets)))
-                            _log("evolution", f"Auto-evolve (shadow): {[s.name for s in selected]}")
+
+                            # Determine shadow mode: real mutation requires explicit opt-in
+                            _shadow = _evo_os.environ.get("DHARMA_EVOLUTION_SHADOW", "1") != "0"
+                            _autonomy = int(_evo_os.environ.get("DGC_AUTONOMY_LEVEL", "1"))
+                            if not _shadow and _autonomy < 2:
+                                _shadow = True  # Autonomy too low for real mutation
+                                _log("evolution", "Shadow forced: DGC_AUTONOMY_LEVEL < 2")
+
+                            # Eval verdict override: HOLD forces shadow mode
+                            try:
+                                if _verdict_file.exists():
+                                    _vd2 = _vj.loads(_verdict_file.read_text())
+                                    if _vd2.get("verdict") == "hold" and not _shadow:
+                                        _shadow = True
+                                        _log("evolution", "Shadow forced: overnight HOLD verdict")
+                            except Exception:
+                                pass
+
+                            # Merge any pending proposals from consolidation/skill bridge
+                            _pending = engine.load_pending_proposals()
+                            if _pending:
+                                _log("evolution", f"Loaded {len(_pending)} pending proposals from consolidation/bridge")
+
+                            mode_label = "shadow" if _shadow else "LIVE"
+                            _log("evolution", f"Auto-evolve ({mode_label}): {[s.name for s in selected]}")
+
+                            # Create darwin branch for live mutation
+                            if not _shadow:
+                                _branch = f"darwin/cycle-{cycle_count}"
+                                _br_proc = await asyncio.create_subprocess_exec(
+                                    "git", "checkout", "-b", _branch,
+                                    cwd=str(_src_root.parent),
+                                    stdout=asyncio.subprocess.PIPE,
+                                    stderr=asyncio.subprocess.PIPE,
+                                )
+                                await _br_proc.communicate()
+                                _log("evolution", f"Created branch {_branch}")
+
                             result = await engine.auto_evolve(
                                 provider=provider,
                                 source_files=selected,
-                                shadow=True,  # Safe: evaluate but don't apply diffs
+                                shadow=_shadow,
                                 timeout=30.0,
                                 context=f"Fitness avg={avg_fitness:.3f}, completions={completions}",
                             )
                             _log(
                                 "evolution",
-                                f"Auto-evolve result: fitness={result.best_fitness:.3f}, "
+                                f"Auto-evolve result ({mode_label}): fitness={result.best_fitness:.3f}, "
                                 f"submitted={result.proposals_submitted}, "
                                 f"gated={result.proposals_gated}",
                             )
+
+                            # For live mode: commit worthy proposals, then return to main branch
+                            if not _shadow and result.proposals_archived > 0:
+                                _committed = 0
+                                _best_entries = await engine.archive.get_best(n=3)
+                                for entry in _best_entries:
+                                    # Build a Proposal from ArchiveEntry for commit_if_worthy
+                                    from dharma_swarm.evolution import Proposal
+                                    _p = Proposal(
+                                        id=entry.id,
+                                        component=entry.component,
+                                        change_type=entry.change_type,
+                                        description=entry.description,
+                                        diff=entry.diff,
+                                        actual_fitness=entry.fitness,
+                                    )
+                                    sha = await engine.commit_if_worthy(_p)
+                                    if sha:
+                                        _committed += 1
+                                        _log("evolution", f"Committed {sha[:8]} for {entry.component}")
+                                if _committed == 0:
+                                    # No commits — delete the branch
+                                    _del_proc = await asyncio.create_subprocess_exec(
+                                        "git", "checkout", "-",
+                                        cwd=str(_src_root.parent),
+                                        stdout=asyncio.subprocess.PIPE,
+                                        stderr=asyncio.subprocess.PIPE,
+                                    )
+                                    await _del_proc.communicate()
+                                    await asyncio.create_subprocess_exec(
+                                        "git", "branch", "-D", _branch,
+                                        cwd=str(_src_root.parent),
+                                        stdout=asyncio.subprocess.PIPE,
+                                        stderr=asyncio.subprocess.PIPE,
+                                    )
+                                else:
+                                    # Return to previous branch, keep darwin branch
+                                    await asyncio.create_subprocess_exec(
+                                        "git", "checkout", "-",
+                                        cwd=str(_src_root.parent),
+                                        stdout=asyncio.subprocess.PIPE,
+                                        stderr=asyncio.subprocess.PIPE,
+                                    )
+                                _log("evolution", f"Live cycle: {_committed} commits on {_branch}")
+
                             # Feed result to meta-evolution
                             meta_engine.observe_cycle_result(result)
                     else:
@@ -396,6 +532,20 @@ async def run_health_loop(shutdown_event: asyncio.Event) -> None:
             if anomalies:
                 for a in anomalies[:3]:
                     _log("health", f"ANOMALY: {a.anomaly_type} severity={a.severity} — {a.description[:80]}")
+                # Emit to signal bus so swarm loop can drain
+                for a in anomalies[:5]:
+                    signal_bus.emit({
+                        "type": "ANOMALY_DETECTED",
+                        "anomaly_type": a.anomaly_type,
+                        "severity": a.severity,
+                        "description": a.description[:200],
+                    })
+                # Write anomaly file for evolution loop (avoids signal bus contention)
+                anomaly_dir = STATE_DIR / "health"
+                anomaly_dir.mkdir(parents=True, exist_ok=True)
+                import json as _hj
+                summary = [{"type": a.anomaly_type, "severity": a.severity} for a in anomalies[:10]]
+                (anomaly_dir / "latest_anomalies.json").write_text(_hj.dumps(summary))
             else:
                 # Quick summary
                 pid_file = STATE_DIR / "daemon.pid"
@@ -587,7 +737,33 @@ async def _run_consolidation_loop(shutdown_event: asyncio.Event) -> None:
 
     cycle = ConsolidationCycle(state_dir=STATE_DIR)
 
+    # Neural consolidator: algorithmic forward-pass + loss detection + corrections
+    # Runs BEFORE the LLM debate cycle — no LLM cost, identifies losses fast
+    try:
+        from dharma_swarm.neural_consolidator import NeuralConsolidator
+        _neural = NeuralConsolidator(
+            provider=None,  # Algorithmic mode, no LLM calls
+            base_path=STATE_DIR,
+        )
+    except Exception as _ne:
+        _neural = None
+        _log("consolidation", f"Neural consolidator init failed: {_ne}")
+
     while not shutdown_event.is_set():
+        # Neural pass first (algorithmic, fast, no LLM cost)
+        if _neural is not None:
+            try:
+                _nr = await _neural.consolidation_cycle()
+                _log(
+                    "consolidation",
+                    f"Neural pass: losses={_nr.losses_found} "
+                    f"corrections={_nr.corrections_applied} "
+                    f"divisions={_nr.division_proposals}",
+                )
+            except Exception as _ne:
+                _log("consolidation", f"Neural pass error: {_ne}")
+
+        # LLM-based contrarian debate cycle
         try:
             outcome = await cycle.run()
             _log(
@@ -596,6 +772,13 @@ async def _run_consolidation_loop(shutdown_event: asyncio.Event) -> None:
                 f"corrections={outcome.corrections_applied}/{outcome.corrections_proposed} "
                 f"({outcome.duration_seconds:.1f}s)",
             )
+            # Export capability/fitness gap corrections as evolution proposals
+            try:
+                exported = cycle.export_evolution_proposals(outcome)
+                if exported:
+                    _log("consolidation", f"Exported {exported} proposals to evolution pipeline")
+            except Exception as _ep_err:
+                _log("consolidation", f"Proposal export failed: {_ep_err}")
         except Exception as e:
             _log("consolidation", f"Cycle failed: {e}")
 
@@ -846,6 +1029,13 @@ async def orchestrate(background: bool = False) -> None:
     # Only genuinely independent loops remain as separate tasks
     from dharma_swarm.context_agent import run_context_agent_loop
     from dharma_swarm.training_flywheel import run_training_flywheel_loop
+    from dharma_swarm.self_improve import run_self_improvement_loop
+
+    # Auto-enable self-improvement when autonomy >= 1
+    _auto_level = int(os.environ.get("DGC_AUTONOMY_LEVEL", "1"))
+    if _auto_level >= 1 and not os.environ.get("DHARMA_SELF_IMPROVE"):
+        os.environ["DHARMA_SELF_IMPROVE"] = "1"
+        _log("orchestrator", "Auto-enabled DHARMA_SELF_IMPROVE (autonomy >= 1)")
 
     tasks = [
         asyncio.create_task(run_swarm_loop(shutdown_event, signal_bus=bus), name="swarm"),
@@ -872,9 +1062,16 @@ async def orchestrate(background: bool = False) -> None:
         asyncio.create_task(
             run_training_flywheel_loop(shutdown_event), name="flywheel"
         ),
+        asyncio.create_task(
+            run_health_loop(shutdown_event), name="health"
+        ),
+        asyncio.create_task(
+            run_self_improvement_loop(shutdown_event, interval=3600),
+            name="self-improve"
+        ),
     ]
 
-    _log("orchestrator", f"All {len(tasks)} systems launched (10 loops incl. training flywheel)")
+    _log("orchestrator", f"All {len(tasks)} systems launched ({len(tasks)} loops incl. self-improve)")
 
     try:
         # Wait for shutdown or first failure

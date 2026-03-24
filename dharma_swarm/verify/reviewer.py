@@ -43,6 +43,35 @@ class ReviewResult:
     suggestions: list[str] = field(default_factory=list)
 
 
+@dataclass
+class PRReview:
+    """API-facing PR review payload used by router/webhook compatibility code."""
+
+    pr_number: int = 0
+    pr_title: str = ""
+    score: DiffScore = field(default_factory=DiffScore)
+    approved: bool = False
+    gate_result: str = "comment"
+    review_comment: str = ""
+    comprehension_debt: float | None = None
+
+    def __post_init__(self) -> None:
+        if self.comprehension_debt is None:
+            self.comprehension_debt = round(1.0 - self.score.overall, 4)
+
+    def model_dump(self) -> dict[str, Any]:
+        """Pydantic-style compatibility helper used by API tests."""
+        return {
+            "pr_number": self.pr_number,
+            "pr_title": self.pr_title,
+            "score": self.score.model_dump(),
+            "approved": self.approved,
+            "gate_result": self.gate_result,
+            "review_comment": self.review_comment,
+            "comprehension_debt": self.comprehension_debt,
+        }
+
+
 # ---------------------------------------------------------------------------
 # Diff parsing (extract files list)
 # ---------------------------------------------------------------------------
@@ -232,3 +261,44 @@ def review_pr(
     )
 
     return result
+
+
+def review_diff_text(
+    diff_text: str,
+    pr_number: int = 0,
+    pr_title: str = "",
+    repo: str = "",
+    pr_body: str = "",
+    context: str = "",
+) -> PRReview:
+    """Backward-compatible review entry point used by API and webhook layers."""
+    review = review_pr(
+        diff_text=diff_text,
+        pr_title=pr_title,
+        pr_body=pr_body,
+        context=context or repo,
+    )
+    from dharma_swarm.verify.reporter import format_review_comment
+
+    gate_result = {
+        "APPROVE": "pass",
+        "COMMENT": "comment",
+        "REQUEST_CHANGES": "fail",
+    }.get(review.verdict, "comment")
+
+    return PRReview(
+        pr_number=pr_number,
+        pr_title=pr_title,
+        score=review.score,
+        approved=gate_result == "pass",
+        gate_result=gate_result,
+        review_comment=format_review_comment(review),
+        comprehension_debt=review.comprehension_debt,
+    )
+
+
+def parse_unified_diff(diff_text: str) -> Any:
+    """Compatibility wrapper re-exporting the shared diff parser."""
+    from dharma_swarm.diff_applier import parse_unified_diff as parse_diff
+
+    return parse_diff(diff_text)
