@@ -1,0 +1,1120 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>dharma_swarm -- Agent Canvas</title>
+<style>
+  *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+
+  :root {
+    --bg: #0f172a;
+    --bg-surface: #1e293b;
+    --bg-raised: #334155;
+    --border: #475569;
+    --text: #e2e8f0;
+    --text-muted: #94a3b8;
+    --text-dim: #64748b;
+    --accent: #8B5CF6;
+    --danger: #ef4444;
+    --success: #10b981;
+    --warning: #f59e0b;
+    --sidebar-w: 280px;
+    --header-h: 52px;
+    --lane-h: 56px;
+    --lane-gap: 4px;
+    --label-w: 160px;
+    --scrubber-h: 36px;
+  }
+
+  body {
+    font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', 'Inter', sans-serif;
+    background: var(--bg);
+    color: var(--text);
+    overflow: hidden;
+    height: 100vh;
+    width: 100vw;
+    display: flex;
+    flex-direction: column;
+  }
+
+  /* ---- Header ---- */
+  header {
+    height: var(--header-h);
+    background: var(--bg-surface);
+    border-bottom: 1px solid var(--border);
+    display: flex;
+    align-items: center;
+    padding: 0 20px;
+    gap: 16px;
+    flex-shrink: 0;
+    z-index: 100;
+  }
+  header h1 {
+    font-size: 15px;
+    font-weight: 600;
+    letter-spacing: 0.02em;
+    white-space: nowrap;
+  }
+  header h1 span { color: var(--accent); }
+
+  .header-controls {
+    display: flex;
+    align-items: center;
+    gap: 12px;
+    margin-left: auto;
+  }
+  .header-controls label {
+    font-size: 12px;
+    color: var(--text-muted);
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    cursor: pointer;
+  }
+  .header-controls input[type="date"] {
+    background: var(--bg-raised);
+    border: 1px solid var(--border);
+    color: var(--text);
+    padding: 4px 8px;
+    border-radius: 4px;
+    font-size: 12px;
+    font-family: inherit;
+  }
+  .header-controls select {
+    background: var(--bg-raised);
+    border: 1px solid var(--border);
+    color: var(--text);
+    padding: 4px 8px;
+    border-radius: 4px;
+    font-size: 12px;
+    font-family: inherit;
+  }
+
+  .filter-chips {
+    display: flex;
+    gap: 6px;
+    flex-wrap: nowrap;
+    overflow-x: auto;
+  }
+  .chip {
+    font-size: 11px;
+    padding: 3px 10px;
+    border-radius: 12px;
+    border: 1px solid var(--border);
+    cursor: pointer;
+    white-space: nowrap;
+    transition: opacity 0.15s, border-color 0.15s;
+    user-select: none;
+  }
+  .chip.active { border-color: currentColor; opacity: 1; }
+  .chip:not(.active) { opacity: 0.4; }
+
+  /* ---- Main layout ---- */
+  .main {
+    display: flex;
+    flex: 1;
+    overflow: hidden;
+  }
+
+  /* ---- Sidebar ---- */
+  .sidebar {
+    width: var(--sidebar-w);
+    background: var(--bg-surface);
+    border-right: 1px solid var(--border);
+    overflow-y: auto;
+    flex-shrink: 0;
+    padding: 12px 0;
+  }
+  .sidebar h2 {
+    font-size: 11px;
+    text-transform: uppercase;
+    letter-spacing: 0.08em;
+    color: var(--text-dim);
+    padding: 0 16px;
+    margin-bottom: 8px;
+  }
+  .agent-card {
+    padding: 10px 16px;
+    border-bottom: 1px solid rgba(71,85,105,0.3);
+    cursor: pointer;
+    transition: background 0.12s;
+  }
+  .agent-card:hover { background: var(--bg-raised); }
+  .agent-card .agent-name {
+    font-size: 13px;
+    font-weight: 600;
+    display: flex;
+    align-items: center;
+    gap: 8px;
+  }
+  .agent-card .agent-name .dot {
+    width: 8px; height: 8px;
+    border-radius: 50%;
+    flex-shrink: 0;
+  }
+  .agent-card .agent-role {
+    font-size: 11px;
+    color: var(--text-muted);
+    margin-top: 2px;
+    margin-left: 16px;
+  }
+  .agent-card .agent-stats {
+    display: flex;
+    gap: 12px;
+    margin-top: 6px;
+    margin-left: 16px;
+  }
+  .agent-card .stat {
+    font-size: 11px;
+    color: var(--text-dim);
+  }
+  .agent-card .stat strong {
+    color: var(--text-muted);
+    font-weight: 600;
+  }
+
+  /* ---- Canvas area ---- */
+  .canvas-wrap {
+    flex: 1;
+    display: flex;
+    flex-direction: column;
+    overflow: hidden;
+    position: relative;
+  }
+
+  /* Scrubber / minimap */
+  .scrubber {
+    height: var(--scrubber-h);
+    background: var(--bg-surface);
+    border-bottom: 1px solid var(--border);
+    position: relative;
+    flex-shrink: 0;
+    cursor: grab;
+    user-select: none;
+  }
+  .scrubber:active { cursor: grabbing; }
+  .scrubber-viewport {
+    position: absolute;
+    top: 2px; bottom: 2px;
+    background: rgba(139,92,246,0.15);
+    border: 1px solid rgba(139,92,246,0.4);
+    border-radius: 3px;
+    pointer-events: none;
+  }
+  .scrubber-tick {
+    position: absolute;
+    top: 0;
+    bottom: 0;
+    width: 1px;
+    background: rgba(71,85,105,0.4);
+  }
+  .scrubber-tick-label {
+    position: absolute;
+    bottom: 2px;
+    font-size: 9px;
+    color: var(--text-dim);
+    transform: translateX(-50%);
+    white-space: nowrap;
+  }
+
+  /* Timeline canvas */
+  .timeline {
+    flex: 1;
+    overflow: auto;
+    position: relative;
+  }
+  .timeline-inner {
+    position: relative;
+    min-height: 100%;
+  }
+
+  /* Time axis */
+  .time-axis {
+    position: sticky;
+    top: 0;
+    height: 28px;
+    background: var(--bg);
+    border-bottom: 1px solid var(--border);
+    z-index: 10;
+  }
+  .time-tick {
+    position: absolute;
+    top: 0;
+    height: 100%;
+    border-left: 1px solid rgba(71,85,105,0.25);
+  }
+  .time-tick-label {
+    position: absolute;
+    top: 8px;
+    font-size: 10px;
+    color: var(--text-dim);
+    transform: translateX(-50%);
+    white-space: nowrap;
+  }
+
+  /* Swim lanes */
+  .lanes {
+    position: relative;
+  }
+  .lane {
+    height: var(--lane-h);
+    margin-bottom: var(--lane-gap);
+    position: relative;
+  }
+  .lane-bg {
+    position: absolute;
+    inset: 0;
+    background: rgba(30,41,59,0.3);
+    border-bottom: 1px solid rgba(71,85,105,0.15);
+  }
+  .lane-label {
+    position: absolute;
+    left: 8px;
+    top: 50%;
+    transform: translateY(-50%);
+    font-size: 11px;
+    font-weight: 500;
+    color: var(--text-muted);
+    z-index: 5;
+    pointer-events: none;
+    white-space: nowrap;
+  }
+
+  /* Session tiles */
+  .tile {
+    position: absolute;
+    top: 6px;
+    height: calc(var(--lane-h) - 12px);
+    border-radius: 4px;
+    cursor: pointer;
+    transition: transform 0.1s, box-shadow 0.15s;
+    min-width: 6px;
+    overflow: hidden;
+    z-index: 2;
+  }
+  .tile:hover {
+    transform: scaleY(1.15);
+    z-index: 8;
+    box-shadow: 0 0 16px rgba(0,0,0,0.5);
+  }
+  .tile-inner {
+    padding: 4px 8px;
+    font-size: 10px;
+    font-weight: 500;
+    color: #fff;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    height: 100%;
+    display: flex;
+    align-items: center;
+  }
+  .tile.status-failed { opacity: 0.5; }
+  .tile.status-in_progress {
+    animation: pulse-tile 2s ease-in-out infinite;
+  }
+  @keyframes pulse-tile {
+    0%, 100% { opacity: 1; }
+    50% { opacity: 0.55; }
+  }
+
+  /* Today marker */
+  .today-marker {
+    position: absolute;
+    top: 0;
+    bottom: 0;
+    width: 2px;
+    background: var(--danger);
+    z-index: 9;
+    pointer-events: none;
+  }
+  .today-marker::before {
+    content: 'NOW';
+    position: absolute;
+    top: -22px;
+    left: 50%;
+    transform: translateX(-50%);
+    font-size: 9px;
+    font-weight: 700;
+    color: var(--danger);
+    letter-spacing: 0.05em;
+  }
+
+  /* Grid lines (day boundaries) */
+  .day-line {
+    position: absolute;
+    top: 0;
+    bottom: 0;
+    width: 1px;
+    background: rgba(71,85,105,0.3);
+    z-index: 1;
+  }
+  .day-label {
+    position: absolute;
+    top: -24px;
+    font-size: 10px;
+    color: var(--text-dim);
+    transform: translateX(-50%);
+    font-weight: 600;
+  }
+
+  /* Tooltip */
+  .tooltip {
+    position: fixed;
+    background: var(--bg-raised);
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    padding: 12px 16px;
+    font-size: 12px;
+    max-width: 340px;
+    z-index: 1000;
+    pointer-events: none;
+    box-shadow: 0 8px 32px rgba(0,0,0,0.5);
+    display: none;
+    line-height: 1.5;
+  }
+  .tooltip.visible { display: block; }
+  .tooltip .tt-agent {
+    font-weight: 700;
+    font-size: 13px;
+    margin-bottom: 4px;
+  }
+  .tooltip .tt-time {
+    color: var(--text-dim);
+    font-size: 11px;
+    margin-bottom: 6px;
+  }
+  .tooltip .tt-summary {
+    color: var(--text-muted);
+    margin-bottom: 8px;
+  }
+  .tooltip .tt-stats {
+    display: flex;
+    gap: 16px;
+  }
+  .tooltip .tt-stat {
+    font-size: 11px;
+    color: var(--text-dim);
+  }
+  .tooltip .tt-stat strong {
+    color: var(--text);
+    font-weight: 600;
+  }
+
+  /* Detail panel */
+  .detail-panel {
+    position: fixed;
+    top: 0; right: -420px;
+    width: 400px;
+    height: 100vh;
+    background: var(--bg-surface);
+    border-left: 1px solid var(--border);
+    z-index: 200;
+    transition: right 0.25s ease;
+    display: flex;
+    flex-direction: column;
+    box-shadow: -4px 0 24px rgba(0,0,0,0.3);
+  }
+  .detail-panel.open { right: 0; }
+  .detail-header {
+    padding: 16px 20px;
+    border-bottom: 1px solid var(--border);
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+  }
+  .detail-header h3 { font-size: 15px; font-weight: 700; }
+  .detail-close {
+    background: none;
+    border: none;
+    color: var(--text-muted);
+    font-size: 20px;
+    cursor: pointer;
+    padding: 4px 8px;
+    border-radius: 4px;
+  }
+  .detail-close:hover { background: var(--bg-raised); color: var(--text); }
+  .detail-body {
+    flex: 1;
+    overflow-y: auto;
+    padding: 20px;
+  }
+  .detail-field {
+    margin-bottom: 16px;
+  }
+  .detail-field label {
+    display: block;
+    font-size: 11px;
+    text-transform: uppercase;
+    letter-spacing: 0.06em;
+    color: var(--text-dim);
+    margin-bottom: 4px;
+  }
+  .detail-field .val {
+    font-size: 13px;
+    color: var(--text);
+    line-height: 1.5;
+  }
+  .detail-field .val.mono {
+    font-family: 'SF Mono', 'Fira Code', monospace;
+    font-size: 12px;
+  }
+  .status-badge {
+    display: inline-block;
+    padding: 2px 10px;
+    border-radius: 10px;
+    font-size: 11px;
+    font-weight: 600;
+    text-transform: uppercase;
+    letter-spacing: 0.04em;
+  }
+  .status-badge.completed { background: rgba(16,185,129,0.15); color: var(--success); }
+  .status-badge.failed { background: rgba(239,68,68,0.15); color: var(--danger); }
+  .status-badge.in_progress { background: rgba(245,158,11,0.15); color: var(--warning); }
+
+  /* Empty state */
+  .empty-state {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    height: 100%;
+    color: var(--text-dim);
+    font-size: 14px;
+  }
+
+  /* Responsive */
+  @media (max-width: 900px) {
+    .sidebar { width: 200px; }
+    :root { --sidebar-w: 200px; }
+  }
+  @media (max-width: 700px) {
+    .sidebar { display: none; }
+  }
+</style>
+</head>
+<body>
+
+<header>
+  <h1><span>dharma_swarm</span> Agent Canvas</h1>
+  <div class="header-controls">
+    <label>From <input type="date" id="dateFrom"></label>
+    <label>To <input type="date" id="dateTo"></label>
+    <label>Status
+      <select id="statusFilter">
+        <option value="all">All</option>
+        <option value="completed">Completed</option>
+        <option value="failed">Failed</option>
+        <option value="in_progress">In Progress</option>
+      </select>
+    </label>
+    <div class="filter-chips" id="agentChips"></div>
+  </div>
+</header>
+
+<div class="main">
+  <aside class="sidebar" id="sidebar"></aside>
+  <div class="canvas-wrap">
+    <div class="scrubber" id="scrubber">
+      <div class="scrubber-viewport" id="scrubberViewport"></div>
+    </div>
+    <div class="timeline" id="timeline">
+      <div class="timeline-inner" id="timelineInner">
+        <div class="time-axis" id="timeAxis"></div>
+        <div class="lanes" id="lanes"></div>
+      </div>
+    </div>
+  </div>
+</div>
+
+<div class="tooltip" id="tooltip"></div>
+<div class="detail-panel" id="detailPanel">
+  <div class="detail-header">
+    <h3 id="detailTitle"></h3>
+    <button class="detail-close" id="detailClose">&times;</button>
+  </div>
+  <div class="detail-body" id="detailBody"></div>
+</div>
+
+<script>
+(function() {
+  'use strict';
+
+  // -- State --
+  let DATA = null;
+  let agentFilter = new Set();
+  let statusFilter = 'all';
+  let dateFrom = null;
+  let dateTo = null;
+  let zoomLevel = 1;     // px per minute
+  let scrollOffset = 0;
+  let globalMin = 0;
+  let globalMax = 0;
+
+  const MIN_ZOOM = 0.15;
+  const MAX_ZOOM = 12;
+  const BASE_PX_PER_MIN = 2.4;
+
+  // -- DOM refs --
+  const $sidebar = document.getElementById('sidebar');
+  const $timeline = document.getElementById('timeline');
+  const $timelineInner = document.getElementById('timelineInner');
+  const $timeAxis = document.getElementById('timeAxis');
+  const $lanes = document.getElementById('lanes');
+  const $tooltip = document.getElementById('tooltip');
+  const $detailPanel = document.getElementById('detailPanel');
+  const $detailClose = document.getElementById('detailClose');
+  const $detailTitle = document.getElementById('detailTitle');
+  const $detailBody = document.getElementById('detailBody');
+  const $dateFrom = document.getElementById('dateFrom');
+  const $dateTo = document.getElementById('dateTo');
+  const $statusFilter = document.getElementById('statusFilter');
+  const $agentChips = document.getElementById('agentChips');
+  const $scrubber = document.getElementById('scrubber');
+  const $scrubberViewport = document.getElementById('scrubberViewport');
+
+  // -- Helpers --
+  function ts(d) { return new Date(d).getTime(); }
+  function fmtTime(d) {
+    const dt = new Date(d);
+    return dt.toLocaleString('en-US', { month:'short', day:'numeric', hour:'2-digit', minute:'2-digit', hour12: false });
+  }
+  function fmtDuration(ms) {
+    const m = Math.round(ms / 60000);
+    if (m < 60) return m + 'm';
+    const h = Math.floor(m / 60);
+    const rm = m % 60;
+    return h + 'h ' + (rm > 0 ? rm + 'm' : '');
+  }
+  function fmtTokens(n) {
+    if (n >= 1000000) return (n / 1000000).toFixed(1) + 'M';
+    if (n >= 1000) return (n / 1000).toFixed(0) + 'K';
+    return String(n);
+  }
+  function agentColor(name) {
+    if (!DATA) return '#8B5CF6';
+    const a = DATA.agents.find(a => a.name === name);
+    return a ? a.color : '#8B5CF6';
+  }
+
+  // -- Data loading --
+  async function loadData() {
+    try {
+      const resp = await fetch('agents.json');
+      if (!resp.ok) throw new Error('HTTP ' + resp.status);
+      DATA = await resp.json();
+    } catch(e) {
+      // file:// protocol blocks fetch -- try XMLHttpRequest as fallback
+      try {
+        DATA = await new Promise((resolve, reject) => {
+          const xhr = new XMLHttpRequest();
+          xhr.open('GET', 'agents.json', true);
+          xhr.onload = () => {
+            if (xhr.status === 200 || xhr.status === 0) {
+              resolve(JSON.parse(xhr.responseText));
+            } else {
+              reject(new Error('XHR ' + xhr.status));
+            }
+          };
+          xhr.onerror = () => reject(new Error('XHR failed'));
+          xhr.send();
+        });
+      } catch(e2) {
+        document.body.innerHTML = '<div class="empty-state" style="flex-direction:column;gap:12px;text-align:center">'
+          + '<div>Cannot load agents.json</div>'
+          + '<div style="font-size:12px;color:#64748b;max-width:400px">'
+          + 'If opening from file://, serve with:<br>'
+          + '<code style="background:#1e293b;padding:4px 8px;border-radius:4px;margin-top:8px;display:inline-block">'
+          + 'python3 -m http.server 8080</code><br>'
+          + 'then open <code>http://localhost:8080</code></div></div>';
+        return;
+      }
+    }
+    // Init agent filter (all on)
+    DATA.agents.forEach(a => agentFilter.add(a.name));
+
+    // Compute global time range
+    let mins = Infinity, maxs = -Infinity;
+    DATA.sessions.forEach(s => {
+      const t0 = ts(s.start), t1 = ts(s.end);
+      if (t0 < mins) mins = t0;
+      if (t1 > maxs) maxs = t1;
+    });
+    // Add some padding
+    const pad = (maxs - mins) * 0.03;
+    globalMin = mins - pad;
+    globalMax = maxs + pad;
+
+    // Set date inputs
+    const dmin = new Date(globalMin);
+    const dmax = new Date(globalMax);
+    $dateFrom.value = dmin.toISOString().slice(0,10);
+    $dateTo.value = dmax.toISOString().slice(0,10);
+    dateFrom = globalMin;
+    dateTo = globalMax;
+
+    // Fit zoom to viewport
+    const canvasWidth = $timeline.clientWidth;
+    const totalMinutes = (globalMax - globalMin) / 60000;
+    zoomLevel = Math.max(MIN_ZOOM, canvasWidth / totalMinutes);
+
+    buildChips();
+    buildSidebar();
+    render();
+  }
+
+  // -- Filter chips --
+  function buildChips() {
+    $agentChips.innerHTML = '';
+    DATA.agents.forEach(a => {
+      const chip = document.createElement('span');
+      chip.className = 'chip active';
+      chip.style.color = a.color;
+      chip.style.borderColor = a.color;
+      chip.textContent = a.name.replace(/_/g, ' ');
+      chip.dataset.agent = a.name;
+      chip.addEventListener('click', () => {
+        if (agentFilter.has(a.name)) {
+          agentFilter.delete(a.name);
+          chip.classList.remove('active');
+        } else {
+          agentFilter.add(a.name);
+          chip.classList.add('active');
+        }
+        render();
+      });
+      $agentChips.appendChild(chip);
+    });
+  }
+
+  // -- Sidebar --
+  function buildSidebar() {
+    $sidebar.innerHTML = '<h2>Agents</h2>';
+    DATA.agents.forEach(ag => {
+      const sessions = DATA.sessions.filter(s => s.agent === ag.name);
+      const total = sessions.length;
+      const completed = sessions.filter(s => s.status === 'completed').length;
+      const tokens = sessions.reduce((sum, s) => sum + (s.tokens || 0), 0);
+      const rate = total > 0 ? Math.round(completed / total * 100) : 0;
+
+      const card = document.createElement('div');
+      card.className = 'agent-card';
+      card.innerHTML = `
+        <div class="agent-name">
+          <span class="dot" style="background:${ag.color}"></span>
+          ${ag.name.replace(/_/g, ' ')}
+        </div>
+        <div class="agent-role">${ag.role}</div>
+        <div class="agent-stats">
+          <span class="stat"><strong>${total}</strong> sessions</span>
+          <span class="stat"><strong>${fmtTokens(tokens)}</strong> tokens</span>
+          <span class="stat"><strong>${rate}%</strong> success</span>
+        </div>
+      `;
+      card.addEventListener('click', () => {
+        // Solo this agent
+        agentFilter.clear();
+        agentFilter.add(ag.name);
+        document.querySelectorAll('.chip').forEach(c => {
+          c.classList.toggle('active', c.dataset.agent === ag.name);
+        });
+        render();
+      });
+      $sidebar.appendChild(card);
+    });
+  }
+
+  // -- Filtered sessions --
+  function getFilteredSessions() {
+    return DATA.sessions.filter(s => {
+      if (!agentFilter.has(s.agent)) return false;
+      if (statusFilter !== 'all' && s.status !== statusFilter) return false;
+      const t0 = ts(s.start), t1 = ts(s.end);
+      if (dateFrom && t1 < dateFrom) return false;
+      if (dateTo && t0 > dateTo) return false;
+      return true;
+    });
+  }
+
+  // -- Visible agents in order --
+  function getVisibleAgents() {
+    return DATA.agents.filter(a => agentFilter.has(a.name));
+  }
+
+  // -- Render --
+  function render() {
+    const sessions = getFilteredSessions();
+    const agents = getVisibleAgents();
+    const pxPerMin = BASE_PX_PER_MIN * zoomLevel;
+    const totalMinutes = (globalMax - globalMin) / 60000;
+    const totalWidth = totalMinutes * pxPerMin;
+
+    const laneH = parseInt(getComputedStyle(document.documentElement).getPropertyValue('--lane-h'));
+    const laneGap = parseInt(getComputedStyle(document.documentElement).getPropertyValue('--lane-gap'));
+    const totalHeight = agents.length * (laneH + laneGap) + 40;
+
+    $timelineInner.style.width = totalWidth + 'px';
+    $timelineInner.style.height = totalHeight + 'px';
+
+    // -- Time axis ticks --
+    renderTimeAxis(pxPerMin, totalWidth);
+
+    // -- Lanes + tiles --
+    $lanes.innerHTML = '';
+    $lanes.style.top = '28px';
+
+    agents.forEach((ag, i) => {
+      const lane = document.createElement('div');
+      lane.className = 'lane';
+
+      const bg = document.createElement('div');
+      bg.className = 'lane-bg';
+      lane.appendChild(bg);
+
+      const label = document.createElement('div');
+      label.className = 'lane-label';
+      label.style.color = ag.color;
+      label.textContent = ag.name.replace(/_/g, ' ');
+      lane.appendChild(label);
+
+      // Sessions in this lane
+      const laneSessions = sessions.filter(s => s.agent === ag.name);
+      laneSessions.forEach(s => {
+        const t0 = ts(s.start), t1 = ts(s.end);
+        const left = (t0 - globalMin) / 60000 * pxPerMin;
+        const width = Math.max(6, (t1 - t0) / 60000 * pxPerMin);
+
+        const tile = document.createElement('div');
+        tile.className = 'tile status-' + s.status;
+        tile.style.left = left + 'px';
+        tile.style.width = width + 'px';
+        tile.style.background = ag.color;
+
+        const inner = document.createElement('div');
+        inner.className = 'tile-inner';
+        if (width > 80) {
+          inner.textContent = s.summary.slice(0, 50) + (s.summary.length > 50 ? '...' : '');
+        }
+        tile.appendChild(inner);
+
+        // Tooltip
+        tile.addEventListener('mouseenter', (e) => showTooltip(e, s, ag));
+        tile.addEventListener('mousemove', (e) => moveTooltip(e));
+        tile.addEventListener('mouseleave', hideTooltip);
+        tile.addEventListener('click', () => showDetail(s, ag));
+
+        lane.appendChild(tile);
+      });
+
+      $lanes.appendChild(lane);
+    });
+
+    // -- Today marker --
+    const existingMarker = document.querySelector('.today-marker');
+    if (existingMarker) existingMarker.remove();
+    const now = Date.now();
+    if (now >= globalMin && now <= globalMax) {
+      const marker = document.createElement('div');
+      marker.className = 'today-marker';
+      marker.style.left = ((now - globalMin) / 60000 * pxPerMin) + 'px';
+      $lanes.appendChild(marker);
+    }
+
+    // -- Day boundary lines --
+    document.querySelectorAll('.day-line').forEach(el => el.remove());
+    const startDay = new Date(globalMin);
+    startDay.setUTCHours(0,0,0,0);
+    let dayTs = startDay.getTime();
+    while (dayTs <= globalMax) {
+      if (dayTs >= globalMin) {
+        const line = document.createElement('div');
+        line.className = 'day-line';
+        line.style.left = ((dayTs - globalMin) / 60000 * pxPerMin) + 'px';
+        $lanes.appendChild(line);
+      }
+      dayTs += 86400000;
+    }
+
+    // -- Scrubber --
+    renderScrubber(pxPerMin, totalWidth);
+  }
+
+  // -- Time axis --
+  function renderTimeAxis(pxPerMin, totalWidth) {
+    $timeAxis.innerHTML = '';
+    $timeAxis.style.width = totalWidth + 'px';
+
+    // Decide tick interval based on zoom
+    let intervalMin;
+    if (pxPerMin > 6) intervalMin = 30;
+    else if (pxPerMin > 3) intervalMin = 60;
+    else if (pxPerMin > 1) intervalMin = 180;
+    else if (pxPerMin > 0.4) intervalMin = 360;
+    else intervalMin = 720;
+
+    const startTime = new Date(globalMin);
+    startTime.setUTCMinutes(Math.ceil(startTime.getUTCMinutes() / intervalMin) * intervalMin, 0, 0);
+    let t = startTime.getTime();
+
+    while (t <= globalMax) {
+      const x = (t - globalMin) / 60000 * pxPerMin;
+      const tick = document.createElement('div');
+      tick.className = 'time-tick';
+      tick.style.left = x + 'px';
+
+      const label = document.createElement('div');
+      label.className = 'time-tick-label';
+      label.style.left = x + 'px';
+      const dt = new Date(t);
+      if (intervalMin >= 720) {
+        label.textContent = dt.toLocaleDateString('en-US', { month: 'short', day: 'numeric' });
+      } else {
+        label.textContent = dt.toLocaleString('en-US', { month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit', hour12: false });
+      }
+
+      $timeAxis.appendChild(tick);
+      $timeAxis.appendChild(label);
+      t += intervalMin * 60000;
+    }
+  }
+
+  // -- Scrubber (minimap) --
+  function renderScrubber(pxPerMin, totalWidth) {
+    // Clear old ticks
+    $scrubber.querySelectorAll('.scrubber-tick, .scrubber-tick-label').forEach(el => el.remove());
+
+    const scrubberW = $scrubber.clientWidth;
+    const scrubberScale = scrubberW / ((globalMax - globalMin) / 60000);
+
+    // Day ticks on scrubber
+    const startDay = new Date(globalMin);
+    startDay.setUTCHours(0,0,0,0);
+    let dayTs = startDay.getTime();
+    while (dayTs <= globalMax) {
+      if (dayTs >= globalMin) {
+        const x = (dayTs - globalMin) / 60000 * scrubberScale;
+        const tick = document.createElement('div');
+        tick.className = 'scrubber-tick';
+        tick.style.left = x + 'px';
+        $scrubber.appendChild(tick);
+
+        const label = document.createElement('div');
+        label.className = 'scrubber-tick-label';
+        label.style.left = x + 'px';
+        const dt = new Date(dayTs);
+        label.textContent = dt.toLocaleDateString('en-US', { month: 'short', day: 'numeric' });
+        $scrubber.appendChild(label);
+      }
+      dayTs += 86400000;
+    }
+
+    // Viewport indicator
+    const viewportLeft = $timeline.scrollLeft;
+    const viewportWidth = $timeline.clientWidth;
+    const vpLeft = (viewportLeft / totalWidth) * scrubberW;
+    const vpWidth = Math.max(20, (viewportWidth / totalWidth) * scrubberW);
+    $scrubberViewport.style.left = vpLeft + 'px';
+    $scrubberViewport.style.width = vpWidth + 'px';
+  }
+
+  // -- Scrubber drag --
+  let scrubberDragging = false;
+  let scrubberDragStartX = 0;
+  let scrubberScrollStart = 0;
+
+  $scrubber.addEventListener('mousedown', (e) => {
+    scrubberDragging = true;
+    scrubberDragStartX = e.clientX;
+    scrubberScrollStart = $timeline.scrollLeft;
+    e.preventDefault();
+  });
+  document.addEventListener('mousemove', (e) => {
+    if (!scrubberDragging) return;
+    const dx = e.clientX - scrubberDragStartX;
+    const scrubberW = $scrubber.clientWidth;
+    const totalWidth = parseFloat($timelineInner.style.width) || 1;
+    const ratio = totalWidth / scrubberW;
+    $timeline.scrollLeft = scrubberScrollStart + dx * ratio;
+  });
+  document.addEventListener('mouseup', () => {
+    scrubberDragging = false;
+  });
+
+  // Update scrubber viewport on scroll
+  $timeline.addEventListener('scroll', () => {
+    if (!DATA) return;
+    const totalWidth = parseFloat($timelineInner.style.width) || 1;
+    const scrubberW = $scrubber.clientWidth;
+    const viewportLeft = $timeline.scrollLeft;
+    const viewportWidth = $timeline.clientWidth;
+    const vpLeft = (viewportLeft / totalWidth) * scrubberW;
+    const vpWidth = Math.max(20, (viewportWidth / totalWidth) * scrubberW);
+    $scrubberViewport.style.left = vpLeft + 'px';
+    $scrubberViewport.style.width = vpWidth + 'px';
+  });
+
+  // -- Zoom (scroll wheel) --
+  $timeline.addEventListener('wheel', (e) => {
+    if (!e.ctrlKey && !e.metaKey) return; // Only zoom on ctrl/cmd + scroll
+    e.preventDefault();
+    const oldZoom = zoomLevel;
+    const factor = e.deltaY > 0 ? 0.85 : 1.18;
+    zoomLevel = Math.max(MIN_ZOOM, Math.min(MAX_ZOOM, zoomLevel * factor));
+
+    // Preserve scroll position relative to mouse
+    const rect = $timeline.getBoundingClientRect();
+    const mouseX = e.clientX - rect.left + $timeline.scrollLeft;
+    const ratio = zoomLevel / oldZoom;
+    const newScrollLeft = mouseX * ratio - (e.clientX - rect.left);
+
+    render();
+    $timeline.scrollLeft = newScrollLeft;
+  }, { passive: false });
+
+  // Also support plain scroll wheel zoom (no modifier needed)
+  $timeline.addEventListener('wheel', (e) => {
+    if (e.ctrlKey || e.metaKey) return; // handled above
+    if (Math.abs(e.deltaY) < Math.abs(e.deltaX)) return; // horizontal scroll pass-through
+    // Vertical scroll on timeline = zoom
+    if (e.shiftKey) {
+      e.preventDefault();
+      const oldZoom = zoomLevel;
+      const factor = e.deltaY > 0 ? 0.9 : 1.12;
+      zoomLevel = Math.max(MIN_ZOOM, Math.min(MAX_ZOOM, zoomLevel * factor));
+      const rect = $timeline.getBoundingClientRect();
+      const mouseX = e.clientX - rect.left + $timeline.scrollLeft;
+      const ratio = zoomLevel / oldZoom;
+      const newScrollLeft = mouseX * ratio - (e.clientX - rect.left);
+      render();
+      $timeline.scrollLeft = newScrollLeft;
+    }
+  }, { passive: false });
+
+  // -- Tooltip --
+  function showTooltip(e, session, agent) {
+    const dur = ts(session.end) - ts(session.start);
+    $tooltip.innerHTML = `
+      <div class="tt-agent" style="color:${agent.color}">${agent.name.replace(/_/g, ' ')}</div>
+      <div class="tt-time">${fmtTime(session.start)} - ${fmtTime(session.end)} (${fmtDuration(dur)})</div>
+      <div class="tt-summary">${session.summary}</div>
+      <div class="tt-stats">
+        <span class="tt-stat"><strong>${session.tasks}</strong> tasks</span>
+        <span class="tt-stat"><strong>${fmtTokens(session.tokens)}</strong> tokens</span>
+        <span class="tt-stat status-badge ${session.status}">${session.status.replace('_', ' ')}</span>
+      </div>
+    `;
+    $tooltip.classList.add('visible');
+    moveTooltip(e);
+  }
+  function moveTooltip(e) {
+    const pad = 16;
+    let x = e.clientX + pad;
+    let y = e.clientY + pad;
+    const rect = $tooltip.getBoundingClientRect();
+    if (x + rect.width > window.innerWidth - 10) x = e.clientX - rect.width - pad;
+    if (y + rect.height > window.innerHeight - 10) y = e.clientY - rect.height - pad;
+    $tooltip.style.left = x + 'px';
+    $tooltip.style.top = y + 'px';
+  }
+  function hideTooltip() {
+    $tooltip.classList.remove('visible');
+  }
+
+  // -- Detail panel --
+  function showDetail(session, agent) {
+    const dur = ts(session.end) - ts(session.start);
+    $detailTitle.innerHTML = `<span style="color:${agent.color}">${agent.name.replace(/_/g, ' ')}</span>`;
+    $detailBody.innerHTML = `
+      <div class="detail-field">
+        <label>Status</label>
+        <span class="status-badge ${session.status}">${session.status.replace('_', ' ')}</span>
+      </div>
+      <div class="detail-field">
+        <label>Role</label>
+        <div class="val">${agent.role}</div>
+      </div>
+      <div class="detail-field">
+        <label>Time</label>
+        <div class="val mono">${fmtTime(session.start)}</div>
+        <div class="val mono">${fmtTime(session.end)}</div>
+        <div class="val" style="color:var(--text-dim);margin-top:4px">Duration: ${fmtDuration(dur)}</div>
+      </div>
+      <div class="detail-field">
+        <label>Summary</label>
+        <div class="val">${session.summary}</div>
+      </div>
+      <div class="detail-field">
+        <label>Tasks</label>
+        <div class="val" style="font-size:24px;font-weight:700;color:${agent.color}">${session.tasks}</div>
+      </div>
+      <div class="detail-field">
+        <label>Tokens</label>
+        <div class="val mono" style="font-size:18px;font-weight:600">${session.tokens.toLocaleString()}</div>
+      </div>
+      <div class="detail-field">
+        <label>Tokens / min</label>
+        <div class="val mono">${dur > 0 ? Math.round(session.tokens / (dur / 60000)).toLocaleString() : 'N/A'}</div>
+      </div>
+    `;
+    $detailPanel.classList.add('open');
+  }
+  $detailClose.addEventListener('click', () => {
+    $detailPanel.classList.remove('open');
+  });
+  document.addEventListener('keydown', (e) => {
+    if (e.key === 'Escape') $detailPanel.classList.remove('open');
+  });
+
+  // -- Filter handlers --
+  $dateFrom.addEventListener('change', () => {
+    dateFrom = new Date($dateFrom.value + 'T00:00:00Z').getTime();
+    render();
+  });
+  $dateTo.addEventListener('change', () => {
+    dateTo = new Date($dateTo.value + 'T23:59:59Z').getTime();
+    render();
+  });
+  $statusFilter.addEventListener('change', () => {
+    statusFilter = $statusFilter.value;
+    render();
+  });
+
+  // -- Keyboard shortcuts --
+  document.addEventListener('keydown', (e) => {
+    if (e.key === '+' || e.key === '=') {
+      zoomLevel = Math.min(MAX_ZOOM, zoomLevel * 1.3);
+      render();
+    } else if (e.key === '-') {
+      zoomLevel = Math.max(MIN_ZOOM, zoomLevel * 0.75);
+      render();
+    } else if (e.key === '0') {
+      // Fit to view
+      const canvasWidth = $timeline.clientWidth;
+      const totalMinutes = (globalMax - globalMin) / 60000;
+      zoomLevel = Math.max(MIN_ZOOM, canvasWidth / totalMinutes / BASE_PX_PER_MIN);
+      render();
+      $timeline.scrollLeft = 0;
+    } else if (e.key === 'a' && !e.ctrlKey && !e.metaKey) {
+      // Toggle all agents
+      const allOn = agentFilter.size === DATA.agents.length;
+      if (allOn) {
+        agentFilter.clear();
+      } else {
+        DATA.agents.forEach(a => agentFilter.add(a.name));
+      }
+      document.querySelectorAll('.chip').forEach(c => {
+        c.classList.toggle('active', agentFilter.has(c.dataset.agent));
+      });
+      render();
+    }
+  });
+
+  // -- Window resize --
+  window.addEventListener('resize', () => { if (DATA) render(); });
+
+  // -- Init --
+  loadData();
+})();
+</script>
+</body>
+</html>

@@ -1,0 +1,1000 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Session Garden - dharma_swarm</title>
+<script src="https://d3js.org/d3.v7.min.js"></script>
+<style>
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+
+  body {
+    background: #0a0a0a;
+    color: #c8c8c8;
+    font-family: 'SF Mono', 'Fira Code', 'Cascadia Code', monospace;
+    overflow: hidden;
+    height: 100vh;
+    width: 100vw;
+  }
+
+  #canvas-container {
+    position: absolute;
+    top: 0;
+    left: 0;
+    width: 100%;
+    height: 100%;
+  }
+
+  svg {
+    width: 100%;
+    height: 100%;
+  }
+
+  /* --- Header --- */
+  #header {
+    position: absolute;
+    top: 16px;
+    left: 24px;
+    z-index: 10;
+    pointer-events: none;
+  }
+
+  #header h1 {
+    font-size: 18px;
+    font-weight: 600;
+    color: #e0e0e0;
+    letter-spacing: 1.5px;
+    text-transform: uppercase;
+  }
+
+  #header .subtitle {
+    font-size: 11px;
+    color: #666;
+    margin-top: 4px;
+    letter-spacing: 0.5px;
+  }
+
+  /* --- Stats bar --- */
+  #stats-bar {
+    position: absolute;
+    top: 16px;
+    right: 24px;
+    z-index: 10;
+    display: flex;
+    gap: 20px;
+    pointer-events: none;
+  }
+
+  .stat {
+    text-align: right;
+  }
+
+  .stat-value {
+    font-size: 20px;
+    font-weight: 700;
+    color: #e0e0e0;
+  }
+
+  .stat-label {
+    font-size: 9px;
+    color: #555;
+    text-transform: uppercase;
+    letter-spacing: 1px;
+  }
+
+  /* --- Legend --- */
+  #legend {
+    position: absolute;
+    bottom: 20px;
+    left: 24px;
+    z-index: 10;
+    display: flex;
+    gap: 16px;
+    pointer-events: none;
+  }
+
+  .legend-item {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+  }
+
+  .legend-dot {
+    width: 10px;
+    height: 10px;
+    border-radius: 50%;
+  }
+
+  .legend-label {
+    font-size: 10px;
+    color: #666;
+    text-transform: uppercase;
+    letter-spacing: 0.8px;
+  }
+
+  /* --- Sidebar --- */
+  #sidebar {
+    position: absolute;
+    top: 0;
+    right: 0;
+    width: 380px;
+    height: 100%;
+    background: linear-gradient(135deg, rgba(12, 12, 18, 0.97), rgba(8, 8, 14, 0.99));
+    border-left: 1px solid #1a1a2e;
+    z-index: 20;
+    transform: translateX(100%);
+    transition: transform 0.35s cubic-bezier(0.22, 1, 0.36, 1);
+    overflow-y: auto;
+    padding: 28px 24px;
+  }
+
+  #sidebar.open {
+    transform: translateX(0);
+  }
+
+  #sidebar-close {
+    position: absolute;
+    top: 14px;
+    right: 16px;
+    background: none;
+    border: 1px solid #333;
+    color: #888;
+    font-size: 13px;
+    cursor: pointer;
+    width: 28px;
+    height: 28px;
+    border-radius: 4px;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    transition: all 0.2s;
+  }
+
+  #sidebar-close:hover {
+    border-color: #666;
+    color: #ccc;
+  }
+
+  .sidebar-section {
+    margin-bottom: 22px;
+  }
+
+  .sidebar-section h3 {
+    font-size: 9px;
+    text-transform: uppercase;
+    letter-spacing: 1.5px;
+    color: #555;
+    margin-bottom: 8px;
+  }
+
+  #sidebar-id {
+    font-size: 11px;
+    color: #444;
+    margin-bottom: 4px;
+  }
+
+  #sidebar-date {
+    font-size: 12px;
+    color: #888;
+  }
+
+  #sidebar-agent {
+    display: inline-block;
+    padding: 3px 10px;
+    border-radius: 3px;
+    font-size: 11px;
+    font-weight: 600;
+    text-transform: uppercase;
+    letter-spacing: 1px;
+  }
+
+  #sidebar-duration {
+    font-size: 13px;
+    color: #bbb;
+  }
+
+  #sidebar-summary {
+    font-size: 12px;
+    line-height: 1.65;
+    color: #aaa;
+  }
+
+  #sidebar-concepts {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 6px;
+  }
+
+  .concept-tag {
+    padding: 3px 9px;
+    background: rgba(255, 255, 255, 0.04);
+    border: 1px solid rgba(255, 255, 255, 0.08);
+    border-radius: 3px;
+    font-size: 10px;
+    color: #999;
+    transition: all 0.2s;
+  }
+
+  .concept-tag.shared {
+    border-color: rgba(255, 200, 50, 0.3);
+    color: #ddb44a;
+    background: rgba(255, 200, 50, 0.06);
+  }
+
+  #sidebar-stats {
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    gap: 10px;
+  }
+
+  .sidebar-stat {
+    background: rgba(255, 255, 255, 0.02);
+    border: 1px solid rgba(255, 255, 255, 0.05);
+    border-radius: 4px;
+    padding: 10px 12px;
+  }
+
+  .sidebar-stat-value {
+    font-size: 18px;
+    font-weight: 700;
+    color: #ddd;
+  }
+
+  .sidebar-stat-label {
+    font-size: 9px;
+    color: #555;
+    text-transform: uppercase;
+    letter-spacing: 0.8px;
+    margin-top: 2px;
+  }
+
+  #sidebar-gotchas {
+    list-style: none;
+  }
+
+  #sidebar-gotchas li {
+    font-size: 11px;
+    color: #b77;
+    padding: 5px 0;
+    border-bottom: 1px solid rgba(255, 255, 255, 0.03);
+    line-height: 1.5;
+  }
+
+  #sidebar-gotchas li::before {
+    content: "!";
+    display: inline-block;
+    width: 16px;
+    height: 16px;
+    line-height: 16px;
+    text-align: center;
+    background: rgba(187, 119, 119, 0.15);
+    border-radius: 2px;
+    font-size: 9px;
+    font-weight: 700;
+    margin-right: 8px;
+    color: #c88;
+  }
+
+  /* --- Cross-pollination panel --- */
+  .xp-card {
+    background: rgba(255, 200, 50, 0.03);
+    border: 1px solid rgba(255, 200, 50, 0.1);
+    border-radius: 4px;
+    padding: 12px;
+    margin-bottom: 8px;
+    font-size: 11px;
+    line-height: 1.6;
+    color: #b8a060;
+  }
+
+  .xp-card .xp-sessions {
+    font-size: 9px;
+    color: #665830;
+    text-transform: uppercase;
+    letter-spacing: 0.5px;
+    margin-bottom: 4px;
+  }
+
+  /* --- Tooltip --- */
+  #tooltip {
+    position: absolute;
+    pointer-events: none;
+    background: rgba(15, 15, 22, 0.95);
+    border: 1px solid #2a2a3e;
+    border-radius: 4px;
+    padding: 8px 12px;
+    font-size: 11px;
+    color: #bbb;
+    z-index: 30;
+    opacity: 0;
+    transition: opacity 0.15s;
+    max-width: 260px;
+  }
+
+  #tooltip.visible { opacity: 1; }
+
+  #tooltip .tt-title {
+    font-weight: 600;
+    color: #e0e0e0;
+    margin-bottom: 3px;
+  }
+
+  #tooltip .tt-meta {
+    font-size: 9px;
+    color: #666;
+  }
+
+  /* --- Scrollbar --- */
+  #sidebar::-webkit-scrollbar { width: 4px; }
+  #sidebar::-webkit-scrollbar-track { background: transparent; }
+  #sidebar::-webkit-scrollbar-thumb { background: #222; border-radius: 2px; }
+
+  /* --- XP Mode toggle --- */
+  #xp-toggle {
+    position: absolute;
+    bottom: 20px;
+    right: 24px;
+    z-index: 10;
+    background: rgba(15, 15, 22, 0.9);
+    border: 1px solid #2a2a3e;
+    border-radius: 4px;
+    padding: 8px 14px;
+    font-family: inherit;
+    font-size: 10px;
+    text-transform: uppercase;
+    letter-spacing: 1px;
+    color: #888;
+    cursor: pointer;
+    transition: all 0.2s;
+  }
+
+  #xp-toggle:hover {
+    border-color: #ddb44a;
+    color: #ddb44a;
+  }
+
+  #xp-toggle.active {
+    border-color: #ddb44a;
+    color: #ddb44a;
+    background: rgba(221, 180, 74, 0.08);
+  }
+</style>
+</head>
+<body>
+
+<div id="header">
+  <h1>Session Garden</h1>
+  <div class="subtitle">dharma_swarm -- cross-pollination topology</div>
+</div>
+
+<div id="stats-bar">
+  <div class="stat">
+    <div class="stat-value" id="stat-sessions">0</div>
+    <div class="stat-label">Sessions</div>
+  </div>
+  <div class="stat">
+    <div class="stat-value" id="stat-connections">0</div>
+    <div class="stat-label">Connections</div>
+  </div>
+  <div class="stat">
+    <div class="stat-value" id="stat-xp">0</div>
+    <div class="stat-label">Cross-pollinations</div>
+  </div>
+  <div class="stat">
+    <div class="stat-value" id="stat-hours">0</div>
+    <div class="stat-label">Hours</div>
+  </div>
+</div>
+
+<div id="legend">
+  <div class="legend-item">
+    <div class="legend-dot" style="background: #8b5cf6;"></div>
+    <div class="legend-label">Opus</div>
+  </div>
+  <div class="legend-item">
+    <div class="legend-dot" style="background: #3b82f6;"></div>
+    <div class="legend-label">Sonnet</div>
+  </div>
+  <div class="legend-item">
+    <div class="legend-dot" style="background: #14b8a6;"></div>
+    <div class="legend-label">Haiku</div>
+  </div>
+  <div class="legend-item">
+    <div class="legend-dot" style="background: #666; opacity: 0.5;"></div>
+    <div class="legend-label">size = duration</div>
+  </div>
+</div>
+
+<button id="xp-toggle">Show Cross-pollinations</button>
+
+<div id="tooltip">
+  <div class="tt-title"></div>
+  <div class="tt-meta"></div>
+</div>
+
+<div id="sidebar">
+  <button id="sidebar-close">x</button>
+  <div class="sidebar-section">
+    <div id="sidebar-id"></div>
+    <div id="sidebar-date"></div>
+  </div>
+  <div class="sidebar-section">
+    <h3>Agent</h3>
+    <span id="sidebar-agent"></span>
+    <span id="sidebar-duration"></span>
+  </div>
+  <div class="sidebar-section">
+    <h3>Summary</h3>
+    <div id="sidebar-summary"></div>
+  </div>
+  <div class="sidebar-section">
+    <h3>Concepts</h3>
+    <div id="sidebar-concepts"></div>
+  </div>
+  <div class="sidebar-section">
+    <h3>Metrics</h3>
+    <div id="sidebar-stats"></div>
+  </div>
+  <div class="sidebar-section">
+    <h3>Gotchas</h3>
+    <ul id="sidebar-gotchas"></ul>
+  </div>
+  <div class="sidebar-section" id="sidebar-xp-section" style="display:none;">
+    <h3>Cross-pollinations</h3>
+    <div id="sidebar-xp"></div>
+  </div>
+</div>
+
+<div id="canvas-container">
+  <svg id="graph"></svg>
+</div>
+
+<script>
+(function () {
+  // --- Color palette ---
+  const AGENT_COLORS = {
+    opus:   '#8b5cf6',
+    sonnet: '#3b82f6',
+    haiku:  '#14b8a6'
+  };
+
+  const AGENT_GLOW = {
+    opus:   'rgba(139, 92, 246, 0.6)',
+    sonnet: 'rgba(59, 130, 246, 0.5)',
+    haiku:  'rgba(20, 184, 166, 0.4)'
+  };
+
+  // --- Data loading ---
+  // Try external JSON files first (works when served via HTTP).
+  // Falls back to embedded sample data for file:// protocol.
+  Promise.all([
+    fetch('sessions.json').then(r => {
+      if (!r.ok) throw new Error('HTTP ' + r.status);
+      return r.json();
+    }),
+    fetch('cross_pollinations.json').then(r => {
+      if (!r.ok) throw new Error('HTTP ' + r.status);
+      return r.json();
+    })
+  ]).then(([sessions, crossPollinations]) => {
+    buildVisualization(sessions, crossPollinations);
+  }).catch(() => {
+    // Fallback: use embedded data (file:// protocol or missing files)
+    console.log('Using embedded sample data (serve via HTTP to load external JSON)');
+    buildVisualization(EMBEDDED_SESSIONS, EMBEDDED_XP);
+  });
+
+  // --- Embedded fallback data ---
+  const EMBEDDED_SESSIONS = [
+    {"id":"session_001","date":"2026-03-22T04:30:00Z","duration_minutes":180,"agent_type":"opus","summary":"Built self-replicating agent architecture: replication_protocol.py, genome_inheritance.py, population_control.py. Wired telos gates to constrain replication.","concepts":["self-replication","genome-inheritance","population-control","telos-gates","consolidation"],"files_touched":15,"tests_written":60,"gotchas":["DifferentiationProposal too thin","loop count is 9 not 8"]},
+    {"id":"session_002","date":"2026-03-22T08:00:00Z","duration_minutes":120,"agent_type":"sonnet","summary":"Graph Nexus wiring: unified 6 existing graphs into single query interface. Bridge Layer connects stigmergy marks to telos gradient.","concepts":["graph-nexus","stigmergy","telos-gradient","bridge-layer","lodestone"],"files_touched":11,"tests_written":34,"gotchas":["SQLite WAL mode required for concurrent graph reads"]},
+    {"id":"session_003","date":"2026-03-21T04:30:00Z","duration_minutes":240,"agent_type":"opus","summary":"Strange Loop v1.0 cascade wiring. L7/L8/L9 layers. Cascade fires recognition fires context fires agents in feedback loop. 17 files, 1351 lines.","concepts":["strange-loop","cascade","recognition","feedback-loop","L7-L8-L9","agent-fitness"],"files_touched":17,"tests_written":89,"gotchas":["Signal bus needed deduplication","Async cascade timing sensitive"]},
+    {"id":"session_004","date":"2026-03-21T10:00:00Z","duration_minutes":90,"agent_type":"haiku","summary":"Garden Daemon cycle debugging. Fixed CLAUDECODE env var nesting issue. All 4 skills producing output.","concepts":["garden-daemon","archaeology","hum","subconscious","ecosystem-pulse"],"files_touched":4,"tests_written":12,"gotchas":["Must unset CLAUDECODE for claude -p nesting","bypassPermissions flag required"]},
+    {"id":"session_005","date":"2026-03-20T04:30:00Z","duration_minutes":150,"agent_type":"opus","summary":"DarwinEngine evolution: L7 fitness handles dict-of-dimensions format. All 5 cascade domains use real scoring.","concepts":["darwin-engine","evolution","agent-fitness","cascade","fitness-signal"],"files_touched":9,"tests_written":45,"gotchas":["Dict fitness format broke old max() comparisons"]},
+    {"id":"session_006","date":"2026-03-19T04:30:00Z","duration_minutes":200,"agent_type":"opus","summary":"Mycelium daemon: continuous autonomous operation with bidirectional stigmergy. Cross-system catalytic graph wired.","concepts":["mycelium","stigmergy","catalytic-graph","daemon","cross-system","autonomy"],"files_touched":12,"tests_written":38,"gotchas":["Stigmergy marks needed TTL to prevent unbounded growth"]},
+    {"id":"session_007","date":"2026-03-19T09:00:00Z","duration_minutes":60,"agent_type":"haiku","summary":"Ecosystem doctor skill updated with D3 field check. Morning brief now includes field intelligence.","concepts":["ecosystem-doctor","field-intelligence","D3","morning-brief","competitive-awareness"],"files_touched":11,"tests_written":8,"gotchas":["Some skills had stale imports after skill-genesis refactor"]},
+    {"id":"session_008","date":"2026-03-18T04:30:00Z","duration_minutes":300,"agent_type":"opus","summary":"TPP (Transmission Prompt Protocol) core module: tpp.py 600 lines, 44 tests. 4 integration points wired.","concepts":["TPP","transmission","handoff","context-injection","stigmergy","agent-runner"],"files_touched":14,"tests_written":44,"gotchas":["Transmission payload size limit needed for large context","SHA-256 signing added for integrity"]},
+    {"id":"session_009","date":"2026-03-17T04:30:00Z","duration_minutes":160,"agent_type":"opus","summary":"Shakti trading skill: three-tier Codified Context for Ginko system. Four Shaktis framework from Aurobindo.","concepts":["shakti-trading","ginko","codified-context","four-shaktis","spec-forge"],"files_touched":7,"tests_written":22,"gotchas":["Ginko module has 7700 lines - skill must reference not duplicate"]},
+    {"id":"session_010","date":"2026-03-17T08:00:00Z","duration_minutes":45,"agent_type":"sonnet","summary":"MiroFish setup: cloned repo, built local Zep stub, generated 33 reviewer personas for R_V paper COLM 2026.","concepts":["mirofish","peer-review","R_V","COLM-2026","reviewer-personas"],"files_touched":5,"tests_written":6,"gotchas":["Zep cloud API deprecated, local stub sufficient"]},
+    {"id":"session_011","date":"2026-03-16T04:30:00Z","duration_minutes":220,"agent_type":"opus","summary":"R_V paper v007 finalized: COLM template applied, all 100/100 claims verified against data. Hedges g=-1.47, AUROC=0.909.","concepts":["R_V","COLM-2026","paper-verification","hedges-g","AUROC","causal-validation"],"files_touched":8,"tests_written":15,"gotchas":["bfloat16 mandatory for Mistral value matrices","Temperature sweet spot 0.7 +/- 0.1"]},
+    {"id":"session_012","date":"2026-03-22T14:00:00Z","duration_minutes":130,"agent_type":"sonnet","summary":"Lodestone library: deep reading daemon with director curated feed. Telos gradient scoring. Graph Nexus queries unified.","concepts":["lodestone","deep-reading","telos-gradient","graph-nexus","living-intelligence","director"],"files_touched":7,"tests_written":28,"gotchas":["Feed scoring needs recalibration after adding telos weight"]},
+    {"id":"session_013","date":"2026-03-20T10:00:00Z","duration_minutes":75,"agent_type":"haiku","summary":"KernelGuard audit: all 10 axioms intact, SHA-256 signatures valid. PolicyCompiler updated. TelosGatekeeper expanded to 11 gates.","concepts":["kernel-guard","telos-gates","policy-compiler","axioms","SHA-256"],"files_touched":5,"tests_written":18,"gotchas":["Gate 11 (apoptosis) needs integration test with replication protocol"]},
+    {"id":"session_014","date":"2026-03-23T04:30:00Z","duration_minutes":190,"agent_type":"opus","summary":"Discerning Autonomy research synthesis: 8-agent parallel deep dive. 90+ sources, 12 convergent principles. Viveka function spec.","concepts":["discerning-autonomy","viveka","convergent-principles","implementation-plan","self-replication","telos-gates"],"files_touched":9,"tests_written":0,"gotchas":["Synthesis doc at 15K words - needs executive summary"]},
+    {"id":"session_015","date":"2026-03-23T09:00:00Z","duration_minutes":100,"agent_type":"sonnet","summary":"Faceless Empire pipeline on AGNI: 5 channels, 8-stage production. SCORSESE skill for self-evolution. Quality score trending 7 to 27/100.","concepts":["faceless-empire","AGNI","content-creation","SCORSESE","self-evolution","quality-score"],"files_touched":12,"tests_written":10,"gotchas":["Edge TTS quality drops on long scripts","Pexels API rate limit: 200 req/hr"]}
+  ];
+
+  const EMBEDDED_XP = [
+    {"id":"xp_001","source_session":"session_001","target_session":"session_014","shared_concepts":["self-replication","telos-gates"],"insight":"Discerning autonomy principles constrain replication: Viveka function evaluates each replication proposal against telos gates before genome inheritance proceeds.","timestamp":"2026-03-23T12:00:00Z"},
+    {"id":"xp_002","source_session":"session_001","target_session":"session_013","shared_concepts":["telos-gates","population-control"],"insight":"Gate 11 (apoptosis) as population control mechanism: KernelGuard axioms enforce that replication proposals failing telos gate evaluation trigger apoptosis rather than silent rejection.","timestamp":"2026-03-22T16:00:00Z"},
+    {"id":"xp_003","source_session":"session_003","target_session":"session_005","shared_concepts":["cascade","agent-fitness"],"insight":"Strange Loop cascade drives DarwinEngine selection: L7 fitness signals from cascade domain scoring feed directly into evolution tournament.","timestamp":"2026-03-21T14:00:00Z"},
+    {"id":"xp_004","source_session":"session_006","target_session":"session_008","shared_concepts":["stigmergy","cross-system"],"insight":"TPP transmissions leave stigmergy marks: every agent handoff deposits a pheromone trail in the mycelium. Future agents follow high-salience trails.","timestamp":"2026-03-19T15:00:00Z"},
+    {"id":"xp_005","source_session":"session_002","target_session":"session_012","shared_concepts":["graph-nexus","lodestone","telos-gradient"],"insight":"Lodestone deep reading daemon uses Graph Nexus as its query backbone. Telos gradient scoring ensures readings align with Jagat Kalyan mission vector.","timestamp":"2026-03-22T18:00:00Z"},
+    {"id":"xp_006","source_session":"session_004","target_session":"session_006","shared_concepts":["daemon","ecosystem-pulse"],"insight":"Garden Daemon and Mycelium Daemon as dual autonomy layers: Garden tends individual skills, Mycelium connects them via catalytic graph.","timestamp":"2026-03-21T11:00:00Z"},
+    {"id":"xp_007","source_session":"session_011","target_session":"session_010","shared_concepts":["R_V","COLM-2026"],"insight":"MiroFish reviewer personas stress-test R_V claims before submission: 33 simulated reviewers probe the verified claims, catching framing weaknesses.","timestamp":"2026-03-17T14:00:00Z"},
+    {"id":"xp_008","source_session":"session_005","target_session":"session_015","shared_concepts":["self-evolution","fitness-signal"],"insight":"SCORSESE self-evolution mirrors DarwinEngine pattern: content quality scores function as fitness signals. Universal pattern: measure, select, amplify.","timestamp":"2026-03-23T11:00:00Z"},
+    {"id":"xp_009","source_session":"session_008","target_session":"session_003","shared_concepts":["agent-runner","feedback-loop"],"insight":"TPP context injection into Strange Loop recognition layer: transmitted context feeds L8 recognition, allowing cascade to detect patterns across agent boundaries.","timestamp":"2026-03-19T20:00:00Z"},
+    {"id":"xp_010","source_session":"session_009","target_session":"session_007","shared_concepts":["codified-context","field-intelligence"],"insight":"Shakti trading Codified Context pattern generalizes to all D3 field intelligence skills: three-tier density maps to strategic awareness levels.","timestamp":"2026-03-18T08:00:00Z"}
+  ];
+
+  function buildVisualization(sessions, crossPollinations) {
+    const width = window.innerWidth;
+    const height = window.innerHeight;
+
+    // --- Stats ---
+    document.getElementById('stat-sessions').textContent = sessions.length;
+    const totalMinutes = sessions.reduce((s, d) => s + d.duration_minutes, 0);
+    document.getElementById('stat-hours').textContent = Math.round(totalMinutes / 60);
+    document.getElementById('stat-xp').textContent = crossPollinations.length;
+
+    // --- Build edges from concept overlap ---
+    const edges = [];
+    for (let i = 0; i < sessions.length; i++) {
+      for (let j = i + 1; j < sessions.length; j++) {
+        const shared = sessions[i].concepts.filter(c => sessions[j].concepts.includes(c));
+        if (shared.length >= 2) {
+          edges.push({
+            source: sessions[i].id,
+            target: sessions[j].id,
+            shared: shared,
+            weight: shared.length
+          });
+        }
+      }
+    }
+    document.getElementById('stat-connections').textContent = edges.length;
+
+    // --- Recency scale ---
+    const dateExtent = d3.extent(sessions, d => new Date(d.date));
+    const recencyScale = d3.scaleLinear()
+      .domain([dateExtent[0], dateExtent[1]])
+      .range([0.35, 1.0]);
+
+    // --- Node radius scale ---
+    const radiusScale = d3.scaleSqrt()
+      .domain(d3.extent(sessions, d => d.duration_minutes))
+      .range([14, 40]);
+
+    // --- SVG setup ---
+    const svg = d3.select('#graph');
+
+    // --- Defs: filters and gradients ---
+    const defs = svg.append('defs');
+
+    // Glow filter for nodes
+    const glowFilter = defs.append('filter')
+      .attr('id', 'glow')
+      .attr('x', '-50%').attr('y', '-50%')
+      .attr('width', '200%').attr('height', '200%');
+    glowFilter.append('feGaussianBlur')
+      .attr('stdDeviation', '6')
+      .attr('result', 'blur');
+    glowFilter.append('feComposite')
+      .attr('in', 'SourceGraphic')
+      .attr('in2', 'blur')
+      .attr('operator', 'over');
+
+    // Softer glow for edges
+    const edgeGlow = defs.append('filter')
+      .attr('id', 'edge-glow')
+      .attr('x', '-20%').attr('y', '-20%')
+      .attr('width', '140%').attr('height', '140%');
+    edgeGlow.append('feGaussianBlur')
+      .attr('stdDeviation', '2')
+      .attr('result', 'blur');
+    edgeGlow.append('feComposite')
+      .attr('in', 'SourceGraphic')
+      .attr('in2', 'blur')
+      .attr('operator', 'over');
+
+    // XP glow for cross-pollination edges
+    const xpGlow = defs.append('filter')
+      .attr('id', 'xp-glow')
+      .attr('x', '-30%').attr('y', '-30%')
+      .attr('width', '160%').attr('height', '160%');
+    xpGlow.append('feGaussianBlur')
+      .attr('stdDeviation', '4')
+      .attr('result', 'blur');
+    xpGlow.append('feComposite')
+      .attr('in', 'SourceGraphic')
+      .attr('in2', 'blur')
+      .attr('operator', 'over');
+
+    // --- Containers ---
+    const container = svg.append('g').attr('class', 'zoom-container');
+    const edgeGroup = container.append('g').attr('class', 'edges');
+    const xpEdgeGroup = container.append('g').attr('class', 'xp-edges').style('opacity', 0);
+    const particleGroup = container.append('g').attr('class', 'particles');
+    const nodeGroup = container.append('g').attr('class', 'nodes');
+
+    // --- Zoom ---
+    const zoom = d3.zoom()
+      .scaleExtent([0.3, 4])
+      .on('zoom', (event) => {
+        container.attr('transform', event.transform);
+      });
+    svg.call(zoom);
+
+    // --- Force simulation ---
+    const simulation = d3.forceSimulation(sessions)
+      .force('link', d3.forceLink(edges)
+        .id(d => d.id)
+        .distance(d => 180 - d.weight * 20)
+        .strength(d => 0.3 + d.weight * 0.1))
+      .force('charge', d3.forceManyBody()
+        .strength(-400)
+        .distanceMax(500))
+      .force('center', d3.forceCenter(width / 2, height / 2))
+      .force('collision', d3.forceCollide()
+        .radius(d => radiusScale(d.duration_minutes) + 8))
+      .alphaDecay(0.015)
+      .velocityDecay(0.4);
+
+    // --- Draw edges ---
+    const edgeElements = edgeGroup.selectAll('line')
+      .data(edges)
+      .enter()
+      .append('line')
+      .attr('stroke', '#1a1a30')
+      .attr('stroke-width', d => 0.5 + d.weight * 0.6)
+      .attr('filter', 'url(#edge-glow)')
+      .attr('opacity', 0.5);
+
+    // --- XP edges (cross-pollination, initially hidden) ---
+    const xpLookup = {};
+    crossPollinations.forEach(xp => {
+      const key = [xp.source_session, xp.target_session].sort().join('--');
+      xpLookup[key] = xp;
+    });
+
+    const xpEdges = crossPollinations.map(xp => ({
+      source: sessions.find(s => s.id === xp.source_session),
+      target: sessions.find(s => s.id === xp.target_session),
+      xp: xp
+    })).filter(e => e.source && e.target);
+
+    const xpEdgeElements = xpEdgeGroup.selectAll('line')
+      .data(xpEdges)
+      .enter()
+      .append('line')
+      .attr('stroke', '#ddb44a')
+      .attr('stroke-width', 1.5)
+      .attr('stroke-dasharray', '6,4')
+      .attr('filter', 'url(#xp-glow)')
+      .attr('opacity', 0.6);
+
+    // --- Draw nodes ---
+    const nodeElements = nodeGroup.selectAll('g')
+      .data(sessions)
+      .enter()
+      .append('g')
+      .attr('class', 'node')
+      .style('cursor', 'pointer')
+      .call(d3.drag()
+        .on('start', dragStarted)
+        .on('drag', dragged)
+        .on('end', dragEnded));
+
+    // Outer glow ring
+    nodeElements.append('circle')
+      .attr('r', d => radiusScale(d.duration_minutes) + 4)
+      .attr('fill', 'none')
+      .attr('stroke', d => AGENT_COLORS[d.agent_type] || '#666')
+      .attr('stroke-width', 1.5)
+      .attr('opacity', d => recencyScale(new Date(d.date)) * 0.25)
+      .attr('filter', 'url(#glow)');
+
+    // Main circle
+    nodeElements.append('circle')
+      .attr('class', 'node-core')
+      .attr('r', d => radiusScale(d.duration_minutes))
+      .attr('fill', d => {
+        const color = AGENT_COLORS[d.agent_type] || '#666';
+        return color;
+      })
+      .attr('fill-opacity', d => recencyScale(new Date(d.date)) * 0.7)
+      .attr('stroke', d => AGENT_COLORS[d.agent_type] || '#666')
+      .attr('stroke-width', 1)
+      .attr('stroke-opacity', d => recencyScale(new Date(d.date)))
+      .attr('filter', 'url(#glow)');
+
+    // Inner detail: concept count text
+    nodeElements.append('text')
+      .text(d => d.concepts.length)
+      .attr('text-anchor', 'middle')
+      .attr('dominant-baseline', 'central')
+      .attr('font-size', d => Math.max(9, radiusScale(d.duration_minutes) * 0.4))
+      .attr('font-weight', '600')
+      .attr('fill', '#fff')
+      .attr('fill-opacity', d => recencyScale(new Date(d.date)) * 0.8)
+      .style('pointer-events', 'none');
+
+    // --- Particles ---
+    const particleData = [];
+    edges.forEach(edge => {
+      const count = Math.min(edge.weight, 4);
+      for (let i = 0; i < count; i++) {
+        particleData.push({
+          edge: edge,
+          offset: Math.random(),
+          speed: 0.0008 + Math.random() * 0.0012,
+          direction: Math.random() > 0.5 ? 1 : -1,
+          size: 1.5 + Math.random() * 1.5
+        });
+      }
+    });
+
+    const particleElements = particleGroup.selectAll('circle')
+      .data(particleData)
+      .enter()
+      .append('circle')
+      .attr('r', d => d.size)
+      .attr('fill', '#ddb44a')
+      .attr('opacity', 0.6);
+
+    // --- Tooltip ---
+    const tooltip = d3.select('#tooltip');
+    const ttTitle = tooltip.select('.tt-title');
+    const ttMeta = tooltip.select('.tt-meta');
+
+    nodeElements
+      .on('mouseenter', function (event, d) {
+        const dateStr = new Date(d.date).toLocaleDateString('en-US', {
+          month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit'
+        });
+        ttTitle.text(d.summary.split('.')[0]);
+        ttMeta.text(d.agent_type + '  --  ' + d.duration_minutes + 'min  --  ' + dateStr);
+        tooltip.classed('visible', true);
+
+        // Highlight connected edges
+        edgeElements.attr('opacity', e =>
+          (e.source.id === d.id || e.target.id === d.id) ? 0.9 : 0.08
+        ).attr('stroke', e =>
+          (e.source.id === d.id || e.target.id === d.id)
+            ? AGENT_GLOW[d.agent_type] || 'rgba(100,100,100,0.4)'
+            : '#1a1a30'
+        );
+
+        // Dim unconnected nodes
+        const connectedIds = new Set();
+        connectedIds.add(d.id);
+        edges.forEach(e => {
+          const sid = typeof e.source === 'object' ? e.source.id : e.source;
+          const tid = typeof e.target === 'object' ? e.target.id : e.target;
+          if (sid === d.id) connectedIds.add(tid);
+          if (tid === d.id) connectedIds.add(sid);
+        });
+
+        nodeElements.select('.node-core')
+          .attr('fill-opacity', n =>
+            connectedIds.has(n.id)
+              ? recencyScale(new Date(n.date)) * 0.85
+              : recencyScale(new Date(n.date)) * 0.15
+          );
+      })
+      .on('mousemove', function (event) {
+        tooltip
+          .style('left', (event.pageX + 16) + 'px')
+          .style('top', (event.pageY - 10) + 'px');
+      })
+      .on('mouseleave', function () {
+        tooltip.classed('visible', false);
+        edgeElements
+          .attr('opacity', 0.5)
+          .attr('stroke', '#1a1a30');
+        nodeElements.select('.node-core')
+          .attr('fill-opacity', n => recencyScale(new Date(n.date)) * 0.7);
+      })
+      .on('click', function (event, d) {
+        event.stopPropagation();
+        openSidebar(d, sessions, crossPollinations, edges);
+      });
+
+    // Close sidebar on background click
+    svg.on('click', () => closeSidebar());
+
+    // --- Simulation tick ---
+    simulation.on('tick', () => {
+      edgeElements
+        .attr('x1', d => d.source.x)
+        .attr('y1', d => d.source.y)
+        .attr('x2', d => d.target.x)
+        .attr('y2', d => d.target.y);
+
+      xpEdgeElements
+        .attr('x1', d => d.source.x)
+        .attr('y1', d => d.source.y)
+        .attr('x2', d => d.target.x)
+        .attr('y2', d => d.target.y);
+
+      nodeElements.attr('transform', d => `translate(${d.x},${d.y})`);
+    });
+
+    // --- Particle animation loop ---
+    function animateParticles() {
+      const now = Date.now();
+      particleElements.each(function (d) {
+        d.offset += d.speed * d.direction;
+        if (d.offset > 1) d.offset -= 1;
+        if (d.offset < 0) d.offset += 1;
+
+        const source = d.edge.source;
+        const target = d.edge.target;
+        if (source.x == null || target.x == null) return;
+
+        const t = d.offset;
+        const x = source.x + (target.x - source.x) * t;
+        const y = source.y + (target.y - source.y) * t;
+
+        d3.select(this)
+          .attr('cx', x)
+          .attr('cy', y)
+          .attr('opacity', 0.3 + 0.4 * Math.sin(t * Math.PI));
+      });
+      requestAnimationFrame(animateParticles);
+    }
+    animateParticles();
+
+    // --- Node breathing animation ---
+    function breathe() {
+      nodeElements.select('.node-core')
+        .transition()
+        .duration(3000)
+        .ease(d3.easeSinInOut)
+        .attr('r', d => radiusScale(d.duration_minutes) * 1.04)
+        .transition()
+        .duration(3000)
+        .ease(d3.easeSinInOut)
+        .attr('r', d => radiusScale(d.duration_minutes))
+        .on('end', function () {
+          // Only restart on the first node to avoid stacking
+          if (this === nodeElements.select('.node-core').node()) {
+            breathe();
+          }
+        });
+    }
+    // Stagger breathing start
+    setTimeout(breathe, 1000);
+
+    // --- XP toggle ---
+    let xpVisible = false;
+    const xpToggle = document.getElementById('xp-toggle');
+    xpToggle.addEventListener('click', () => {
+      xpVisible = !xpVisible;
+      xpToggle.classList.toggle('active', xpVisible);
+      xpToggle.textContent = xpVisible ? 'Hide Cross-pollinations' : 'Show Cross-pollinations';
+      xpEdgeGroup
+        .transition()
+        .duration(500)
+        .style('opacity', xpVisible ? 1 : 0);
+    });
+
+    // --- Drag handlers ---
+    function dragStarted(event, d) {
+      if (!event.active) simulation.alphaTarget(0.1).restart();
+      d.fx = d.x;
+      d.fy = d.y;
+    }
+
+    function dragged(event, d) {
+      d.fx = event.x;
+      d.fy = event.y;
+    }
+
+    function dragEnded(event, d) {
+      if (!event.active) simulation.alphaTarget(0);
+      d.fx = null;
+      d.fy = null;
+    }
+
+    // --- Resize handler ---
+    window.addEventListener('resize', () => {
+      simulation.force('center', d3.forceCenter(window.innerWidth / 2, window.innerHeight / 2));
+      simulation.alpha(0.3).restart();
+    });
+  }
+
+  // --- Sidebar logic ---
+  function openSidebar(session, allSessions, crossPollinations, edges) {
+    const sidebar = document.getElementById('sidebar');
+    sidebar.classList.add('open');
+
+    const dateStr = new Date(session.date).toLocaleDateString('en-US', {
+      weekday: 'short', year: 'numeric', month: 'short', day: 'numeric',
+      hour: '2-digit', minute: '2-digit'
+    });
+
+    document.getElementById('sidebar-id').textContent = session.id;
+    document.getElementById('sidebar-date').textContent = dateStr;
+
+    const agentEl = document.getElementById('sidebar-agent');
+    agentEl.textContent = session.agent_type;
+    const color = AGENT_COLORS[session.agent_type] || '#666';
+    agentEl.style.background = color + '18';
+    agentEl.style.color = color;
+    agentEl.style.border = '1px solid ' + color + '33';
+
+    document.getElementById('sidebar-duration').textContent = '  ' + session.duration_minutes + ' min';
+    document.getElementById('sidebar-summary').textContent = session.summary;
+
+    // Concepts -- find which are shared with other connected sessions
+    const connectedConcepts = new Set();
+    edges.forEach(e => {
+      const sid = typeof e.source === 'object' ? e.source.id : e.source;
+      const tid = typeof e.target === 'object' ? e.target.id : e.target;
+      if (sid === session.id || tid === session.id) {
+        e.shared.forEach(c => connectedConcepts.add(c));
+      }
+    });
+
+    const conceptsEl = document.getElementById('sidebar-concepts');
+    conceptsEl.innerHTML = '';
+    session.concepts.forEach(c => {
+      const tag = document.createElement('span');
+      tag.className = 'concept-tag' + (connectedConcepts.has(c) ? ' shared' : '');
+      tag.textContent = c;
+      conceptsEl.appendChild(tag);
+    });
+
+    // Stats
+    document.getElementById('sidebar-stats').innerHTML =
+      '<div class="sidebar-stat"><div class="sidebar-stat-value">' + session.files_touched + '</div><div class="sidebar-stat-label">Files touched</div></div>' +
+      '<div class="sidebar-stat"><div class="sidebar-stat-value">' + session.tests_written + '</div><div class="sidebar-stat-label">Tests written</div></div>';
+
+    // Gotchas
+    const gotchasEl = document.getElementById('sidebar-gotchas');
+    gotchasEl.innerHTML = '';
+    (session.gotchas || []).forEach(g => {
+      const li = document.createElement('li');
+      li.textContent = g;
+      gotchasEl.appendChild(li);
+    });
+
+    // Cross-pollinations involving this session
+    const relatedXP = crossPollinations.filter(
+      xp => xp.source_session === session.id || xp.target_session === session.id
+    );
+
+    const xpSection = document.getElementById('sidebar-xp-section');
+    const xpContainer = document.getElementById('sidebar-xp');
+    xpContainer.innerHTML = '';
+
+    if (relatedXP.length > 0) {
+      xpSection.style.display = 'block';
+      relatedXP.forEach(xp => {
+        const card = document.createElement('div');
+        card.className = 'xp-card';
+
+        const header = document.createElement('div');
+        header.className = 'xp-sessions';
+        header.textContent = xp.source_session + ' <-> ' + xp.target_session +
+          '  [' + xp.shared_concepts.join(', ') + ']';
+
+        const body = document.createElement('div');
+        body.textContent = xp.insight;
+
+        card.appendChild(header);
+        card.appendChild(body);
+        xpContainer.appendChild(card);
+      });
+    } else {
+      xpSection.style.display = 'none';
+    }
+  }
+
+  function closeSidebar() {
+    document.getElementById('sidebar').classList.remove('open');
+  }
+
+  document.getElementById('sidebar-close').addEventListener('click', (e) => {
+    e.stopPropagation();
+    closeSidebar();
+  });
+
+  // Escape key closes sidebar
+  document.addEventListener('keydown', (e) => {
+    if (e.key === 'Escape') closeSidebar();
+  });
+})();
+</script>
+</body>
+</html>

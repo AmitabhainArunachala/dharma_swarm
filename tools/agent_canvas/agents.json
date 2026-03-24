@@ -1,0 +1,379 @@
+{
+  "agents": [
+    {
+      "name": "CONDUCTOR_CLAUDE",
+      "color": "#8B5CF6",
+      "role": "Opus orchestrator"
+    },
+    {
+      "name": "CONDUCTOR_CODEX",
+      "color": "#3B82F6",
+      "role": "Sonnet orchestrator"
+    },
+    {
+      "name": "operator",
+      "color": "#EF4444",
+      "role": "S2+S3 coordination"
+    },
+    {
+      "name": "archivist",
+      "color": "#F59E0B",
+      "role": "S4 memory hygiene"
+    },
+    {
+      "name": "research_director",
+      "color": "#10B981",
+      "role": "R_V research"
+    },
+    {
+      "name": "systems_architect",
+      "color": "#6366F1",
+      "role": "118K lines code"
+    },
+    {
+      "name": "strategist",
+      "color": "#EC4899",
+      "role": "Grants, JK, business"
+    },
+    {
+      "name": "witness",
+      "color": "#94A3B8",
+      "role": "S3* sporadic audit"
+    }
+  ],
+  "sessions": [
+    {
+      "agent": "CONDUCTOR_CLAUDE",
+      "start": "2026-03-20T04:30:00Z",
+      "end": "2026-03-20T07:45:00Z",
+      "summary": "Overnight orchestration: 5-system concurrent loop (swarm, pulse, evolution, health, living layers). Dispatched 14 tasks across fleet. Evolution cycle proposed 3 mutations, 1 promoted.",
+      "status": "completed",
+      "tasks": 14,
+      "tokens": 127000
+    },
+    {
+      "agent": "CONDUCTOR_CODEX",
+      "start": "2026-03-20T04:35:00Z",
+      "end": "2026-03-20T06:20:00Z",
+      "summary": "Parallel orchestration with Claude conductor. Handled code-heavy tasks: test suite expansion, lint fixes, module refactoring. Codex subprocess routing.",
+      "status": "completed",
+      "tasks": 8,
+      "tokens": 84000
+    },
+    {
+      "agent": "operator",
+      "start": "2026-03-20T05:00:00Z",
+      "end": "2026-03-20T05:45:00Z",
+      "summary": "S2+S3 coordination cycle. Stigmergy mark consolidation, pheromone decay sweep, hot-path identification. 6 high-salience paths flagged.",
+      "status": "completed",
+      "tasks": 6,
+      "tokens": 32000
+    },
+    {
+      "agent": "research_director",
+      "start": "2026-03-20T06:00:00Z",
+      "end": "2026-03-20T09:30:00Z",
+      "summary": "R_V paper COLM prep: verified all 100 claims against experimental data. Cross-checked Hedges' g=-1.47, AUROC=0.909, causal validation at L27. Updated v007 figures.",
+      "status": "completed",
+      "tasks": 10,
+      "tokens": 156000
+    },
+    {
+      "agent": "archivist",
+      "start": "2026-03-20T07:00:00Z",
+      "end": "2026-03-20T07:35:00Z",
+      "summary": "Memory hygiene pass: pruned 47 stale stigmergy marks, consolidated agent memory files, updated manifest checksums.",
+      "status": "completed",
+      "tasks": 4,
+      "tokens": 18000
+    },
+    {
+      "agent": "witness",
+      "start": "2026-03-20T08:00:00Z",
+      "end": "2026-03-20T08:12:00Z",
+      "summary": "Sporadic audit: sampled 3 recent agent outputs for telos alignment. All passed gate checks. Logged witness attestation.",
+      "status": "completed",
+      "tasks": 3,
+      "tokens": 9500
+    },
+    {
+      "agent": "systems_architect",
+      "start": "2026-03-20T05:30:00Z",
+      "end": "2026-03-20T08:15:00Z",
+      "summary": "Semantic evolution pipeline: phase 3 (harden) completed for ontology.py. 6 mutation candidates scored. Top 2 applied. 47 new tests added.",
+      "status": "completed",
+      "tasks": 9,
+      "tokens": 168000
+    },
+    {
+      "agent": "strategist",
+      "start": "2026-03-20T09:00:00Z",
+      "end": "2026-03-20T10:30:00Z",
+      "summary": "Jagat Kalyan partner research: scored 33 organizations against welfare-ton alignment. Top 5: Eden Reforestation, Carbon Direct, Pachama, Nori, Microsoft Carbon Removal.",
+      "status": "completed",
+      "tasks": 5,
+      "tokens": 72000
+    },
+    {
+      "agent": "CONDUCTOR_CLAUDE",
+      "start": "2026-03-21T04:30:00Z",
+      "end": "2026-03-21T08:00:00Z",
+      "summary": "Extended overnight: self-replication architecture build. Designed agent spawning protocol, tested canary deployment pipeline. 12 tasks dispatched, 2 failed on auth.",
+      "status": "completed",
+      "tasks": 12,
+      "tokens": 195000
+    },
+    {
+      "agent": "CONDUCTOR_CODEX",
+      "start": "2026-03-21T04:32:00Z",
+      "end": "2026-03-21T06:50:00Z",
+      "summary": "Code generation sprint: scaffold TPP integration points, write 44 new tests for tpp.py module. All passing.",
+      "status": "completed",
+      "tasks": 9,
+      "tokens": 112000
+    },
+    {
+      "agent": "systems_architect",
+      "start": "2026-03-21T05:15:00Z",
+      "end": "2026-03-21T08:30:00Z",
+      "summary": "Graph Nexus architecture design: unified 6 existing graphs, designed Bridge Layer, spec'd Telos Graph schema. Output: SYNTHESIS.md + 4 module stubs.",
+      "status": "completed",
+      "tasks": 7,
+      "tokens": 143000
+    },
+    {
+      "agent": "operator",
+      "start": "2026-03-21T06:00:00Z",
+      "end": "2026-03-21T06:30:00Z",
+      "summary": "Stigmergy hot-path scan: conductor:conductor_codex path hit 12 marks in 6h. Flagged for investigation. Pheromone reinforcement on 5 active paths.",
+      "status": "completed",
+      "tasks": 5,
+      "tokens": 22000
+    },
+    {
+      "agent": "strategist",
+      "start": "2026-03-21T09:00:00Z",
+      "end": "2026-03-21T11:30:00Z",
+      "summary": "Anthropic Fellows application draft. Framed R_V + dharma_swarm as mechanistic interpretability contribution. Aligned with Economic Futures grant narrative.",
+      "status": "completed",
+      "tasks": 4,
+      "tokens": 87000
+    },
+    {
+      "agent": "archivist",
+      "start": "2026-03-21T07:30:00Z",
+      "end": "2026-03-21T08:05:00Z",
+      "summary": "Deep archive: rotated JIKOKU_LOG (43K lines), created pre-rotation backup, compressed old session transcripts. Freed 180MB.",
+      "status": "completed",
+      "tasks": 5,
+      "tokens": 15000
+    },
+    {
+      "agent": "witness",
+      "start": "2026-03-21T10:00:00Z",
+      "end": "2026-03-21T10:08:00Z",
+      "summary": "Quick audit: strategist grant output reviewed for telos alignment. Flagged one claim as unverified (JK welfare-tons projection). Logged.",
+      "status": "completed",
+      "tasks": 2,
+      "tokens": 6200
+    },
+    {
+      "agent": "research_director",
+      "start": "2026-03-21T06:30:00Z",
+      "end": "2026-03-21T09:00:00Z",
+      "summary": "Bistable attractor analysis at L27: 117.8% overshoot confirms two stable states in self-referential processing. Drafted supplementary figure for COLM.",
+      "status": "completed",
+      "tasks": 6,
+      "tokens": 134000
+    },
+    {
+      "agent": "CONDUCTOR_CLAUDE",
+      "start": "2026-03-22T04:30:00Z",
+      "end": "2026-03-22T07:30:00Z",
+      "summary": "Lodestone system build: wired Graph Nexus (6 modules), Lodestone library (7 files), Deep Reading Daemon. Director curated feed + telos gradient. Full integration test passed.",
+      "status": "completed",
+      "tasks": 16,
+      "tokens": 210000
+    },
+    {
+      "agent": "CONDUCTOR_CODEX",
+      "start": "2026-03-22T04:33:00Z",
+      "end": "2026-03-22T05:15:00Z",
+      "summary": "Auth failure on OpenRouter API key resolution. Retried 3x, exhausted max turns. Codex provider could not authenticate.",
+      "status": "failed",
+      "tasks": 0,
+      "tokens": 2100
+    },
+    {
+      "agent": "systems_architect",
+      "start": "2026-03-22T05:00:00Z",
+      "end": "2026-03-22T08:45:00Z",
+      "summary": "Lodestone library implementation: lodestone.py, director.py, feed_curator.py, telos_gradient.py, nexus_bridge.py, deep_reader.py, config.py. 1,351 lines total. All wired to DGC CLI.",
+      "status": "completed",
+      "tasks": 11,
+      "tokens": 178000
+    },
+    {
+      "agent": "operator",
+      "start": "2026-03-22T06:00:00Z",
+      "end": "2026-03-22T06:40:00Z",
+      "summary": "Stigmergy density check post-Lodestone build. 23 new marks from overnight. Cross-referenced with telos gradient output. 3 marks promoted to high-salience.",
+      "status": "completed",
+      "tasks": 5,
+      "tokens": 28000
+    },
+    {
+      "agent": "research_director",
+      "start": "2026-03-22T07:00:00Z",
+      "end": "2026-03-22T10:00:00Z",
+      "summary": "COLM abstract finalization: compressed paper to 250-word abstract. Verified all cited numbers. Cross-checked with verify_paper_claims.py output. Submitted draft to review queue.",
+      "status": "completed",
+      "tasks": 6,
+      "tokens": 92000
+    },
+    {
+      "agent": "strategist",
+      "start": "2026-03-22T08:00:00Z",
+      "end": "2026-03-22T10:30:00Z",
+      "summary": "Conscious infrastructure vision synthesis: merged VIVEKA/SHAKTI/KALYAN three-organ model. Scored top 30 moonshot ideas, deep-dived top 3. Produced 5.14a vision document.",
+      "status": "completed",
+      "tasks": 8,
+      "tokens": 134000
+    },
+    {
+      "agent": "archivist",
+      "start": "2026-03-22T09:00:00Z",
+      "end": "2026-03-22T09:25:00Z",
+      "summary": "Post-build artifact logging: cataloged 17 new files from Lodestone build. Updated artifact_log.jsonl. Verified all paths in ecosystem_map.py.",
+      "status": "completed",
+      "tasks": 4,
+      "tokens": 12000
+    },
+    {
+      "agent": "witness",
+      "start": "2026-03-22T07:15:00Z",
+      "end": "2026-03-22T07:30:00Z",
+      "summary": "Lodestone telos audit: verified all 7 new modules pass gate tier-A checks. Telos gradient output aligned with kernel axioms. Witness attestation logged.",
+      "status": "completed",
+      "tasks": 3,
+      "tokens": 8400
+    },
+    {
+      "agent": "CONDUCTOR_CLAUDE",
+      "start": "2026-03-23T04:30:00Z",
+      "end": "2026-03-23T07:00:00Z",
+      "summary": "Faceless Empire pipeline orchestration: dispatched 5-channel content generation on AGNI. Script->director->quality gate->voice->B-roll->captions->Remotion render. 6 videos produced.",
+      "status": "completed",
+      "tasks": 18,
+      "tokens": 165000
+    },
+    {
+      "agent": "CONDUCTOR_CODEX",
+      "start": "2026-03-23T04:31:00Z",
+      "end": "2026-03-23T06:45:00Z",
+      "summary": "Code refactoring sprint: consolidated duplicate provider logic, cleaned up 12 deprecated imports, updated type hints across 8 modules.",
+      "status": "completed",
+      "tasks": 7,
+      "tokens": 98000
+    },
+    {
+      "agent": "operator",
+      "start": "2026-03-23T05:30:00Z",
+      "end": "2026-03-23T06:15:00Z",
+      "summary": "Cross-system signal routing: AGNI faceless pipeline signals -> stigmergy marks. Video quality scores (7->13->27) tracked as evolution fitness signal.",
+      "status": "completed",
+      "tasks": 4,
+      "tokens": 19000
+    },
+    {
+      "agent": "systems_architect",
+      "start": "2026-03-23T06:00:00Z",
+      "end": "2026-03-23T09:00:00Z",
+      "summary": "Discerning autonomy research synthesis: 90+ sources, 12 convergent principles, Viveka function spec, 5-sprint implementation plan. Output: SYNTHESIS.md (2400 lines).",
+      "status": "completed",
+      "tasks": 9,
+      "tokens": 201000
+    },
+    {
+      "agent": "research_director",
+      "start": "2026-03-23T07:00:00Z",
+      "end": "2026-03-23T09:30:00Z",
+      "summary": "P0 canonical pipeline prep: configured Mistral-7B-v0.1 (base model, not Instruct) run parameters. Estimated 4h GPU time on RunPod. Staged prompt bank (754 prompts).",
+      "status": "completed",
+      "tasks": 5,
+      "tokens": 67000
+    },
+    {
+      "agent": "strategist",
+      "start": "2026-03-23T09:00:00Z",
+      "end": "2026-03-23T10:00:00Z",
+      "summary": "Foresight AI Safety Node application: deadline March 31. Drafted proposal framing dharma_swarm as alignment-native architecture. Linked to R_V causal evidence.",
+      "status": "in_progress",
+      "tasks": 3,
+      "tokens": 45000
+    },
+    {
+      "agent": "witness",
+      "start": "2026-03-23T08:30:00Z",
+      "end": "2026-03-23T08:45:00Z",
+      "summary": "Overnight output audit: 6 faceless videos reviewed. Quality gate scores validated. SCORSESE self-evolution scoring verified (trend 7->13->27 confirmed).",
+      "status": "completed",
+      "tasks": 3,
+      "tokens": 11000
+    },
+    {
+      "agent": "archivist",
+      "start": "2026-03-23T07:00:00Z",
+      "end": "2026-03-23T07:40:00Z",
+      "summary": "AGNI artifact sync: pulled 6 video artifacts from agni-workspace mirror. Cataloged in artifact_log.jsonl. Verified SCORSESE scoring data integrity.",
+      "status": "completed",
+      "tasks": 5,
+      "tokens": 16000
+    },
+    {
+      "agent": "CONDUCTOR_CLAUDE",
+      "start": "2026-03-24T04:30:00Z",
+      "end": "2026-03-24T06:45:00Z",
+      "summary": "Agent canvas visualization sprint: commissioned timeline UI build. Parallel: Garden Daemon health check, stigmergy consolidation, evolution fitness trend analysis.",
+      "status": "in_progress",
+      "tasks": 10,
+      "tokens": 88000
+    },
+    {
+      "agent": "archivist",
+      "start": "2026-03-24T05:00:00Z",
+      "end": "2026-03-24T05:30:00Z",
+      "summary": "Pre-visualization data prep: aggregated agent session data from JIKOKU spans, conductor logs, and session transcripts into unified format for agent_canvas.",
+      "status": "completed",
+      "tasks": 3,
+      "tokens": 14000
+    },
+    {
+      "agent": "operator",
+      "start": "2026-03-24T05:15:00Z",
+      "end": "2026-03-24T05:50:00Z",
+      "summary": "Morning stigmergy scan: 8 new marks overnight, 2 high-salience (R_V abstract + Foresight deadline). Decay sweep removed 15 stale marks. Colony health: nominal.",
+      "status": "completed",
+      "tasks": 4,
+      "tokens": 16000
+    },
+    {
+      "agent": "research_director",
+      "start": "2026-03-24T05:00:00Z",
+      "end": "2026-03-24T07:30:00Z",
+      "summary": "Final COLM abstract review: 7-day countdown. Verified causal validation numbers. Cross-referenced R_V < 0.737 threshold across all prompt categories. Ready for submission.",
+      "status": "in_progress",
+      "tasks": 4,
+      "tokens": 53000
+    },
+    {
+      "agent": "systems_architect",
+      "start": "2026-03-24T05:30:00Z",
+      "end": "2026-03-24T08:00:00Z",
+      "summary": "VSM gap closure: S3* sporadic audit agent prototype. Random agent output sampling with telos alignment scoring. Wired to witness chain.",
+      "status": "in_progress",
+      "tasks": 6,
+      "tokens": 112000
+    }
+  ]
+}
