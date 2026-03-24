@@ -15,10 +15,7 @@ import {
 import "@xyflow/react/dist/style.css";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 import {
-  Activity,
-  AlertTriangle,
   Bot,
-  DollarSign,
   FileCode2,
   Network,
   Play,
@@ -26,13 +23,10 @@ import {
   Sparkles,
   Eye,
   MessageSquare,
-  Zap,
 } from "lucide-react";
 import { apiFetch } from "@/lib/api";
 import { DharmaSocket } from "@/lib/ws";
 import { colors } from "@/lib/theme";
-import { useVizSnapshot } from "@/hooks/useVizSnapshot";
-import { useVizEvents } from "@/hooks/useVizEvents";
 import type { AgentOut, FleetAgentConfig, StigmergyMarkOut, TraceOut, WsEvent } from "@/lib/types";
 
 interface GraphNodeOut {
@@ -101,7 +95,6 @@ export default function EcosystemPage() {
   const [selectedFile, setSelectedFile] = useState<string | null>(null);
   const [selectedAgent, setSelectedAgent] = useState<string>("");
   const [agentCommentary, setAgentCommentary] = useState("");
-  const [activityFeed, setActivityFeed] = useState<AgentActivityEvent[]>([]);
   const [graphExpanded, setGraphExpanded] = useState(false);
   const [search, setSearch] = useState("");
 
@@ -135,10 +128,6 @@ export default function EcosystemPage() {
     refetchInterval: 10_000,
   });
 
-  // ── Operator Nervous System overlay ──
-  const { data: vizSnapshot } = useVizSnapshot(10_000);
-  const { data: vizEvents = [] } = useVizEvents(5_000, 20);
-
   useEffect(() => {
     const socket = new DharmaSocket("agents", {
       onMessage: (event: WsEvent) => {
@@ -151,26 +140,27 @@ export default function EcosystemPage() {
     return () => socket.close();
   }, [qc]);
 
-  useEffect(() => {
-    const next = traces.slice(0, 20).map((trace) => {
-      const metadata = trace.metadata ?? {};
-      const filePath =
-        (metadata.file_path as string | undefined) ??
-        (metadata.path as string | undefined) ??
-        (metadata.target_file as string | undefined) ??
-        null;
-      return {
-        id: trace.id,
-        timestamp: trace.timestamp,
-        agent: trace.agent,
-        action: trace.action,
-        state: trace.state,
-        commentary: summarizeTrace(trace),
-        file_path: filePath,
-      } satisfies AgentActivityEvent;
-    });
-    setActivityFeed(next);
-  }, [traces]);
+  const activityFeed = useMemo(
+    () =>
+      traces.slice(0, 20).map((trace) => {
+        const metadata = trace.metadata ?? {};
+        const filePath =
+          (metadata.file_path as string | undefined) ??
+          (metadata.path as string | undefined) ??
+          (metadata.target_file as string | undefined) ??
+          null;
+        return {
+          id: trace.id,
+          timestamp: trace.timestamp,
+          agent: trace.agent,
+          action: trace.action,
+          state: trace.state,
+          commentary: summarizeTrace(trace),
+          file_path: filePath,
+        } satisfies AgentActivityEvent;
+      }),
+    [traces],
+  );
 
   const clusters = useMemo<SemanticCluster[]>(() => {
     const groups = new Map<string, Set<string>>();
@@ -298,101 +288,6 @@ export default function EcosystemPage() {
           Living semantic map of files, agent touch patterns, and real-time swarm movement.
         </p>
       </motion.div>
-
-      {/* ── Operator Nervous System ── */}
-      {vizSnapshot && (
-        <motion.div
-          initial={{ opacity: 0, y: -4 }}
-          animate={{ opacity: 1, y: 0 }}
-          className="grid grid-cols-2 gap-3 md:grid-cols-4 xl:grid-cols-6"
-        >
-          <div className="glass-panel-subtle flex items-center gap-2 px-3 py-2">
-            <Activity size={14} className="text-rokusho" />
-            <div>
-              <div className="text-[10px] uppercase tracking-wider text-sumi-600">Alive</div>
-              <div className="font-mono text-sm font-bold text-rokusho">
-                {vizSnapshot.summary.alive_count ?? 0}
-              </div>
-            </div>
-          </div>
-          <div className="glass-panel-subtle flex items-center gap-2 px-3 py-2">
-            <AlertTriangle size={14} className="text-bengara" />
-            <div>
-              <div className="text-[10px] uppercase tracking-wider text-sumi-600">Stuck</div>
-              <div className="font-mono text-sm font-bold text-bengara">
-                {vizSnapshot.summary.stuck_count ?? 0}
-              </div>
-            </div>
-          </div>
-          <div className="glass-panel-subtle flex items-center gap-2 px-3 py-2">
-            <Zap size={14} className="text-kinpaku" />
-            <div>
-              <div className="text-[10px] uppercase tracking-wider text-sumi-600">Trajectories</div>
-              <div className="font-mono text-sm font-bold text-kinpaku">
-                {vizSnapshot.summary.trajectories_completed ?? 0}
-              </div>
-            </div>
-          </div>
-          <div className="glass-panel-subtle flex items-center gap-2 px-3 py-2">
-            <DollarSign size={14} className="text-rokusho" />
-            <div>
-              <div className="text-[10px] uppercase tracking-wider text-sumi-600">Balance</div>
-              <div className="font-mono text-sm font-bold text-rokusho">
-                ${(vizSnapshot.summary.net_balance ?? 0).toFixed(2)}
-              </div>
-            </div>
-          </div>
-          <div className="glass-panel-subtle flex items-center gap-2 px-3 py-2">
-            <Sparkles size={14} className="text-fuji" />
-            <div>
-              <div className="text-[10px] uppercase tracking-wider text-sumi-600">Marks</div>
-              <div className="font-mono text-sm font-bold text-fuji">
-                {vizSnapshot.summary.stigmergy_marks ?? 0}
-              </div>
-            </div>
-          </div>
-          <div className="glass-panel-subtle flex items-center gap-2 px-3 py-2">
-            <Network size={14} className="text-aozora" />
-            <div>
-              <div className="text-[10px] uppercase tracking-wider text-sumi-600">Training $</div>
-              <div className="font-mono text-sm font-bold text-aozora">
-                ${(vizSnapshot.summary.training_budget ?? 0).toFixed(2)}
-              </div>
-            </div>
-          </div>
-        </motion.div>
-      )}
-
-      {/* ── Recent Events Feed ── */}
-      {vizEvents.length > 0 && (
-        <motion.div
-          initial={{ opacity: 0 }}
-          animate={{ opacity: 1 }}
-          className="glass-panel-subtle max-h-24 overflow-y-auto px-3 py-2"
-        >
-          <div className="mb-1 text-[10px] uppercase tracking-wider text-sumi-600">What Changed</div>
-          <div className="space-y-1">
-            {vizEvents.slice(0, 5).map((evt, i) => (
-              <div key={`evt-${i}`} className="flex items-center gap-2 text-[11px]">
-                <span className="text-sumi-600">
-                  {new Date(evt.timestamp * 1000).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })}
-                </span>
-                <span className={
-                  evt.event_type === "revenue" ? "text-rokusho" :
-                  evt.event_type === "expense" ? "text-bengara" :
-                  evt.event_type === "trajectory_completed" ? "text-kinpaku" :
-                  "text-torinoko/70"
-                }>
-                  {evt.event_type.replace(/_/g, " ")}
-                </span>
-                <span className="truncate text-torinoko/50">
-                  {evt.node_id ?? (evt.data?.description as string)?.slice(0, 60) ?? ""}
-                </span>
-              </div>
-            ))}
-          </div>
-        </motion.div>
-      )}
 
       <div className="grid grid-cols-1 gap-4 xl:grid-cols-[280px_minmax(0,1fr)_360px]">
         <section className="glass-panel p-4">

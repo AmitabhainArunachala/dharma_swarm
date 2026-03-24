@@ -14,7 +14,6 @@ import {
 } from "lucide-react";
 import { MetricCard } from "@/components/dashboard/MetricCard";
 import { useTelemetry } from "@/hooks/useTelemetry";
-import { useVizSnapshot } from "@/hooks/useVizSnapshot";
 import { colors, glowBorder, glowBox, statusColor } from "@/lib/theme";
 import { timeAgo } from "@/lib/utils";
 
@@ -42,8 +41,6 @@ export default function TelemetryPage() {
     outcomes,
     isLoading,
   } = useTelemetry();
-
-  const { data: vizSnapshot } = useVizSnapshot(15_000);
 
   const topPaths = topEntries(routing?.path_counts ?? {});
   const topProviders = topEntries(routing?.provider_counts ?? {});
@@ -380,51 +377,6 @@ export default function TelemetryPage() {
           </div>
         </motion.section>
       </div>
-
-      {/* ── Self-Training Pipeline Metrics ── */}
-      {vizSnapshot && (
-        <motion.div
-          initial={{ opacity: 0, y: 14 }}
-          animate={{ opacity: 1, y: 0 }}
-          transition={{ duration: 0.45, delay: 0.26 }}
-        >
-          <div className="mb-3 flex items-center gap-2">
-            <Sparkles size={14} className="text-kinpaku" />
-            <h2 className="text-[11px] font-semibold uppercase tracking-[0.12em] text-kitsurubami">
-              Self-Training Pipeline
-            </h2>
-          </div>
-          <div className="grid grid-cols-2 gap-3 md:grid-cols-4">
-            <MetricCard
-              label="Trajectories"
-              value={vizSnapshot.summary.trajectories_completed ?? 0}
-              trendLabel={`${vizSnapshot.summary.trajectories_active ?? 0} active`}
-              accentColor={colors.kinpaku}
-              index={0}
-            />
-            <MetricCard
-              label="Net Balance"
-              value={formatUsd(vizSnapshot.summary.net_balance ?? 0)}
-              trendLabel={`$${(vizSnapshot.summary.training_budget ?? 0).toFixed(2)} training budget`}
-              trend={(vizSnapshot.summary.net_balance ?? 0) > 0 ? "up" : null}
-              accentColor={colors.rokusho}
-              index={1}
-            />
-            <MetricCard
-              label="Revenue"
-              value={formatUsd(vizSnapshot.summary.revenue_total ?? 0)}
-              accentColor={colors.rokusho}
-              index={2}
-            />
-            <MetricCard
-              label="Expenses"
-              value={formatUsd(vizSnapshot.summary.expense_total ?? 0)}
-              accentColor={colors.bengara}
-              index={3}
-            />
-          </div>
-        </motion.div>
-      )}
 
       <motion.div
         initial={{ opacity: 0, y: 14 }}

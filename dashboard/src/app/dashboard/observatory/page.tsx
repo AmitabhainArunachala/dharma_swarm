@@ -32,7 +32,6 @@ import { ControlPlaneSurfaceGrid } from "@/components/dashboard/ControlPlaneSurf
 import { ControlPlaneStrip } from "@/components/dashboard/ControlPlaneStrip";
 import { useRuntimeControlPlane } from "@/hooks/useRuntimeControlPlane";
 import { apiFetch } from "@/lib/api";
-import { useVizSnapshot } from "@/hooks/useVizSnapshot";
 import { buildControlPlanePageMeta } from "@/lib/controlPlanePageMeta";
 import { buildControlPlaneSyncState } from "@/lib/controlPlaneShell";
 import { buildControlPlaneSurfaces } from "@/lib/controlPlaneSurfaces";
@@ -228,7 +227,6 @@ export default function ObservatoryPage() {
     queryFn: () => apiFetch<ObservatoryData>("/api/agents/observatory"),
     refetchInterval: 10_000,
   });
-  const { data: vizSnapshot } = useVizSnapshot(15_000);
   const rankedAgents = [...(data?.agents ?? [])].sort(
     (a, b) => b.composite_fitness - a.composite_fitness,
   );
@@ -733,41 +731,6 @@ export default function ObservatoryPage() {
                   >
                     {name}
                   </span>
-                ))}
-              </div>
-            </motion.div>
-          )}
-
-          {/* ============================================================ */}
-          {/* Self-Training Pipeline Status */}
-          {/* ============================================================ */}
-          {vizSnapshot && (
-            <motion.div
-              initial={{ opacity: 0, y: 8 }}
-              animate={{ opacity: 1, y: 0 }}
-              transition={{ delay: 0.55 }}
-            >
-              <SectionHeading
-                icon={<Zap size={15} />}
-                label="Self-Training Pipeline"
-                accent={colors.kinpaku}
-              />
-              <div className="mt-3 grid grid-cols-2 gap-3 md:grid-cols-4">
-                {[
-                  { icon: <Activity size={15} />, label: "Trajectories", value: String(vizSnapshot.summary.trajectories_completed ?? 0), accent: colors.kinpaku },
-                  { icon: <DollarSign size={15} />, label: "Training Budget", value: `$${(vizSnapshot.summary.training_budget ?? 0).toFixed(2)}`, accent: colors.rokusho },
-                  { icon: <HeartPulse size={15} />, label: "Stigmergy Marks", value: String(vizSnapshot.summary.stigmergy_marks ?? 0), accent: colors.fuji },
-                  { icon: <Users size={15} />, label: "Agents Alive", value: String(vizSnapshot.summary.alive_count ?? 0), accent: colors.aozora },
-                ].map((item) => (
-                  <div key={item.label} className="glass-panel-subtle flex items-center gap-3 p-3">
-                    <div className="flex h-8 w-8 items-center justify-center rounded-lg" style={{ backgroundColor: `color-mix(in srgb, ${item.accent} 12%, transparent)`, color: item.accent }}>
-                      {item.icon}
-                    </div>
-                    <div>
-                      <p className="text-[10px] uppercase tracking-wider" style={{ color: colors.sumi[600] }}>{item.label}</p>
-                      <p className="font-mono text-sm font-bold" style={{ color: colors.torinoko }}>{item.value}</p>
-                    </div>
-                  </div>
                 ))}
               </div>
             </motion.div>

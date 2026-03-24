@@ -501,3 +501,16 @@ class TestSemanticDigester:
 
         assert graph.node_count >= 2
         assert graph.edge_count >= 0  # may have reference edges
+
+    def test_digest_directory_under_dot_prefixed_ancestor(self, tmp_path):
+        scan_root = tmp_path / ".worktrees" / "scan-root"
+        scan_root.mkdir(parents=True)
+        (scan_root / "module.py").write_text(
+            '"""A module about entropy and coordination."""\n\n'
+            'class Coordinator:\n    """Coordinates agents."""\n    pass\n'
+        )
+
+        digester = SemanticDigester()
+        graph = digester.digest_directory(scan_root)
+
+        assert graph.node_count >= 1

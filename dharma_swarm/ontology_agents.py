@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import re
+from pathlib import Path
 from typing import Any
 
 from dharma_swarm.ontology import OntologyObj, OntologyRegistry
@@ -95,9 +96,10 @@ def upsert_agent_identity(
     *,
     registry: OntologyRegistry | None = None,
     persist: bool = True,
+    path: str | Path | None = None,
 ) -> OntologyObj | None:
     """Project a live agent into the canonical AgentIdentity ontology type."""
-    shared_registry = registry or get_shared_registry()
+    shared_registry = registry or get_shared_registry(path)
     properties = build_agent_identity_properties(agent)
     existing = find_agent_identity(
         shared_registry,
@@ -124,7 +126,7 @@ def upsert_agent_identity(
             return None
 
     if persist and registry is None:
-        persist_shared_registry(shared_registry)
+        persist_shared_registry(shared_registry, path)
     return obj
 
 
@@ -134,9 +136,10 @@ def mark_agent_retiring(
     name: str | None = None,
     registry: OntologyRegistry | None = None,
     persist: bool = True,
+    path: str | Path | None = None,
 ) -> OntologyObj | None:
     """Mark an AgentIdentity as stopping/retiring when a stop signal is issued."""
-    shared_registry = registry or get_shared_registry()
+    shared_registry = registry or get_shared_registry(path)
     existing = find_agent_identity(shared_registry, agent_id=agent_id, name=name)
     if existing is None:
         return None
@@ -150,5 +153,5 @@ def mark_agent_retiring(
         return None
 
     if persist and registry is None:
-        persist_shared_registry(shared_registry)
+        persist_shared_registry(shared_registry, path)
     return obj

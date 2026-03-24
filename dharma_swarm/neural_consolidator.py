@@ -830,16 +830,8 @@ class NeuralConsolidator:
         }
 
     def _append_correction(self, path: Path, correction: BehavioralCorrection) -> None:
-        """Append a correction to an agent's correction file, deduplicating."""
+        """Append a correction to an agent's correction file."""
         existing = path.read_text() if path.exists() else ""
-
-        # Dedup: skip if the same correction text already exists in the file
-        if correction.correction in existing:
-            logger.debug(
-                "Skipping duplicate correction for %s: %.60s...",
-                correction.target_agent, correction.correction,
-            )
-            return
 
         entry = (
             f"\n## Correction ({correction.timestamp})\n"

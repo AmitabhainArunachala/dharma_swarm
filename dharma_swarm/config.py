@@ -133,39 +133,6 @@ class LiveLoopConfig(BaseModel):
         ge=3600, le=604800,
         description="Consolidation (sleep) cycle interval (default 24h)",
     )
-
-    # Replication parameters
-    replication_check_interval_seconds: int = Field(
-        default=int(os.environ.get("DGC_REPLICATION_CHECK", "86400")),
-        ge=3600, le=604800,
-        description="How often to check for replication proposals (default 24h)",
-    )
-    max_generations: int = Field(
-        default=int(os.environ.get("DGC_MAX_GENERATIONS", "2")),
-        ge=1, le=5,
-        description="Maximum replication depth (gen 0 -> gen 1 -> gen 2)",
-    )
-    probation_cycles: int = Field(
-        default=int(os.environ.get("DGC_PROBATION_CYCLES", "10")),
-        ge=1, le=100,
-        description="Heartbeat cycles before new agent graduates from probation",
-    )
-    apoptosis_fitness_threshold: float = Field(
-        default=float(os.environ.get("DGC_APOPTOSIS_FITNESS", "0.2")),
-        ge=0.0, le=1.0,
-        description="Fitness below this for N cycles triggers apoptosis",
-    )
-    apoptosis_cycle_count: int = Field(
-        default=int(os.environ.get("DGC_APOPTOSIS_CYCLES", "5")),
-        ge=1, le=50,
-        description="Consecutive low-fitness cycles before apoptosis",
-    )
-    daily_token_budget: int = Field(
-        default=int(os.environ.get("DGC_DAILY_TOKEN_BUDGET", "500000")),
-        ge=10000, le=10000000,
-        description="Daily token budget for all agents combined",
-    )
-
     max_daily_tasks: int = Field(
         default=int(os.environ.get("DGC_MAX_DAILY", "50")),
         ge=1, le=1000,

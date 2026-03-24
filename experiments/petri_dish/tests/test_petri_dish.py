@@ -318,64 +318,6 @@ class TestWorker:
         assert mock_complete.await_count == 2
 
 
-class TestPetriDishLLMProviderPreference:
-    @pytest.mark.asyncio
-    async def test_complete_prefers_low_cost_runtime_providers_before_openrouter(self, monkeypatch):
-        class _FakeProvider:
-            def __init__(self, label: str, content: str = "", fail: bool = False):
-                self.label = label
-                self.content = content
-                self.fail = fail
-
-            async def complete(self, request):
-                if self.fail:
-                    raise RuntimeError(f"{self.label} failed")
-                return type("Resp", (), {"content": self.content, "usage": {}, "model": request.model})()
-
-            async def close(self):
-                return None
-
-        calls: list[str] = []
-
-        def _fake_preferred_configs(**kwargs):
-            from dharma_swarm.models import ProviderType
-            from dharma_swarm.runtime_provider import RuntimeProviderConfig
-
-            return [
-                RuntimeProviderConfig(provider=ProviderType.OLLAMA, available=True, default_model="ollama-test"),
-                RuntimeProviderConfig(provider=ProviderType.NVIDIA_NIM, available=True, default_model="nim-test"),
-                RuntimeProviderConfig(provider=ProviderType.OPENROUTER, available=True, default_model="or-test"),
-            ]
-
-        def _fake_create_provider(config):
-            label = config.provider.value
-            calls.append(label)
-            if label == "ollama":
-                return _FakeProvider(label, fail=True)
-            if label == "nvidia_nim":
-                return _FakeProvider(label, content="nim success")
-            return _FakeProvider(label, content="openrouter success")
-
-        monkeypatch.setattr(
-            "experiments.petri_dish.llm_client.preferred_runtime_provider_configs",
-            _fake_preferred_configs,
-        )
-        monkeypatch.setattr(
-            "experiments.petri_dish.llm_client.create_runtime_provider",
-            _fake_create_provider,
-        )
-
-        llm = PetriDishLLM(api_key="unused")
-        result = await llm.complete(
-            system="system",
-            user_message="hello",
-            model="meta-llama/llama-3.3-70b-instruct:free",
-        )
-
-        assert result == "nim success"
-        assert calls == ["ollama", "nvidia_nim"]
-
-
 class TestTracePersistence:
     @pytest.mark.asyncio
     async def test_save_and_load_traces(self, tmp_path: Path):

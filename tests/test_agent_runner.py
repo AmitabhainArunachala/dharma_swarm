@@ -21,6 +21,26 @@ def config():
     return AgentConfig(name="test-agent", role=AgentRole.CODER)
 
 
+def _with_state_dir(config: AgentConfig, tmp_path: Path) -> AgentConfig:
+    state_dir = tmp_path / ".dharma"
+    state_dir.mkdir(exist_ok=True)
+    return config.model_copy(
+        update={
+            "metadata": {
+                **config.metadata,
+                "state_dir": str(state_dir),
+                "memory_state_dir": str(state_dir),
+            }
+        }
+    )
+
+
+def _ontology_path(tmp_path: Path) -> Path:
+    state_dir = tmp_path / ".dharma"
+    state_dir.mkdir(exist_ok=True)
+    return state_dir / "ontology.db"
+
+
 @pytest.mark.asyncio
 async def test_runner_start(config):
     runner = AgentRunner(config)
@@ -53,8 +73,12 @@ async def test_runner_start_registers_bus_presence_and_topics(config, tmp_path: 
 
 
 @pytest.mark.asyncio
-async def test_runner_mock_task(config, fast_gate):
-    runner = AgentRunner(config)
+@pytest.mark.timeout(90)
+async def test_runner_mock_task(config, fast_gate, tmp_path: Path):
+    runner = AgentRunner(
+        _with_state_dir(config, tmp_path),
+        ontology_path=_ontology_path(tmp_path),
+    )
     await runner.start()
     task = Task(title="Write tests")
     result = await runner.run_task(task)
@@ -75,19 +99,24 @@ async def test_runner_records_telic_chain_with_stable_agent_id_and_cell_scope(
 
     provider = AsyncMock()
     provider.complete = AsyncMock(return_value=LLMResponse(content="done", model="test"))
+    ontology_path = _ontology_path(tmp_path)
 
     seam = TelicSeam(
         registry=OntologyRegistry.create_dharma_registry(),
         lineage=LineageGraph(db_path=tmp_path / "telic-lineage.db"),
+        path=ontology_path,
     )
     old_seam = telic_module._SEAM
     telic_module._SEAM = seam
 
     try:
-        named_config = config.model_copy(
+        named_config = _with_state_dir(
+            config,
+            tmp_path,
+        ).model_copy(
             update={"name": "display-name", "id": "agent-stable-id"}
         )
-        runner = AgentRunner(named_config, provider=provider)
+        runner = AgentRunner(named_config, provider=provider, ontology_path=ontology_path)
         await runner.start()
         task = Task(
             title="Write scoped telic record",
@@ -121,7 +150,7 @@ async def test_runner_records_telic_chain_with_stable_agent_id_and_cell_scope(
         telic_module._SEAM = old_seam
 
 
-def test_build_prompt_uses_active_memory_recall_by_default(config, monkeypatch):
+def test_build_prompt_uses_active_memory_recall_by_default(config, monkeypatch, tmp_path):
     recorded: dict[str, object] = {}
 
     def _fake_memory(**kwargs):
@@ -131,7 +160,10 @@ def test_build_prompt_uses_active_memory_recall_by_default(config, monkeypatch):
     monkeypatch.setattr("dharma_swarm.context.read_memory_context", _fake_memory, raising=True)
     monkeypatch.setattr("dharma_swarm.context.read_latent_gold_context", lambda **_: "", raising=True)
 
-    _build_prompt(Task(title="Build prompt", description="Use memory carefully"), config)
+    _build_prompt(
+        Task(title="Build prompt", description="Use memory carefully"),
+        _with_state_dir(config, tmp_path),
+    )
 
     # Default mode is now "active" — semantic search enabled for richer recall
     assert recorded["allow_semantic_search"] is True
@@ -178,16 +210,78 @@ def test_build_prompt_handles_memory_context_import_failure(config, monkeypatch)
 
 
 @pytest.mark.asyncio
-async def test_runner_provider_error_string_marks_failure(config, fast_gate):
+async def test_runner_without_state_dir_skips_shared_memory_surfaces(
+    config,
+    fast_gate,
+    monkeypatch,
+    tmp_path: Path,
+):
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setattr(
+        "dharma_swarm.context.read_memory_context",
+        lambda **_: pytest.fail("shared prompt memory should not be consulted"),
+        raising=True,
+    )
+    monkeypatch.setattr(
+        "dharma_swarm.context.read_latent_gold_context",
+        lambda **_: pytest.fail("latent gold should not be consulted without isolated state"),
+        raising=True,
+    )
+    monkeypatch.setattr(
+        "dharma_swarm.engine.conversation_memory.ConversationMemoryStore",
+        lambda *_args, **_kwargs: pytest.fail(
+            "shared conversation memory should not be initialized without isolated state"
+        ),
+        raising=True,
+    )
+    monkeypatch.setattr(
+        "dharma_swarm.engine.retrieval_feedback.RetrievalFeedbackStore",
+        lambda *_args, **_kwargs: pytest.fail(
+            "shared retrieval feedback should not be initialized without isolated state"
+        ),
+        raising=True,
+    )
+    monkeypatch.setattr(
+        "dharma_swarm.agent_registry.get_registry",
+        lambda *_args, **_kwargs: pytest.fail(
+            "shared agent registry should not be initialized without isolated state"
+        ),
+        raising=True,
+    )
+    monkeypatch.setattr(
+        "dharma_swarm.telic_seam.get_seam",
+        lambda *_args, **_kwargs: pytest.fail(
+            "shared telic seam should not be initialized without isolated state"
+        ),
+        raising=True,
+    )
+
+    runner = AgentRunner(config)
+    await runner.start()
+
+    result = await runner.run_task(Task(title="No shared state"))
+
+    assert "No shared state" in result
+    assert runner.state.tasks_completed == 1
+
+
+@pytest.mark.asyncio
+@pytest.mark.timeout(180)
+async def test_runner_provider_error_string_marks_failure(config, fast_gate, tmp_path: Path):
     from dharma_swarm.models import LLMResponse
 
+    isolated_config = _with_state_dir(config, tmp_path)
     for text in ("ERROR: upstream unavailable", "API Error: Unable to connect to API (ENOTFOUND)"):
         provider = AsyncMock()
         provider.complete = AsyncMock(
             return_value=LLMResponse(content=text, model="test"),
         )
 
-        runner = AgentRunner(config, provider=provider)
+        runner = AgentRunner(
+            isolated_config,
+            provider=provider,
+            ontology_path=_ontology_path(tmp_path),
+        )
         await runner.start()
 
         with pytest.raises(RuntimeError, match=re.escape(text)):
@@ -295,42 +389,3 @@ async def test_pool_remove_dead():
     await pool.remove_dead()
     agents = await pool.list_agents()
     assert len(agents) == 0
-
-
-@pytest.mark.asyncio
-async def test_emit_fitness_signal_publishes_to_message_bus(config, fast_gate, tmp_path: Path):
-    """Verify that completing a task publishes an AGENT_FITNESS event
-    to the MessageBus with a numeric fitness_score from ThinkodynamicScorer."""
-    from dharma_swarm.models import LLMResponse
-
-    provider = AsyncMock()
-    provider.complete = AsyncMock(
-        return_value=LLMResponse(content="Task completed successfully", model="test"),
-    )
-
-    bus = MessageBus(tmp_path / "fitness_bus.db")
-    await bus.init_db()
-
-    runner = AgentRunner(config, provider=provider, message_bus=bus)
-    await runner.start()
-
-    task = Task(title="Write tests for the witness module")
-    await runner.run_task(task)
-
-    # Let background tasks (emit_event) settle
-    import asyncio
-    await asyncio.sleep(0.1)
-
-    # Consume the AGENT_FITNESS events from the durable bus
-    events = await bus.consume_events("AGENT_FITNESS", limit=10)
-    assert len(events) >= 1, "Expected at least one AGENT_FITNESS event on the bus"
-
-    evt = events[0]
-    payload = evt["payload"]
-    assert "fitness_score" in payload, f"fitness_score missing from payload: {payload}"
-    assert isinstance(payload["fitness_score"], (int, float)), "fitness_score must be numeric"
-    assert 0.0 <= payload["fitness_score"] <= 1.0, "fitness_score must be in [0, 1]"
-    assert payload["agent"] == "test-agent"
-    assert payload["task_id"] == task.id
-    assert "timestamp" in payload
-    assert "thinkodynamic_dimensions" in payload

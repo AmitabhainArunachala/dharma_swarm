@@ -10,8 +10,6 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
-from dharma_swarm.models import LLMResponse, ProviderType
-from dharma_swarm.runtime_provider import RuntimeProviderConfig
 from dharma_swarm.ginko_agents import (
     DOMAIN_CREW,
     FLEET_SPEC,
@@ -676,104 +674,31 @@ class TestModelFallbacks:
 
 class TestCallOpenRouter:
     @pytest.mark.asyncio
-    async def test_no_available_providers(self, monkeypatch):
+    async def test_no_api_key(self, monkeypatch):
         from dharma_swarm.ginko_agents import _call_openrouter
 
-        monkeypatch.setattr(
-            "dharma_swarm.ginko_agents.preferred_runtime_provider_configs",
-            lambda **kwargs: [],
-        )
+        monkeypatch.delenv("OPENROUTER_API_KEY", raising=False)
         result = await _call_openrouter("m/m", [{"role": "user", "content": "hi"}])
         assert result["error"] is True
-        assert "No preferred providers available" in result["content"]
+        assert "OPENROUTER_API_KEY" in result["content"]
 
     @pytest.mark.asyncio
     async def test_timeout_handling(self, monkeypatch):
         import httpx
         from dharma_swarm.ginko_agents import _call_openrouter
 
-        class _TimeoutProvider:
-            async def complete(self, request):
-                raise httpx.TimeoutException("timed out")
+        monkeypatch.setenv("OPENROUTER_API_KEY", "test-key")
 
-            async def close(self):
-                return None
+        async def mock_post(*args, **kwargs):
+            raise httpx.TimeoutException("timed out")
 
-        monkeypatch.setattr(
-            "dharma_swarm.ginko_agents.preferred_runtime_provider_configs",
-            lambda **kwargs: [
-                RuntimeProviderConfig(
-                    provider=ProviderType.OLLAMA,
-                    available=True,
-                    default_model="ollama-local",
-                )
-            ],
-        )
-        monkeypatch.setattr(
-            "dharma_swarm.ginko_agents.create_runtime_provider",
-            lambda config: _TimeoutProvider(),
-        )
-        result = await _call_openrouter("m/m", [{"role": "user", "content": "hi"}])
+        with patch("httpx.AsyncClient") as mock_client:
+            mock_client.return_value.__aenter__ = AsyncMock(return_value=MagicMock(post=mock_post))
+            mock_client.return_value.__aexit__ = AsyncMock(return_value=False)
+            result = await _call_openrouter("m/m", [{"role": "user", "content": "hi"}])
 
         assert result["error"] is True
         assert "TIMEOUT" in result["content"] or "ERROR" in result["content"]
-
-    @pytest.mark.asyncio
-    async def test_prefers_ollama_then_nim_before_openrouter(self, monkeypatch):
-        from dharma_swarm.ginko_agents import _call_openrouter
-
-        calls: list[tuple[str, str]] = []
-
-        class _FakeProvider:
-            def __init__(self, label: str, *, fail: bool = False):
-                self.label = label
-                self.fail = fail
-
-            async def complete(self, request):
-                calls.append((self.label, request.model))
-                if self.fail:
-                    raise RuntimeError(f"{self.label} failed")
-                return LLMResponse(content=f"{self.label} ok", model=request.model)
-
-            async def close(self):
-                return None
-
-        monkeypatch.setattr(
-            "dharma_swarm.ginko_agents.preferred_runtime_provider_configs",
-            lambda **kwargs: [
-                RuntimeProviderConfig(
-                    provider=ProviderType.OLLAMA,
-                    available=True,
-                    default_model="ollama-local",
-                ),
-                RuntimeProviderConfig(
-                    provider=ProviderType.NVIDIA_NIM,
-                    available=True,
-                    default_model="nim-local",
-                ),
-                RuntimeProviderConfig(
-                    provider=ProviderType.OPENROUTER,
-                    available=True,
-                    default_model="openrouter-model",
-                ),
-            ],
-        )
-        monkeypatch.setattr(
-            "dharma_swarm.ginko_agents.create_runtime_provider",
-            lambda config: _FakeProvider(
-                config.provider.value,
-                fail=config.provider == ProviderType.OLLAMA,
-            ),
-        )
-
-        result = await _call_openrouter("moonshotai/kimi-k2.5", [{"role": "user", "content": "hi"}])
-
-        assert result["error"] is False
-        assert result["content"] == "nvidia_nim ok"
-        assert calls == [
-            ("ollama", "ollama-local"),
-            ("nvidia_nim", "nim-local"),
-        ]
 
 
 # ---------------------------------------------------------------------------

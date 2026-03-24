@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import sqlite3
 import tempfile
 from pathlib import Path
@@ -68,7 +69,12 @@ def _setup_memory_db(db_path: Path) -> None:
 
 
 def _insert_retrieval_log(
-    db_path: Path, record_id: str, source_kind: str, uptake: str,
+    db_path: Path,
+    record_id: str,
+    source_kind: str,
+    uptake: str,
+    *,
+    source_path: str = "",
 ) -> None:
     """Insert a fake retrieval_log row for Bridge 2 tests."""
     from uuid import uuid4
@@ -79,8 +85,16 @@ def _insert_retrieval_log(
             "(feedback_id, query_text, record_id, source_kind, source_path, "
             " score, rank, consumer, retrieved_at, evidence_json, "
             " outcome, uptake_state) "
-            "VALUES (?, ?, ?, ?, '', 0.5, 1, 'test', datetime('now'), '{}', ?, ?)",
-            (uuid4().hex[:16], "test query", record_id, source_kind, uptake, uptake),
+            "VALUES (?, ?, ?, ?, ?, 0.5, 1, 'test', datetime('now'), '{}', ?, ?)",
+            (
+                uuid4().hex[:16],
+                "test query",
+                record_id,
+                source_kind,
+                source_path,
+                uptake,
+                uptake,
+            ),
         )
         db.commit()
 
@@ -145,6 +159,95 @@ class TestBridge1IndexConcepts:
         db = tmp_path / "mem.db"
         count = index_concepts_into_memory(graph, db_path=db)
         assert count == 0
+
+    def test_reindexing_same_source_tree_is_idempotent(self, tmp_path: Path) -> None:
+        from dharma_swarm.engine.unified_index import UnifiedIndex
+        from dharma_swarm.semantic_digester import SemanticDigester
+
+        source_root = tmp_path / "repo"
+        source_root.mkdir()
+        (source_root / "module.py").write_text(
+            '"""Semantic indexing should stay stable."""\n\n'
+            'class StableConcept:\n'
+            '    """Tracks one stable concept."""\n'
+            "    pass\n",
+            encoding="utf-8",
+        )
+
+        db = tmp_path / "mem.db"
+        digester = SemanticDigester()
+
+        first_graph = digester.digest_directory(source_root)
+        second_graph = digester.digest_directory(source_root)
+
+        first_count = index_concepts_into_memory(first_graph, db_path=db)
+        assert first_count > 0
+
+        index_concepts_into_memory(second_graph, db_path=db)
+
+        idx = UnifiedIndex(db)
+        semantic_records = idx.records(filters={"source_kind": "semantic_concept"})
+        assert len(semantic_records) == first_count
+
+    def test_indexing_semantic_concepts_records_index_run(self, tmp_path: Path) -> None:
+        graph = _make_graph(3)
+        db = tmp_path / "mem.db"
+
+        count = index_concepts_into_memory(graph, db_path=db)
+        assert count == 3
+
+        with sqlite3.connect(str(db)) as conn:
+            row = conn.execute(
+                "SELECT source_kind, status, stats_json FROM index_runs ORDER BY rowid DESC LIMIT 1",
+            ).fetchone()
+
+        assert row is not None
+        assert row[0] == "semantic_concept"
+        assert row[1] == "completed"
+
+    def test_retrieval_uptake_matches_redigested_graph_via_stable_source_path(
+        self, tmp_path: Path,
+    ) -> None:
+        from dharma_swarm.semantic_digester import SemanticDigester
+
+        source_root = tmp_path / "repo"
+        source_root.mkdir()
+        (source_root / "module.py").write_text(
+            '"""Semantic indexing should stay stable."""\n\n'
+            'class StableConcept:\n'
+            '    """Tracks one stable concept."""\n'
+            "    pass\n",
+            encoding="utf-8",
+        )
+
+        db = tmp_path / "mem.db"
+        _setup_memory_db(db)
+        digester = SemanticDigester()
+        first_graph = digester.digest_directory(source_root)
+        second_graph = digester.digest_directory(source_root)
+
+        index_concepts_into_memory(first_graph, db_path=db)
+
+        with sqlite3.connect(str(db)) as conn:
+            source_path, metadata_json = conn.execute(
+                "SELECT source_path, metadata_json FROM source_documents "
+                "WHERE source_kind = 'semantic_concept' LIMIT 1",
+            ).fetchone()
+
+        target_name = json.loads(metadata_json)["concept_name"]
+        target_node = next(node for node in second_graph.all_nodes() if node.name == target_name)
+        original_salience = target_node.salience
+        _insert_retrieval_log(
+            db,
+            "chunk-does-not-match-graph-id",
+            "semantic_concept",
+            "used",
+            source_path=source_path,
+        )
+
+        changes = apply_retrieval_uptake_to_salience(second_graph, db_path=db)
+        assert target_node.id in changes
+        assert target_node.salience > original_salience
 
 
 # ---------------------------------------------------------------------------

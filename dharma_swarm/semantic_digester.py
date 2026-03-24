@@ -763,7 +763,8 @@ class SemanticDigester:
                 break
             if not path.is_file():
                 continue
-            if _should_skip(path):
+            scan_path = path.relative_to(root)
+            if _should_skip(scan_path):
                 continue
             if not include_tests and "test" in path.name.lower():
                 continue

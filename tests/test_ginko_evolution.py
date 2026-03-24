@@ -4,12 +4,10 @@ from __future__ import annotations
 
 import json
 from pathlib import Path
-from types import SimpleNamespace
 from unittest.mock import AsyncMock, patch
 
 import pytest
 
-from dharma_swarm.models import LLMResponse, ProviderType
 from dharma_swarm.ginko_evolution import (
     FLEET_AGENTS,
     MUTATION_MODEL,
@@ -335,30 +333,11 @@ class TestPromptTournament:
         assert len(history) == 2
 
     @pytest.mark.asyncio
-    async def test_mutate_prompt_no_available_providers(self, monkeypatch):
+    async def test_mutate_prompt_no_api_key(self, monkeypatch):
         monkeypatch.delenv("OPENROUTER_API_KEY", raising=False)
         t = PromptTournament()
-        with patch(
-            "dharma_swarm.ginko_evolution.complete_via_preferred_runtime_providers",
-            new=AsyncMock(side_effect=RuntimeError("No preferred providers available")),
-        ):
-            result = await t.mutate_prompt("original prompt", {"success_rate": 0.5})
+        result = await t.mutate_prompt("original prompt", {"success_rate": 0.5})
         assert result == "original prompt"  # Safe fallback
-
-    @pytest.mark.asyncio
-    async def test_mutate_prompt_uses_runtime_provider_stack(self):
-        t = PromptTournament()
-        with patch(
-            "dharma_swarm.ginko_evolution.complete_via_preferred_runtime_providers",
-            new=AsyncMock(
-                return_value=(
-                    LLMResponse(content="mutated prompt", model="nim-local"),
-                    SimpleNamespace(provider=ProviderType.NVIDIA_NIM),
-                )
-            ),
-        ):
-            result = await t.mutate_prompt("original prompt", {"success_rate": 0.5})
-        assert result == "mutated prompt"
 
     @pytest.mark.asyncio
     async def test_run_tournament_no_agents(self, tmp_path, monkeypatch):

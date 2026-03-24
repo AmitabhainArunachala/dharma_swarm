@@ -1,32 +1,44 @@
-"""Thin async LLM client for the petri dish.
+"""Thin async LLM client for OpenRouter.
 
-Uses the canonical dharma_swarm runtime-provider preference:
-Ollama -> NVIDIA NIM -> OpenRouter Free -> OpenRouter.
+Zero dharma_swarm imports. Uses the openai SDK pointed at OpenRouter,
+replicating the pattern from providers.py:224-271.
 """
 
 from __future__ import annotations
 
 import logging
+import os
 from typing import Any
-
-from dharma_swarm.models import LLMRequest, ProviderType
-from dharma_swarm.runtime_provider import (
-    create_runtime_provider,
-    preferred_runtime_provider_configs,
-)
 
 logger = logging.getLogger(__name__)
 
 
 class PetriDishLLM:
-    """Minimal async client that respects the canonical low-cost provider order."""
+    """Minimal async OpenRouter client for the petri dish experiment."""
 
-    def __init__(self, api_key: str | None = None, base_url: str | None = None) -> None:
-        # Kept for backward compatibility with existing tests/call sites.
-        self._api_key = api_key
+    def __init__(
+        self,
+        api_key: str | None = None,
+        base_url: str = "https://openrouter.ai/api/v1",
+    ) -> None:
+        self._api_key = api_key or os.environ.get("OPENROUTER_API_KEY", "")
         self._base_url = base_url
+        self._client: Any = None
         self._total_calls = 0
         self._total_tokens = 0
+
+    def _get_client(self) -> Any:
+        if self._client is not None:
+            return self._client
+        if not self._api_key:
+            raise RuntimeError("OPENROUTER_API_KEY not set")
+        from openai import AsyncOpenAI
+
+        self._client = AsyncOpenAI(
+            api_key=self._api_key,
+            base_url=self._base_url,
+        )
+        return self._client
 
     async def complete(
         self,
@@ -38,68 +50,35 @@ class PetriDishLLM:
         max_tokens: int = 2048,
         messages: list[dict[str, str]] | None = None,
     ) -> str:
-        """Single completion call via preferred runtime providers."""
-        msg_list: list[dict[str, str]]
+        """Single completion call. Returns content string.
+
+        If `messages` is provided, it is used as the conversation history
+        (system prompt is still prepended). Otherwise, a single user message
+        is constructed from `user_message`.
+        """
+        client = self._get_client()
+
+        msg_list: list[dict[str, str]] = [{"role": "system", "content": system}]
         if messages:
-            msg_list = list(messages)
+            msg_list.extend(messages)
         else:
-            msg_list = [{"role": "user", "content": user_message}]
+            msg_list.append({"role": "user", "content": user_message})
 
-        configs = preferred_runtime_provider_configs(
-            model_overrides={
-                ProviderType.OPENROUTER_FREE: model,
-                ProviderType.OPENROUTER: model,
-            }
-        )
-        if not configs:
-            raise RuntimeError(
-                "No preferred providers available; configure Ollama, NVIDIA NIM, or OpenRouter"
+        try:
+            resp = await client.chat.completions.create(
+                model=model,
+                messages=msg_list,
+                max_tokens=max_tokens,
+                temperature=temperature,
             )
-
-        last_exc: Exception | None = None
-        for config in configs:
-            provider = create_runtime_provider(config)
-            try:
-                response = await provider.complete(
-                    LLMRequest(
-                        model=config.default_model or model,
-                        system=system,
-                        messages=msg_list,
-                        max_tokens=max_tokens,
-                        temperature=temperature,
-                    )
-                )
-                self._total_calls += 1
-                usage = response.usage or {}
-                if "total_tokens" in usage:
-                    try:
-                        self._total_tokens += int(usage["total_tokens"])
-                    except (TypeError, ValueError):
-                        pass
-                elif "prompt_tokens" in usage or "completion_tokens" in usage:
-                    try:
-                        self._total_tokens += int(usage.get("prompt_tokens", 0)) + int(
-                            usage.get("completion_tokens", 0)
-                        )
-                    except (TypeError, ValueError):
-                        pass
-                return response.content
-            except Exception as exc:
-                last_exc = exc
-                logger.error(
-                    "LLM call failed (provider=%s, model=%s): %s",
-                    config.provider.value,
-                    config.default_model or model,
-                    exc,
-                )
-            finally:
-                close = getattr(provider, "close", None)
-                if callable(close):
-                    await close()
-
-        if last_exc is not None:
-            raise last_exc
-        raise RuntimeError("Provider chain exhausted without an explicit error")
+            self._total_calls += 1
+            if resp.usage:
+                self._total_tokens += resp.usage.total_tokens
+            content = resp.choices[0].message.content or ""
+            return content
+        except Exception as e:
+            logger.error("LLM call failed (model=%s): %s", model, e)
+            raise
 
     @property
     def stats(self) -> dict[str, int]:

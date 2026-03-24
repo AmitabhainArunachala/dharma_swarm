@@ -598,57 +598,6 @@ class TestCallLLM:
         await agent._call_llm("sys", [], [])
         agent._call_openrouter.assert_awaited_once()
 
-    @pytest.mark.asyncio
-    async def test_openrouter_path_prefers_ollama_then_nim_before_openrouter(self, monkeypatch):
-        from dharma_swarm.models import ProviderType
-        from dharma_swarm.runtime_provider import RuntimeProviderConfig
-
-        class _FakeProvider:
-            def __init__(self, label: str, *, fail: bool = False):
-                self.label = label
-                self.fail = fail
-
-            async def complete(self, request):
-                if self.fail:
-                    raise RuntimeError(f"{self.label} failed")
-                from dharma_swarm.models import LLMResponse
-
-                return LLMResponse(content=f"{self.label} ok", model=str(request.model))
-
-            async def close(self):
-                return None
-
-        calls: list[str] = []
-
-        def _fake_preferred_configs(**kwargs):
-            return [
-                RuntimeProviderConfig(provider=ProviderType.OLLAMA, available=True, default_model="ollama-local"),
-                RuntimeProviderConfig(provider=ProviderType.NVIDIA_NIM, available=True, default_model="nim-model"),
-                RuntimeProviderConfig(provider=ProviderType.OPENROUTER, available=True, default_model="or-model"),
-            ]
-
-        def _fake_create_provider(config):
-            calls.append(config.provider.value)
-            return _FakeProvider(config.provider.value, fail=config.provider == ProviderType.OLLAMA)
-
-        monkeypatch.setattr(
-            "dharma_swarm.autonomous_agent.preferred_runtime_provider_configs",
-            _fake_preferred_configs,
-        )
-        monkeypatch.setattr(
-            "dharma_swarm.autonomous_agent.create_runtime_provider",
-            _fake_create_provider,
-        )
-
-        ident = AgentIdentity(
-            name="t", role="r", system_prompt="s", provider="openrouter", model="or-model",
-        )
-        agent = AutonomousAgent(ident)
-        payload = await agent._call_openrouter("sys", [{"role": "user", "content": "hello"}], [])
-
-        assert payload["text"] == ["nvidia_nim ok"]
-        assert calls == ["ollama", "nvidia_nim"]
-
 
 # ---------------------------------------------------------------------------
 # Memory and stigmergy tools (mocked backends)

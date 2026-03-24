@@ -56,11 +56,11 @@ class TelicSeam:
         self,
         registry: OntologyRegistry | None = None,
         lineage: LineageGraph | None = None,
-        registry_path: str | Path | None = None,
+        path: str | Path | None = None,
     ) -> None:
-        self._registry_path = Path(registry_path) if registry_path is not None else None
-        self._registry = registry or get_shared_registry(path=self._registry_path)
-        self._persist_registry = registry is None or self._registry_path is not None
+        self._path = path
+        self._registry = registry or get_shared_registry(path)
+        self._persist_registry = registry is None
         self._lineage = lineage or LineageGraph()
         self._proposal_map: dict[str, str] = {}  # task_id -> proposal obj_id
         self._duplicate_suppressions: dict[str, int] = {
@@ -68,7 +68,6 @@ class TelicSeam:
             "value_events": 0,
             "contributions": 0,
         }
-        self._last_flush_at: float = 0.0
 
     @property
     def registry(self) -> OntologyRegistry:
@@ -79,17 +78,8 @@ class TelicSeam:
         return self._lineage
 
     def _flush_registry(self) -> None:
-        """Debounced flush — at most once per 60s to avoid 14s-per-dispatch bottleneck."""
-        import time
-        now = time.monotonic()
-        if (now - self._last_flush_at) < 60.0:
-            return
-        try:
-            from dharma_swarm.ontology_runtime import persist_shared_registry
-            persist_shared_registry()
-            self._last_flush_at = now
-        except Exception:
-            pass  # Non-critical — registry is still in memory
+        if self._persist_registry:
+            persist_shared_registry(self._registry, self._path)
 
     def record_dispatch(
         self,
@@ -629,11 +619,11 @@ class TelicSeam:
 _SEAM: TelicSeam | None = None
 
 
-def get_seam() -> TelicSeam:
+def get_seam(path: str | Path | None = None) -> TelicSeam:
     """Get or create the module-level TelicSeam singleton."""
     global _SEAM
-    if _SEAM is None:
-        _SEAM = TelicSeam()
+    if _SEAM is None or getattr(_SEAM, "_path", None) != path:
+        _SEAM = TelicSeam(path=path)
     return _SEAM
 
 
