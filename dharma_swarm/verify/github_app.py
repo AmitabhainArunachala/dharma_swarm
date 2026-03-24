@@ -21,6 +21,7 @@ import json
 import logging
 import os
 import time
+from dataclasses import asdict
 from typing import Any
 
 from pydantic import BaseModel, Field
@@ -232,33 +233,32 @@ class VerifyWebhookHandler:
             )
 
         # Run the review pipeline
-        from dharma_swarm.verify.reviewer import review_diff_text
+        from dharma_swarm.verify.reviewer import review_pr
 
-        review = review_diff_text(
-            diff_text,
-            pr_number=ctx.pr_number,
+        review = review_pr(
+            diff_text=diff_text,
             pr_title=ctx.pr_title,
-            repo=ctx.repo_full_name,
+            pr_body=ctx.pr_body,
         )
 
         # Update stats
         self._review_count += 1
-        self._total_score += review.score.overall_composite
-        self._total_debt += review.score.comprehension_debt
+        self._total_score += review.score.overall
+        self._total_debt += review.comprehension_debt
 
         logger.info(
-            "Reviewed PR #%d (%s) via webhook: gate=%s, composite=%.2f",
+            "Reviewed PR #%d (%s) via webhook: verdict=%s, score=%.2f",
             ctx.pr_number,
             ctx.repo_full_name,
-            review.gate_result,
-            review.score.overall_composite,
+            review.verdict,
+            review.score.overall,
         )
 
         return WebhookResult(
             event_type="pull_request",
             action=action,
             processed=True,
-            review=review.model_dump(),
+            review=asdict(review),
         )
 
     # -- Ping handler --------------------------------------------------------

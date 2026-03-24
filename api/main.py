@@ -139,9 +139,11 @@ def _get_api_key() -> str | None:
 _PUBLIC_ROUTES: set[tuple[str, str]] = {
     ("GET", "/"),
     ("GET", "/api/health"),
+    ("GET", "/api/verify/health"),
     ("GET", "/docs"),
     ("GET", "/openapi.json"),
     ("GET", "/redoc"),
+    ("POST", "/api/verify/webhook"),  # uses its own HMAC-SHA256 auth
 }
 
 _AUTH_FAILURE_RESPONSE = {
@@ -253,6 +255,7 @@ from api.routers.dashboard_new import router as dashboard_new_router
 from api.routers.telemetry import router as telemetry_router
 from api.routers.graphql_router import router as graphql_router
 from api.routers.viz import router as viz_router
+from api.routers.verify import router as verify_router
 
 app.include_router(health_router)
 app.include_router(agents_router)
@@ -268,6 +271,7 @@ app.include_router(dashboard_new_router)
 app.include_router(telemetry_router)
 app.include_router(graphql_router)
 app.include_router(viz_router)
+app.include_router(verify_router)
 
 
 # ── Root ──────────────────────────────────────────────────────────
