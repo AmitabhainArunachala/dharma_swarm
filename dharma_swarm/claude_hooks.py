@@ -176,13 +176,56 @@ def verify_baseline() -> dict:
     return report
 
 
+def post_edit(payload_json: str = "") -> None:
+    """Called by PostToolUse hook on Write|Edit. Quality check on Python files.
+
+    Reads JSON payload from stdin. Extracts file_path. Runs ruff with
+    fatal-only selectors (E9, F63, F7, F82). Warns on stderr but does
+    NOT block (exit 0 always) — blocking writes creates more friction
+    than the quality gain warrants.
+    """
+    import subprocess
+
+    if not payload_json:
+        payload_json = sys.stdin.read()
+
+    try:
+        payload = json.loads(payload_json)
+    except (json.JSONDecodeError, TypeError):
+        return
+
+    file_path = payload.get("tool_input", {}).get("file_path", "")
+    if not file_path or not file_path.endswith(".py"):
+        return
+
+    if not Path(file_path).exists():
+        return
+
+    try:
+        result = subprocess.run(
+            ["ruff", "check", "--select", "E9,F63,F7,F82", file_path],
+            capture_output=True, text=True, timeout=5,
+        )
+        if result.returncode != 0 and result.stdout.strip():
+            print(f"Quality: {result.stdout.strip()}", file=sys.stderr)
+    except FileNotFoundError:
+        # ruff not installed — fallback to py_compile
+        try:
+            import py_compile
+            py_compile.compile(file_path, doraise=True)
+        except py_compile.PyCompileError as exc:
+            print(f"Syntax error: {exc}", file=sys.stderr)
+    except (subprocess.TimeoutExpired, Exception):
+        pass
+
+
 # ── CLI entry point ─────────────────────────────────────────────────
 
 def main():
     """CLI dispatcher for hook invocations."""
     if len(sys.argv) < 2:
         print("Usage: python -m dharma_swarm.claude_hooks <command>")
-        print("Commands: stop_verify, session_context, verify_baseline")
+        print("Commands: stop_verify, session_context, verify_baseline, post_edit")
         sys.exit(1)
 
     cmd = sys.argv[1]
@@ -195,9 +238,10 @@ def main():
     elif cmd == "verify_baseline":
         result = verify_baseline()
         print(json.dumps(result, indent=2))
-        # Exit non-zero if gates failed
         if result["gates"].get("decision") == "BLOCK":
             sys.exit(1)
+    elif cmd == "post_edit":
+        post_edit()
     else:
         print(f"Unknown command: {cmd}", file=sys.stderr)
         sys.exit(1)
