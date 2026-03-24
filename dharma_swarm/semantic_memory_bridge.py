@@ -13,9 +13,14 @@ SleepCycle, ExperimentMemory):
 
 from __future__ import annotations
 
+import hashlib
+import json
 import logging
+import sqlite3
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
+from uuid import uuid4
 
 from dharma_swarm.semantic_gravity import (
     ConceptGraph,
@@ -28,6 +33,25 @@ from dharma_swarm.semantic_gravity import (
 )
 
 logger = logging.getLogger(__name__)
+
+
+def _utc_now_iso() -> str:
+    return datetime.now(timezone.utc).isoformat()
+
+
+def _stable_concept_key(node: ConceptNode) -> str:
+    """Build a deterministic persistence key for a concept node."""
+    payload: dict[str, Any] = {
+        "name": node.name.strip(),
+        "source_file": node.source_file or "",
+        "source_line": int(node.source_line or 0),
+        "recognition_type": node.recognition_type or "",
+        "category": node.category or "",
+    }
+    if not payload["source_file"] and not payload["source_line"]:
+        payload["definition"] = " ".join(node.definition.split())[:500]
+    canonical = json.dumps(payload, sort_keys=True, ensure_ascii=True)
+    return hashlib.sha256(canonical.encode("utf-8")).hexdigest()[:16]
 
 
 # ---------------------------------------------------------------------------
@@ -47,31 +71,67 @@ def index_concepts_into_memory(
 
     Returns the number of concepts indexed.
     """
+    from dharma_swarm.engine.event_memory import (
+        DEFAULT_MEMORY_PLANE_DB,
+        ensure_memory_plane_schema_sync,
+    )
     from dharma_swarm.engine.unified_index import UnifiedIndex
 
-    index = UnifiedIndex(db_path)
+    resolved_db_path = Path(db_path or DEFAULT_MEMORY_PLANE_DB)
+    index = UnifiedIndex(resolved_db_path)
+    run_id = f"run_{uuid4().hex[:12]}"
+    started_at = _utc_now_iso()
+    stats = {"processed": 0, "errors": 0}
     count = 0
 
-    for node in graph.all_nodes():
-        text = _concept_to_searchable_text(node)
-        metadata = {
-            "source_kind": "semantic_concept",
-            "concept_id": node.id,
-            "concept_name": node.name,
-            "category": node.category,
-            "salience": node.salience,
-            "formal_structures": node.formal_structures,
-            "source_file": node.source_file,
-            "semantic_density": node.semantic_density,
-            "recognition_type": node.recognition_type,
-        }
-        index.index_document(
-            "semantic_concept",
-            f"concept://{node.id}",
-            text,
-            metadata,
+    with sqlite3.connect(str(resolved_db_path)) as db:
+        ensure_memory_plane_schema_sync(db)
+        db.execute(
+            "INSERT INTO index_runs (run_id, source_kind, started_at, completed_at, status, stats_json)"
+            " VALUES (?, ?, ?, ?, ?, ?)",
+            (run_id, "semantic_concept", started_at, None, "running", "{}"),
         )
-        count += 1
+        db.commit()
+
+    status = "completed"
+    for node in graph.all_nodes():
+        try:
+            concept_key = _stable_concept_key(node)
+            text = _concept_to_searchable_text(node)
+            metadata = {
+                "source_kind": "semantic_concept",
+                "concept_id": concept_key,
+                "graph_concept_id": node.id,
+                "concept_name": node.name,
+                "category": node.category,
+                "salience": node.salience,
+                "formal_structures": node.formal_structures,
+                "source_file": node.source_file,
+                "source_line": node.source_line,
+                "semantic_density": node.semantic_density,
+                "recognition_type": node.recognition_type,
+            }
+            index.index_document(
+                "semantic_concept",
+                f"concept://{concept_key}",
+                text,
+                metadata,
+            )
+            count += 1
+            stats["processed"] += 1
+        except Exception:
+            status = "completed_with_errors"
+            stats["errors"] += 1
+            logger.exception("Failed to index semantic concept %s", node.name)
+
+    completed_at = _utc_now_iso()
+    with sqlite3.connect(str(resolved_db_path)) as db:
+        ensure_memory_plane_schema_sync(db)
+        db.execute(
+            "UPDATE index_runs SET completed_at = ?, status = ?, stats_json = ? WHERE run_id = ?",
+            (completed_at, status, json.dumps(stats, sort_keys=True), run_id),
+        )
+        db.commit()
 
     logger.info("Indexed %d concepts into UnifiedIndex", count)
     return count
@@ -108,7 +168,6 @@ def apply_retrieval_uptake_to_salience(
 
     Returns a dict of {concept_id: new_salience} for changed concepts.
     """
-    import sqlite3
     from dharma_swarm.engine.event_memory import DEFAULT_MEMORY_PLANE_DB
 
     db_path = Path(db_path or DEFAULT_MEMORY_PLANE_DB)
@@ -116,16 +175,25 @@ def apply_retrieval_uptake_to_salience(
         return {}
 
     changes: dict[str, float] = {}
+    nodes_by_stable_key = {_stable_concept_key(node): node for node in graph.all_nodes()}
 
     with sqlite3.connect(str(db_path)) as db:
         db.row_factory = sqlite3.Row
         # Find recent retrieval feedback for semantic_concept records
         rows = db.execute(
             """
-            SELECT record_id, source_kind, outcome, uptake_state
-            FROM retrieval_log
-            WHERE source_kind = 'semantic_concept'
-            ORDER BY retrieved_at DESC
+            SELECT
+                rl.record_id,
+                rl.source_kind,
+                rl.source_path,
+                rl.outcome,
+                rl.uptake_state,
+                sd.source_path AS indexed_source_path
+            FROM retrieval_log rl
+            LEFT JOIN source_chunks sc ON sc.chunk_id = rl.record_id
+            LEFT JOIN source_documents sd ON sd.doc_id = sc.doc_id
+            WHERE rl.source_kind = 'semantic_concept'
+            ORDER BY rl.retrieved_at DESC
             LIMIT 200
             """,
         ).fetchall()
@@ -138,11 +206,31 @@ def apply_retrieval_uptake_to_salience(
         uptake = str(row["uptake_state"] or "")
         outcome = str(row["outcome"] or "")
 
-        # Try to extract concept_id from record_id
-        if record_id.startswith("concept://"):
-            cid = record_id[len("concept://"):]
-        else:
-            cid = record_id
+        candidate_ids: list[str] = []
+        for raw_identifier in (
+            str(row["source_path"] or ""),
+            str(row["indexed_source_path"] or ""),
+            record_id,
+        ):
+            if not raw_identifier:
+                continue
+            if raw_identifier.startswith("concept://"):
+                candidate_ids.append(raw_identifier[len("concept://"):])
+            else:
+                candidate_ids.append(raw_identifier)
+
+        node: ConceptNode | None = None
+        cid = ""
+        for candidate in candidate_ids:
+            node = graph.get_node(candidate)
+            if node is None:
+                node = nodes_by_stable_key.get(candidate)
+            if node is not None:
+                cid = node.id
+                break
+
+        if node is None:
+            continue
 
         if cid not in concept_signals:
             concept_signals[cid] = []
