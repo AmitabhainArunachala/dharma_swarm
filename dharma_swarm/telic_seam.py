@@ -68,6 +68,7 @@ class TelicSeam:
             "value_events": 0,
             "contributions": 0,
         }
+        self._last_flush_at: float = 0.0
 
     @property
     def registry(self) -> OntologyRegistry:
@@ -78,8 +79,17 @@ class TelicSeam:
         return self._lineage
 
     def _flush_registry(self) -> None:
-        if self._persist_registry:
-            persist_shared_registry(self._registry, path=self._registry_path)
+        """Debounced flush — at most once per 60s to avoid 14s-per-dispatch bottleneck."""
+        import time
+        now = time.monotonic()
+        if (now - self._last_flush_at) < 60.0:
+            return
+        try:
+            from dharma_swarm.ontology_runtime import persist_shared_registry
+            persist_shared_registry()
+            self._last_flush_at = now
+        except Exception:
+            pass  # Non-critical — registry is still in memory
 
     def record_dispatch(
         self,

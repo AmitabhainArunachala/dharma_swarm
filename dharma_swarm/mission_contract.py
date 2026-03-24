@@ -236,6 +236,9 @@ class ExecutionBrief(BaseModel):
     evidence_paths: list[str] = Field(default_factory=list)
     depends_on_briefs: list[str] = Field(default_factory=list)
     metadata: dict[str, Any] = Field(default_factory=dict)
+    promotion_count: int = 0
+    last_promoted_at: float = 0.0
+    status: str = "active"  # active | completed | exhausted
 
     @field_validator("brief_id", "title", "goal", mode="before")
     @classmethod

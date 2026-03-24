@@ -6,6 +6,7 @@ import pytest
 
 from dharma_swarm.mission_contract import (
     CampaignArtifact,
+    CampaignState,
     ExecutionBrief,
     MISSION_CONTRACT_VERSION,
     MissionState,
@@ -13,6 +14,7 @@ from dharma_swarm.mission_contract import (
     build_campaign_state,
     default_campaign_state_path,
     load_active_campaign_state,
+    load_campaign_state,
     default_latest_snapshot_path,
     default_mission_state_path,
     load_active_mission_state,
@@ -197,3 +199,45 @@ def test_campaign_state_round_trip_and_merges_briefs(tmp_path):
     assert artifact.state.evidence_paths == ["graph.json", "briefs.md"]
     assert artifact.state.semantic_briefs[0].brief_id == "semantic-a"
     assert artifact.state.execution_briefs[0].brief_id == "exec-a"
+
+
+def test_execution_brief_promotion_tracking():
+    """ExecutionBrief should track promotion count, timestamp, and status."""
+    brief = ExecutionBrief(
+        brief_id="exec-promo",
+        title="Test brief",
+        readiness_score=0.8,
+    )
+    assert brief.promotion_count == 0
+    assert brief.last_promoted_at == 0.0
+    assert brief.status == "active"
+
+    brief.promotion_count += 1
+    brief.last_promoted_at = 1234567890.0
+    assert brief.promotion_count == 1
+
+    brief.status = "exhausted"
+    assert brief.status == "exhausted"
+
+
+def test_execution_brief_promotion_fields_roundtrip(tmp_path):
+    """Promotion tracking fields should survive save/load roundtrip."""
+    brief = ExecutionBrief(
+        brief_id="exec-rt",
+        title="Roundtrip brief",
+        readiness_score=0.75,
+        promotion_count=3,
+        last_promoted_at=1711000000.0,
+        status="exhausted",
+    )
+    campaign = CampaignState(
+        campaign_id="campaign-promo",
+        mission_title="Promo test",
+        execution_briefs=[brief],
+    )
+    path = tmp_path / "campaign_promo.json"
+    save_campaign_state(path, campaign)
+    loaded = load_campaign_state(path)
+    assert loaded.execution_briefs[0].promotion_count == 3
+    assert loaded.execution_briefs[0].last_promoted_at == 1711000000.0
+    assert loaded.execution_briefs[0].status == "exhausted"

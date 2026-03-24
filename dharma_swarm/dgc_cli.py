@@ -4766,6 +4766,9 @@ def _build_parser() -> argparse.ArgumentParser:
     # -- health-check (v0.2.0 monitor) --
     sub.add_parser("health-check", help="Monitor-based system health check")
 
+    # -- verify-baseline (claude_hooks bridge) --
+    sub.add_parser("verify-baseline", help="Full baseline verification (gates + health)")
+
     # -- doctor --
     p_doc = sub.add_parser("doctor", help="Deep runtime diagnostics and fix guidance")
     p_doc.add_argument(
@@ -5667,6 +5670,17 @@ def main() -> None:
             cmd_loops()
         case "health-check":
             cmd_health_check()
+        case "verify-baseline":
+            from dharma_swarm.claude_hooks import verify_baseline
+            import json as _json
+            result = verify_baseline()
+            print(_json.dumps(result, indent=2))
+            gates = result.get("gates", {})
+            health = result.get("health", {})
+            status = health.get("status", "unknown") if isinstance(health, dict) else "unknown"
+            print(f"\nGates: {gates.get('passed', '?')}/{gates.get('total', '?')} | Health: {status}")
+            if gates.get("decision") == "BLOCK":
+                raise SystemExit(1)
         case "doctor":
             rc = cmd_doctor(
                 doctor_cmd=args.doctor_action,

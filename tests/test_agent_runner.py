@@ -295,3 +295,42 @@ async def test_pool_remove_dead():
     await pool.remove_dead()
     agents = await pool.list_agents()
     assert len(agents) == 0
+
+
+@pytest.mark.asyncio
+async def test_emit_fitness_signal_publishes_to_message_bus(config, fast_gate, tmp_path: Path):
+    """Verify that completing a task publishes an AGENT_FITNESS event
+    to the MessageBus with a numeric fitness_score from ThinkodynamicScorer."""
+    from dharma_swarm.models import LLMResponse
+
+    provider = AsyncMock()
+    provider.complete = AsyncMock(
+        return_value=LLMResponse(content="Task completed successfully", model="test"),
+    )
+
+    bus = MessageBus(tmp_path / "fitness_bus.db")
+    await bus.init_db()
+
+    runner = AgentRunner(config, provider=provider, message_bus=bus)
+    await runner.start()
+
+    task = Task(title="Write tests for the witness module")
+    await runner.run_task(task)
+
+    # Let background tasks (emit_event) settle
+    import asyncio
+    await asyncio.sleep(0.1)
+
+    # Consume the AGENT_FITNESS events from the durable bus
+    events = await bus.consume_events("AGENT_FITNESS", limit=10)
+    assert len(events) >= 1, "Expected at least one AGENT_FITNESS event on the bus"
+
+    evt = events[0]
+    payload = evt["payload"]
+    assert "fitness_score" in payload, f"fitness_score missing from payload: {payload}"
+    assert isinstance(payload["fitness_score"], (int, float)), "fitness_score must be numeric"
+    assert 0.0 <= payload["fitness_score"] <= 1.0, "fitness_score must be in [0, 1]"
+    assert payload["agent"] == "test-agent"
+    assert payload["task_id"] == task.id
+    assert "timestamp" in payload
+    assert "thinkodynamic_dimensions" in payload

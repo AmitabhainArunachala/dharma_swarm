@@ -261,6 +261,7 @@ class LLMResponse(BaseModel):
     """Response from an LLM provider."""
     content: str
     model: str
+    provider: str = ""
     usage: dict[str, int] = Field(default_factory=dict)
     tool_calls: list[dict[str, Any]] = Field(default_factory=list)
     stop_reason: Optional[str] = None

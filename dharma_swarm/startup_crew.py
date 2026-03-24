@@ -212,8 +212,11 @@ async def spawn_default_crew(swarm) -> list:
         logger.info("All agents already exist, skipping spawn")
         return []
 
-    # Prepare spawn tasks for parallel execution
-    spawn_tasks = []
+    # Spawn agents sequentially to avoid SQLite write contention.
+    # With a single-writer DB (runtime.db), parallel spawns serialize at the
+    # lock anyway, and concurrent aiosqlite connections risk "database is locked"
+    # errors that crash init. Sequential spawn is faster AND more reliable.
+    agents = []
     for spec in specs_to_spawn:
         provider = spec.get("provider", ProviderType.CLAUDE_CODE)
         model = spec.get("model", "claude-code")
@@ -224,8 +227,8 @@ async def spawn_default_crew(swarm) -> list:
             else MEMORY_SURVIVAL_INSTINCT
         )
 
-        spawn_tasks.append(
-            swarm.spawn_agent(
+        try:
+            agent = await swarm.spawn_agent(
                 name=spec["name"],
                 role=spec["role"],
                 thread=spec["thread"],
@@ -233,17 +236,13 @@ async def spawn_default_crew(swarm) -> list:
                 model=model,
                 system_prompt=merged_prompt,
             )
-        )
-
-    # Spawn all agents in parallel
-    agents = await asyncio.gather(*spawn_tasks)
-
-    # Log results
-    for spec in specs_to_spawn:
-        logger.info("Spawned %s (%s) on %s [%s]",
-                     spec["name"], spec["role"].value,
-                     spec.get("provider", ProviderType.CLAUDE_CODE).value,
-                     spec["thread"])
+            agents.append(agent)
+            logger.info("Spawned %s (%s) on %s [%s]",
+                         spec["name"], spec["role"].value,
+                         provider.value, spec["thread"])
+        except Exception as exc:
+            logger.warning("Failed to spawn %s (non-fatal, will retry next restart): %s",
+                           spec["name"], exc)
 
     return list(agents)
 

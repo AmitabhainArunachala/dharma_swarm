@@ -889,6 +889,7 @@ class TestFitnessRouting:
                 )
 
             orch = Orchestrator.__new__(Orchestrator)
+            orch._telic_seam = seam  # Wire test seam into instance
             agents = [
                 AgentState(id="agent_b", name="agent_b", role=AgentRole.CODER),
                 AgentState(id="agent_a", name="agent_a", role=AgentRole.CODER),
@@ -916,6 +917,7 @@ class TestFitnessRouting:
             from dharma_swarm.models import AgentRole, AgentState
 
             orch = Orchestrator.__new__(Orchestrator)
+            orch._telic_seam = seam  # Wire test seam into instance
 
             # Two coders + one researcher
             agents = [
@@ -949,6 +951,7 @@ class TestFitnessRouting:
             from dharma_swarm.models import AgentRole, AgentState
 
             orch = Orchestrator.__new__(Orchestrator)
+            orch._telic_seam = seam  # Wire test seam into instance
 
             picks = {"a1": 0, "a2": 0}
             for i in range(100):

@@ -181,7 +181,8 @@ async def run_pulse_loop(shutdown_event: asyncio.Event) -> None:
 
 async def run_evolution_loop(shutdown_event: asyncio.Event) -> None:
     """Periodic evolution cycles — propose, gate, evaluate, archive."""
-    from dharma_swarm.evolution import DarwinEngine
+    from dharma_swarm.evolution import DarwinEngine, CycleResult
+    from dharma_swarm.meta_evolution import MetaEvolutionEngine
 
     _log("evolution", f"Starting (interval={EVOLUTION_INTERVAL}s)")
     await asyncio.sleep(30)  # Let swarm init first
@@ -196,6 +197,14 @@ async def run_evolution_loop(shutdown_event: asyncio.Event) -> None:
     )
     await engine.init()
 
+    # Meta-evolution: adapts hyperparameters when object-level fitness stalls
+    meta_engine = MetaEvolutionEngine(
+        engine,
+        meta_archive_path=evo_dir / "meta_archive.jsonl",
+        n_object_cycles_per_meta=2,
+        auto_apply=True,
+    )
+
     # Connect to MessageBus for durable fitness event consumption
     from dharma_swarm.message_bus import MessageBus as _MBus
     db_dir = STATE_DIR / "db"
@@ -208,20 +217,31 @@ async def run_evolution_loop(shutdown_event: asyncio.Event) -> None:
     except Exception:
         logger.debug("Evolution: lifecycle subscription failed", exc_info=True)
 
+    # Source files for evolution proposals — core modules only
+    _src_root = Path(__file__).resolve().parent
+    _EVOLUTION_TARGETS = [
+        "swarm.py", "orchestrator.py", "agent_runner.py", "providers.py",
+        "evolution.py", "dharma_kernel.py", "telos_gates.py",
+        "thinkodynamic_director.py",
+    ]
+    cycle_count = 0
+
     while not shutdown_event.is_set():
         try:
             count = len(engine.archive._entries) if engine.archive else 0
             _log("evolution", f"Archive: {count} entries")
 
             # Consume durable fitness events from MessageBus
+            fitness_events = []
             try:
-                events = await _bus.consume_events("AGENT_FITNESS", limit=50)
-                if events:
-                    _log("evolution", f"Consumed {len(events)} fitness events from bus")
+                fitness_events = await _bus.consume_events("AGENT_FITNESS", limit=50)
+                if fitness_events:
+                    _log("evolution", f"Consumed {len(fitness_events)} fitness events from bus")
             except Exception as exc:
                 _log("evolution", f"Bus consume error: {exc}")
 
             # Drain lifecycle events — task completion throughput for fitness context
+            completions = 0
             try:
                 lifecycle_msgs = await _bus.receive("evolution_loop", limit=20)
                 completions = sum(
@@ -237,13 +257,95 @@ async def run_evolution_loop(shutdown_event: asyncio.Event) -> None:
                 logger.debug("Evolution: lifecycle drain failed", exc_info=True)
 
             # Check fitness trend
+            avg_fitness = 0.0
             try:
                 trend = await engine.get_fitness_trend(limit=5)
                 if trend:
-                    avg = sum(f for _, f in trend) / len(trend)
-                    _log("evolution", f"Fitness trend (last {len(trend)}): avg={avg:.3f}")
+                    avg_fitness = sum(f for _, f in trend) / len(trend)
+                    _log("evolution", f"Fitness trend (last {len(trend)}): avg={avg_fitness:.3f}")
             except Exception:
                 logger.debug("Fitness trend read failed", exc_info=True)
+
+            # ── ACTIVE EVOLUTION: run cycle + meta-adaptation ──
+            cycle_count += 1
+
+            # Extract live fitness from AGENT_FITNESS event payloads
+            live_fitness_scores: list[float] = []
+            for ev in fitness_events:
+                payload = ev.get("payload") if isinstance(ev, dict) else {}
+                if isinstance(payload, dict):
+                    score = payload.get("fitness_score") or payload.get("composite")
+                    if isinstance(score, (int, float)) and score > 0:
+                        live_fitness_scores.append(float(score))
+            if live_fitness_scores:
+                _log("evolution", f"Live fitness from {len(live_fitness_scores)} agents: "
+                     f"avg={sum(live_fitness_scores)/len(live_fitness_scores):.3f} "
+                     f"max={max(live_fitness_scores):.3f}")
+
+            # Feed meta-evolution with observed fitness
+            # Prefer live agent fitness; fall back to historical archive average
+            if avg_fitness > 0 or fitness_events:
+                if live_fitness_scores:
+                    best_fitness = max(live_fitness_scores)
+                else:
+                    best_fitness = avg_fitness if avg_fitness > 0 else 0.0
+                synthetic_result = CycleResult(
+                    cycle_id=f"orch-evo-{cycle_count}",
+                    best_fitness=best_fitness,
+                    proposals_submitted=len(fitness_events),
+                )
+                meta_result = meta_engine.observe_cycle_result(synthetic_result)
+                if meta_result is not None:
+                    if meta_result.evolved_parameters:
+                        _log(
+                            "evolution",
+                            f"Meta-evolution adapted parameters "
+                            f"(meta_fitness={meta_result.meta_fitness:.3f}, "
+                            f"applied={meta_result.applied_parameters})",
+                        )
+                    else:
+                        _log(
+                            "evolution",
+                            f"Meta-evolution: no adaptation needed "
+                            f"(meta_fitness={meta_result.meta_fitness:.3f})",
+                        )
+
+            # Auto-evolve: propose improvements via LLM every 3rd cycle
+            # Uses shadow mode (no real code changes) for safety
+            if cycle_count % 3 == 0:
+                try:
+                    from dharma_swarm.providers import OpenRouterProvider
+                    import os as _evo_os
+                    if _evo_os.environ.get("OPENROUTER_API_KEY"):
+                        provider = OpenRouterProvider()
+                        # Pick 2 random source files per cycle to limit LLM cost
+                        import random as _evo_rng
+                        targets = [
+                            _src_root / f for f in _EVOLUTION_TARGETS
+                            if (_src_root / f).exists()
+                        ]
+                        if targets:
+                            selected = _evo_rng.sample(targets, min(2, len(targets)))
+                            _log("evolution", f"Auto-evolve (shadow): {[s.name for s in selected]}")
+                            result = await engine.auto_evolve(
+                                provider=provider,
+                                source_files=selected,
+                                shadow=True,  # Safe: evaluate but don't apply diffs
+                                timeout=30.0,
+                                context=f"Fitness avg={avg_fitness:.3f}, completions={completions}",
+                            )
+                            _log(
+                                "evolution",
+                                f"Auto-evolve result: fitness={result.best_fitness:.3f}, "
+                                f"submitted={result.proposals_submitted}, "
+                                f"gated={result.proposals_gated}",
+                            )
+                            # Feed result to meta-evolution
+                            meta_engine.observe_cycle_result(result)
+                    else:
+                        _log("evolution", "Auto-evolve skipped: OPENROUTER_API_KEY not set")
+                except Exception as exc:
+                    _log("evolution", f"Auto-evolve error: {exc}")
 
             # Bus metrics for observability
             try:

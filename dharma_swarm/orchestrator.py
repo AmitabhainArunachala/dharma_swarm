@@ -132,6 +132,8 @@ class Orchestrator:
         self._last_coordination_result: CoordinationResult | None = None
         self._last_coordination_summary: dict[str, Any] = self._empty_coordination_summary()
         self._last_coordination_signature = ""
+        self._last_coordination_refresh_at: float = 0.0  # monotonic timestamp
+        self._coordination_refresh_interval_s: float = 120.0  # skip if refreshed within this window
 
     def _runtime_root(self) -> Path:
         base_dir = self._ledger.base_dir
@@ -220,11 +222,14 @@ class Orchestrator:
 
     async def route_next(self) -> list[TaskDispatch]:
         """Match ready tasks to idle agents, one-to-one. Returns dispatches."""
+        import time as _tt; _rn0 = _tt.monotonic()
         if self._board is None or self._pool is None:
             return []
 
         ready = await self._board.get_ready_tasks()
+        logger.info("route_next: ready=%d (%.1fs)", len(ready), _tt.monotonic() - _rn0)
         idle = await self._pool.get_idle_agents()
+        logger.info("route_next: idle=%d (%.1fs)", len(idle), _tt.monotonic() - _rn0)
         if not ready or not idle:
             return []
 
@@ -264,7 +269,9 @@ class Orchestrator:
                     self._default_timeout_seconds,
                 ),
             )
+            _ad_t0 = _tt.monotonic()
             await self._assign_dispatch(td)
+            logger.info("route_next: assign_dispatch took %.1fs (total %.1fs)", _tt.monotonic() - _ad_t0, _tt.monotonic() - _rn0)
 
             # Record dispatch in YogaNode usage tracker
             if self._yoga is not None:
@@ -280,13 +287,29 @@ class Orchestrator:
 
     async def tick(self) -> dict[str, int]:
         """One orchestration cycle: collect completed, then route pending."""
+        import time as _tt
+        _t0 = _tt.monotonic()
         settled, recovered = await self._collect_completed()
+        logger.info("orchestrator.tick: collect=%.1fs", _tt.monotonic() - _t0)
         dispatches = await self.route_next()
+        logger.info("orchestrator.tick: dispatched=%d route=%.1fs", len(dispatches), _tt.monotonic() - _t0)
         coordination = self._empty_coordination_summary()
-        try:
-            coordination = await self._refresh_coordination_state()
-        except Exception as exc:
-            logger.debug("Coordination refresh failed (non-critical): %s", exc)
+        _since_last_refresh = _tt.monotonic() - self._last_coordination_refresh_at
+        if _since_last_refresh >= self._coordination_refresh_interval_s:
+            logger.info("orchestrator.tick: entering coordination refresh (%.0fs since last)", _since_last_refresh)
+            try:
+                coordination = await asyncio.wait_for(
+                    self._refresh_coordination_state(), timeout=15.0
+                )
+                self._last_coordination_refresh_at = _tt.monotonic()
+            except asyncio.TimeoutError:
+                logger.warning("Coordination refresh timed out after 15s — skipping")
+            except Exception as exc:
+                logger.warning("Coordination refresh failed: %s", exc)
+            logger.info("orchestrator.tick: coordination done")
+        else:
+            coordination = dict(self._last_coordination_summary)
+            logger.info("orchestrator.tick: coordination cached (%.0fs ago)", _since_last_refresh)
 
         summary = {
             "settled": settled,
@@ -428,6 +451,20 @@ class Orchestrator:
         self._ledger.progress_event(event, **payload)
 
     async def _emit_lifecycle_event(
+        self,
+        event: str,
+        *,
+        task_id: str,
+        agent_id: str,
+        extra: dict[str, Any] | None = None,
+    ) -> None:
+        """Fire-and-forget lifecycle event — non-blocking to avoid stalling dispatch."""
+        asyncio.create_task(
+            self._emit_lifecycle_event_impl(event, task_id=task_id, agent_id=agent_id, extra=extra),
+            name=f"lifecycle-{event}-{task_id[:8]}",
+        )
+
+    async def _emit_lifecycle_event_impl(
         self,
         event: str,
         *,
@@ -768,6 +805,12 @@ class Orchestrator:
         # Pick from role-matched subset if any, else all candidates
         candidates = role_matched if role_matched else list(idle_agents)
 
+        # Active inference EFE-based selection (Friston P10)
+        best = self._efe_biased_pick(candidates, task)
+        if best is not None:
+            idle_agents.remove(best)
+            return best
+
         # Fitness-biased selection (feature-flagged, best-effort)
         best = self._fitness_biased_pick(candidates, task)
         if best is not None:
@@ -780,6 +823,45 @@ class Orchestrator:
             idle_agents.remove(pick)
             return pick
         return idle_agents.pop(0)
+
+    def _efe_biased_pick(
+        self,
+        candidates: list[AgentState],
+        task: Task | None,
+    ) -> AgentState | None:
+        """Expected Free Energy routing — Friston P10 embodiment.
+
+        Routes tasks to agents that minimize expected surprise (Risk + Ambiguity).
+        Feature-flagged via ENABLE_EFE_ROUTING env var.
+        """
+        if len(candidates) <= 1:
+            return candidates[0] if candidates else None
+
+        import os
+        if os.getenv("ENABLE_EFE_ROUTING", "").lower() not in ("1", "true", "yes"):
+            return None  # Falls through to fitness-biased or FIFO
+
+        try:
+            from dharma_swarm.active_inference import get_engine
+            engine = get_engine()
+            task_meta = task.metadata if task and isinstance(task.metadata, dict) else {}
+            task_type = str(task_meta.get("task_type", "general") or "general")
+
+            scored: list[tuple[float, AgentState]] = []
+            for agent in candidates:
+                efe = engine.expected_free_energy(agent.id, task_type)
+                scored.append((efe, agent))
+
+            # Sort ascending: lower EFE = better match
+            scored.sort(key=lambda x: x[0])
+            logger.debug(
+                "EFE routing: %s",
+                [(round(s, 3), a.id) for s, a in scored[:3]],
+            )
+            return scored[0][1]
+        except Exception:
+            logger.debug("EFE routing failed", exc_info=True)
+            return None
 
     def _fitness_biased_pick(
         self,
@@ -1274,9 +1356,14 @@ class Orchestrator:
         return merged
 
     async def _refresh_coordination_state(self) -> dict[str, Any]:
+        import time as _t; _cs_t0 = _t.monotonic()
+        logger.info("_refresh_coordination: entering")
         agents = await self._list_coordination_agents()
+        logger.info("_refresh_coordination: agents=%.1fs (n=%d)", _t.monotonic() - _cs_t0, len(agents))
         tasks = await self._list_coordination_tasks()
+        logger.info("_refresh_coordination: tasks=%.1fs", _t.monotonic() - _cs_t0)
         messages = await self._list_coordination_messages(limit=500)
+        logger.info("_refresh_coordination: messages=%.1fs (n=%d)", _t.monotonic() - _cs_t0, len(messages))
         agent_ids = {agent.id for agent in agents}
 
         relevant_messages = [
@@ -1301,7 +1388,9 @@ class Orchestrator:
             if discovery is not None:
                 protocol.publish(discovery.agent_id, [discovery])
 
+        logger.info("_refresh_coordination: sheaf_compute=%.1fs", _t.monotonic() - _cs_t0)
         result = protocol.coordinate()
+        logger.info("_refresh_coordination: coordinate_done=%.1fs", _t.monotonic() - _cs_t0)
         self._last_coordination_result = result.model_copy(deep=True)
         summary = {
             "observed_at": datetime.now(timezone.utc).isoformat(),
@@ -1352,6 +1441,7 @@ class Orchestrator:
                 )
             self._last_coordination_signature = signature
         self._last_coordination_summary = dict(summary)
+        logger.info("_refresh_coordination: total=%.1fs", _t.monotonic() - _cs_t0)
         return dict(summary)
 
     async def get_coordination_summary(self, *, refresh: bool = True) -> dict[str, Any]:
@@ -1528,8 +1618,10 @@ class Orchestrator:
 
     async def _assign_dispatch(self, td: TaskDispatch) -> None:
         """Record dispatch, update board + pool, kick off execution, notify via bus."""
+        import time as _adt; _ad0 = _adt.monotonic()
         td.metadata["dispatch_started_monotonic"] = time.monotonic()
         task_for_gate = await self._safe_get_task(td.task_id)
+        logger.info("_assign_dispatch(%s): get_task=%.2fs", td.task_id[:8], _adt.monotonic() - _ad0)
 
         # ── Telic Seam: record ActionProposal in ontology ──
         proposal_id: str | None = None
@@ -1551,6 +1643,7 @@ class Orchestrator:
             else f"dispatch task {td.task_id} -> {td.agent_id}"
         )
         content_ref = task_for_gate.description if task_for_gate else ""
+        _gate_t0 = _adt.monotonic()
         gate = check_with_reflective_reroute(
             action=action_ref,
             content=content_ref,
@@ -1563,6 +1656,10 @@ class Orchestrator:
             max_reroutes=1,
             requirement_refs=[f"task:{td.task_id}", f"agent:{td.agent_id}"],
         )
+        logger.info("_assign_dispatch(%s): gate=%.2fs total=%.2fs", td.task_id[:8], _adt.monotonic() - _gate_t0, _adt.monotonic() - _ad0)
+
+        # Yield after sync gate check so other coroutines can progress
+        await asyncio.sleep(0)
 
         # ── Telic Seam: record GateDecision in ontology ──
         if proposal_id is not None:
@@ -1618,15 +1715,20 @@ class Orchestrator:
         if task_for_gate is not None:
             task_for_gate.metadata = dict(claim_meta)
 
+        _pe_t0 = _adt.monotonic()
         if self._pool is not None:
             await self._pool.assign(td.agent_id, td.task_id)
+        logger.info("_assign_dispatch(%s): pool_assign=%.2fs", td.task_id[:8], _adt.monotonic() - _pe_t0)
+        _pe_t1 = _adt.monotonic()
         await self._safe_update_task(
             td.task_id,
             status=TaskStatus.ASSIGNED,
             assigned_to=td.agent_id,
             metadata=claim_meta,
         )
+        logger.info("_assign_dispatch(%s): update_task=%.2fs", td.task_id[:8], _adt.monotonic() - _pe_t1)
         self._active_dispatches[td.task_id] = td
+        _pe_t2 = _adt.monotonic()
         if self._bus is not None:
             await self._bus.send(Message(
                 from_agent="orchestrator",
@@ -1634,6 +1736,7 @@ class Orchestrator:
                 subject=f"Task assigned: {td.task_id}",
                 body=f"You have been assigned task {td.task_id}.",
             ))
+        logger.info("_assign_dispatch(%s): bus_send=%.2fs", td.task_id[:8], _adt.monotonic() - _pe_t2)
         self._record_task_event(
             "dispatch_assigned",
             task_id=td.task_id,
@@ -1669,13 +1772,16 @@ class Orchestrator:
                     ],
                 },
             )
+        _pe_t3 = _adt.monotonic()
         await self._emit_lifecycle_event(
             "dispatch_assigned",
             task_id=td.task_id,
             agent_id=td.agent_id,
             extra={"topology": td.topology.value},
         )
+        logger.info("_assign_dispatch(%s): lifecycle_event=%.2fs", td.task_id[:8], _adt.monotonic() - _pe_t3)
 
+        logger.info("_assign_dispatch(%s): pre_execute=%.2fs", td.task_id[:8], _adt.monotonic() - _ad0)
         # Actually execute the task via the agent runner
         pool_get = getattr(self._pool, "get", None)
         runner = await pool_get(td.agent_id) if pool_get else None
@@ -1708,6 +1814,7 @@ class Orchestrator:
                 name=f"exec-{td.task_id[:8]}",
             )
             self._running_tasks[td.task_id] = bg
+            logger.info("_assign_dispatch(%s): bg_task_created total=%.2fs", td.task_id[:8], _adt.monotonic() - _ad0)
         else:
             reason = (
                 f"Dispatch accepted but worker unavailable "
@@ -1729,6 +1836,9 @@ class Orchestrator:
 
     async def _execute_task(self, runner: Any, task: Task, td: TaskDispatch) -> None:
         """Run agent.run_task() in background, update board on completion/failure."""
+        # Yield immediately so the dispatching coroutine can finish its loop
+        # before this background task starts its synchronous pre-LLM work
+        await asyncio.sleep(0)
         run_started = float(td.metadata.get("run_started_monotonic", time.monotonic()))
         timeout_seconds = max(
             0.01,

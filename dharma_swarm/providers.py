@@ -1997,6 +1997,9 @@ class ModelRouter:
                     initial_model=planned_model,
                     response_model=response.model,
                 )
+                # Enrich response with provider info for trajectory capture
+                if not response.provider:
+                    response.provider = selected_provider.value
                 return (routed_decision, response)
             except Exception as exc:
                 latency_ms = (

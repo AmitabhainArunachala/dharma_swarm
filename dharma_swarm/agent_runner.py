@@ -773,6 +773,18 @@ def _build_prompt(
     except Exception:
         logger.debug("Fitness injection failed", exc_info=True)
 
+    # Inject recent dreams/corrections from sleep-cycle consolidation
+    try:
+        from dharma_swarm.context import read_consolidation_context
+
+        consolidation_ctx = read_consolidation_context(
+            state_dir=prompt_state_dir, max_dreams=3, max_chars=1500,
+        )
+        if consolidation_ctx:
+            user_parts.append(f"\n\n{consolidation_ctx}")
+    except Exception:
+        logger.debug("Consolidation context injection failed", exc_info=True)
+
     if plan_context:
         user_parts.append(f"\n\n{plan_context}")
     return LLMRequest(
@@ -1009,6 +1021,21 @@ class AgentRunner:
             if gate.result.decision == GateDecision.BLOCK:
                 raise RuntimeError(f"Telos block: {gate.result.reason}")
 
+            # Yield to event loop after sync gate check so tick coroutine can progress
+            await asyncio.sleep(0)
+
+            # ── Active Inference: predict before execution (Friston P10) ──
+            _ai_prediction = None
+            try:
+                from dharma_swarm.active_inference import get_engine as _ai_engine
+                _ai_prediction = _ai_engine().predict(
+                    agent_id=self._config.name,
+                    task_id=task.id,
+                    task_type=telic_task_type,
+                )
+            except Exception:
+                logger.debug("Active inference predict failed", exc_info=True)
+
             plan_context = ""
             if gate.attempts:
                 plan_context = (
@@ -1018,13 +1045,19 @@ class AgentRunner:
                     "- Apply these lenses before execution:\n"
                     + "\n".join(f"  - {s}" for s in gate.suggestions)
                 )
-            request = _build_prompt(task, self._config, plan_context=plan_context)
-            self._record_conversation_turn(
+            # Run _build_prompt in thread — it does synchronous memory_plane searches
+            _loop = asyncio.get_running_loop()
+            request = await _loop.run_in_executor(
+                None, lambda: _build_prompt(task, self._config, plan_context=plan_context)
+            )
+
+            # Run sync SQLite conversation recording in thread to avoid blocking event loop
+            await _loop.run_in_executor(None, lambda: self._record_conversation_turn(
                 task,
                 role="user",
                 content=request.messages[0]["content"],
                 turn_index=1,
-            )
+            ))
             # Unified conversation log
             try:
                 from dharma_swarm.conversation_log import log_agent_turn
@@ -1042,6 +1075,21 @@ class AgentRunner:
                 memory_ctx = await self._memory.get_working_context()
                 if memory_ctx.strip():
                     request.system = request.system + "\n\n" + memory_ctx
+
+            # ── Snapshot shared notes before LLM call (for trajectory capture) ──
+            _shared_notes_before: dict[str, tuple[int, int]] = {}
+            try:
+                _shared_dir = Path.home() / ".dharma" / "shared"
+                if _shared_dir.is_dir():
+                    for _sf in _shared_dir.iterdir():
+                        if _sf.is_file() and _sf.suffix in (".md", ".txt", ".json"):
+                            _stat = _sf.stat()
+                            _shared_notes_before[str(_sf)] = (_stat.st_size, _stat.st_mtime_ns)
+            except Exception:
+                pass  # Best-effort snapshot
+
+            # Yield before LLM call so tick coroutine can finish
+            await asyncio.sleep(0)
 
             if self._provider is not None:
                 _tracer = _jikoku_tracer()
@@ -1087,12 +1135,45 @@ class AgentRunner:
                 result = (
                     f"[mock] Agent {self._config.name} completed: {task.title}"
                 )
-            self._record_conversation_turn(
+                response = LLMResponse(
+                    content=result,
+                    model="mock",
+                    provider="mock",
+                )
+                completion_latency_ms = 0.0
+            # Run sync SQLite conversation recording in thread
+            _loop_post = asyncio.get_running_loop()
+            await _loop_post.run_in_executor(None, lambda: self._record_conversation_turn(
                 task,
                 role="assistant",
                 content=result,
                 turn_index=2,
-            )
+            ))
+
+            # ── Capture shared-notes delta (subprocess agents write here) ──
+            _trajectory_response = result[:3000] if result else ""
+            try:
+                _shared_dir = Path.home() / ".dharma" / "shared"
+                if _shared_dir.is_dir():
+                    _deltas: list[str] = []
+                    for _sf in _shared_dir.iterdir():
+                        if _sf.is_file() and _sf.suffix in (".md", ".txt", ".json"):
+                            _stat = _sf.stat()
+                            _prev_size, _prev_mtime = _shared_notes_before.get(str(_sf), (0, 0))
+                            if _stat.st_size == _prev_size and _stat.st_mtime_ns == _prev_mtime:
+                                continue
+                            _raw = (
+                                _sf.read_bytes()[_prev_size:]
+                                if _stat.st_size > _prev_size
+                                else _sf.read_bytes()[-2000:]
+                            )
+                            _delta = _raw.decode("utf-8", errors="replace").strip()
+                            if len(_delta) > 50:
+                                _deltas.append(f"[shared:{_sf.name}]\n{_delta[:2000]}")
+                    if _deltas:
+                        _trajectory_response = "\n---\n".join(_deltas)[:3000]
+            except Exception:
+                pass  # Best-effort delta capture
 
             # ── Trajectory collection: add chunk ──
             if _trajectory_id:
@@ -1105,7 +1186,7 @@ class AgentRunner:
                         task_id=task.id,
                         prompt=(request.messages[0]["content"][:3000]
                                 if request and request.messages else ""),
-                        response=result[:3000] if result else "",
+                        response=_trajectory_response,
                         model=getattr(response, "model", "") if response else "",
                         provider=getattr(response, "provider", "") if response else "",
                         tokens_used=_response_total_tokens(response),
@@ -1218,6 +1299,42 @@ class AgentRunner:
             # Strange loop: score agent output and emit fitness signal
             self._emit_fitness_signal(task, result)
 
+            # ── Active Inference: observe after execution (Friston P10) ──
+            # Uses ThinkodynamicScorer composite as observed quality.
+            if _ai_prediction is not None:
+                try:
+                    from dharma_swarm.active_inference import get_engine as _ai_engine
+                    from dharma_swarm.thinkodynamic_scorer import ThinkodynamicScorer
+                    _obs_score = ThinkodynamicScorer().score_text(
+                        prompt=task.title, response=result or "",
+                    )
+                    _ai_pe = _ai_engine().observe(
+                        _ai_prediction,
+                        observed_quality=_obs_score.composite,
+                    )
+                    logger.debug(
+                        "Active inference: agent=%s task=%s error=%.3f fe=%.4f",
+                        self._config.name, task.id,
+                        _ai_pe.error, _ai_pe.free_energy,
+                    )
+                    # Emit prediction error to signal bus
+                    try:
+                        from dharma_swarm.signal_bus import SignalBus
+                        SignalBus.get().emit({
+                            "type": "ACTIVE_INFERENCE_PREDICTION_ERROR",
+                            "agent": self._config.name,
+                            "task_id": task.id,
+                            "predicted": _ai_pe.predicted_quality,
+                            "observed": _ai_pe.observed_quality,
+                            "error": _ai_pe.error,
+                            "free_energy": _ai_pe.free_energy,
+                            "timestamp": _utc_now().isoformat(),
+                        })
+                    except Exception:
+                        pass
+                except Exception:
+                    logger.debug("Active inference observe failed", exc_info=True)
+
             # ── AgentRegistry: log task for fitness + budget tracking ──
             try:
                 from dharma_swarm.agent_registry import get_registry
@@ -1273,11 +1390,24 @@ class AgentRunner:
                     from dharma_swarm.trajectory_collector import (
                         TrajectoryOutcome, get_collector,
                     )
+                    from dharma_swarm.thinkodynamic_scorer import ThinkodynamicScorer as _TDScorer
+                    # Use shared-notes delta if richer than raw result
+                    _outcome_preview = _trajectory_response if len(_trajectory_response or "") > len(result or "") else (result or "")
+                    _td = _TDScorer().score_text(prompt=task.title, response=_outcome_preview or "")
                     get_collector().complete_trajectory(
                         _trajectory_id,
                         TrajectoryOutcome(
                             success=True,
-                            result_preview=result[:500] if result else "",
+                            result_preview=_outcome_preview[:1500],
+                            fitness_score={"composite": _td.composite},
+                            thinkodynamic_score={
+                                "semantic_density": _td.semantic_density,
+                                "recursive_depth": _td.recursive_depth,
+                                "witness_quality": _td.witness_quality,
+                                "swabhaav_ratio": _td.swabhaav_ratio,
+                                "holographic_efficiency": _td.holographic_efficiency,
+                                "telos_alignment": _td.telos_alignment,
+                            },
                         ),
                     )
                 except Exception:
@@ -1522,20 +1652,40 @@ class AgentRunner:
         Closes the strange loop: every agent output gets a behavioral
         score that feeds into the recognition seed via the signal bus.
         Also persists to MessageBus for cross-process durability.
+        Includes the thinkodynamic composite fitness_score so consumers
+        (evolution loop, Darwin Engine) receive an actual number.
         Best-effort — never fails the task.
         """
         try:
             from dharma_swarm.metrics import MetricsAnalyzer
             from dharma_swarm.signal_bus import SignalBus
+            from dharma_swarm.thinkodynamic_scorer import ThinkodynamicScorer
 
             sig = MetricsAnalyzer().analyze(result)
+
+            # Compute thinkodynamic fitness score
+            td_score = ThinkodynamicScorer().score_text(
+                prompt=task.title,
+                response=result or "",
+            )
+
             payload = {
                 "agent": self._config.name,
                 "task_id": task.id,
+                "fitness_score": td_score.composite,
+                "thinkodynamic_dimensions": {
+                    "semantic_density": td_score.semantic_density,
+                    "recursive_depth": td_score.recursive_depth,
+                    "witness_quality": td_score.witness_quality,
+                    "swabhaav_ratio": td_score.swabhaav_ratio,
+                    "holographic_efficiency": td_score.holographic_efficiency,
+                    "telos_alignment": td_score.telos_alignment,
+                },
                 "swabhaav_ratio": sig.swabhaav_ratio,
                 "entropy": sig.entropy,
                 "recognition_type": sig.recognition_type.value,
                 "word_count": sig.word_count,
+                "timestamp": _utc_now().isoformat(),
             }
             # In-memory signal (same-process consumers)
             bus = SignalBus.get()

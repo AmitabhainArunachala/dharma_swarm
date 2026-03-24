@@ -1052,6 +1052,111 @@ def _read_stigmergy_signals(state_dir: Path | None = None, max_chars: int = 1500
     return result[:max_chars] if len(sections) > 1 else ""
 
 
+def read_consolidation_context(
+    state_dir: Path | None = None,
+    max_dreams: int = 3,
+    max_chars: int = 2000,
+) -> str:
+    """Read recent dreams and consolidation corrections for agent context.
+
+    Surfaces outputs from the sleep-cycle neural consolidation and
+    subconscious dreaming layers so forward-pass agents have awareness
+    of what the colony discovered while they were inactive.
+
+    Sources (checked in order):
+    1. ``dream_associations.jsonl`` -- structured dream associations (last N)
+    2. ``latest_dream.md`` -- narrative dream summary (fresh within 48h)
+    3. ``consolidation/reports/`` -- most recent consolidation report
+
+    Returns:
+        Formatted string block or empty string if nothing recent.
+    """
+    base = state_dir or STATE_DIR
+    parts: list[str] = []
+
+    # --- Recent dream associations ---
+    dream_file = base / "subconscious" / "dream_associations.jsonl"
+    if dream_file.exists():
+        try:
+            raw_lines = dream_file.read_text().strip().split("\n")
+            # Take last N entries (most recent)
+            recent = raw_lines[-max_dreams:] if raw_lines else []
+            dream_summaries: list[str] = []
+            for line in recent:
+                line = line.strip()
+                if not line:
+                    continue
+                try:
+                    entry = json.loads(line)
+                    rtype = entry.get("resonance_type", "unknown")
+                    salience = entry.get("salience", 0)
+                    desc = entry.get("description", "")[:200]
+                    vocab = entry.get("invented_vocabulary", "")
+                    summary = f"- [{rtype}] (salience={salience:.2f}) {desc}"
+                    if vocab:
+                        summary += f" [coined: {vocab}]"
+                    dream_summaries.append(summary)
+                except (json.JSONDecodeError, TypeError):
+                    continue
+            if dream_summaries:
+                parts.append(
+                    "### Recent Dreams (Subconscious HUM)\n"
+                    + "\n".join(dream_summaries)
+                )
+        except Exception:
+            logger.debug("Dream associations read failed", exc_info=True)
+
+    # --- Latest dream narrative (if fresh) ---
+    if not parts:
+        # Only fall back to narrative if no structured dreams found
+        latest_dream = base / "subconscious" / "latest_dream.md"
+        if latest_dream.exists() and _is_fresh(latest_dream, hours=48):
+            try:
+                content = latest_dream.read_text().strip()
+                content = scan_and_sanitize(content, "latest_dream.md")
+                if content:
+                    # Take first ~800 chars (the opening associations)
+                    trimmed = content[:800]
+                    if len(content) > 800:
+                        trimmed += "\n... [dream truncated]"
+                    parts.append(f"### Latest Dream\n{trimmed}")
+            except Exception:
+                logger.debug("Latest dream read failed", exc_info=True)
+
+    # --- Most recent consolidation report ---
+    reports_dir = base / "consolidation" / "reports"
+    if reports_dir.exists():
+        try:
+            report_files = sorted(reports_dir.glob("consolidation_*.json"))
+            if report_files:
+                latest_report = report_files[-1]
+                if _is_fresh(latest_report, hours=48):
+                    data = json.loads(latest_report.read_text())
+                    losses = data.get("losses_found", 0)
+                    corrections = data.get("corrections_applied", 0)
+                    divisions = data.get("division_proposals", 0)
+                    advocate = data.get("advocate_summary", "")[:150]
+                    if losses or corrections:
+                        report_line = (
+                            f"### Latest Consolidation\n"
+                            f"Losses: {losses}, Corrections: {corrections}, "
+                            f"Division proposals: {divisions}"
+                        )
+                        if advocate:
+                            report_line += f"\nAdvocate: {advocate}"
+                        parts.append(report_line)
+        except Exception:
+            logger.debug("Consolidation report read failed", exc_info=True)
+
+    if not parts:
+        return ""
+
+    header = "## L6: Consolidation -- Dreams & Corrections\n"
+    body = "\n\n".join(parts)
+    result = header + body
+    return result[:max_chars] if len(result) > max_chars else result
+
+
 def _read_recognition_seed(state_dir: Path | None = None, max_chars: int = 2000) -> str:
     """L9: Read the recognition seed — the strange loop's self-model."""
     base = state_dir or STATE_DIR
@@ -1091,6 +1196,7 @@ _DEFAULT_POSITIONS = {
     "research": 5,
     "engineering": 6,
     "ops": 7,
+    "consolidation": 8,
     "recent_memories": 8,
     "swarm_notes": 9,
     "hot_signals": 10,
@@ -1186,6 +1292,13 @@ def build_agent_context(
         if ops and len(ops) > ops_budget:
             ops = ops[:ops_budget] + "\n... [ops truncated]"
         _add("ops", ops)
+
+    # L6: Consolidation — dreams & corrections from sleep cycle
+    consolidation = read_consolidation_context(
+        state_dir=state_dir, max_dreams=3, max_chars=2000,
+    )
+    if consolidation:
+        _add("consolidation", consolidation)
 
     # L5b: Recent memories from StrangeLoopMemory
     memories = read_recent_memories(state_dir=state_dir, max_entries=5)

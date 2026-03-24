@@ -3419,26 +3419,55 @@ class ThinkodynamicDirector:
             ))
 
         # Fallback: campaign execution briefs (below vision, above meta-tasks)
+        # Round-robin with promotion tracking to prevent stuck loops
         try:
             active_campaign = load_active_campaign_state(state_dir=self.state_dir)
         except ValueError:
             active_campaign = None
         if active_campaign and active_campaign.state.execution_briefs:
-            ranked_briefs = sorted(
-                active_campaign.state.execution_briefs,
-                key=lambda brief: brief.readiness_score,
-                reverse=True,
-            )
-            promoted = next(
-                (brief for brief in ranked_briefs if brief.task_titles or brief.goal or brief.title),
-                None,
-            )
-            if promoted is not None:
-                logger.info(
-                    "Campaign-driven workflow (fallback): promoting execution brief %s",
-                    promoted.brief_id or promoted.title,
+            import time as _time
+            # Filter to active briefs only, deprioritize recently promoted
+            active_briefs = [
+                b for b in active_campaign.state.execution_briefs
+                if getattr(b, "status", "active") == "active"
+                and (b.task_titles or b.goal or b.title)
+            ]
+            if active_briefs:
+                # Sort by: lowest promotion_count first, then highest readiness
+                ranked_briefs = sorted(
+                    active_briefs,
+                    key=lambda brief: (
+                        getattr(brief, "promotion_count", 0),
+                        -brief.readiness_score,
+                    ),
                 )
-                return self.workflow_from_execution_brief(promoted, cycle_id=cycle_id)
+                # Also skip briefs promoted more than 3x without completing
+                promoted = next(
+                    (b for b in ranked_briefs if getattr(b, "promotion_count", 0) < 4),
+                    None,
+                )
+                # If all briefs exhausted, mark lowest-promoted as exhausted and pick next
+                if promoted is None and ranked_briefs:
+                    ranked_briefs[0].status = "exhausted"
+                    promoted = ranked_briefs[1] if len(ranked_briefs) > 1 else None
+                if promoted is not None:
+                    promoted.promotion_count = getattr(promoted, "promotion_count", 0) + 1
+                    promoted.last_promoted_at = _time.time()
+                    # Persist updated counts back to campaign state
+                    try:
+                        from dharma_swarm.mission_contract import (
+                            save_campaign_state, default_campaign_state_path,
+                        )
+                        _cpath = default_campaign_state_path(self.state_dir)
+                        save_campaign_state(_cpath, active_campaign.state)
+                    except Exception:
+                        pass  # Best-effort persistence
+                    logger.info(
+                        "Campaign-driven workflow (fallback): promoting execution brief %s (count=%d)",
+                        promoted.brief_id or promoted.title,
+                        promoted.promotion_count,
+                    )
+                    return self.workflow_from_execution_brief(promoted, cycle_id=cycle_id)
 
         # Fallback to theme-based planner
         if primary:

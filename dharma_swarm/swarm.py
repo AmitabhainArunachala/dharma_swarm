@@ -300,6 +300,17 @@ class SwarmManager:
             )
             self._manifest = update_manifest(manifest_path=fallback_manifest_path)
 
+        # Reap stale running tasks from prior daemon incarnations.
+        # When the daemon crashes, tasks it dispatched are left in RUNNING status
+        # forever. No other daemon instance will ever settle them because
+        # _collect_completed only tracks in-process asyncio tasks.
+        try:
+            reaped = await self._reap_stale_running_tasks()
+            if reaped:
+                logger.info("Reaped %d stale running tasks from prior daemon", reaped)
+        except Exception as exc:
+            logger.warning("Stale task reaper failed (non-fatal): %s", exc)
+
         # Spawn default crew and seed tasks if this is a fresh start
         from dharma_swarm.startup_crew import spawn_default_crew, create_seed_tasks
         crew = await spawn_default_crew(self)
@@ -332,6 +343,16 @@ class SwarmManager:
             predictor_path=evo_dir / "predictor_data.jsonl",
         )
         await self._engine.init()
+
+        # v0.9.2: Meta-evolution engine — adapts DarwinEngine hyperparameters
+        from dharma_swarm.meta_evolution import MetaEvolutionEngine
+
+        self._meta_engine = MetaEvolutionEngine(
+            self._engine,
+            meta_archive_path=evo_dir / "meta_archive.jsonl",
+            n_object_cycles_per_meta=2,
+            auto_apply=True,
+        )
 
         self._monitor = SystemMonitor(trace_store=self._trace_store)
 
@@ -965,9 +986,14 @@ class SwarmManager:
         }
 
         store = ConversationMemoryStore(plane_path)
+        # Run synchronous SQLite query in thread to avoid blocking event loop
+        loop = asyncio.get_running_loop()
+        all_shards = await loop.run_in_executor(
+            None, lambda: store.latent_gold("", limit=200)
+        )
         candidates = [
             shard
-            for shard in store.latent_gold("", limit=200)
+            for shard in all_shards
             if shard.state in {"orphaned", "deferred"}
             and float(shard.salience) >= min_salience
             and shard.shard_id not in claimed_shards
@@ -1284,6 +1310,53 @@ class SwarmManager:
                 logger.debug("Stigmergy access_decay failed: %s", exc)
         return summary
 
+    async def _reap_stale_running_tasks(
+        self,
+        *,
+        max_age_hours: float = 6.0,
+    ) -> int:
+        """Fail tasks stuck in RUNNING status from prior daemon incarnations.
+
+        When the daemon crashes, dispatched tasks remain in RUNNING forever
+        because _collect_completed only tracks in-process asyncio futures.
+        This method runs once at init to clean up orphaned tasks.
+        """
+        if self._task_board is None:
+            return 0
+
+        running = await self._task_board.list_tasks(
+            status=TaskStatus.RUNNING, limit=500,
+        )
+        if not running:
+            return 0
+
+        now = datetime.now(timezone.utc)
+        age_limit = timedelta(hours=max_age_hours)
+        reaped = 0
+
+        for task in running:
+            age = now - task.updated_at
+            if age < age_limit:
+                continue
+            try:
+                await self._task_board.update_task(
+                    task.id,
+                    status=TaskStatus.FAILED,
+                    result=(
+                        f"Reaped: task was stuck in RUNNING for {age.total_seconds()/3600:.1f}h "
+                        f"(daemon crash recovery). Agent {task.assigned_to or 'unknown'} is dead."
+                    ),
+                )
+                reaped += 1
+                logger.info(
+                    "Reaped stale task %s (age=%.1fh): %s",
+                    task.id[:8], age.total_seconds() / 3600, task.title[:60],
+                )
+            except Exception as exc:
+                logger.warning("Failed to reap stale task %s: %s", task.id[:8], exc)
+
+        return reaped
+
     def _derive_failure_source(self, task: Task) -> str:
         meta = dict(task.metadata or {})
         source = str(meta.get("last_failure_source", "")).strip()
@@ -1471,6 +1544,9 @@ class SwarmManager:
             "reopened": 0, "living_summary": {},
             "organism_verdict": None, "organism_power": None,
         }
+        import time as _time
+        _tick_t0 = _time.monotonic()
+        logger.info("tick-%d start", self._tick_count + 1)
         overrides = self._check_human_overrides()
         if overrides["paused"]:
             result["paused"] = True
@@ -1508,7 +1584,7 @@ class SwarmManager:
         if (self._organism is not None
                 and self._tick_count % self._organism_interval_ticks == 0):
             try:
-                hb = await self._organism.heartbeat()
+                hb = await asyncio.wait_for(self._organism.heartbeat(), timeout=10.0)
                 result["organism_verdict"] = hb.gnani_verdict.decision if hb.gnani_verdict else None
                 result["organism_power"] = (
                     self._organism.samvara.current_power.value
@@ -1546,48 +1622,143 @@ class SwarmManager:
                             )
                     except Exception as corr_exc:
                         logger.debug("Samvara correction task creation failed: %s", corr_exc)
+            except asyncio.TimeoutError:
+                logger.warning("Organism heartbeat timed out after 10s")
             except Exception as exc:
                 logger.debug("Organism heartbeat error: %s", exc)
+
+        # ── Meta-evolution: observe organism fitness, adapt hyperparameters ──
+        if (hasattr(self, "_meta_engine") and self._meta_engine is not None
+                and result.get("organism_verdict") is not None):
+            try:
+                from dharma_swarm.evolution import CycleResult
+
+                blended = 0.0
+                if self._organism is not None:
+                    status = self._organism.status()
+                    blended = status.get("last_blended") or 0.0
+
+                # Consume live agent fitness from durable bus (if available)
+                live_best = 0.0
+                if self._message_bus is not None:
+                    try:
+                        fitness_events = await asyncio.wait_for(
+                            self._message_bus.consume_events("AGENT_FITNESS", limit=50),
+                            timeout=3.0,
+                        )
+                        for ev in fitness_events:
+                            payload = ev.get("payload") if isinstance(ev, dict) else {}
+                            if isinstance(payload, dict):
+                                score = payload.get("fitness_score")
+                                if isinstance(score, (int, float)) and score > live_best:
+                                    live_best = float(score)
+                        if live_best > 0:
+                            logger.info("Meta-evo: live agent fitness=%.3f (from %d events)",
+                                        live_best, len(fitness_events))
+                    except (asyncio.TimeoutError, Exception):
+                        pass  # Non-critical
+
+                # Use max of organism blended and live agent fitness
+                best_fitness = max(blended, live_best) if live_best > 0 else blended
+
+                meta_obs = self._meta_engine.observe_cycle_result(
+                    CycleResult(
+                        cycle_id=f"tick-{self._tick_count}",
+                        best_fitness=best_fitness,
+                    ),
+                )
+                if meta_obs is not None:
+                    result["meta_evolved"] = meta_obs.evolved_parameters
+                    result["meta_fitness"] = meta_obs.meta_fitness
+                    logger.info(
+                        "Meta-evolution tick-%d: mf=%.3f evolved=%s",
+                        self._tick_count, meta_obs.meta_fitness, meta_obs.evolved_parameters,
+                    )
+            except Exception as me_exc:
+                logger.debug("Meta-evolution observation error: %s", me_exc)
 
         rescued: list[Task] = []
         now = datetime.now(timezone.utc)
         if (self._last_auto_rescue_scan is None
             or (now - self._last_auto_rescue_scan).total_seconds()
             >= self._auto_rescue_scan_interval_seconds):
-            rescued = await self.rescue_recent_failures()
+            try:
+                rescued = await asyncio.wait_for(
+                    self.rescue_recent_failures(), timeout=10.0
+                )
+            except asyncio.TimeoutError:
+                logger.warning("rescue_recent_failures timed out after 10s")
             self._last_auto_rescue_scan = now
         result["rescued"] = len(rescued)
 
         reopened: list[Any] = []
         if allow_autonomous_generation:
-            reopened = await self.spawn_latent_gold_tasks()
+            import time as _t; _t0 = _t.monotonic()
+            try:
+                reopened = await asyncio.wait_for(
+                    self.spawn_latent_gold_tasks(), timeout=20.0
+                )
+            except asyncio.TimeoutError:
+                logger.warning("spawn_latent_gold_tasks timed out after 20s")
+            _dur = _t.monotonic() - _t0
+            if _dur > 2.0:
+                logger.warning("spawn_latent_gold_tasks took %.1fs", _dur)
         result["reopened"] = len(reopened)
 
         # When Gnani holds, skip orchestrator dispatch — no new task execution
-        if not gnani_holds:
-            activity = await self._orchestrator.tick()
-            result["dispatched"] = activity.get("dispatched", 0)
-            result["settled"] = activity.get("settled", 0)
-        else:
-            # Still settle completed tasks, just don't dispatch new ones
-            activity = await self._orchestrator.tick_settle_only()
+        activity: dict = {}
+        _orch_t0 = _time.monotonic()
+        try:
+            if not gnani_holds:
+                activity = await asyncio.wait_for(
+                    self._orchestrator.tick(), timeout=25.0
+                )
+                result["dispatched"] = activity.get("dispatched", 0)
+                result["settled"] = activity.get("settled", 0)
+            else:
+                # Still settle completed tasks, just don't dispatch new ones
+                activity = await asyncio.wait_for(
+                    self._orchestrator.tick_settle_only(), timeout=25.0
+                )
+        except asyncio.TimeoutError:
+            logger.warning("orchestrator.tick timed out after 25s")
+        _orch_dur = _time.monotonic() - _orch_t0
+        if _orch_dur > 5.0:
+            logger.warning("orchestrator.tick took %.1fs", _orch_dur)
 
+        _coord_t0 = _time.monotonic()
         coordination = await self.coordination_status(refresh=False)
         synthesized = await self.spawn_coordination_tasks(coordination=coordination)
         result["synthesized"] = len(synthesized)
+        _coord_dur = _time.monotonic() - _coord_t0
+        if _coord_dur > 5.0:
+            logger.warning("coordination took %.1fs", _coord_dur)
 
         director_proposals: list[Task] = []
         if (allow_autonomous_generation and self._director is not None
             and self._tick_count % self._director_interval_ticks == 0):
+            _dir_t0 = _time.monotonic()
             try:
-                director_proposals = await self._director_pulse()
+                director_proposals = await asyncio.wait_for(
+                    self._director_pulse(), timeout=20.0
+                )
+            except asyncio.TimeoutError:
+                logger.warning("director_pulse timed out after 20s")
             except Exception:
                 logger.debug("Director pulse failed", exc_info=True)
+            _dir_dur = _time.monotonic() - _dir_t0
+            if _dir_dur > 5.0:
+                logger.warning("director_pulse took %.1fs", _dir_dur)
         result["director_proposals"] = len(director_proposals)
 
         living_summary: dict[str, int] = {}
         if self._tick_count % self._living_interval_ticks == 0:
-            living_summary = await self._tick_living_layers()
+            try:
+                living_summary = await asyncio.wait_for(
+                    self._tick_living_layers(), timeout=15.0
+                )
+            except asyncio.TimeoutError:
+                logger.warning("_tick_living_layers timed out after 15s")
         result["living_summary"] = living_summary
 
         # ── Witness audit (Beer S3*): sporadic random audit ──
@@ -1605,6 +1776,16 @@ class SwarmManager:
             except Exception as exc:
                 logger.debug("Witness audit error: %s", exc)
 
+        _tick_dur = _time.monotonic() - _tick_t0
+        logger.info(
+            "tick-%d done (%.1fs): dispatched=%d settled=%d rescued=%d reopened=%d "
+            "organism=%s meta=%s",
+            self._tick_count, _tick_dur,
+            result.get("dispatched", 0), result.get("settled", 0),
+            len(rescued), len(reopened),
+            result.get("organism_verdict", "-"),
+            result.get("meta_fitness", "-"),
+        )
         did_work = (bool(reopened) or bool(rescued) or bool(synthesized)
                     or bool(director_proposals) or self._tick_did_work(activity))
         if did_work:
