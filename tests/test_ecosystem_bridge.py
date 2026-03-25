@@ -4,6 +4,8 @@ import json
 import tempfile
 from pathlib import Path
 
+import pytest
+
 from dharma_swarm.ecosystem_bridge import (
     ECOSYSTEM_PATHS,
     get_fitness_thresholds,
@@ -25,6 +27,10 @@ def test_ecosystem_paths_defined():
     assert "dharma_swarm" in ECOSYSTEM_PATHS
 
 
+@pytest.mark.skipif(
+    not (Path.home() / "dharma_swarm").exists(),
+    reason="ECOSYSTEM_PATHS point to ~/dharma_swarm which does not exist in CI",
+)
 def test_scan_ecosystem():
     status = scan_ecosystem()
     assert isinstance(status, dict)

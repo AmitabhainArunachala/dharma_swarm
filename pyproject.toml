@@ -24,6 +24,7 @@ dependencies = [
     "fastapi>=0.104",
     "uvicorn>=0.24",
     "numpy>=1.24",
+    "pyyaml>=6.0",
 ]
 
 [project.optional-dependencies]

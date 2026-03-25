@@ -37,10 +37,13 @@ class TestClassifySeverity:
 
 class TestFindingToProposal:
     def test_basic_conversion(self):
+        # Use a path relative to whatever DHARMA_SWARM_DIR resolves to at runtime
+        from dharma_swarm.review_bridge import DHARMA_SWARM_DIR
+        fake_file = str(DHARMA_SWARM_DIR / "dharma_swarm" / "foo.py")
         finding = {
             "code": "F401",
             "message": "unused import",
-            "filename": "/Users/dhyana/dharma_swarm/dharma_swarm/foo.py",
+            "filename": fake_file,
             "location": {"row": 10, "column": 1},
         }
         p = _finding_to_proposal(finding, cycle_id="c-1")

@@ -53,6 +53,7 @@ class TestTFIDFEmbedder:
         assert emb.dim == 64
 
     def test_fit_add_expands_vocabulary(self, tmp_path):
+        pytest.importorskip("sklearn", reason="scikit-learn not installed")
         from dharma_swarm.vector_store import TFIDFEmbedder
         emb = TFIDFEmbedder(dim=16, state_path=tmp_path / "emb.pkl")
         # Initial fit
@@ -66,6 +67,7 @@ class TestTFIDFEmbedder:
         assert len(vecs[0]) == 16
 
     def test_persistence_round_trip(self, tmp_path):
+        pytest.importorskip("sklearn", reason="scikit-learn not installed")
         from dharma_swarm.vector_store import TFIDFEmbedder
         path = tmp_path / "emb.pkl"
         emb1 = TFIDFEmbedder(dim=32, state_path=path)
@@ -273,6 +275,7 @@ class TestVectorStoreInvalidation:
 class TestVectorStoreDecay:
 
     def test_decay_reduces_confidence(self, tmp_path):
+        pytest.importorskip("sqlite_vec", reason="sqlite_vec not installed")
         from dharma_swarm.vector_store import VectorStore
         store = VectorStore(state_dir=tmp_path, dim=32)
         doc_id = store.upsert("Decaying knowledge item", source="test")

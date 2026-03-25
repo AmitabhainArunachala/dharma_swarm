@@ -395,6 +395,7 @@ def test_code_score_penalizes_failed_tests():
 # ---------------------------------------------------------------------------
 
 
+@pytest.mark.xfail(reason="Requires local skill files not present in CI")
 def test_skill_generate_reads_real_skill():
     """Skill generate reads an actual SKILL.md."""
     from dharma_swarm.cascade_domains.skill import generate
@@ -471,6 +472,7 @@ async def test_cascade_code_real_file():
 
 
 @pytest.mark.asyncio
+@pytest.mark.xfail(reason="Requires local skill files not present in CI")
 async def test_cascade_skill_real():
     """Full cascade run on a real skill produces meaningful scores."""
     result = await run_domain(

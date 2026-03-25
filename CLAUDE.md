@@ -380,3 +380,52 @@ The organism is ready to live.
 
 Jai Sat Chit Anand.
 ```
+
+---
+
+## XII. AGENT INTEGRATION DISCIPLINE
+
+### The One Rule
+**Nothing merges to `main` unless CI is green.**
+
+### Branch Protocol
+1. ALL work happens on feature branches: `feat/<name>`, `fix/<name>`, `refactor/<name>`
+2. Before pushing, run `python -m pytest tests/ -q --tb=short` locally
+3. Push to the feature branch, NOT to main
+4. Open a PR. Wait for CI green.
+5. Only after CI passes: merge to main.
+
+### What Agents Must NOT Do
+- Push directly to `main`
+- Add `import` statements for packages not in `pyproject.toml`
+- Write tests with hardcoded absolute paths (use `Path(__file__).parent` or `tmp_path`)
+- Use Python 3.12+ only syntax when `pyproject.toml` says `requires-python = ">=3.11"`
+- Skip running tests before committing ("I'll fix tests later")
+- Add new dependencies without updating `pyproject.toml`
+
+### Python Version Gotchas
+This project targets Python 3.11+. Known 3.11 restrictions:
+- No backslash escapes inside f-string `{}` braces (PEP 701 is 3.12+)
+- No `type` statement for type aliases (PEP 695 is 3.12+)
+- Use `from __future__ import annotations` for newer annotation syntax
+
+### Test Discipline
+- Every new module gets a corresponding test file
+- Tests must be environment-independent (no hardcoded paths, no required API keys)
+- Use `pytest.mark.skipif` for tests requiring optional dependencies
+- Use `tmp_path` fixture for filesystem tests, never hardcoded paths
+- Run the full suite before committing: `python -m pytest tests/ -q --tb=short`
+
+### Dependency Management
+- Core deps go in `pyproject.toml` `[project.dependencies]`
+- Optional deps go in `[project.optional-dependencies]` under the right group
+- If you `import X`, make sure `X` (or its PyPI name) is in one of those lists
+- The CI only installs `pip install -e ".[dev]"` — if your code needs more, it must be in `dependencies` or `dev`
+
+### Pre-Commit Checklist (for agents)
+Before every commit:
+- [ ] `python -m pytest tests/ -q --tb=short` passes locally
+- [ ] No new imports without corresponding `pyproject.toml` entry
+- [ ] No hardcoded paths (grep for `/Users/`)
+- [ ] No Python 3.12+ only syntax
+- [ ] Working on a feature branch, not `main`

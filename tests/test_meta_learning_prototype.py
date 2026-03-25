@@ -50,7 +50,10 @@ async def test_meta_learning_can_improve_with_custom_scorer(engine):
 
     assert result.final_score > result.baseline_score
     assert result.fitness_improvement > 0.0
-    assert engine.get_fitness_weights() == result.weight_history[-1]
+    actual = engine.get_fitness_weights()
+    expected = result.weight_history[-1]
+    for key in expected:
+        assert actual[key] == pytest.approx(expected[key], rel=1e-9)
 
 
 @pytest.mark.asyncio

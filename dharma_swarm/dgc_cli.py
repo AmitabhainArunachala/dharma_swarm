@@ -4190,7 +4190,8 @@ def cmd_initiatives(
                 print("  Error: initiative_id is required")
                 return
             ok, msg = ledger.promote(initiative_id)
-            print(f"  {'\u2705' if ok else '\u274c'} {msg}")
+            icon = '\u2705' if ok else '\u274c'
+            print(f"  {icon} {msg}")
         case "summary":
             summary = ledger.summary()
             print(f"  Total: {summary['total']}  Active: {summary['active_count']}")
