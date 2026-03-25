@@ -172,6 +172,25 @@ class SwarmManager:
         self._witness: WitnessAuditor | None = None
         self._witness_interval_ticks: int = 120  # audit every ~60 min (120 × 30s)
 
+        # v1.0: Darwin auto-evolution
+        self._evolution_interval_ticks: int = 120  # ~1 hour at 30s tick
+        self._evolution_tick_counter: int = 0
+        self._fitness_history: list[float] = []
+        self._max_auto_evolves_per_day: int = 6
+        self._auto_evolves_today: int = 0
+        self._auto_evolve_day: str | None = None
+        self._stagnation_threshold: float = 0.01
+        self._stagnation_window: int = 60
+        self._auto_evolution_enabled: bool = True
+
+        # v1.0: Ginko Trading Fleet
+        self._ginko_fleet: Any = None
+        self._ginko_enabled: bool = False
+        self._ginko_interval_ticks: int = 720  # ~6 hours at 30s tick
+        self._ginko_tick_counter: int = 0
+        self._ginko_last_result: dict[str, Any] | None = None
+        self._ginko_running: bool = False
+
         # v0.9.0: Decision Ontology — structured decision governance
         self._decision_log: Any = None  # DecisionLog
 
@@ -452,6 +471,20 @@ class SwarmManager:
         except Exception as e:
             logger.warning("DecisionLog init failed (non-fatal): %s", e)
 
+        # v1.0: Ginko Trading Fleet
+        try:
+            from dharma_swarm.ginko_agents import GinkoFleet
+            self._ginko_fleet = GinkoFleet()
+            self._ginko_enabled = True
+            logger.info(
+                "Ginko trading fleet initialized (%d agents)",
+                len(self._ginko_fleet.list_agents()),
+            )
+        except Exception as e:
+            logger.debug("Ginko fleet not available: %s", e)
+            self._ginko_fleet = None
+            self._ginko_enabled = False
+
         # v0.9.1: Telos Substrate — seed ConceptGraph + TelosGraph with pillar data
         # Deferred to first tick() to avoid heavyweight I/O during init.
         self._telos_substrate_seeded = False
@@ -475,6 +508,7 @@ class SwarmManager:
             ("organism", self._organism),
             ("witness", self._witness),
             ("decision_log", self._decision_log),
+            ("ginko_fleet", self._ginko_fleet),
         ]:
             if attr is not None:
                 self._initialized.add(name)
@@ -1597,6 +1631,29 @@ class SwarmManager:
             except Exception as exc:
                 logger.debug("Witness audit error: %s", exc)
 
+        # ── Auto-evolution: trigger proposals when fitness stagnates ──
+        if self._auto_evolution_enabled and self._engine is not None:
+            self._evolution_tick_counter += 1
+            if (self._evolution_tick_counter >= self._evolution_interval_ticks
+                    and not getattr(self._engine, '_evolving', False)):
+                self._evolution_tick_counter = 0
+                try:
+                    evo_result = await self._maybe_auto_evolve(gnani_holds)
+                    result["auto_evolution"] = evo_result
+                except Exception as exc:
+                    logger.debug("Auto-evolution check failed: %s", exc)
+
+        # ── Ginko trading cycle ──
+        if self._ginko_enabled and not self._ginko_running:
+            self._ginko_tick_counter += 1
+            if self._ginko_tick_counter >= self._ginko_interval_ticks:
+                self._ginko_tick_counter = 0
+                try:
+                    await self._run_ginko_cycle()
+                    result["ginko_cycle"] = True
+                except Exception as exc:
+                    logger.debug("Ginko cycle failed: %s", exc)
+
         did_work = (bool(reopened) or bool(rescued) or bool(synthesized)
                     or bool(director_proposals) or self._tick_did_work(activity))
         if did_work:
@@ -1767,6 +1824,90 @@ class SwarmManager:
         if self._engine is None:
             return []
         return await self._engine.get_fitness_trend(component=component)
+
+    def get_ginko_status(self) -> dict[str, Any]:
+        """Return Ginko fleet status for coordination snapshots."""
+        if not self._ginko_enabled:
+            return {"enabled": False}
+        return {
+            "enabled": True,
+            "fleet_size": len(self._ginko_fleet.list_agents()) if self._ginko_fleet else 0,
+            "last_result": self._ginko_last_result is not None,
+            "running": self._ginko_running,
+        }
+
+    # --- Auto-Evolution (v1.0) ---
+
+    def _detect_fitness_stagnation(self) -> bool:
+        """Check if mean agent fitness has stagnated over the window."""
+        window = self._stagnation_window
+        if len(self._fitness_history) < window * 2:
+            return False
+        recent = self._fitness_history[-window:]
+        previous = self._fitness_history[-window * 2:-window]
+        recent_mean = sum(recent) / len(recent)
+        previous_mean = sum(previous) / len(previous)
+        return (recent_mean - previous_mean) < self._stagnation_threshold
+
+    async def _maybe_auto_evolve(self, gnani_holds: bool = False) -> dict[str, Any]:
+        """Check conditions and trigger a single auto-evolution cycle if warranted."""
+        if gnani_holds:
+            return {"skipped": "gnani_hold"}
+
+        # Reset daily counter at midnight
+        today = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+        if self._auto_evolve_day != today:
+            self._auto_evolve_day = today
+            self._auto_evolves_today = 0
+
+        if self._auto_evolves_today >= self._max_auto_evolves_per_day:
+            return {"skipped": "daily_limit"}
+
+        # Record current mean fitness
+        if self._agent_pool is not None:
+            agents = await self._agent_pool.list_agents()
+            if agents:
+                mean_fitness = sum(
+                    getattr(a, "fitness", 0.5) for a in agents
+                ) / len(agents)
+                self._fitness_history.append(mean_fitness)
+
+        if not self._detect_fitness_stagnation():
+            return {"skipped": "no_stagnation"}
+
+        # All conditions met — propose a mutation
+        self._auto_evolves_today += 1
+        logger.info(
+            "Auto-evolution triggered (evolves today: %d/%d)",
+            self._auto_evolves_today,
+            self._max_auto_evolves_per_day,
+        )
+
+        result = await self.evolve(
+            component="swarm",
+            change_type="mutation",
+            description="Auto-evolution: fitness stagnation detected, proposing mutation",
+        )
+        return {"triggered": True, **result}
+
+    # --- Ginko Fleet (v1.0) ---
+
+    async def _run_ginko_cycle(self) -> None:
+        """Run a Ginko full trading cycle."""
+        if self._ginko_running:
+            return
+        self._ginko_running = True
+        try:
+            from dharma_swarm.ginko_orchestrator import action_full_cycle
+            logger.info("Starting Ginko trading cycle")
+            result = await action_full_cycle()
+            self._ginko_last_result = result
+            duration = result.get("total_duration_ms", 0)
+            logger.info("Ginko cycle complete in %dms", duration)
+        except Exception as e:
+            logger.error("Ginko cycle failed: %s", e)
+        finally:
+            self._ginko_running = False
 
     # --- Dharma Status (v0.3.0) ---
 
