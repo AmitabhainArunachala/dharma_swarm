@@ -4,6 +4,7 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 import sqlite3
 
+import pytest
 import subprocess
 
 from dharma_swarm.doctor import (
@@ -68,6 +69,10 @@ def test_run_doctor_quick_report_shape(monkeypatch, tmp_path: Path) -> None:
     assert statuses.issubset({"PASS", "WARN", "FAIL"})
 
 
+@pytest.mark.skipif(
+    not (Path.home() / "dharma_swarm" / ".env").exists(),
+    reason="Requires local .env file; skipped in CI",
+)
 def test_env_autoload_passes_for_delegate_launcher(monkeypatch, tmp_path: Path) -> None:
     launcher = tmp_path / "dgc"
     launcher.write_text(

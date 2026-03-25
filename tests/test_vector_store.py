@@ -273,6 +273,7 @@ class TestVectorStoreInvalidation:
 class TestVectorStoreDecay:
 
     def test_decay_reduces_confidence(self, tmp_path):
+        pytest.importorskip("sqlite_vec", reason="sqlite_vec not installed")
         from dharma_swarm.vector_store import VectorStore
         store = VectorStore(state_dir=tmp_path, dim=32)
         doc_id = store.upsert("Decaying knowledge item", source="test")

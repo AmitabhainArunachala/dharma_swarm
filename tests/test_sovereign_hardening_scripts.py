@@ -5,7 +5,7 @@ import subprocess
 from pathlib import Path
 
 
-REPO_ROOT = Path("/Users/dhyana/dharma_swarm")
+REPO_ROOT = Path(__file__).resolve().parent.parent
 
 
 def _write_executable(path: Path, content: str) -> None:
