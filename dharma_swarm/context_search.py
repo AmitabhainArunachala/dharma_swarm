@@ -236,7 +236,7 @@ class ContextSearchEngine:
     def _load_ecosystem_map(self) -> dict[str, dict]:
         """Load paths from dharma_swarm's ecosystem map."""
         try:
-            from dharma_swarm.ecosystem_map import ECOSYSTEM_MAP
+            from dharma_swarm.ecosystem_map import ECOSYSTEM as ECOSYSTEM_MAP
             result: dict[str, dict] = {}
             for domain, entries in ECOSYSTEM_MAP.items():
                 if isinstance(entries, dict):

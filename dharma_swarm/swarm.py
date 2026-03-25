@@ -185,6 +185,8 @@ class SwarmManager:
         # v0.6.0: Hermes-inspired integration (OPTIONAL)
         self._tool_registry: Any = None    # ToolRegistry
         self._cron_scheduler: Any = None   # module ref
+        # Reserved for future Telegram integration (gateway/ package).
+        # Not yet initialized — wire into init() when gateway is ready.
         self._gateway: Any = None          # GatewayRunner
 
         # Subsystem initialization tracking
