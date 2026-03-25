@@ -295,14 +295,15 @@ class MemoryPalace:
         # Existing lattice ingestion (unchanged)
         if self._lattice is not None:
             try:
-                from dharma_swarm.strange_loop_memory import MemoryLayer
+                from dharma_swarm.models import MemoryLayer
                 layer_map = {
                     "immediate": MemoryLayer.IMMEDIATE,
-                    "working": MemoryLayer.WORKING,
-                    "consolidated": MemoryLayer.CONSOLIDATED,
-                    "crystallized": MemoryLayer.CRYSTALLIZED,
+                    "session": MemoryLayer.SESSION,
+                    "development": MemoryLayer.DEVELOPMENT,
+                    "witness": MemoryLayer.WITNESS,
+                    "meta": MemoryLayer.META,
                 }
-                mem_layer = layer_map.get(layer, MemoryLayer.WORKING)
+                mem_layer = layer_map.get(layer, MemoryLayer.SESSION)
                 entry = await self._lattice.remember(
                     content,
                     mem_layer,

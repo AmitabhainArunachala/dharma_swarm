@@ -23,7 +23,8 @@ def test_anthropic_provider_init():
     assert p._api_key == "test-key"
 
 
-def test_anthropic_provider_no_key():
+def test_anthropic_provider_no_key(monkeypatch):
+    monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
     p = AnthropicProvider(api_key=None)
     with pytest.raises(RuntimeError, match="ANTHROPIC_API_KEY"):
         p._client_or_raise()

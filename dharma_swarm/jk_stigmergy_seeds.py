@@ -5,6 +5,10 @@ These marks are injected into the stigmergy store so that ANY agent working
 on JK tasks will encounter them through the PULL protocol (query_relevant).
 
 Run once to seed. Idempotent — checks for existing marks before adding.
+
+NOTE: This module is currently archived/unused. It is not imported by any
+other module in the codebase. Retained for potential future re-integration
+of JK stigmergy seeding into the swarm runtime.
 """
 
 from __future__ import annotations

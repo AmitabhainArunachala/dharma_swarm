@@ -108,9 +108,18 @@ async def test_vision_via_provider_tries_nim_before_slow_openrouter(monkeypatch)
 
 @pytest.mark.asyncio
 async def test_vision_via_provider_ignores_error_string_and_uses_next_provider(monkeypatch):
-    monkeypatch.setattr("dharma_swarm.providers.OpenRouterProvider", _ErrorStringProvider)
-    monkeypatch.setattr("dharma_swarm.providers.OpenRouterFreeProvider", _SuccessProvider)
-    monkeypatch.setattr("dharma_swarm.providers.AnthropicProvider", _SuccessProvider)
+    monkeypatch.setattr(
+        "dharma_swarm.providers.OpenRouterProvider",
+        lambda *args, **kwargs: _ErrorStringProvider(),
+    )
+    monkeypatch.setattr(
+        "dharma_swarm.providers.OpenRouterFreeProvider",
+        lambda *args, **kwargs: _SuccessProvider(),
+    )
+    monkeypatch.setattr(
+        "dharma_swarm.providers.AnthropicProvider",
+        lambda *args, **kwargs: _SuccessProvider(),
+    )
 
     output, success = await _vision_via_provider("prompt", timeout_seconds=0.3)
 

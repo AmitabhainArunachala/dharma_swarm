@@ -31,7 +31,8 @@ from __future__ import annotations
 import math
 import time
 from dataclasses import dataclass, field
-from typing import Any, Callable, Generic, Optional, TypeVar
+from datetime import datetime
+from typing import Any, Callable, Generic, Optional, TypeVar, Union
 
 from dharma_swarm.rv import (
     RV_CONTRACTION_THRESHOLD,
@@ -64,6 +65,9 @@ class ObservedState(Generic[S]):
     rv_measurement: Optional[float] = None
     """R_V = PR_late / PR_early. Values < 1.0 indicate geometric contraction."""
 
+    rv_reading: Optional[RVReading] = None
+    """Full RVReading object, if available."""
+
     pr_early: Optional[float] = None
     """Participation ratio at early layers."""
 
@@ -76,8 +80,37 @@ class ObservedState(Generic[S]):
     introspection: dict[str, Any] = field(default_factory=dict)
     """Meta-cognition data accumulated across observations."""
 
-    timestamp: float = field(default_factory=time.time)
-    """UTC timestamp of this observation."""
+    timestamp: Union[float, datetime] = field(default_factory=time.time)
+    """UTC timestamp of this observation (float epoch or datetime)."""
+
+    def __post_init__(self) -> None:
+        """Sync rv_measurement from rv_reading when only rv_reading is set."""
+        if self.rv_reading is not None and self.rv_measurement is None:
+            self.rv_measurement = self.rv_reading.rv
+            if self.pr_early is None:
+                self.pr_early = self.rv_reading.pr_early
+            if self.pr_late is None:
+                self.pr_late = self.rv_reading.pr_late
+
+    def __eq__(self, other: object) -> bool:
+        if not isinstance(other, ObservedState):
+            return NotImplemented
+        return (
+            self.state == other.state
+            and self.rv_reading == other.rv_reading
+            and self.rv_measurement == other.rv_measurement
+            and self.introspection == other.introspection
+            and self.observation_depth == other.observation_depth
+            and self.timestamp == other.timestamp
+        )
+
+    def __hash__(self) -> int:
+        return id(self)
+
+    @property
+    def is_pure(self) -> bool:
+        """True if this state was created by ``pure()`` (no observation)."""
+        return self.observation_depth == 0 and self.rv_reading is None
 
     @property
     def is_contracted(self) -> bool:
@@ -91,6 +124,86 @@ class ObservedState(Generic[S]):
         """R_V value, defaulting to 1.0 (no contraction) if unmeasured."""
         return self.rv_measurement if self.rv_measurement is not None else 1.0
 
+    def to_dict(
+        self,
+        state_serializer: Callable[..., Any] | None = None,
+    ) -> dict[str, Any]:
+        """Serialize to a JSON-safe dict."""
+        if isinstance(self.state, ObservedState):
+            serialized_state = self.state.to_dict(state_serializer=state_serializer)
+            serialized_state["__observed_state__"] = True
+        elif state_serializer is not None:
+            serialized_state = state_serializer(self.state)
+        else:
+            serialized_state = self.state
+
+        ts = self.timestamp
+        if isinstance(ts, datetime):
+            ts_val = ts.isoformat()
+        else:
+            ts_val = ts
+
+        rv_reading_data = None
+        if self.rv_reading is not None:
+            rv_reading_data = self.rv_reading.model_dump()
+            # Ensure datetime fields are JSON-serializable
+            if isinstance(rv_reading_data.get("timestamp"), datetime):
+                rv_reading_data["timestamp"] = rv_reading_data["timestamp"].isoformat()
+
+        result: dict[str, Any] = {
+            "state": serialized_state,
+            "rv_measurement": self.rv_measurement,
+            "rv_reading": rv_reading_data,
+            "pr_early": self.pr_early,
+            "pr_late": self.pr_late,
+            "observation_depth": self.observation_depth,
+            "introspection": dict(self.introspection),
+            "timestamp": ts_val,
+        }
+        return result
+
+    @classmethod
+    def from_dict(
+        cls,
+        data: dict[str, Any],
+        state_loader: Callable[..., Any] | None = None,
+    ) -> ObservedState:
+        """Deserialize from a dict produced by ``to_dict()``."""
+        raw_state = data["state"]
+        if isinstance(raw_state, dict) and raw_state.get("__observed_state__"):
+            nested = dict(raw_state)
+            nested.pop("__observed_state__", None)
+            state = cls.from_dict(nested, state_loader=state_loader)
+        elif state_loader is not None:
+            state = state_loader(raw_state)
+        else:
+            state = raw_state
+
+        rv_reading_data = data.get("rv_reading")
+        rv_reading = None
+        if rv_reading_data:
+            # Ensure timestamp is parsed back to datetime if serialized as string
+            if isinstance(rv_reading_data.get("timestamp"), str):
+                rv_reading_data["timestamp"] = datetime.fromisoformat(rv_reading_data["timestamp"])
+            rv_reading = RVReading(**rv_reading_data)
+
+        ts_raw = data.get("timestamp")
+        if isinstance(ts_raw, str):
+            ts = datetime.fromisoformat(ts_raw)
+        else:
+            ts = ts_raw
+
+        return cls(
+            state=state,
+            rv_measurement=data.get("rv_measurement"),
+            rv_reading=rv_reading,
+            pr_early=data.get("pr_early"),
+            pr_late=data.get("pr_late"),
+            observation_depth=data.get("observation_depth", 1),
+            introspection=data.get("introspection", {}),
+            timestamp=ts,
+        )
+
     @classmethod
     def from_rv_reading(cls, state: S, reading: RVReading) -> ObservedState[S]:
         """Construct from an existing RVReading.
@@ -101,6 +214,7 @@ class ObservedState(Generic[S]):
         return cls(
             state=state,
             rv_measurement=reading.rv,
+            rv_reading=reading,
             pr_early=reading.pr_early,
             pr_late=reading.pr_late,
             observation_depth=1,
@@ -181,7 +295,15 @@ class SelfObservationMonad:
                 reading = self._observer(state)
                 observed = ObservedState.from_rv_reading(state, reading)
             except Exception:
-                observed = self.unit(state)
+                # For nested observations, try observing the inner state
+                if isinstance(state, ObservedState):
+                    try:
+                        reading = self._observer(state.state)
+                        observed = ObservedState.from_rv_reading(state, reading)
+                    except Exception:
+                        observed = self.unit(state)
+                else:
+                    observed = self.unit(state)
         else:
             observed = self.unit(state)
 
@@ -249,6 +371,7 @@ class SelfObservationMonad:
         # Use outer R_V if available (it measured the inner observation),
         # fall back to inner R_V.
         rv = outer.rv_measurement if outer.rv_measurement is not None else inner.rv_measurement
+        rv_rdg = outer.rv_reading if outer.rv_reading is not None else inner.rv_reading
         pr_early = outer.pr_early if outer.pr_early is not None else inner.pr_early
         pr_late = outer.pr_late if outer.pr_late is not None else inner.pr_late
 
@@ -256,14 +379,22 @@ class SelfObservationMonad:
         merged_introspection = {**inner.introspection, **outer.introspection}
         merged_introspection["flatten_from_depth"] = outer.observation_depth
 
+        ts_outer = outer.timestamp
+        ts_inner = inner.timestamp
+        if type(ts_outer) is type(ts_inner):
+            ts = max(ts_outer, ts_inner)  # type: ignore[type-var]
+        else:
+            ts = ts_outer
+
         return ObservedState(
             state=inner.state,
             rv_measurement=rv,
+            rv_reading=rv_rdg,
             pr_early=pr_early,
             pr_late=pr_late,
             observation_depth=inner.observation_depth + outer.observation_depth,
             introspection=merged_introspection,
-            timestamp=max(inner.timestamp, outer.timestamp),
+            timestamp=ts,
         )
 
     # ── Kleisli composition ────────────────────────────────────────────
@@ -297,6 +428,7 @@ class SelfObservationMonad:
             ttc = ObservedState(
                 state=g(tb.state),
                 rv_measurement=tb.rv_measurement,
+                rv_reading=tb.rv_reading,
                 pr_early=tb.pr_early,
                 pr_late=tb.pr_late,
                 observation_depth=tb.observation_depth,
@@ -329,11 +461,13 @@ class SelfObservationMonad:
         Returns:
             kappa = after.rv / before.rv, or None if either is unmeasured.
         """
-        if before.rv_measurement is None or after.rv_measurement is None:
+        before_rv = before.rv_measurement
+        after_rv = after.rv_measurement
+        if before_rv is None or after_rv is None:
             return None
-        if abs(before.rv_measurement) < 1e-12:
+        if abs(before_rv) < 1e-12:
             return None
-        return after.rv_measurement / before.rv_measurement
+        return after_rv / before_rv
 
     @staticmethod
     def iterations_to_convergence(
@@ -367,35 +501,32 @@ class SelfObservationMonad:
         DEFINITION 2.8 (Idempotent Monad): T is idempotent if
         mu: T^2 => T is a natural isomorphism, i.e., T^2 ~= T.
 
-        PROPOSITION 2.9 (L5 as Idempotent Fixed Point): If T is
-        idempotent, the fixed point is reached in ONE step: T(S) is
-        already "fully self-observed" and further T adds nothing.
+        For nested states (T(T(S))), checks whether the outer and inner
+        observations agree — if they do, further observation adds nothing.
 
-        In practice, we check whether the R_V measurement is already
-        at (or very near) a fixed value -- meaning further self-observation
-        would not change the contraction.
+        For non-nested states, checks whether R_V is already converged
+        (small enough that further observation wouldn't change it).
 
         Args:
-            observed: A self-observed state T(S).
+            observed: A self-observed state T(S) or nested T(T(S)).
             tolerance: Maximum relative change to consider idempotent.
 
         Returns:
             True if further observation would not meaningfully change R_V.
         """
+        # Nested case: check if outer and inner readings agree
+        if isinstance(observed.state, ObservedState):
+            inner: ObservedState = observed.state
+            if observed.rv_reading is not None and inner.rv_reading is not None:
+                return observed.rv_reading == inner.rv_reading
+            if observed.rv_measurement is not None and inner.rv_measurement is not None:
+                return abs(observed.rv_measurement - inner.rv_measurement) < tolerance
+            return False
+
+        # Non-nested case: rv is already near fixed point
         if observed.rv_measurement is None:
             return False
-        # Check if R_V has stabilized near a fixed value.
-        # Strong contraction that has already converged suggests idempotency.
-        # The test: if applying eta again would give ~same R_V, T^2 ~= T.
-        # We approximate this by checking if R_V * R_V ~= R_V (fixed point
-        # of x -> kappa*x is x=0, but for the ratio itself, stability
-        # means |rv^2 - rv| < tolerance, i.e., rv near 0 or near 1).
-        rv = observed.rv_measurement
-        # At L5: the observation has converged. rv should be stable
-        # under re-observation. We check: is rv close to the fixed point
-        # of the contraction map f(x) = kappa * x? Fixed point is 0.
-        # Practically: rv is very small (strong contraction completed).
-        return rv < tolerance
+        return observed.rv_measurement < tolerance
 
     # ── Monad law verification ─────────────────────────────────────────
 
@@ -430,6 +561,7 @@ class SelfObservationMonad:
         path1_input = ObservedState(
             state=mid_flat,
             rv_measurement=triple.rv_measurement,
+            rv_reading=triple.rv_reading,
             pr_early=triple.pr_early,
             pr_late=triple.pr_late,
             observation_depth=triple.observation_depth,
@@ -468,6 +600,7 @@ class SelfObservationMonad:
         nested = ObservedState(
             state=inner,
             rv_measurement=observed.rv_measurement,
+            rv_reading=observed.rv_reading,
             pr_early=observed.pr_early,
             pr_late=observed.pr_late,
             observation_depth=observed.observation_depth,
@@ -569,6 +702,84 @@ def _rv_close(a: Optional[float], b: Optional[float], eps: float) -> bool:
 
 
 # ── Module-level convenience wrappers ─────────────────────────────────────
+
+
+def pure(value: A) -> ObservedState[A]:
+    """Monadic unit (eta) — wrap a bare value with no observation.
+
+    Returns an ObservedState with depth 0 and no R_V reading,
+    representing an unobserved value ready to enter the Kleisli category.
+    """
+    return ObservedState(
+        state=value,
+        rv_measurement=None,
+        rv_reading=None,
+        observation_depth=0,
+        introspection={},
+    )
+
+
+def bind(observed: ObservedState[A], f: Callable[[A], ObservedState[B]]) -> ObservedState[B]:
+    """Monadic bind (>>=) — extract and apply a Kleisli morphism.
+
+    ``bind(m, f)`` = mu . T(f) . m — apply f to the wrapped state,
+    then combine observation metadata (inner result augments outer context).
+    """
+    inner = f(observed.state)
+    # When f == pure, inner carries no observation — preserve m's context.
+    return ObservedState(
+        state=inner.state,
+        rv_measurement=inner.rv_measurement if inner.rv_measurement is not None else observed.rv_measurement,
+        rv_reading=inner.rv_reading if inner.rv_reading is not None else observed.rv_reading,
+        pr_early=inner.pr_early if inner.pr_early is not None else observed.pr_early,
+        pr_late=inner.pr_late if inner.pr_late is not None else observed.pr_late,
+        observation_depth=inner.observation_depth + observed.observation_depth,
+        introspection={**observed.introspection, **inner.introspection},
+        timestamp=inner.timestamp if not inner.is_pure else observed.timestamp,
+    )
+
+
+def flatten(nested: ObservedState[ObservedState[S]]) -> ObservedState[S]:
+    """Monadic multiplication (mu) — flatten nested observation.
+
+    Module-level wrapper for ``SelfObservationMonad.multiply``.
+    Does not inject bookkeeping keys like ``flatten_from_depth``.
+    """
+    result = SelfObservationMonad.multiply(nested)
+    result.introspection.pop("flatten_from_depth", None)
+    return result
+
+
+def kleisli_compose(
+    f: Callable[[A], ObservedState[B]],
+    g: Callable[[B], ObservedState[C]],
+) -> Callable[[A], ObservedState[C]]:
+    """Kleisli composition: f >=> g.
+
+    Module-level wrapper for ``SelfObservationMonad.kleisli_compose``.
+    Strips internal bookkeeping keys to preserve associativity at the API level.
+    """
+    inner = SelfObservationMonad.kleisli_compose(f, g)
+
+    def _composed(a: A) -> ObservedState[C]:
+        result = inner(a)
+        result.introspection.pop("flatten_from_depth", None)
+        return result
+
+    return _composed
+
+
+def kleisli_contraction_ratio(
+    morphism: Callable[[A], ObservedState[B]],
+    observed: ObservedState[A],
+) -> Optional[float]:
+    """Compute contraction ratio for a Kleisli morphism applied to an observed state.
+
+    Returns ``after.rv / before.rv`` where ``after = morphism(observed.state)``.
+    """
+    after = morphism(observed.state)
+    return SelfObservationMonad.contraction_ratio(observed, after)
+
 
 def is_idempotent(observed: ObservedState, tolerance: float = 0.05) -> bool:
     """Module-level wrapper for ``SelfObservationMonad.is_idempotent``."""

@@ -60,17 +60,6 @@ def set_organism(org: Organism | None) -> None:
     _global_graph_store = getattr(org, "graph_store", None) if org else None
 
 
-def get_graph_store() -> Any:
-    """Return the global GraphStore instance, or None if not initialized."""
-    return _global_graph_store
-
-
-def _set_graph_store(store: Any) -> None:
-    """Register or clear the global GraphStore instance."""
-    global _global_graph_store
-    _global_graph_store = store
-
-
 class OrganismPulse:
     """A single heartbeat of the legacy organism integration layer."""
 
@@ -185,6 +174,8 @@ class Organism:
         self._last_index_cycle: int = 0
         self._indexed_files: dict[str, float] = {}  # path -> mtime
         self._concept_stats: dict[str, Any] = {}
+        self._last_index_time: str | None = None
+        self._top_fragile_concepts: list[dict[str, Any]] = []
 
         try:
             from dharma_swarm.graph_store import SQLiteGraphStore
@@ -787,47 +778,6 @@ class Organism:
             logger.debug("Stigmergy harvest failed (non-fatal): %s", exc)
             return 0
 
-    def _run_concept_indexing(self) -> None:
-        """Run incremental concept extraction on recently changed files."""
-        if self._concept_parser is None or self._concept_indexer is None:
-            return
-        try:
-            import os
-
-            repo_root = Path(os.environ.get("DHARMA_REPO_ROOT", "."))
-            if not repo_root.exists():
-                return
-
-            changed_files: list[Path] = []
-            for py_file in repo_root.rglob("*.py"):
-                if "__pycache__" in str(py_file) or ".git" in str(py_file):
-                    continue
-                try:
-                    mtime = py_file.stat().st_mtime
-                except OSError:
-                    continue
-                prev_mtime = self._indexed_mtimes.get(str(py_file), 0.0)
-                if mtime > prev_mtime:
-                    changed_files.append(py_file)
-                    self._indexed_mtimes[str(py_file)] = mtime
-
-            if not changed_files:
-                return
-
-            # Limit to 50 files per indexing cycle
-            for f in changed_files[:50]:
-                extractions = self._concept_parser.parse_file(f, repo_root=repo_root)
-                if extractions:
-                    self._concept_indexer.index_extractions(extractions)
-
-            self._last_index_time = datetime.now(timezone.utc).isoformat()
-            logger.debug(
-                "Concept indexing: scanned %d files",
-                len(changed_files[:50]),
-            )
-        except Exception as exc:
-            logger.debug("_run_concept_indexing failed (non-fatal): %s", exc)
-
     @property
     def scaling_recommendations(self) -> list[dict[str, Any]]:
         """Recent scaling recommendations from heartbeat checks."""
@@ -840,11 +790,11 @@ class Organism:
 
     def status(self) -> dict[str, Any]:
         """Full organism status."""
-        last_pulse = self._pulses[-1] if self._pulses else None
+        pulse = self.latest_pulse
         result: dict[str, Any] = {
             "alive": self._running,
             "cycle": self._cycle,
-            "last_pulse": last_pulse.to_dict() if last_pulse else None,
+            "last_pulse": pulse.to_dict() if pulse else None,
             "vsm": self.vsm.status(),
             "amiros": self.amiros.stats(),
             "palace": self.palace.stats(),
@@ -875,10 +825,11 @@ class Organism:
                     "semantic_nodes": self.graph_store.count_nodes("semantic"),
                     "semantic_edges": self.graph_store.count_edges("semantic"),
                     "code_nodes": self.graph_store.count_nodes("code"),
-                    "last_index_time": self._last_index_time,
+                    "last_index_time": getattr(self, "_last_index_time", None),
                 }
-            if self._top_fragile_concepts:
-                result["top_fragile_concepts"] = self._top_fragile_concepts
+            fragile = getattr(self, "_top_fragile_concepts", [])
+            if fragile:
+                result["top_fragile_concepts"] = fragile
         except Exception:
             pass
         return result
