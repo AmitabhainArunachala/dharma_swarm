@@ -85,3 +85,25 @@ def test_respond_to_task_writes_response_and_updates_task(tmp_path: Path) -> Non
     assert response.status == "responded"
     assert task_after.status == "responded"
     assert task_after.response_ref == str(response_path)
+
+
+def test_write_heartbeat_persists_presence_record(tmp_path: Path) -> None:
+    mailbox = RoamingMailbox(queue_root=tmp_path / "mailbox")
+
+    heartbeat = mailbox.write_heartbeat(
+        agent_id="kimi-claw-phone",
+        callsign="kimi-claw-phone",
+        status="working",
+        summary="Handling trade memo",
+        current_task_id="mbx_123",
+        progress=0.4,
+        metadata={"provider": "moonshot"},
+    )
+
+    stored = mailbox.load_heartbeat("kimi-claw-phone")
+    assert stored is not None
+    assert heartbeat.agent_id == "kimi-claw-phone"
+    assert stored.status == "working"
+    assert stored.current_task_id == "mbx_123"
+    assert stored.progress == 0.4
+    assert stored.metadata["provider"] == "moonshot"

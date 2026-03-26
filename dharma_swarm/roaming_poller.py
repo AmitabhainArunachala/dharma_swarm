@@ -12,6 +12,7 @@ Typical flow on a remote host:
 from __future__ import annotations
 
 import argparse
+from datetime import datetime, timezone
 import json
 import os
 from dataclasses import dataclass, field
@@ -59,10 +60,16 @@ class GitMailboxSync:
             "--",
             "roaming_mailbox/tasks",
             "roaming_mailbox/responses",
+            "roaming_mailbox/heartbeats",
         ).stdout.strip()
         if not status:
             return
-        self._run("add", "roaming_mailbox/tasks", "roaming_mailbox/responses")
+        self._run(
+            "add",
+            "roaming_mailbox/tasks",
+            "roaming_mailbox/responses",
+            "roaming_mailbox/heartbeats",
+        )
         self._run("commit", "-m", f"Respond from {responder} for {task_id}")
         self._run("push", "origin", f"HEAD:refs/heads/{self.branch}")
 
@@ -76,12 +83,49 @@ class RoamingPoller:
         responder: str,
         command: Sequence[str],
         git_sync: GitMailboxSync | None = None,
+        heartbeat_agent_id: str | None = None,
+        heartbeat_interval_seconds: float = 300.0,
     ) -> None:
         self.mailbox = mailbox
         self.recipient = recipient
         self.responder = responder
         self.command = list(command)
         self.git_sync = git_sync
+        self.heartbeat_agent_id = heartbeat_agent_id or responder
+        self.heartbeat_interval_seconds = max(30.0, float(heartbeat_interval_seconds))
+        self._last_heartbeat_at: datetime | None = None
+
+    def _heartbeat_due(self) -> bool:
+        if self._last_heartbeat_at is None:
+            return True
+        age = (datetime.now(timezone.utc) - self._last_heartbeat_at).total_seconds()
+        return age >= self.heartbeat_interval_seconds
+
+    def _emit_heartbeat(
+        self,
+        *,
+        status: str,
+        summary: str,
+        current_task_id: str = "",
+        progress: float | None = None,
+        force: bool = False,
+    ) -> None:
+        if not force and not self._heartbeat_due():
+            return
+        self.mailbox.write_heartbeat(
+            agent_id=self.heartbeat_agent_id,
+            callsign=self.responder,
+            status=status,
+            summary=summary,
+            current_task_id=current_task_id,
+            progress=progress,
+            metadata={
+                "recipient": self.recipient,
+                "responder": self.responder,
+                "mode": "roaming_poller",
+            },
+        )
+        self._last_heartbeat_at = datetime.now(timezone.utc)
 
     def _env_for_task(self, task: MailboxTask) -> dict[str, str]:
         env = dict(os.environ)
@@ -121,7 +165,18 @@ class RoamingPoller:
 
         task = self.mailbox.claim_next_task(self.recipient)
         if task is None:
+            self._emit_heartbeat(status="idle", summary="Polling for work")
+            if self.git_sync is not None and self._last_heartbeat_at is not None:
+                self.git_sync.sync_outbound(task_id="heartbeat", responder=self.responder)
             return None
+
+        self._emit_heartbeat(
+            status="working",
+            summary=task.summary,
+            current_task_id=task.task_id,
+            progress=0.05,
+            force=True,
+        )
 
         proc = subprocess.run(
             self.command,
@@ -142,6 +197,14 @@ class RoamingPoller:
             summary=summary,
             body=body,
             metadata=metadata,
+        )
+
+        self._emit_heartbeat(
+            status="idle",
+            summary=f"Completed {task.task_id}",
+            current_task_id="",
+            progress=1.0,
+            force=True,
         )
 
         if self.git_sync is not None:
@@ -174,6 +237,8 @@ def _parser() -> argparse.ArgumentParser:
     parser.add_argument("--command", required=True, help="Responder command string.")
     parser.add_argument("--repo-root", default="")
     parser.add_argument("--git-branch", default="")
+    parser.add_argument("--heartbeat-agent-id", default="")
+    parser.add_argument("--heartbeat-seconds", type=float, default=300.0)
 
     sub = parser.add_subparsers(dest="mode", required=True)
     once = sub.add_parser("run-once")
@@ -196,6 +261,8 @@ def main(argv: list[str] | None = None) -> int:
         responder=args.responder,
         command=shlex.split(args.command),
         git_sync=git_sync,
+        heartbeat_agent_id=args.heartbeat_agent_id or args.responder,
+        heartbeat_interval_seconds=args.heartbeat_seconds,
     )
 
     if args.mode == "run-once":

@@ -88,14 +88,53 @@ class MailboxResponse:
         return asdict(self)
 
 
+@dataclass(frozen=True)
+class RoamingHeartbeat:
+    agent_id: str
+    callsign: str
+    status: str = "online"
+    summary: str = ""
+    current_task_id: str = ""
+    progress: float | None = None
+    metadata: dict[str, Any] = field(default_factory=dict)
+    recorded_at: str = field(default_factory=_utc_now_iso)
+
+    def to_dict(self) -> dict[str, Any]:
+        return asdict(self)
+
+    @classmethod
+    def from_dict(cls, data: dict[str, Any]) -> RoamingHeartbeat:
+        progress = data.get("progress")
+        parsed_progress: float | None
+        if progress in (None, ""):
+            parsed_progress = None
+        else:
+            try:
+                parsed_progress = float(progress)
+            except Exception:
+                parsed_progress = None
+        return cls(
+            agent_id=str(data.get("agent_id", "")),
+            callsign=str(data.get("callsign", "")),
+            status=str(data.get("status", "online")),
+            summary=str(data.get("summary", "")),
+            current_task_id=str(data.get("current_task_id", "")),
+            progress=parsed_progress,
+            metadata=dict(data.get("metadata") or {}),
+            recorded_at=str(data.get("recorded_at", "")) or _utc_now_iso(),
+        )
+
+
 class RoamingMailbox:
     def __init__(self, queue_root: Path | None = None) -> None:
         self.queue_root = queue_root or _default_queue_root()
         self.tasks_dir = self.queue_root / "tasks"
         self.responses_dir = self.queue_root / "responses"
+        self.heartbeats_dir = self.queue_root / "heartbeats"
         self.receipts_dir = self.queue_root / "receipts"
         self.tasks_dir.mkdir(parents=True, exist_ok=True)
         self.responses_dir.mkdir(parents=True, exist_ok=True)
+        self.heartbeats_dir.mkdir(parents=True, exist_ok=True)
         self.receipts_dir.mkdir(parents=True, exist_ok=True)
 
     def task_path(self, task_id: str) -> Path:
@@ -104,6 +143,10 @@ class RoamingMailbox:
     def response_path(self, task_id: str, responder: str) -> Path:
         safe = responder.replace("/", "_").replace("\\", "_")
         return self.responses_dir / f"{task_id}.{safe}.json"
+
+    def heartbeat_path(self, agent_id: str) -> Path:
+        safe = agent_id.replace("/", "_").replace("\\", "_")
+        return self.heartbeats_dir / f"{safe}.json"
 
     def _write_json(self, path: Path, payload: dict[str, Any]) -> None:
         path.parent.mkdir(parents=True, exist_ok=True)
@@ -206,6 +249,42 @@ class RoamingMailbox:
         )
         self._write_json(self.task_path(task_id), updated.to_dict())
         return response
+
+    def write_heartbeat(
+        self,
+        *,
+        agent_id: str,
+        callsign: str,
+        status: str = "online",
+        summary: str = "",
+        current_task_id: str = "",
+        progress: float | None = None,
+        metadata: dict[str, Any] | None = None,
+    ) -> RoamingHeartbeat:
+        heartbeat = RoamingHeartbeat(
+            agent_id=agent_id,
+            callsign=callsign,
+            status=status,
+            summary=summary,
+            current_task_id=current_task_id,
+            progress=progress,
+            metadata=dict(metadata or {}),
+        )
+        self._write_json(self.heartbeat_path(agent_id), heartbeat.to_dict())
+        return heartbeat
+
+    def load_heartbeat(self, agent_id: str) -> RoamingHeartbeat | None:
+        path = self.heartbeat_path(agent_id)
+        if not path.exists():
+            return None
+        return RoamingHeartbeat.from_dict(self._read_json(path))
+
+    def list_heartbeats(self) -> list[RoamingHeartbeat]:
+        heartbeats: list[RoamingHeartbeat] = []
+        for path in sorted(self.heartbeats_dir.glob("*.json")):
+            heartbeats.append(RoamingHeartbeat.from_dict(self._read_json(path)))
+        heartbeats.sort(key=lambda item: item.recorded_at)
+        return heartbeats
 
 
 def _parser() -> argparse.ArgumentParser:

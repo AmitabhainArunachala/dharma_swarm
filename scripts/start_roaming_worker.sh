@@ -5,6 +5,7 @@ recipient="kimi-claw-phone"
 responder="kimi-claw-phone"
 branch="roaming-fixall-20260326"
 interval="15"
+heartbeat_seconds="300"
 provider=""
 model=""
 session=""
@@ -16,6 +17,7 @@ while [[ $# -gt 0 ]]; do
     --responder) responder="$2"; shift 2 ;;
     --branch) branch="$2"; shift 2 ;;
     --interval) interval="$2"; shift 2 ;;
+    --heartbeat-seconds) heartbeat_seconds="$2"; shift 2 ;;
     --provider) provider="$2"; shift 2 ;;
     --model) model="$2"; shift 2 ;;
     --session) session="$2"; shift 2 ;;
@@ -55,6 +57,8 @@ poller_cmd=(
   --git-branch "$branch"
   --recipient "$recipient"
   --responder "$responder"
+  --heartbeat-agent-id "$responder"
+  --heartbeat-seconds "$heartbeat_seconds"
   --command "${worker_cmd[*]}"
 )
 

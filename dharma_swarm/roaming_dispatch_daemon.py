@@ -19,12 +19,14 @@ import time
 
 from dharma_swarm.roaming_mailbox import RoamingMailbox
 from dharma_swarm.roaming_operator_bridge import RoamingOperatorBridge, _build_bridge
+from dharma_swarm.roaming_presence import PresenceProjectionResult, RoamingPresenceProjector
 
 
 @dataclass(frozen=True)
 class DaemonCycleResult:
     collected_bridge_task_ids: list[str] = field(default_factory=list)
     dispatched_mailbox_task_ids: list[str] = field(default_factory=list)
+    projected_agents: list[str] = field(default_factory=list)
 
 
 class MailboxRepoSync:
@@ -52,6 +54,7 @@ class MailboxRepoSync:
             "--",
             "roaming_mailbox/tasks",
             "roaming_mailbox/responses",
+            "roaming_mailbox/heartbeats",
             "roaming_mailbox/receipts",
         ).stdout.strip()
         if not status:
@@ -60,6 +63,7 @@ class MailboxRepoSync:
             "add",
             "roaming_mailbox/tasks",
             "roaming_mailbox/responses",
+            "roaming_mailbox/heartbeats",
             "roaming_mailbox/receipts",
         )
         self._run("commit", "-m", note)
@@ -75,12 +79,14 @@ class RoamingDispatchDaemon:
         responder: str,
         dispatch_limit: int = 1,
         git_sync: MailboxRepoSync | None = None,
+        presence_projector: RoamingPresenceProjector | None = None,
     ) -> None:
         self.adapter = adapter
         self.recipient = recipient
         self.responder = responder
         self.dispatch_limit = max(1, int(dispatch_limit))
         self.git_sync = git_sync
+        self.presence_projector = presence_projector
 
     @property
     def mailbox(self) -> RoamingMailbox:
@@ -113,15 +119,23 @@ class RoamingDispatchDaemon:
             dispatched.append(task.task_id)
         return dispatched
 
+    async def project_presence(self) -> list[PresenceProjectionResult]:
+        if self.presence_projector is None:
+            return []
+        return await self.presence_projector.project_all()
+
     async def cycle_once(self) -> DaemonCycleResult:
         if self.git_sync is not None:
             self.git_sync.sync_inbound()
 
+        projected = await self.project_presence()
         collected = await self.collect_available()
         dispatched = await self.dispatch_available()
 
-        if self.git_sync is not None and (collected or dispatched):
+        if self.git_sync is not None and (projected or collected or dispatched):
             parts: list[str] = []
+            if projected:
+                parts.append(f"presence {len(projected)}")
             if collected:
                 parts.append(f"collect {len(collected)}")
             if dispatched:
@@ -131,6 +145,7 @@ class RoamingDispatchDaemon:
         return DaemonCycleResult(
             collected_bridge_task_ids=collected,
             dispatched_mailbox_task_ids=dispatched,
+            projected_agents=[item.agent_id for item in projected],
         )
 
     async def run_loop(self, *, interval_seconds: float = 10.0) -> None:
@@ -171,12 +186,17 @@ async def _main_async(argv: list[str] | None = None) -> int:
     git_sync = None
     if args.repo_root and args.git_branch:
         git_sync = MailboxRepoSync(repo_root=Path(args.repo_root), branch=args.git_branch)
+    presence_projector = RoamingPresenceProjector(
+        mailbox=adapter.mailbox,
+        bridge=adapter.bridge,
+    )
     daemon = RoamingDispatchDaemon(
         adapter=adapter,
         recipient=args.recipient,
         responder=args.responder,
         dispatch_limit=args.dispatch_limit,
         git_sync=git_sync,
+        presence_projector=presence_projector,
     )
 
     if args.mode == "run-once":

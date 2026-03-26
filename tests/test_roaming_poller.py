@@ -55,6 +55,7 @@ def test_process_once_claims_and_responds(tmp_path: Path) -> None:
     updated = mailbox.load_task(task.task_id)
     response_path = mailbox.response_path(task.task_id, "kimi-claw-phone")
     response = json.loads(response_path.read_text(encoding="utf-8"))
+    heartbeat = mailbox.load_heartbeat("kimi-claw-phone")
 
     assert result is not None
     assert result.task_id == task.task_id
@@ -62,6 +63,9 @@ def test_process_once_claims_and_responds(tmp_path: Path) -> None:
     assert updated.claimed_by == "kimi-claw-phone"
     assert response["summary"] == f"Handled {task.task_id}"
     assert json.loads(response["body"])["callsign"] == "kimi-claw-phone"
+    assert heartbeat is not None
+    assert heartbeat.status == "idle"
+    assert heartbeat.summary == f"Completed {task.task_id}"
 
 
 def test_process_once_returns_none_when_no_work(tmp_path: Path) -> None:
@@ -74,6 +78,11 @@ def test_process_once_returns_none_when_no_work(tmp_path: Path) -> None:
         recipient="kimi-claw-phone",
         responder="kimi-claw-phone",
         command=["python3", str(responder)],
+        heartbeat_interval_seconds=60.0,
     )
 
     assert poller.process_once() is None
+    heartbeat = mailbox.load_heartbeat("kimi-claw-phone")
+    assert heartbeat is not None
+    assert heartbeat.status == "idle"
+    assert heartbeat.summary == "Polling for work"
