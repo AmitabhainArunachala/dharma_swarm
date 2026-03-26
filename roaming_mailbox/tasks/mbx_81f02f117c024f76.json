@@ -4,7 +4,7 @@
   "sender": "dharma_swarm",
   "summary": "Live ping",
   "body": "Reply with ONLY valid JSON: {\"callsign\":\"kimi-claw-phone\",\"status\":\"online\",\"utc_time\":\"<UTC ISO-8601>\",\"market_view\":\"<one sentence>\",\"host\":\"<host>\",\"model\":\"<model>\"}",
-  "status": "queued",
+  "status": "responded",
   "capabilities": [
     "research",
     "synthesis",
@@ -12,8 +12,8 @@
   ],
   "metadata": {},
   "created_at": "2026-03-26T13:33:46.303684+00:00",
-  "claimed_at": "",
-  "claimed_by": "",
-  "responded_at": "",
-  "response_ref": ""
+  "claimed_at": "2026-03-26T14:47:03.222570+00:00",
+  "claimed_by": "kimi-claw-phone",
+  "responded_at": "2026-03-26T14:47:03.254928+00:00",
+  "response_ref": "/root/.openclaw/workspace/repos/dharma_swarm/roaming_mailbox/responses/mbx_81f02f117c024f76.kimi-claw-phone.json"
 }
