@@ -41,8 +41,26 @@ class RoamingOperatorBridge:
         safe = responder.replace("/", "_").replace("\\", "_")
         return self.mailbox.receipts_dir / f"{task_id}.{safe}.imported.json"
 
+    @staticmethod
+    def _target_agent(task: OperatorBridgeTask) -> str:
+        for source in (task.metadata, task.payload):
+            if not isinstance(source, dict):
+                continue
+            value = str(source.get("target_agent") or source.get("recipient") or "").strip()
+            if value:
+                return value
+        return ""
+
     async def dispatch_next(self, *, recipient: str) -> MailboxTask | None:
-        claimed = await self.bridge.claim_task(claimed_by=recipient)
+        queued = await self.bridge.list_tasks(status="queued", limit=200)
+        claimed: OperatorBridgeTask | None = None
+        for candidate in queued:
+            target_agent = self._target_agent(candidate)
+            if target_agent and target_agent != recipient:
+                continue
+            claimed = await self.bridge.claim_task(task_id=candidate.id, claimed_by=recipient)
+            if claimed is not None:
+                break
         if claimed is None:
             return None
         return self.mailbox.enqueue_task(
