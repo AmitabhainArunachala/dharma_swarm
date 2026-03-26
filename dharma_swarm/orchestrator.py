@@ -834,6 +834,13 @@ class Orchestrator:
             return ["reviewer", "researcher", "general"]
         return []
 
+    def _task_preferred_agent_names(self, task: Task | None) -> list[str]:
+        meta = self._task_meta(task)
+        raw = meta.get("director_preferred_agents")
+        if raw is None:
+            raw = meta.get("preferred_agents")
+        return self._dedupe_strings(self._coerce_string_list(raw))
+
     _EXPLORATION_RATE = 0.1  # 10% random exploration
 
     def _select_idle_agent(
@@ -844,7 +851,23 @@ class Orchestrator:
         if not idle_agents:
             return None
 
+        preferred_names = self._task_preferred_agent_names(task)
         preferred_roles = self._task_preferred_roles(task)
+
+        # Prefer exact agent-name routing when the task already knows its seats.
+        name_matched: list[AgentState] = []
+        if preferred_names:
+            seen: set[str] = set()
+            for preferred_name in preferred_names:
+                wanted = preferred_name.strip()
+                if not wanted:
+                    continue
+                for agent in idle_agents:
+                    if agent.name != wanted or agent.id in seen:
+                        continue
+                    name_matched.append(agent)
+                    seen.add(agent.id)
+                    break
 
         # Collect ALL role-matched candidates (not just first match)
         role_matched: list[AgentState] = []
@@ -853,8 +876,8 @@ class Orchestrator:
             if any(role_value == p for p in preferred_roles):
                 role_matched.append(agent)
 
-        # Pick from role-matched subset if any, else all candidates
-        candidates = role_matched if role_matched else list(idle_agents)
+        # Pick from name-matched subset first, then role-matched subset, else all candidates.
+        candidates = name_matched or role_matched or list(idle_agents)
 
         # Active inference EFE-based selection (Friston P10)
         best = self._efe_biased_pick(candidates, task)
@@ -869,6 +892,10 @@ class Orchestrator:
             return best
 
         # FIFO fallback (original behavior)
+        if name_matched:
+            pick = name_matched[0]
+            idle_agents.remove(pick)
+            return pick
         if role_matched:
             pick = role_matched[0]
             idle_agents.remove(pick)
@@ -1765,6 +1792,16 @@ class Orchestrator:
         claim_meta = self._attach_latent_gold(task_for_gate, claim_meta)
         if task_for_gate is not None:
             task_for_gate.metadata = dict(claim_meta)
+        if proposal_id is not None:
+            try:
+                if self._telic_seam is not None:
+                    self._telic_seam.record_execution_lease(
+                        proposal_id,
+                        claim_meta.get("active_claim"),
+                    )
+            except Exception:
+                logger.debug("Telic seam execution lease recording failed", exc_info=True)
+
         _pe_t0 = _adt.monotonic()
         if self._pool is not None:
             await self._pool.assign(td.agent_id, td.task_id)

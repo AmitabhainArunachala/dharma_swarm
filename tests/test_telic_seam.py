@@ -1,8 +1,8 @@
 """Tests for the Telic Seam — Phase A/A.2 write-through metabolic loop.
 
 Verifies:
-1. New ontology types exist (ActionProposal, GateDecisionRecord, Outcome, VentureCell,
-   ValueEvent, Contribution)
+1. New ontology types exist (ActionProposal, GateDecisionRecord, ExecutionLease,
+   Outcome, VentureCell, ValueEvent, Contribution)
 2. TelicSeam.record_dispatch creates ActionProposal
 3. TelicSeam.record_gate_decision creates GateDecisionRecord + links
 4. TelicSeam.record_outcome creates Outcome + lineage edge
@@ -106,6 +106,14 @@ class TestOntologyTypes:
         assert "success" in t.properties
         assert "fitness_score" in t.properties
 
+    def test_execution_lease_type_exists(self, registry):
+        t = registry.get_type("ExecutionLease")
+        assert t is not None
+        assert "proposal_id" in t.properties
+        assert "claim_id" in t.properties
+        assert "agent_id" in t.properties
+        assert "claim_timeout_seconds" in t.properties
+
     def test_value_event_type_exists(self, registry):
         t = registry.get_type("ValueEvent")
         assert t is not None
@@ -134,6 +142,7 @@ class TestOntologyTypes:
         links = registry.get_links_for("ActionProposal")
         link_names = {ld.name for ld in links}
         assert "has_gate_decision" in link_names
+        assert "has_execution_lease" in link_names
         assert "has_outcome" in link_names
 
     def test_value_event_links_registered(self, registry):
@@ -212,6 +221,52 @@ class TestRecordDispatch:
         ids = [seam.record_dispatch(t, f"agent_{i}") for i, t in enumerate(tasks)]
         assert all(pid is not None for pid in ids)
         assert len(set(ids)) == 5  # All unique
+
+
+class TestRecordExecutionLease:
+    def test_creates_execution_lease_and_links_to_proposal(self, seam, sample_task):
+        proposal_id = seam.record_dispatch(sample_task, "agent_alpha")
+
+        lease_id = seam.record_execution_lease(
+            proposal_id,
+            {
+                "claim_id": "claim-1",
+                "agent_id": "agent_alpha",
+                "claimed_at": "2026-03-26T00:00:00+00:00",
+                "claim_timeout_seconds": 300.0,
+                "claim_expires_at_epoch": 1234.5,
+                "dispatch_timeout_seconds": 120.0,
+                "dispatch_attempt": 1,
+            },
+        )
+
+        assert lease_id is not None
+        lease = seam.registry.get_object(lease_id)
+        assert lease is not None
+        assert lease.type_name == "ExecutionLease"
+        assert lease.properties["proposal_id"] == proposal_id
+        assert lease.properties["claim_id"] == "claim-1"
+        assert lease.properties["agent_id"] == "agent_alpha"
+        proposal = seam.registry.get_object(proposal_id)
+        assert proposal is not None
+        assert proposal.properties["status"] == "executing"
+
+    def test_duplicate_execution_lease_reuses_existing_record(self, seam, sample_task):
+        proposal_id = seam.record_dispatch(sample_task, "agent_alpha")
+        claim = {
+            "claim_id": "claim-1",
+            "agent_id": "agent_alpha",
+            "claimed_at": "2026-03-26T00:00:00+00:00",
+            "claim_timeout_seconds": 300.0,
+            "claim_expires_at_epoch": 1234.5,
+            "dispatch_timeout_seconds": 120.0,
+            "dispatch_attempt": 1,
+        }
+
+        first = seam.record_execution_lease(proposal_id, claim)
+        second = seam.record_execution_lease(proposal_id, claim)
+
+        assert first == second
 
     def test_default_seam_uses_shared_registry(
         self,

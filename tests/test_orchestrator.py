@@ -212,6 +212,43 @@ async def test_route_next_prefers_reviewer_for_uncertain_coordination_task():
 
 
 @pytest.mark.asyncio
+async def test_route_next_prefers_director_named_agent_over_role_match():
+    board = MockTaskBoard()
+    board.tasks = [
+        Task(
+            id="t-cyber",
+            title="Wire cybernetics lever",
+            metadata={
+                "director_preferred_agents": ["cyber-codex", "cyber-opus"],
+                "coordination_preferred_roles": ["architect"],
+            },
+        )
+    ]
+    pool = MockAgentPool(
+        [
+            AgentState(
+                id="a-opus-legacy",
+                name="opus-primus",
+                role=AgentRole.ARCHITECT,
+                status=AgentStatus.IDLE,
+            ),
+            AgentState(
+                id="a-cyber-codex",
+                name="cyber-codex",
+                role=AgentRole.SURGEON,
+                status=AgentStatus.IDLE,
+            ),
+        ]
+    )
+    orch = Orchestrator(task_board=board, agent_pool=pool)
+
+    dispatches = await orch.route_next()
+
+    assert len(dispatches) == 1
+    assert dispatches[0].agent_id == "a-cyber-codex"
+
+
+@pytest.mark.asyncio
 async def test_fan_in(agents):
     pool = MockAgentPool(agents)
     pool.set_result("a1", "result from agent 1")
