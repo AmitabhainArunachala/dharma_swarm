@@ -29,6 +29,7 @@ from dharma_swarm.models import (
     TaskPriority,
 )
 from dharma_swarm.agent_memory import AgentMemoryBank
+from dharma_swarm.agent_memory_manager import AgentMemoryManager, Scope as MemoryScope
 from dharma_swarm.jikoku_samaya import get_global_tracer as _jikoku_tracer
 from dharma_swarm.runtime_fields import (
     RuntimeFieldRegistry,
@@ -944,6 +945,7 @@ class AgentRunner:
         message_bus: Any | None = None,
         worker_spawner: Any | None = None,
         ontology_path: Path | str | None = None,
+        advanced_memory: AgentMemoryManager | None = None,
     ) -> None:
         self._config = config
         self._provider = provider
@@ -956,6 +958,8 @@ class AgentRunner:
         self._lock = asyncio.Lock()
         self._background_tasks: set[asyncio.Task[Any]] = set()
         self._runtime_fields = build_runtime_field_registry_from_agent_config(config)
+        # Letta-inspired self-managing memory (SQLite-backed)
+        self._advanced_memory = advanced_memory
 
     # -- properties ---------------------------------------------------------
 
@@ -971,6 +975,11 @@ class AgentRunner:
     def runtime_fields(self) -> RuntimeFieldRegistry:
         """Expose runtime mutation targets for prompt/parameter evolution."""
         return self._runtime_fields
+
+    @property
+    def advanced_memory(self) -> AgentMemoryManager | None:
+        """Access the SQLite-backed self-managing memory, if configured."""
+        return self._advanced_memory
 
     async def run_auto_research_workflow(
         self,
@@ -997,6 +1006,55 @@ class AgentRunner:
             grade_kwargs=grade_kwargs,
             runtime_field_names=self._runtime_fields.names(),
         )
+
+    def get_memory_tools(self) -> dict[str, Any]:
+        """Return callable memory tools for agent sandbox injection.
+
+        These tools let the agent explicitly manage its own memory
+        during task execution (Letta/MemGPT pattern).
+
+        Returns:
+            Dict of tool_name -> async callable, or empty dict if no
+            advanced_memory is configured.
+        """
+        if self._advanced_memory is None:
+            return {}
+
+        mgr = self._advanced_memory
+
+        async def remember(key: str, content: str, scope: str = "working", ttl: int | None = None) -> str:
+            """Store a memory. Scope: working, short_term, long_term, shared."""
+            s = MemoryScope(scope)
+            mem = await mgr.remember(key, content, scope=s, ttl=ttl)
+            return f"Remembered '{key}' in {scope}"
+
+        async def recall(query: str, scope: str | None = None, limit: int = 5) -> str:
+            """Search memories by keyword. Returns matching memories."""
+            s = MemoryScope(scope) if scope else None
+            results = await mgr.recall(query, scope=s, limit=limit)
+            if not results:
+                return "No memories found."
+            lines = [f"Found {len(results)} memories:"]
+            for m in results:
+                lines.append(f"  [{m.scope.value}] {m.key}: {m.content[:200]}")
+            return "\n".join(lines)
+
+        async def forget(key: str) -> str:
+            """Delete a memory by key."""
+            deleted = await mgr.forget(key)
+            return f"Forgot '{key}'" if deleted else f"No memory found for '{key}'"
+
+        async def share(key: str, content: str, tags: str = "") -> str:
+            """Share a memory with all agents in the swarm."""
+            await mgr.share(key, content, tags=tags)
+            return f"Shared '{key}' with swarm"
+
+        return {
+            "remember": remember,
+            "recall": recall,
+            "forget": forget,
+            "share": share,
+        }
 
     # -- lifecycle ----------------------------------------------------------
 
@@ -1192,6 +1250,24 @@ class AgentRunner:
                 result_text=result,
             )
 
+            # ── Langfuse / local observability trace ──
+            try:
+                from dharma_swarm.observability import get_observer
+                _usage = response.usage if response else {}
+                get_observer().trace_agent_dispatch(
+                    agent=self._config.name,
+                    task_id=task.id,
+                    task_title=task.title[:200],
+                    provider=getattr(response, "provider", "") if response else "",
+                    model=getattr(response, "model", "") if response else "",
+                    prompt_tokens=int(_usage.get("prompt_tokens", 0)),
+                    completion_tokens=int(_usage.get("completion_tokens", 0)),
+                    latency_ms=completion_latency_ms,
+                    success=True,
+                    result_preview=result[:300] if result else "",
+                )
+            except Exception:
+                logger.debug("Observability trace failed", exc_info=True)
 
             # ── Output guardrails: check agent output before accepting ──
             try:
@@ -1357,6 +1433,24 @@ class AgentRunner:
                 success=False,
             )
 
+            # ── Langfuse / local observability trace (failure) ──
+            try:
+                from dharma_swarm.observability import get_observer
+                _usage = response.usage if response else {}
+                get_observer().trace_agent_dispatch(
+                    agent=self._config.name,
+                    task_id=task.id,
+                    task_title=task.title[:200],
+                    provider=getattr(response, "provider", "") if response else "",
+                    model=getattr(response, "model", "") if response else "",
+                    prompt_tokens=int(_usage.get("prompt_tokens", 0)),
+                    completion_tokens=int(_usage.get("completion_tokens", 0)),
+                    latency_ms=completion_latency_ms,
+                    success=False,
+                    error=str(exc)[:500],
+                )
+            except Exception:
+                logger.debug("Observability trace (failure) failed", exc_info=True)
 
             # Record failure as a learned lesson
             await self._record_failure_memory(task, exc)
@@ -1528,25 +1622,41 @@ class AgentRunner:
         derived from task priority. Consolidates every 5 completed tasks.
         Best-effort: never fails the task if memory operations error.
         """
-        if self._memory is None:
-            return
-        try:
-            salience = _PRIORITY_SALIENCE.get(task.priority, 0.5)
-            await self._memory.remember(
-                key=f"task:{task.id}",
-                value=result[:200],
-                category="working",
-                importance=salience,
-                source=self._config.name,
-            )
-            # Consolidate periodically
-            if self._state.tasks_completed % 5 == 0:
-                await self._memory.consolidate()
-            await self._memory.save()
-        except Exception as exc:
-            logger.debug(
-                "Memory record failed for %s: %s", self._config.name, exc
-            )
+        if self._memory is not None:
+            try:
+                salience = _PRIORITY_SALIENCE.get(task.priority, 0.5)
+                await self._memory.remember(
+                    key=f"task:{task.id}",
+                    value=result[:200],
+                    category="working",
+                    importance=salience,
+                    source=self._config.name,
+                )
+                # Consolidate periodically
+                if self._state.tasks_completed % 5 == 0:
+                    await self._memory.consolidate()
+                await self._memory.save()
+            except Exception as exc:
+                logger.debug(
+                    "Memory record failed for %s: %s", self._config.name, exc
+                )
+
+        # Also record in advanced memory (SQLite-backed, Letta-inspired)
+        if self._advanced_memory is not None:
+            try:
+                await self._advanced_memory.remember(
+                    key=f"task:{task.id}",
+                    content=result[:500],
+                    scope=MemoryScope.SHORT_TERM,
+                    ttl=86400,  # 24h TTL for task results
+                )
+                if self._state.tasks_completed % 5 == 0:
+                    await self._advanced_memory.consolidate()
+            except Exception as exc:
+                logger.debug(
+                    "Advanced memory record failed for %s: %s",
+                    self._config.name, exc,
+                )
 
     def _emit_fitness_signal(self, task: Task, result: str) -> None:
         """Score agent output and emit fitness signal to the bus.
@@ -1871,6 +1981,7 @@ class AgentPool:
         message_bus: Any | None = None,
         worker_spawner: Any | None = None,
         ontology_path: Path | str | None = None,
+        advanced_memory: AgentMemoryManager | None = None,
     ) -> AgentRunner:
         """Create, start, and register an agent.
 
@@ -1882,6 +1993,7 @@ class AgentPool:
             message_bus: Optional persistent MessageBus for durable fitness events.
             worker_spawner: Optional WorkerSpawner for ephemeral worker delegation.
             ontology_path: Optional ontology DB path to isolate runtime projection.
+            advanced_memory: Optional SQLite-backed self-managing memory (Letta-inspired).
 
         Returns:
             The started AgentRunner.
@@ -1896,6 +2008,12 @@ class AgentPool:
         except Exception:
             logger.debug("Constitutional enrichment skipped", exc_info=True)
 
+        # Auto-create advanced memory if not provided
+        if advanced_memory is None:
+            try:
+                advanced_memory = AgentMemoryManager(config.name)
+            except Exception:
+                logger.debug("Auto-create advanced memory failed", exc_info=True)
 
         runner = AgentRunner(
             config,
@@ -1905,6 +2023,7 @@ class AgentPool:
             message_bus=message_bus,
             worker_spawner=worker_spawner,
             ontology_path=ontology_path,
+            advanced_memory=advanced_memory,
         )
         await runner.start()
         async with self._lock:

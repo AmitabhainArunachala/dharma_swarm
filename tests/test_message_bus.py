@@ -1,7 +1,10 @@
 """Tests for dharma_swarm.message_bus."""
 
+import sqlite3
+
 import pytest
 
+import dharma_swarm.message_bus as message_bus_module
 from dharma_swarm.models import Message, MessagePriority
 from dharma_swarm.message_bus import MessageBus
 
@@ -158,3 +161,140 @@ async def test_reply_nonexistent_raises(bus):
     """Regression: reply() to a non-existent message must raise ValueError."""
     with pytest.raises(ValueError, match="not found"):
         await bus.reply("totally_fake_id", from_agent="x", body="orphan reply")
+
+
+class _FakeCursor:
+    def __init__(self, rows):
+        self._rows = rows
+
+    async def fetchall(self):
+        return list(self._rows)
+
+
+class _FlakyEventConnection:
+    def __init__(self, state):
+        self._state = state
+        self.row_factory = None
+
+    async def __aenter__(self):
+        return self
+
+    async def __aexit__(self, exc_type, exc, tb):
+        return False
+
+    async def execute(self, sql, params=()):
+        normalized = " ".join(sql.split())
+        if normalized.startswith("PRAGMA"):
+            return _FakeCursor([])
+
+        if normalized.startswith("INSERT INTO events"):
+            if not self._state["lock_raised"]:
+                self._state["lock_raised"] = True
+                raise sqlite3.OperationalError("database is locked")
+            self._state["events"].append({
+                "event_id": params[0],
+                "event_type": params[1],
+                "task_id": params[2],
+                "agent_id": params[3],
+                "source_pid": params[4],
+                "occurred_at": params[5],
+                "consumed_at": None,
+                "payload": params[6],
+            })
+            return _FakeCursor([])
+
+        if normalized.startswith("SELECT * FROM events"):
+            event_type, limit = params
+            rows = [
+                event.copy()
+                for event in self._state["events"]
+                if event["event_type"] == event_type and event["consumed_at"] is None
+            ][:limit]
+            return _FakeCursor(rows)
+
+        if normalized.startswith("UPDATE events SET consumed_at = ? WHERE event_id = ?"):
+            consumed_at, event_id = params
+            for event in self._state["events"]:
+                if event["event_id"] == event_id:
+                    event["consumed_at"] = consumed_at
+            return _FakeCursor([])
+
+        raise AssertionError(f"Unexpected SQL in test double: {sql}")
+
+    async def commit(self):
+        return None
+
+
+@pytest.mark.asyncio
+async def test_emit_event_retries_transient_database_lock(tmp_path, monkeypatch):
+    """Regression: transient SQLite writer contention should not drop events."""
+    state = {"lock_raised": False, "events": []}
+
+    def fake_connect(*args, **kwargs):
+        return _FlakyEventConnection(state)
+
+    async def fast_sleep(_seconds):
+        return None
+
+    monkeypatch.setattr("dharma_swarm.message_bus.aiosqlite.connect", fake_connect)
+    if hasattr(message_bus_module, "asyncio"):
+        monkeypatch.setattr(message_bus_module.asyncio, "sleep", fast_sleep)
+
+    bus = MessageBus(tmp_path / "messages.db")
+    event_id = await bus.emit_event(
+        "EVAL_PROBE",
+        agent_id="eval_harness",
+        payload={"probe": True},
+    )
+
+    events = await bus.consume_events("EVAL_PROBE", limit=10)
+
+    assert state["lock_raised"] is True
+    assert event_id
+    assert len(events) == 1
+    assert events[0]["event_id"] == event_id
+    assert events[0]["payload"]["probe"] is True
+
+
+@pytest.mark.asyncio
+async def test_send_uses_managed_connection(monkeypatch, tmp_path):
+    """send() should go through the bus connection wrapper, not raw connect()."""
+    state = {"opened": 0, "configured": 0, "inserts": 0, "commits": 0}
+
+    class _ManagedConnection:
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, exc_type, exc, tb):
+            return False
+
+        async def execute(self, sql, params=()):
+            if sql.startswith("INSERT INTO messages"):
+                state["inserts"] += 1
+                return _FakeCursor([])
+            raise AssertionError(f"Unexpected SQL in managed connection test: {sql}")
+
+        async def commit(self):
+            state["commits"] += 1
+
+    def fake_open(self):
+        state["opened"] += 1
+        return _ManagedConnection()
+
+    async def fake_configure(_db):
+        state["configured"] += 1
+
+    def fail_raw_connect(*args, **kwargs):
+        raise AssertionError("raw aiosqlite.connect should not be used here")
+
+    monkeypatch.setattr(MessageBus, "_open", fake_open)
+    monkeypatch.setattr(MessageBus, "_configure_connection", staticmethod(fake_configure))
+    monkeypatch.setattr(message_bus_module.aiosqlite, "connect", fail_raw_connect)
+
+    bus = MessageBus(tmp_path / "messages.db")
+    msg = Message(from_agent="alice", to_agent="bob", body="hello")
+
+    message_id = await bus.send(msg)
+
+    assert message_id == msg.id
+    assert state == {"opened": 1, "configured": 1, "inserts": 1, "commits": 1}
