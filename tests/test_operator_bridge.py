@@ -3,11 +3,13 @@
 from __future__ import annotations
 
 import json
+import sqlite3
 from datetime import datetime, timedelta, timezone
 
 import pytest
 
 from dharma_swarm.message_bus import MessageBus
+from dharma_swarm import operator_bridge as operator_bridge_module
 from dharma_swarm.operator_bridge import (
     BRIDGE_STATUS_IN_PROGRESS,
     BRIDGE_STATUS_QUEUED,
@@ -196,3 +198,55 @@ async def test_list_unacknowledged_responses_only_returns_overdue(bridge_env):
         now=datetime.now(timezone.utc) + timedelta(seconds=5),
     )
     assert pending_after_ack == []
+
+
+@pytest.mark.asyncio
+async def test_enqueue_task_retries_transient_database_lock(bridge_env, monkeypatch):
+    bridge, _, _ = bridge_env
+    real_connect = operator_bridge_module.aiosqlite.connect
+    state = {"raised": False}
+
+    class _ProxyConnection:
+        def __init__(self, conn):
+            object.__setattr__(self, "_conn", conn)
+
+        def __getattr__(self, name):
+            return getattr(self._conn, name)
+
+        def __setattr__(self, name, value):
+            if name == "_conn":
+                object.__setattr__(self, name, value)
+                return
+            setattr(self._conn, name, value)
+
+        async def execute(self, sql, parameters=()):
+            if not state["raised"] and "INSERT INTO operator_bridge_tasks" in sql:
+                state["raised"] = True
+                raise sqlite3.OperationalError("database is locked")
+            return await self._conn.execute(sql, parameters)
+
+    class _ConnectWrapper:
+        def __init__(self, *args, **kwargs):
+            self._args = args
+            self._kwargs = kwargs
+            self._ctx = None
+
+        async def __aenter__(self):
+            self._ctx = real_connect(*self._args, **self._kwargs)
+            conn = await self._ctx.__aenter__()
+            return _ProxyConnection(conn)
+
+        async def __aexit__(self, exc_type, exc, tb):
+            assert self._ctx is not None
+            return await self._ctx.__aexit__(exc_type, exc, tb)
+
+    monkeypatch.setattr(
+        operator_bridge_module.aiosqlite,
+        "connect",
+        lambda *args, **kwargs: _ConnectWrapper(*args, **kwargs),
+    )
+
+    record = await bridge.enqueue_task(task="survive transient lock", sender="openclaw")
+
+    assert state["raised"] is True
+    assert record.status == BRIDGE_STATUS_QUEUED
