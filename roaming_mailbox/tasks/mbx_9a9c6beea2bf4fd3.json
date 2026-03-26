@@ -1,0 +1,19 @@
+{
+  "task_id": "mbx_9a9c6beea2bf4fd3",
+  "recipient": "kimi-claw-phone",
+  "sender": "operator",
+  "summary": "Roaming control memo",
+  "body": "Draft a concise roaming-agent control memo with 5 bullets: current transport, current risk, immediate next upgrade, what the phone worker should do, and one recommendation for the hybrid control plane.",
+  "status": "queued",
+  "capabilities": [
+    "research",
+    "architecture",
+    "operations"
+  ],
+  "metadata": {},
+  "created_at": "2026-03-26T14:43:18.601316+00:00",
+  "claimed_at": "",
+  "claimed_by": "",
+  "responded_at": "",
+  "response_ref": ""
+}
