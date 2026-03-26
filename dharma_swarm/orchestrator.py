@@ -161,11 +161,14 @@ class Orchestrator:
     async def dispatch(
         self,
         task: Task,
-        topology: TopologyType = TopologyType.FAN_OUT,
+        topology: TopologyType | Any = TopologyType.FAN_OUT,
     ) -> list[TaskDispatch]:
         """Assign task to available agents based on topology."""
         if self._pool is None:
             return []
+
+        if self._is_topology_genome(topology):
+            return await self._dispatch_topology_genome(task, topology)
 
         idle: list[AgentState] = await self._pool.get_idle_agents()
         if not idle:
@@ -186,6 +189,54 @@ class Orchestrator:
         )
         await self._assign_dispatch(td)
         return [td]
+
+    @staticmethod
+    def _is_topology_genome(topology: Any) -> bool:
+        return all(
+            hasattr(topology, attr)
+            for attr in ("nodes", "entrypoints", "validate_structure")
+        )
+
+    async def _dispatch_topology_genome(
+        self,
+        task: Task,
+        genome: Any,
+    ) -> list[TaskDispatch]:
+        if self._pool is None:
+            return []
+
+        genome.validate_structure()
+        idle: list[AgentState] = await self._pool.get_idle_agents()
+        if not idle:
+            return []
+
+        available = list(idle)
+        dispatches: list[TaskDispatch] = []
+        entrypoints = list(genome.entrypoints)
+        topology_type = TopologyType.FAN_OUT if len(entrypoints) > 1 else TopologyType.PIPELINE
+
+        for node_id in entrypoints or [genome.nodes[0].node_id]:
+            agent = self._select_idle_agent(task, available)
+            if agent is None:
+                break
+            td = TaskDispatch(
+                task_id=task.id,
+                agent_id=agent.id,
+                topology=topology_type,
+                timeout_seconds=self._resolve_timeout_seconds(
+                    task,
+                    self._default_timeout_seconds,
+                ),
+                metadata={
+                    "topology_genome_id": genome.genome_id,
+                    "topology_node_id": node_id,
+                    "topology_entrypoints": list(entrypoints),
+                    "topology_edge_ids": list(genome.incoming_edge_ids(node_id)),
+                },
+            )
+            await self._assign_dispatch(td)
+            dispatches.append(td)
+        return dispatches
 
     async def fan_out(
         self, task: Task, agents: list[AgentState]
@@ -1714,7 +1765,6 @@ class Orchestrator:
         claim_meta = self._attach_latent_gold(task_for_gate, claim_meta)
         if task_for_gate is not None:
             task_for_gate.metadata = dict(claim_meta)
-
         _pe_t0 = _adt.monotonic()
         if self._pool is not None:
             await self._pool.assign(td.agent_id, td.task_id)

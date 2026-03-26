@@ -1,0 +1,100 @@
+{
+  "project": "self-evolving-organism",
+  "project_root": "/Users/dhyana/dharma_swarm",
+  "generated_at": "2026-03-26",
+  "status": "build_complete",
+  "execution_mode": "sequential_by_phase",
+  "feature_count": 0,
+  "estimated_hours_raw": 16.5,
+  "estimated_hours_wall_clock": {
+    "optimistic": 14.0,
+    "expected": 16.5,
+    "conservative": 18.0
+  },
+  "completed_phases": [
+    "phase_0",
+    "phase_1",
+    "phase_2",
+    "phase_3",
+    "phase_4",
+    "phase_5_optimizer_bridge",
+    "phase_6_topology_genome",
+    "phase_7_curriculum_engine",
+    "phase_8_export_install",
+    "phase_9_offline_training_lane"
+  ],
+  "remaining_phases": [],
+  "phase_order": [
+    "phase_5_optimizer_bridge",
+    "phase_6_topology_genome",
+    "phase_7_curriculum_engine",
+    "phase_8_export_install",
+    "phase_9_offline_training_lane"
+  ],
+  "streams": [
+    {
+      "id": "optimizer-core",
+      "hours": 4.0,
+      "phase": "phase_5_optimizer_bridge",
+      "notes": "Runtime field mutation, reward loop, Darwin hooks"
+    },
+    {
+      "id": "topology-compiler",
+      "hours": 4.0,
+      "phase": "phase_6_topology_genome",
+      "notes": "Contracts, validation, workflow compilation, orchestrator support"
+    },
+    {
+      "id": "curriculum-runtime",
+      "hours": 3.0,
+      "phase": "phase_7_curriculum_engine",
+      "notes": "Frontier tasks, provenance, persistence, evolution hook"
+    },
+    {
+      "id": "export-install",
+      "hours": 3.0,
+      "phase": "phase_8_export_install",
+      "notes": "Pure rendering preserved, explicit install planning and execution"
+    },
+    {
+      "id": "offline-export",
+      "hours": 1.5,
+      "phase": "phase_9_offline_training_lane",
+      "notes": "Export-only manifests and bundle stubs"
+    },
+    {
+      "id": "hardening-fixtures",
+      "hours": 1.0,
+      "phase": "cross_cutting",
+      "notes": "Golden and adversarial research fixtures"
+    }
+  ],
+  "canonical_docs": [
+    "docs/plans/2026-03-26-self-evolving-organism-master-build-spec.md",
+    "spec-forge/consciousness-computing/INTEGRATION_SPEC.md"
+  ],
+  "handoff_docs": [
+    "spec-forge/self-evolving-organism/CONSTITUTION.md",
+    "spec-forge/self-evolving-organism/ARCHITECTURE.md",
+    "spec-forge/self-evolving-organism/TRACEABILITY.md",
+    "spec-forge/self-evolving-organism/WISDOM_LAYER.md",
+    "spec-forge/self-evolving-organism/features.json"
+  ],
+  "verification_commands": [
+    "pytest tests/test_auto_research_models.py -q",
+    "pytest tests/test_auto_research_engine.py -q",
+    "pytest tests/test_auto_grade_models.py -q",
+    "pytest tests/test_auto_grade_engine.py -q",
+    "pytest tests/test_auto_research_workflow.py -q",
+    "pytest tests/test_research_eval_registry.py -q",
+    "pytest tests/test_optimizer_bridge.py -q",
+    "pytest tests/test_evolution_runtime_fields.py -q",
+    "pytest tests/test_topology_genome.py -q",
+    "pytest tests/test_topology_execution.py -q",
+    "pytest tests/test_curriculum_engine.py -q",
+    "pytest tests/test_agent_install.py -q",
+    "pytest tests/test_offline_training_bridge.py -q"
+  ],
+  "known_warnings": [],
+  "recommended_start_feature": ""
+}

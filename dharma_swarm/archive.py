@@ -36,6 +36,10 @@ _DEFAULT_WEIGHTS: dict[str, float] = {
 FITNESS_DIMENSIONS: tuple[str, ...] = tuple(_DEFAULT_WEIGHTS)
 
 
+def _clamp01(value: float) -> float:
+    return max(0.0, min(1.0, float(value)))
+
+
 def normalize_fitness_weights(
     weights: dict[str, float] | None = None,
 ) -> dict[str, float]:
@@ -63,6 +67,40 @@ def normalize_fitness_weights(
         raise ValueError("At least one fitness weight must be positive")
 
     return {key: value / total for key, value in merged.items()}
+
+
+def research_reward_to_fitness(reward_signal: Any) -> "FitnessScore":
+    """Project a research reward signal into archive-compatible fitness."""
+    if hasattr(reward_signal, "model_dump"):
+        payload = reward_signal.model_dump()
+    elif isinstance(reward_signal, dict):
+        payload = dict(reward_signal)
+    else:
+        raise TypeError("reward_signal must be a RewardSignal or dict-like payload")
+
+    grade_card = dict(payload.get("grade_card") or {})
+    metadata = dict(grade_card.get("metadata") or {})
+    gate_failures = list(grade_card.get("gate_failures") or [])
+    final_score = _clamp01(float(grade_card.get("final_score", 0.0) or 0.0))
+    groundedness = _clamp01(float(grade_card.get("groundedness", 0.0) or 0.0))
+    contradiction_handling = _clamp01(
+        float(grade_card.get("contradiction_handling", 0.0) or 0.0)
+    )
+    structure = _clamp01(float(grade_card.get("structure", 0.0) or 0.0))
+    cost_norm = _clamp01(float(metadata.get("cost_norm", 0.0) or 0.0))
+    latency_norm = _clamp01(float(metadata.get("latency_norm", 0.0) or 0.0))
+    token_norm = _clamp01(float(metadata.get("token_norm", 0.0) or 0.0))
+
+    return FitnessScore(
+        correctness=final_score,
+        dharmic_alignment=_clamp01((groundedness * 0.6) + (contradiction_handling * 0.4)),
+        performance=_clamp01(1.0 - latency_norm),
+        utilization=_clamp01(1.0 - token_norm),
+        economic_value=_clamp01(1.0 - cost_norm),
+        elegance=structure,
+        efficiency=_clamp01(1.0 - ((cost_norm + latency_norm + token_norm) / 3.0)),
+        safety=1.0 if not gate_failures else 0.0,
+    )
 
 
 class FitnessScore(BaseModel):

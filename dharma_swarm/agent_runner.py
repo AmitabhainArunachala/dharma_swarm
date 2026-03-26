@@ -30,6 +30,11 @@ from dharma_swarm.models import (
 )
 from dharma_swarm.agent_memory import AgentMemoryBank
 from dharma_swarm.jikoku_samaya import get_global_tracer as _jikoku_tracer
+from dharma_swarm.runtime_fields import (
+    RuntimeFieldRegistry,
+    build_runtime_field_registry_from_agent_config,
+    runtime_field_manifest_for_agent_config,
+)
 from dharma_swarm.telos_gates import check_with_reflective_reroute
 
 logger = logging.getLogger(__name__)
@@ -950,6 +955,7 @@ class AgentRunner:
         self._state = _state_from_config(config)
         self._lock = asyncio.Lock()
         self._background_tasks: set[asyncio.Task[Any]] = set()
+        self._runtime_fields = build_runtime_field_registry_from_agent_config(config)
 
     # -- properties ---------------------------------------------------------
 
@@ -960,6 +966,37 @@ class AgentRunner:
     @property
     def agent_id(self) -> str:
         return self._config.id
+
+    @property
+    def runtime_fields(self) -> RuntimeFieldRegistry:
+        """Expose runtime mutation targets for prompt/parameter evolution."""
+        return self._runtime_fields
+
+    async def run_auto_research_workflow(
+        self,
+        brief: Any,
+        *,
+        research_engine: Any,
+        grade_engine: Any,
+        trace_store: Any | None = None,
+        lineage_graph: Any | None = None,
+        checkpoint_dir: Path | None = None,
+        grade_kwargs: dict[str, Any] | None = None,
+    ) -> Any:
+        """Execute AutoResearch + AutoGrade through the canonical workflow runtime."""
+        from dharma_swarm.workflow import execute_auto_research_workflow
+
+        return await execute_auto_research_workflow(
+            brief=brief,
+            research_engine=research_engine,
+            grade_engine=grade_engine,
+            agent_name=self._config.name,
+            trace_store=trace_store,
+            lineage_graph=lineage_graph,
+            checkpoint_dir=checkpoint_dir,
+            grade_kwargs=grade_kwargs,
+            runtime_field_names=self._runtime_fields.names(),
+        )
 
     # -- lifecycle ----------------------------------------------------------
 
@@ -1155,6 +1192,7 @@ class AgentRunner:
                 result_text=result,
             )
 
+
             # ── Output guardrails: check agent output before accepting ──
             try:
                 from dharma_swarm.guardrails import (
@@ -1318,6 +1356,7 @@ class AgentRunner:
                 result_text=str(exc),
                 success=False,
             )
+
 
             # Record failure as a learned lesson
             await self._record_failure_memory(task, exc)
@@ -1857,6 +1896,7 @@ class AgentPool:
         except Exception:
             logger.debug("Constitutional enrichment skipped", exc_info=True)
 
+
         runner = AgentRunner(
             config,
             provider=provider,
@@ -1890,6 +1930,7 @@ class AgentPool:
                     role=config.role.value if hasattr(config.role, "value") else str(config.role),
                     model=config.model or "",
                     system_prompt=config.system_prompt or "",
+                    runtime_fields=runtime_field_manifest_for_agent_config(config),
                 )
         except Exception:
             logger.debug("AgentRegistry registration skipped", exc_info=True)

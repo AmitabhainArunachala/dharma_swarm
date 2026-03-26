@@ -1,6 +1,7 @@
 """Tests for dharma_swarm.agent_runner."""
 
 import builtins
+import json
 import re
 from pathlib import Path
 import sqlite3
@@ -344,6 +345,36 @@ async def test_pool_spawn():
     agents = await pool.list_agents()
     assert len(agents) == 1
     assert agents[0].name == "worker-1"
+
+
+@pytest.mark.asyncio
+async def test_pool_spawn_registers_runtime_fields(tmp_path: Path):
+    pool = AgentPool()
+    state_dir = tmp_path / ".dharma"
+    state_dir.mkdir()
+    config = AgentConfig(
+        name="worker-rt",
+        role=AgentRole.GENERAL,
+        system_prompt="Act carefully.",
+        metadata={
+            "state_dir": str(state_dir),
+            "memory_state_dir": str(state_dir),
+            "optimizable_fields": [
+                "system_prompt",
+                {"name": "style", "path": "metadata['prompt_style']"},
+            ],
+            "prompt_style": "precise",
+        },
+    )
+
+    runner = await pool.spawn(config)
+
+    assert runner.runtime_fields.names() == ["system_prompt", "style"]
+
+    manifest_path = state_dir / "ginko" / "agents" / "worker-rt" / "runtime_fields.json"
+    assert manifest_path.exists()
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    assert [field["name"] for field in manifest["fields"]] == ["system_prompt", "style"]
 
 
 @pytest.mark.asyncio
