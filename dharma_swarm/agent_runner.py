@@ -645,6 +645,15 @@ def _build_system_prompt(config: AgentConfig) -> str:
         else:
             parts.append(f"You are a {config.role.value} agent in the DHARMA SWARM.")
 
+    # Inject dharmic ground — the Gnani field (ambient recognition environment)
+    try:
+        from dharma_swarm.dharma_attractor import DharmaAttractor
+        _seed = DharmaAttractor().ambient_seed()
+        if _seed:
+            parts.append(_seed)
+    except Exception:
+        logger.debug("Attractor seed injection failed for %s", config.name, exc_info=True)
+
     # Inject agent self-state: identity, organism state, recent memory
     try:
         self_state = _build_self_state_block(config.name)

@@ -121,12 +121,33 @@ class StigmergyStore:
         Derives a channel from the agent name when the mark uses the
         default channel (``general``), giving dashboard, cascade, and
         test agents proper channel separation.
+
+        Applies salience boosting so the living layers (Shakti, subconscious)
+        have meaningful signal to perceive:
+        - Governance/witness channel marks: +0.1
+        - Marks with connections: +0.05 per connection (cap +0.2)
         """
+        updates: dict[str, object] = {}
+
+        # Channel derivation
         if mark.channel == "general" and mark.agent:
             derived = _derive_channel(mark.agent)
             if derived != "general":
-                # Pydantic frozen? Use model_copy for immutable marks.
-                mark = mark.model_copy(update={"channel": derived})
+                updates["channel"] = derived
+
+        # Salience boosting — feed the living layers
+        boosted = mark.salience
+        effective_channel = updates.get("channel", mark.channel)
+        if effective_channel in ("governance", "witness"):
+            boosted += 0.1
+        if mark.connections:
+            boosted += min(len(mark.connections) * 0.05, 0.2)
+        if boosted != mark.salience:
+            updates["salience"] = min(boosted, 1.0)
+
+        if updates:
+            mark = mark.model_copy(update=updates)
+
         self.base_path.mkdir(parents=True, exist_ok=True)
         line = mark.model_dump_json() + "\n"
         async with self._write_lock:

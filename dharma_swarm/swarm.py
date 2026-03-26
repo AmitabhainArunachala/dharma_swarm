@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import os
 import time
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -47,6 +48,7 @@ if TYPE_CHECKING:
     from dharma_swarm.adaptive_autonomy import AdaptiveAutonomy
     from dharma_swarm.agent_memory import AgentMemoryBank
     from dharma_swarm.agent_runner import AgentPool
+    from dharma_swarm.auto_proposer import AutoProposer
     from dharma_swarm.canary import CanaryDeployer
     from dharma_swarm.context_search import ContextSearchEngine
     from dharma_swarm.dharma_corpus import DharmaCorpus
@@ -177,6 +179,10 @@ class SwarmManager:
         # v0.9.0: Decision Ontology — structured decision governance
         self._decision_log: Any = None  # DecisionLog
 
+        # v0.9.3: AutoProposer — closes the autonomy loop
+        self._auto_proposer: AutoProposer | None = None
+        self._auto_proposer_interval_ticks: int = 60  # every ~30 min (60 × 30s)
+
         # Central config (Beer's S5 — identity at the parameter level)
         from dharma_swarm.config import DEFAULT_CONFIG
         self._config = DEFAULT_CONFIG
@@ -191,6 +197,13 @@ class SwarmManager:
 
         # Subsystem initialization tracking
         self._initialized: set[str] = set()
+        self._startup_background_task: asyncio.Task[None] | None = None
+        self._fast_boot = str(os.environ.get("DHARMA_FAST_BOOT", "")).strip().lower() in {
+            "1",
+            "true",
+            "yes",
+            "on",
+        }
 
         # Daemon state
         self._last_contribution: datetime | None = None
@@ -231,6 +244,270 @@ class SwarmManager:
     def is_ready(self, subsystem_name: str) -> bool:
         """Check if a subsystem has been initialized."""
         return getattr(self, f"_{subsystem_name}", None) is not None
+
+    def _refresh_initialized_registry(self) -> None:
+        """Refresh the initialized subsystem ledger from current attributes."""
+        self._initialized.clear()
+        for name, attr in [
+            ("task_board", self._task_board),
+            ("agent_pool", self._agent_pool),
+            ("message_bus", self._message_bus),
+            ("orchestrator", self._orchestrator),
+            ("gatekeeper", self._gatekeeper),
+            ("memory", self._memory),
+            ("event_memory", self._event_memory),
+            ("engine", self._engine),
+            ("monitor", self._monitor),
+            ("kernel_guard", self._kernel_guard),
+            ("corpus", self._corpus),
+            ("stigmergy", self._stigmergy),
+            ("skill_registry", self._skill_registry),
+            ("director", self._director),
+            ("organism", self._organism),
+            ("witness", self._witness),
+            ("decision_log", self._decision_log),
+            ("tool_registry", self._tool_registry),
+            ("cron_scheduler", self._cron_scheduler),
+            ("gateway", self._gateway),
+            ("bridge_rv", self._bridge_rv),
+        ]:
+            if attr is not None:
+                self._initialized.add(name)
+
+        logger.info(
+            "Subsystems initialized: %d/%d critical, %d optional",
+            len(self._initialized & self._CRITICAL_SUBSYSTEMS),
+            len(self._CRITICAL_SUBSYSTEMS),
+            len(self._initialized - self._CRITICAL_SUBSYSTEMS),
+        )
+
+    async def _init_optional_subsystems(self) -> None:
+        """Initialize noncritical subsystems after the core runtime is live."""
+        # v0.2.0: Darwin Engine + System Monitor
+        from dharma_swarm.evolution import DarwinEngine
+        from dharma_swarm.monitor import SystemMonitor
+        from dharma_swarm.traces import TraceStore
+
+        evo_dir = self.state_dir / "evolution"
+        traces_dir = self.state_dir / "traces"
+
+        self._trace_store = TraceStore(base_path=traces_dir)
+        await self._trace_store.init()
+
+        self._engine = DarwinEngine(
+            archive_path=evo_dir / "archive.jsonl",
+            traces_path=traces_dir,
+            predictor_path=evo_dir / "predictor_data.jsonl",
+        )
+        await self._engine.init()
+
+        # v0.9.2: Meta-evolution engine — adapts DarwinEngine hyperparameters
+        from dharma_swarm.meta_evolution import MetaEvolutionEngine
+
+        self._meta_engine = MetaEvolutionEngine(
+            self._engine,
+            meta_archive_path=evo_dir / "meta_archive.jsonl",
+            n_object_cycles_per_meta=2,
+            auto_apply=True,
+        )
+
+        self._monitor = SystemMonitor(trace_store=self._trace_store)
+
+        # v0.3.0: Gödel Claw — Dharma Kernel, Corpus, Policy, Canary, Stigmergy
+        from dharma_swarm.dharma_kernel import KernelGuard
+        from dharma_swarm.dharma_corpus import DharmaCorpus
+        from dharma_swarm.policy_compiler import PolicyCompiler
+        from dharma_swarm.canary import CanaryDeployer
+
+        kernel_path = self.state_dir / "kernel.json"
+        corpus_path = self.state_dir / "corpus.jsonl"
+
+        self._kernel_guard = KernelGuard(kernel_path=kernel_path)
+        try:
+            await self._kernel_guard.load()
+        except (FileNotFoundError, ValueError):
+            from dharma_swarm.dharma_kernel import DharmaKernel
+
+            default = DharmaKernel.create_default()
+            await self._kernel_guard.save(default)
+
+        self._corpus = DharmaCorpus(path=corpus_path)
+        await self._corpus.load()
+
+        self._compiler = PolicyCompiler()
+
+        self._canary = CanaryDeployer(archive=self._engine.archive)
+
+        try:
+            from dharma_swarm.stigmergy import StigmergyStore
+
+            stigmergy_path = self.state_dir / "stigmergy"
+            self._stigmergy = StigmergyStore(base_path=stigmergy_path)
+        except ImportError:
+            self._stigmergy = None
+            logger.debug("Stigmergy module not available yet")
+
+        logger.info("Gödel Claw v1 subsystems initialized")
+
+        # v0.9.3: AutoProposer — closes the autonomy loop
+        try:
+            from dharma_swarm.auto_proposer import AutoProposer
+
+            self._auto_proposer = AutoProposer(
+                darwin_engine=self._engine,
+                system_monitor=self._monitor,
+                fitness_predictor=self._engine.predictor,
+                stigmergy=self._stigmergy,
+                log_dir=self.state_dir / "auto_proposer",
+            )
+            logger.info("AutoProposer initialized — autonomy loop closed")
+        except Exception as exc:
+            self._auto_proposer = None
+            logger.debug("AutoProposer init failed (non-fatal): %s", exc)
+
+        # v0.4.0: Oz-inspired systems
+        try:
+            from dharma_swarm.skills import SkillRegistry
+            from dharma_swarm.profiles import ProfileManager
+            from dharma_swarm.intent_router import IntentRouter
+            from dharma_swarm.context_search import ContextSearchEngine
+            from dharma_swarm.adaptive_autonomy import AdaptiveAutonomy
+
+            self._skill_registry = SkillRegistry()
+            self._skill_registry.discover()
+
+            profiles_dir = self.state_dir / "profiles"
+            self._profile_mgr = ProfileManager(profile_dir=profiles_dir)
+            self._profile_mgr.load_all()
+
+            self._intent_router = IntentRouter(registry=self._skill_registry)
+
+            self._context_search = ContextSearchEngine()
+            self._context_search.build_index()
+
+            self._autonomy = AdaptiveAutonomy(base_level="balanced")
+
+            from dharma_swarm.skill_composer import SkillComposer
+            from dharma_swarm.handoff import HandoffProtocol
+
+            self._skill_composer = SkillComposer(
+                registry=self._skill_registry,
+                router=self._intent_router,
+            )
+            self._handoff = HandoffProtocol(
+                store_path=self.state_dir / "handoffs.jsonl",
+            )
+
+            logger.info("v0.4.0+ Oz-inspired systems initialized")
+        except Exception as e:
+            logger.warning("v0.4.0 systems init failed (non-fatal): %s", e)
+
+        # v0.5.0: Thinkodynamic Director
+        try:
+            from dharma_swarm.thinkodynamic_director import ThinkodynamicDirector
+
+            self._director = ThinkodynamicDirector(
+                state_dir=self.state_dir,
+                swarm=self,
+            )
+            await self._director.init()
+            logger.info("ThinkodynamicDirector initialized")
+        except Exception as e:
+            logger.warning("ThinkodynamicDirector init failed (non-fatal): %s", e)
+
+        # v0.7.0: OrganismRuntime
+        try:
+            from dharma_swarm.organism import OrganismRuntime
+
+            self._organism = OrganismRuntime(
+                state_dir=self.state_dir,
+                on_algedonic=self._algedonic_handler,
+            )
+            logger.info("OrganismRuntime initialized — Gnani/Samvara/Algedonic active")
+        except Exception as e:
+            logger.warning("OrganismRuntime init failed (non-fatal): %s", e)
+
+        # v0.8.0: Witness auditor
+        try:
+            from dharma_swarm.witness import WitnessAuditor
+
+            self._witness = WitnessAuditor(
+                cycle_seconds=3600.0,
+                provider=self._router,
+            )
+            logger.info("WitnessAuditor initialized — S3* sporadic audit active")
+        except Exception as e:
+            logger.warning("WitnessAuditor init failed (non-fatal): %s", e)
+
+        # v0.9.0: Decision Ontology
+        try:
+            from dharma_swarm.decision_ontology import DecisionLog
+
+            self._decision_log = DecisionLog(
+                path=self.state_dir / "meta" / "decisions.jsonl",
+            )
+            logger.info("DecisionLog initialized — structured decision governance active")
+        except Exception as e:
+            logger.warning("DecisionLog init failed (non-fatal): %s", e)
+
+        # v0.6.0: Hermes-inspired integration
+        try:
+            from dharma_swarm.tool_registry import ToolRegistry
+
+            self._tool_registry = ToolRegistry()
+            logger.info("ToolRegistry initialized")
+        except Exception as e:
+            logger.warning("ToolRegistry init failed (non-fatal): %s", e)
+
+        try:
+            from dharma_swarm import cron_scheduler as _cron_mod
+
+            self._cron_scheduler = _cron_mod
+            logger.info("CronScheduler module loaded")
+        except Exception as e:
+            logger.warning("CronScheduler import failed (non-fatal): %s", e)
+
+        try:
+            from dharma_swarm.gateway import GatewayRunner
+
+            self._gateway = GatewayRunner(message_handler=None)
+            logger.info("GatewayRunner initialized (call gateway.start() to activate adapters)")
+        except Exception as e:
+            logger.warning("GatewayRunner init failed (non-fatal): %s", e)
+
+        try:
+            from dharma_swarm.bridge import ResearchBridge
+
+            bridge_path = self.state_dir / "bridge_measurements.jsonl"
+            self._bridge_rv = ResearchBridge(data_path=bridge_path)
+            logger.info("ResearchBridge initialized")
+        except Exception as e:
+            logger.warning("ResearchBridge init failed (non-fatal): %s", e)
+
+        self._telos_substrate_seeded = False
+        self._refresh_initialized_registry()
+
+    async def _complete_deferred_startup(self) -> None:
+        """Backfill the default crew and optional subsystems after fast boot."""
+        try:
+            from dharma_swarm.startup_crew import spawn_default_crew
+
+            crew = await spawn_default_crew(self)
+            if crew:
+                logger.info("Deferred startup spawned %d agents from default crew", len(crew))
+            await self._init_optional_subsystems()
+            if self._memory is not None:
+                await self._memory.remember(
+                    f"Swarm fast-boot backfill complete — {len(crew)} default agents added",
+                    layer=MemoryLayer.SESSION,
+                    source="swarm",
+                )
+            logger.info("Deferred startup bootstrap complete")
+        except asyncio.CancelledError:
+            logger.info("Deferred startup bootstrap cancelled")
+            raise
+        except Exception as exc:
+            logger.exception("Deferred startup bootstrap failed: %s", exc)
 
     async def init(self) -> None:
         """Initialize all subsystems."""
@@ -312,206 +589,77 @@ class SwarmManager:
             logger.warning("Stale task reaper failed (non-fatal): %s", exc)
 
         # Spawn default crew and seed tasks if this is a fresh start
-        from dharma_swarm.startup_crew import spawn_default_crew, create_seed_tasks
-        crew = await spawn_default_crew(self)
-        seeds = await create_seed_tasks(self)
-        if crew:
-            logger.info("Spawned %d agents from default crew", len(crew))
+        from dharma_swarm.startup_crew import (
+            spawn_cybernetics_crew,
+            spawn_default_crew,
+            create_seed_tasks,
+        )
+        crew: list[AgentState] | list = []
+        _CREW_TIMEOUT = 30.0  # seconds — crew spawning should not block init
+        try:
+            cyber_crew = await asyncio.wait_for(
+                spawn_cybernetics_crew(self), timeout=_CREW_TIMEOUT,
+            )
+        except (asyncio.TimeoutError, Exception) as exc:
+            logger.warning("Cybernetics crew spawn timed out or failed (non-fatal): %s", exc)
+            cyber_crew = []
+        try:
+            seeds = await asyncio.wait_for(
+                create_seed_tasks(self), timeout=_CREW_TIMEOUT,
+            )
+        except (asyncio.TimeoutError, Exception) as exc:
+            logger.warning("Seed tasks creation timed out or failed (non-fatal): %s", exc)
+            seeds = []
+
+        if cyber_crew:
+            logger.info("Spawned %d agents for cybernetics crew", len(cyber_crew))
         if seeds:
             logger.info("Created %d seed tasks", len(seeds))
 
+        if self._fast_boot:
+            await self._memory.remember(
+                f"Swarm fast-boot initialized — 0 default agents, "
+                f"{len(cyber_crew)} cybernetics agents, {len(seeds)} seed tasks",
+                layer=MemoryLayer.SESSION,
+                source="swarm",
+            )
+            self._telos_substrate_seeded = False
+            self._refresh_initialized_registry()
+            self._startup_background_task = asyncio.create_task(
+                self._complete_deferred_startup()
+            )
+            logger.info(
+                "Fast boot enabled — deferred default crew and noncritical subsystems"
+            )
+            return
+
+        try:
+            crew = await asyncio.wait_for(
+                spawn_default_crew(self), timeout=_CREW_TIMEOUT,
+            )
+        except (asyncio.TimeoutError, Exception) as exc:
+            logger.warning("Default crew spawn timed out or failed (non-fatal): %s", exc)
+            crew = []
+        if crew:
+            logger.info("Spawned %d agents from default crew", len(crew))
+
         await self._memory.remember(
-            f"Swarm initialized — {len(crew)} agents, {len(seeds)} seed tasks",
+            f"Swarm initialized — {len(crew)} default agents, "
+            f"{len(cyber_crew)} cybernetics agents, {len(seeds)} seed tasks",
             layer=MemoryLayer.SESSION,
             source="swarm",
         )
 
-        # v0.2.0: Darwin Engine + System Monitor
-        from dharma_swarm.evolution import DarwinEngine
-        from dharma_swarm.monitor import SystemMonitor
-        from dharma_swarm.traces import TraceStore
-
-        evo_dir = self.state_dir / "evolution"
-        traces_dir = self.state_dir / "traces"
-
-        self._trace_store = TraceStore(base_path=traces_dir)
-        await self._trace_store.init()
-
-        self._engine = DarwinEngine(
-            archive_path=evo_dir / "archive.jsonl",
-            traces_path=traces_dir,
-            predictor_path=evo_dir / "predictor_data.jsonl",
-        )
-        await self._engine.init()
-
-        # v0.9.2: Meta-evolution engine — adapts DarwinEngine hyperparameters
-        from dharma_swarm.meta_evolution import MetaEvolutionEngine
-
-        self._meta_engine = MetaEvolutionEngine(
-            self._engine,
-            meta_archive_path=evo_dir / "meta_archive.jsonl",
-            n_object_cycles_per_meta=2,
-            auto_apply=True,
-        )
-
-        self._monitor = SystemMonitor(trace_store=self._trace_store)
-
-        # v0.3.0: Gödel Claw — Dharma Kernel, Corpus, Policy, Canary, Stigmergy
-        from dharma_swarm.dharma_kernel import KernelGuard
-        from dharma_swarm.dharma_corpus import DharmaCorpus
-        from dharma_swarm.policy_compiler import PolicyCompiler
-        from dharma_swarm.canary import CanaryDeployer
-
-        kernel_path = self.state_dir / "kernel.json"
-        corpus_path = self.state_dir / "corpus.jsonl"
-
-        self._kernel_guard = KernelGuard(kernel_path=kernel_path)
         try:
-            await self._kernel_guard.load()
-        except (FileNotFoundError, ValueError):
-            # First run or tampered — create default kernel
-            from dharma_swarm.dharma_kernel import DharmaKernel
-            default = DharmaKernel.create_default()
-            await self._kernel_guard.save(default)
-
-        self._corpus = DharmaCorpus(path=corpus_path)
-        await self._corpus.load()
-
-        self._compiler = PolicyCompiler()
-
-        self._canary = CanaryDeployer(archive=self._engine.archive)
-
-        # Stigmergy (may not exist yet — created by Agent 11)
-        try:
-            from dharma_swarm.stigmergy import StigmergyStore
-            stigmergy_path = self.state_dir / "stigmergy"
-            self._stigmergy = StigmergyStore(base_path=stigmergy_path)
-        except ImportError:
-            self._stigmergy = None
-            logger.debug("Stigmergy module not available yet")
-
-        logger.info("Gödel Claw v1 subsystems initialized")
-
-        # v0.4.0: Oz-inspired systems (skill registry, profiles, intent router,
-        # context search, adaptive autonomy)
-        try:
-            from dharma_swarm.skills import SkillRegistry
-            from dharma_swarm.profiles import ProfileManager
-            from dharma_swarm.intent_router import IntentRouter
-            from dharma_swarm.context_search import ContextSearchEngine
-            from dharma_swarm.adaptive_autonomy import AdaptiveAutonomy
-
-            self._skill_registry = SkillRegistry()
-            self._skill_registry.discover()
-
-            profiles_dir = self.state_dir / "profiles"
-            self._profile_mgr = ProfileManager(profile_dir=profiles_dir)
-            self._profile_mgr.load_all()
-
-            self._intent_router = IntentRouter(registry=self._skill_registry)
-
-            self._context_search = ContextSearchEngine()
-            self._context_search.build_index()
-
-            self._autonomy = AdaptiveAutonomy(base_level="balanced")
-
-            # v0.4.1: Composition, handoff, agent memory
-            from dharma_swarm.skill_composer import SkillComposer
-            from dharma_swarm.handoff import HandoffProtocol
-            self._skill_composer = SkillComposer(
-                registry=self._skill_registry,
-                router=self._intent_router,
+            await asyncio.wait_for(
+                self._init_optional_subsystems(), timeout=120.0,
             )
-            self._handoff = HandoffProtocol(
-                store_path=self.state_dir / "handoffs.jsonl",
+        except asyncio.TimeoutError:
+            logger.warning(
+                "Optional subsystem init timed out after 120s — "
+                "continuing with critical subsystems only"
             )
-
-            logger.info("v0.4.0+ Oz-inspired systems initialized")
-        except Exception as e:
-            logger.warning("v0.4.0 systems init failed (non-fatal): %s", e)
-
-        # v0.5.0: Thinkodynamic Director
-        try:
-            from dharma_swarm.thinkodynamic_director import ThinkodynamicDirector
-
-            self._director = ThinkodynamicDirector(
-                state_dir=self.state_dir,
-                swarm=self,
-            )
-            await self._director.init()
-            logger.info("ThinkodynamicDirector initialized")
-        except Exception as e:
-            logger.warning("ThinkodynamicDirector init failed (non-fatal): %s", e)
-
-        # v0.7.0: OrganismRuntime — Gnani, Samvara, LiveCoherence
-        # v0.7.1: Algedonic channel wired — pain signals → file + macOS notification
-        try:
-            from dharma_swarm.organism import OrganismRuntime
-
-            self._organism = OrganismRuntime(
-                state_dir=self.state_dir,
-                on_algedonic=self._algedonic_handler,
-            )
-            logger.info("OrganismRuntime initialized — Gnani/Samvara/Algedonic active")
-        except Exception as e:
-            logger.warning("OrganismRuntime init failed (non-fatal): %s", e)
-
-        # v0.8.0: Witness auditor (Beer S3* — sporadic random audit)
-        try:
-            from dharma_swarm.witness import WitnessAuditor
-
-            self._witness = WitnessAuditor(
-                cycle_seconds=3600.0,
-                provider=self._router,
-            )
-            logger.info("WitnessAuditor initialized — S3* sporadic audit active")
-        except Exception as e:
-            logger.warning("WitnessAuditor init failed (non-fatal): %s", e)
-
-        # v0.9.0: Decision Ontology (structured decision governance + quality scoring)
-        try:
-            from dharma_swarm.decision_ontology import DecisionLog
-
-            self._decision_log = DecisionLog(
-                path=self.state_dir / "meta" / "decisions.jsonl",
-            )
-            logger.info("DecisionLog initialized — structured decision governance active")
-        except Exception as e:
-            logger.warning("DecisionLog init failed (non-fatal): %s", e)
-
-        # v0.9.1: Telos Substrate — seed ConceptGraph + TelosGraph with pillar data
-        # Deferred to first tick() to avoid heavyweight I/O during init.
-        self._telos_substrate_seeded = False
-
-        # Track which subsystems successfully initialized
-        for name, attr in [
-            ("task_board", self._task_board),
-            ("agent_pool", self._agent_pool),
-            ("message_bus", self._message_bus),
-            ("orchestrator", self._orchestrator),
-            ("gatekeeper", self._gatekeeper),
-            ("memory", self._memory),
-            ("event_memory", self._event_memory),
-            ("engine", self._engine),
-            ("monitor", self._monitor),
-            ("kernel_guard", self._kernel_guard),
-            ("corpus", self._corpus),
-            ("stigmergy", self._stigmergy),
-            ("skill_registry", self._skill_registry),
-            ("director", self._director),
-            ("organism", self._organism),
-            ("witness", self._witness),
-            ("decision_log", self._decision_log),
-        ]:
-            if attr is not None:
-                self._initialized.add(name)
-
-        logger.info(
-            "Subsystems initialized: %d/%d critical, %d optional",
-            len(self._initialized & self._CRITICAL_SUBSYSTEMS),
-            len(self._CRITICAL_SUBSYSTEMS),
-            len(self._initialized - self._CRITICAL_SUBSYSTEMS),
-        )
+            self._refresh_initialized_registry()
 
     # --- Agent Operations ---
 
@@ -986,16 +1134,18 @@ class SwarmManager:
         }
 
         store = ConversationMemoryStore(plane_path)
-        # Run synchronous SQLite query in thread to avoid blocking event loop
+        # Run synchronous SQLite query in thread to avoid blocking event loop.
+        # Push state + salience filters into SQL (min_salience param) so we
+        # scan far fewer of the 85K+ shards.
+        _sal = min_salience
         loop = asyncio.get_running_loop()
         all_shards = await loop.run_in_executor(
-            None, lambda: store.latent_gold("", limit=200)
+            None, lambda: store.latent_gold("", limit=200, min_salience=_sal)
         )
         candidates = [
             shard
             for shard in all_shards
             if shard.state in {"orphaned", "deferred"}
-            and float(shard.salience) >= min_salience
             and shard.shard_id not in claimed_shards
         ]
         if not candidates:
@@ -1694,16 +1844,32 @@ class SwarmManager:
             return result
 
         # v0.9.1: Deferred Telos Substrate seeding (once, first tick)
+        # The concept graph is ~21 MB JSON (4686 nodes, 54804 edges).
+        # Once seeded, subsequent runs create 0 new entities but still
+        # load/parse the full file, blocking the event loop for 30-60s.
+        # Persist the seeded flag so we skip on daemon restart.
         if not self._telos_substrate_seeded:
-            self._telos_substrate_seeded = True
-            try:
-                from dharma_swarm.telos_substrate import TelosSubstrate
+            seed_marker = self.state_dir / "meta" / "substrate_seeded.flag"
+            if seed_marker.exists():
+                self._telos_substrate_seeded = True
+                logger.info("TelosSubstrate already seeded (flag exists)")
+            else:
+                self._telos_substrate_seeded = True
+                try:
+                    from dharma_swarm.telos_substrate import TelosSubstrate
 
-                substrate = TelosSubstrate(state_dir=self.state_dir)
-                seed_result = await substrate.seed_all()
-                logger.info("TelosSubstrate seeded: %s", seed_result)
-            except Exception as e:
-                logger.warning("TelosSubstrate seeding failed (non-fatal): %s", e)
+                    substrate = TelosSubstrate(state_dir=self.state_dir)
+                    seed_result = await asyncio.wait_for(
+                        substrate.seed_all(), timeout=120.0
+                    )
+                    logger.info("TelosSubstrate seeded: %s", seed_result)
+                    # Persist the flag
+                    seed_marker.parent.mkdir(parents=True, exist_ok=True)
+                    seed_marker.write_text("seeded")
+                except asyncio.TimeoutError:
+                    logger.warning("TelosSubstrate seeding timed out (120s)")
+                except Exception as e:
+                    logger.warning("TelosSubstrate seeding failed (non-fatal): %s", e)
 
         allow_autonomous_generation = True
         if self._in_quiet_hours():
@@ -1878,8 +2044,18 @@ class SwarmManager:
             logger.warning("orchestrator.tick took %.1fs", _orch_dur)
 
         _coord_t0 = _time.monotonic()
-        coordination = await self.coordination_status(refresh=False)
-        synthesized = await self.spawn_coordination_tasks(coordination=coordination)
+        try:
+            coordination = await asyncio.wait_for(
+                self.coordination_status(refresh=False), timeout=10.0
+            )
+            synthesized = await asyncio.wait_for(
+                self.spawn_coordination_tasks(coordination=coordination),
+                timeout=15.0,
+            )
+        except asyncio.TimeoutError:
+            coordination = SwarmCoordinationState()
+            synthesized = []
+            logger.warning("coordination timed out")
         result["synthesized"] = len(synthesized)
         _coord_dur = _time.monotonic() - _coord_t0
         if _coord_dur > 5.0:
@@ -1926,6 +2102,28 @@ class SwarmManager:
                     )
             except Exception as exc:
                 logger.debug("Witness audit error: %s", exc)
+
+        # ── AutoProposer: closed-loop self-improvement ──
+        if (self._auto_proposer is not None
+                and self._tick_count % self._auto_proposer_interval_ticks == 0):
+            try:
+                ap_result = await asyncio.wait_for(
+                    self._auto_proposer.cycle(), timeout=30.0
+                )
+                result["auto_proposer_observations"] = ap_result.observations_collected
+                result["auto_proposer_proposals"] = ap_result.proposals_generated
+                result["auto_proposer_submitted"] = ap_result.proposals_submitted
+                if ap_result.proposals_generated:
+                    logger.info(
+                        "AutoProposer: %d observations -> %d proposals -> %d submitted",
+                        ap_result.observations_collected,
+                        ap_result.proposals_generated,
+                        ap_result.proposals_submitted,
+                    )
+            except asyncio.TimeoutError:
+                logger.warning("AutoProposer.cycle timed out after 30s")
+            except Exception as exc:
+                logger.debug("AutoProposer cycle error: %s", exc)
 
         _tick_dur = _time.monotonic() - _tick_t0
         logger.info(
@@ -2469,6 +2667,26 @@ class SwarmManager:
                         await result
             except Exception as exc:
                 logger.debug("Director stop failed (non-fatal): %s", exc)
+
+        # 2b. Stop gateway (optional subsystem)
+        if self._gateway:
+            try:
+                await self._gateway.stop()
+            except Exception as exc:
+                logger.debug("Gateway stop failed (non-fatal): %s", exc)
+
+        # 2c. Cancel deferred startup work if it is still running
+        if self._startup_background_task is not None:
+            try:
+                if not self._startup_background_task.done():
+                    self._startup_background_task.cancel()
+                await self._startup_background_task
+            except asyncio.CancelledError:
+                pass
+            except Exception as exc:
+                logger.debug("Deferred startup shutdown failed (non-fatal): %s", exc)
+            finally:
+                self._startup_background_task = None
 
         # 3. Shutdown agents
         if self._agent_pool:
