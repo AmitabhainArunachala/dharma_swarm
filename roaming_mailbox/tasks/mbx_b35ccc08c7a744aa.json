@@ -1,0 +1,30 @@
+{
+  "task_id": "mbx_b35ccc08c7a744aa",
+  "recipient": "kimi-claw-phone",
+  "sender": "operator",
+  "summary": "Bridge lockfix smoke test task for kimi-claw-phone.",
+  "body": "# Operator Bridge Task\n\n## Task\nBridge lockfix smoke test task for kimi-claw-phone.\n\n## Scope\noperations\n\n## Constraints\nbounded\n\n## Expected Output\nstatus_note\n\n## Payload\n{\n  \"target_agent\": \"kimi-claw-phone\"\n}",
+  "status": "queued",
+  "capabilities": [
+    "operations"
+  ],
+  "metadata": {
+    "bridge_task_id": "bridge_e5b74a50024b4751",
+    "bridge_status": "in_progress",
+    "request_message_id": "d6653be7d59b48b5",
+    "bridge_payload": {
+      "target_agent": "kimi-claw-phone"
+    },
+    "bridge_constraints": [
+      "bounded"
+    ],
+    "bridge_output": [
+      "status_note"
+    ]
+  },
+  "created_at": "2026-03-26T14:53:32.727763+00:00",
+  "claimed_at": "",
+  "claimed_by": "",
+  "responded_at": "",
+  "response_ref": ""
+}
