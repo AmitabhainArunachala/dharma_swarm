@@ -664,9 +664,12 @@ def test_algedonic_handler_writes_signal_log(tmp_path):
 
 
 def test_algedonic_critical_creates_emergency_hold(tmp_path):
-    """Critical signal writes EMERGENCY_HOLD marker file."""
+    """Critical signal writes EMERGENCY_HOLD marker file (after cold-start grace)."""
+    import time
     sm = SwarmManager.__new__(SwarmManager)
     sm.state_dir = tmp_path
+    # Simulate post-grace-period: set _start_time far in the past
+    sm._start_time = time.monotonic() - 300.0
 
     class FakeSignal:
         kind = "telos_drift"
