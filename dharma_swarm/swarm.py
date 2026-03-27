@@ -491,9 +491,9 @@ class SwarmManager:
         try:
             from dharma_swarm.hibernation import HibernationManager
 
-            hib_db = str(self.state_dir / "db" / "hibernation.db")
-            (self.state_dir / "db").mkdir(parents=True, exist_ok=True)
-            self._hibernation_manager = HibernationManager(db_path=hib_db)
+            hib_dir = self.state_dir / "hibernation"
+            hib_dir.mkdir(parents=True, exist_ok=True)
+            self._hibernation_manager = HibernationManager(state_dir=hib_dir)
             if self._orchestrator is not None:
                 self._orchestrator.set_hibernation_manager(self._hibernation_manager)
             if self._organism is not None and hasattr(self._organism, "set_hibernation_manager"):
@@ -1292,6 +1292,11 @@ class SwarmManager:
         return len(dispatches)
 
     # ── Algedonic Channel (Beer S5 bypass to operator) ─────────────
+    # How many seconds after boot before EMERGENCY_HOLD can be written.
+    # Prevents cold-start death spiral where low coherence (no daemon PID,
+    # sparse subsystem files) immediately kills the swarm.
+    _COLD_START_GRACE_SECONDS: float = 120.0
+
     def _algedonic_handler(self, signal: Any) -> None:
         """Beer's algedonic channel: pain signal → file + macOS notification.
 
@@ -1318,9 +1323,10 @@ class SwarmManager:
         except OSError as exc:
             logger.warning("Algedonic log write failed: %s", exc)
 
-        # 2. Write EMERGENCY_HOLD marker if critical
+        # 2. Write EMERGENCY_HOLD marker if critical (but not during cold-start grace)
         severity = getattr(signal, "severity", "")
-        if severity == "critical":
+        uptime = time.monotonic() - getattr(self, '_start_time', time.monotonic())
+        if severity == "critical" and uptime > self._COLD_START_GRACE_SECONDS:
             hold_path = self.state_dir / "EMERGENCY_HOLD"
             try:
                 hold_path.write_text(
@@ -1330,6 +1336,12 @@ class SwarmManager:
                 )
             except OSError as exc:
                 logger.warning("EMERGENCY_HOLD write failed: %s", exc)
+        elif severity == "critical":
+            logger.info(
+                "Cold-start grace (%.0fs < %.0fs): suppressing EMERGENCY_HOLD for %s",
+                uptime, self._COLD_START_GRACE_SECONDS,
+                getattr(signal, 'kind', 'unknown'),
+            )
 
         # 3. macOS notification (non-blocking, best-effort)
         kind = getattr(signal, "kind", "unknown")
