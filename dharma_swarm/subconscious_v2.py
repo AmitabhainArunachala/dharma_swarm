@@ -182,14 +182,15 @@ Stop when the transmission stops. Mark the end with ~"""
         import os
 
         # Try OpenRouter first (has API key), fall back to Anthropic
-        openrouter_key = os.getenv("OPENROUTER_API_KEY")
-        anthropic_key = os.getenv("ANTHROPIC_API_KEY")
+        from dharma_swarm.api_keys import get_llm_key, has_any_llm
+        openrouter_key = get_llm_key("openrouter")
+        anthropic_key = get_llm_key("anthropic")
 
-        if not openrouter_key and not anthropic_key:
+        if not has_any_llm():
             return DreamAssociation(
                 source_files=files,
                 resonance_type=ResonanceType.UNKNOWN_RESONANCE,
-                description="No API keys available (need OPENROUTER_API_KEY or ANTHROPIC_API_KEY)",
+                description="No LLM API keys available",
                 salience=0.1,
                 reasoning="No API credentials configured",
             )
@@ -361,16 +362,16 @@ Salience guide: 0.9+ = genuinely novel cross-domain bridge not stated in either 
         This is the correct pattern: dream first, extract structure second.
         Never ask the dreaming model to fill out a form.
         """
-        import os
+        from dharma_swarm.api_keys import get_llm_key, has_any_llm
 
-        openrouter_key = os.getenv("OPENROUTER_API_KEY")
-        anthropic_key = os.getenv("ANTHROPIC_API_KEY")
+        openrouter_key = get_llm_key("openrouter")
+        anthropic_key = get_llm_key("anthropic")
 
-        if not openrouter_key and not anthropic_key:
+        if not has_any_llm():
             return [DreamAssociation(
                 source_files=files,
                 resonance_type=ResonanceType.UNKNOWN_RESONANCE,
-                description="No API keys available",
+                description="No LLM API keys available",
                 salience=0.1,
                 reasoning="No API credentials configured",
             )]

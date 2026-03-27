@@ -390,8 +390,9 @@ class AutonomousAgent:
     ) -> dict[str, Any]:
         if self._anthropic_client is None:
             from anthropic import AsyncAnthropic
+            from dharma_swarm.api_keys import get_llm_key
             self._anthropic_client = AsyncAnthropic(
-                api_key=os.environ.get("ANTHROPIC_API_KEY"),
+                api_key=get_llm_key("anthropic"),
             )
 
         kwargs: dict[str, Any] = {
@@ -427,8 +428,9 @@ class AutonomousAgent:
     ) -> dict[str, Any]:
         if self._openai_client is None:
             from openai import AsyncOpenAI
+            from dharma_swarm.api_keys import get_llm_key
             self._openai_client = AsyncOpenAI(
-                api_key=os.environ.get("OPENROUTER_API_KEY"),
+                api_key=get_llm_key("openrouter"),
                 base_url="https://openrouter.ai/api/v1",
             )
 

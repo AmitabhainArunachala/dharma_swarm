@@ -452,8 +452,9 @@ class ContrarianDialogue:
         except ImportError:
             # Fallback: use openai SDK directly (for testing)
             from openai import AsyncOpenAI
+            from dharma_swarm.api_keys import get_llm_key
             client = AsyncOpenAI(
-                api_key=os.environ.get("OPENROUTER_API_KEY", ""),
+                api_key=get_llm_key("openrouter") or "",
                 base_url="https://openrouter.ai/api/v1",
             )
             resp = await client.chat.completions.create(

@@ -75,7 +75,8 @@ def _hermes_available() -> bool:
     """Check if Hermes Agent can be imported and has an API key."""
     if not HERMES_DIR.is_dir():
         return False
-    if not os.getenv("ANTHROPIC_API_KEY") and not os.getenv("OPENROUTER_API_KEY"):
+    from dharma_swarm.api_keys import has_any_llm
+    if not has_any_llm():
         return False
     return True
 
