@@ -295,6 +295,95 @@ class DarwinEngine:
             return 0.0
         return fitness.weighted(weights=self._fitness_weights)
 
+    # -- Sprint 1-3 wiring: subsystem setters + extended fitness ----------
+
+    def set_knowledge_store(self, store: Any) -> None:
+        """Attach a KnowledgeStore for memory quality fitness signals."""
+        self._knowledge_store = store
+
+    def set_economic_spine(self, spine: Any) -> None:
+        """Attach an EconomicSpine for economic efficiency fitness signals."""
+        self._economic_spine = spine
+
+    def set_correction_engine(self, engine: Any) -> None:
+        """Attach a DynamicCorrectionEngine for correction health signals."""
+        self._correction_engine = engine
+
+    def compute_extended_fitness(self, agent_id: str, base_fitness: float) -> float:
+        """Extend base fitness with Sprint 1-3 signals.
+
+        Three new dimensions (each 0.0-1.0, weighted):
+        1. Memory quality: proportion of tasks that produced useful knowledge
+        2. Economic efficiency: quality per token (normalized)
+        3. Correction health: inverse of correction frequency
+
+        Final = base_fitness * 0.6 + memory * 0.15 + econ * 0.15 + health * 0.10
+        """
+        memory_signal = self._memory_quality_signal(agent_id)
+        econ_signal = self._economic_efficiency_signal(agent_id)
+        health_signal = self._correction_health_signal(agent_id)
+
+        return (
+            base_fitness * 0.6
+            + memory_signal * 0.15
+            + econ_signal * 0.15
+            + health_signal * 0.10
+        )
+
+    def _memory_quality_signal(self, agent_id: str) -> float:
+        """How well does this agent's work produce reusable knowledge?
+
+        Metric: count of knowledge units with this agent's provenance.
+        Returns 0.5 (neutral) if KnowledgeStore is not wired.
+        """
+        store = getattr(self, "_knowledge_store", None)
+        if store is None:
+            return 0.5
+        try:
+            props = store.get_by_agent_provenance(agent_id, unit_type="proposition")
+            prescs = store.get_by_agent_provenance(agent_id, unit_type="prescription")
+            total_units = len(props) + len(prescs)
+            # Normalize: 10+ units = 1.0, 0 = 0.0
+            return min(total_units / 10.0, 1.0)
+        except Exception:
+            return 0.5
+
+    def _economic_efficiency_signal(self, agent_id: str) -> float:
+        """Quality per token spent.
+
+        Returns 0.5 (neutral) if EconomicSpine is not wired.
+        """
+        spine = getattr(self, "_economic_spine", None)
+        if spine is None:
+            return 0.5
+        try:
+            stats = spine.get_agent_stats(agent_id)
+            if stats.get("mission_count", 0) == 0:
+                return 0.5
+            avg_quality = stats.get("efficiency_score", 0.5)
+            avg_cost = stats.get("tokens_spent", 1)
+            # Higher quality per token = better
+            efficiency = avg_quality / max(avg_cost / 10000.0, 0.01)
+            return min(efficiency, 1.0)
+        except Exception:
+            return 0.5
+
+    def _correction_health_signal(self, agent_id: str) -> float:
+        """Agents that trigger fewer corrections are fitter.
+
+        Returns 0.5 (neutral) if CorrectionEngine is not wired.
+        """
+        correction_engine = getattr(self, "_correction_engine", None)
+        if correction_engine is None:
+            return 0.5
+        try:
+            history = correction_engine.get_correction_history(agent_id=agent_id, limit=20)
+            correction_count = len(history)
+            # 10+ corrections in window = 0.0, 0 = 1.0
+            return max(1.0 - (correction_count / 10.0), 0.0)
+        except Exception:
+            return 0.5
+
     def get_meta_parameter_state(self) -> dict[str, Any]:
         """Export the engine knobs used by meta-evolution."""
         return {

@@ -93,12 +93,13 @@ class TestEndToEndMissionLifecycle:
 
 
 # ---------------------------------------------------------------------------
-# Budget enforcement blocks over-budget dispatch
+# Budget tracking is observational only — no enforcement
 # ---------------------------------------------------------------------------
 
 
 class TestBudgetEnforcement:
-    def test_insufficient_budget_blocks_spend(self):
+    def test_over_budget_spend_still_succeeds(self):
+        """spend_tokens always returns True — tracking only, no enforcement."""
         spine = EconomicSpine()
         b = spine.get_or_create_budget("agent-1")
         b.total_tokens_allocated = 1000
@@ -106,8 +107,10 @@ class TestBudgetEnforcement:
 
         # Spend up to limit
         assert spine.spend_tokens("agent-1", 1000) is True
-        # No more budget
-        assert spine.spend_tokens("agent-1", 1) is False
+        # Spending beyond budget still succeeds (tracking only)
+        assert spine.spend_tokens("agent-1", 1) is True
+        budget = spine.get_or_create_budget("agent-1")
+        assert budget.tokens_remaining < 0
 
     def test_earned_tokens_extend_budget(self):
         spine = EconomicSpine()

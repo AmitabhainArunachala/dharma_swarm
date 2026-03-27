@@ -204,11 +204,14 @@ class TestEconomicSpineTokens:
         budget = spine.get_or_create_budget("a1")
         assert budget.tokens_spent == 5000
 
-    def test_spend_tokens_insufficient(self):
+    def test_spend_tokens_over_budget_still_succeeds(self):
+        """spend_tokens always returns True — tracking only, no enforcement."""
         spine = EconomicSpine()
         spine.get_or_create_budget("a1")
-        # Try to spend more than available
-        assert spine.spend_tokens("a1", INITIAL_AGENT_BUDGET + 1) is False
+        # Spending more than available still succeeds (tracking only)
+        assert spine.spend_tokens("a1", INITIAL_AGENT_BUDGET + 1) is True
+        budget = spine.get_or_create_budget("a1")
+        assert budget.tokens_remaining < 0
 
     def test_spend_tokens_exact_budget(self):
         spine = EconomicSpine()
@@ -448,12 +451,15 @@ class TestEconomicSpineReporting:
 
 
 class TestEconomicSpineEdgeCases:
-    def test_zero_budget_agent(self):
+    def test_zero_budget_agent_still_spends(self):
+        """Zero-budget agent can still spend — tracking only, no enforcement."""
         spine = EconomicSpine()
         b = spine.get_or_create_budget("a1")
         b.total_tokens_allocated = 0
         spine._save_budget(b)
-        assert spine.spend_tokens("a1", 1) is False
+        assert spine.spend_tokens("a1", 1) is True
+        updated = spine.get_or_create_budget("a1")
+        assert updated.tokens_remaining < 0
 
     def test_concurrent_missions(self):
         spine = EconomicSpine()
