@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import os
 import time
 from collections import deque
 from dataclasses import dataclass, field
@@ -206,6 +207,51 @@ class Organism:
             self._concept_parser = None
             logger.debug("ConceptParser init failed (non-fatal): %s", exc)
 
+        # ── Sprint 3: Economic Spine + Dynamic Correction ────────────
+        self.economic_spine = None
+        self.correction_engine = None
+        self._reallocation_interval = int(
+            os.environ.get("REALLOCATION_INTERVAL", "10")
+        )
+        self._total_token_pool = int(
+            os.environ.get("INITIAL_AGENT_BUDGET", "100000")
+        ) * 10  # Pool = 10x single agent budget
+
+        try:
+            from dharma_swarm.economic_spine import ENABLE_ECONOMIC_SPINE, EconomicSpine
+
+            if ENABLE_ECONOMIC_SPINE:
+                econ_db = os.environ.get("ECONOMIC_DB_PATH", "")
+                if not econ_db:
+                    data_dir = self._state_dir / "data"
+                    data_dir.mkdir(parents=True, exist_ok=True)
+                    econ_db = str(data_dir / "economic_spine.db")
+                self.economic_spine = EconomicSpine(econ_db)
+                logger.info("EconomicSpine initialized: %s", econ_db)
+        except Exception as exc:
+            logger.debug("EconomicSpine init failed (non-fatal): %s", exc)
+
+        try:
+            from dharma_swarm.dynamic_correction import (
+                ENABLE_DYNAMIC_CORRECTION,
+                DynamicCorrectionEngine,
+            )
+
+            if ENABLE_DYNAMIC_CORRECTION:
+                correction_db = str(
+                    self._state_dir / "data" / "corrections.db"
+                ) if self._state_dir else ":memory:"
+                if self._state_dir:
+                    (self._state_dir / "data").mkdir(parents=True, exist_ok=True)
+                self.correction_engine = DynamicCorrectionEngine(
+                    economic_spine=self.economic_spine,
+                    dharma_attractor=self.attractor,
+                    db_path=correction_db,
+                )
+                logger.info("DynamicCorrectionEngine initialized")
+        except Exception as exc:
+            logger.debug("DynamicCorrectionEngine init failed (non-fatal): %s", exc)
+
         self.vsm.algedonic.register_callback(self._on_algedonic)
 
     async def boot(self) -> dict[str, Any]:
@@ -386,6 +432,36 @@ class Organism:
         except Exception as exc:
             logger.debug("Blast radius heartbeat failed (non-fatal): %s", exc)
 
+        # ── Sprint 3: Dynamic correction for active agents ─────────
+        try:
+            if self.correction_engine is not None:
+                active_agents = self._get_active_agent_ids()
+                for agent_id in active_agents:
+                    agent_state = self._get_agent_state_for_correction(agent_id)
+                    drift_signals = self.correction_engine.evaluate_and_correct(
+                        agent_id, agent_state
+                    )
+                    for signal in drift_signals:
+                        if signal.corrective_action:
+                            logger.info(
+                                "CORRECTION: agent=%s drift=%s action=%s",
+                                agent_id,
+                                signal.drift_type.value,
+                                signal.corrective_action.value,
+                            )
+        except Exception as exc:
+            logger.debug("Dynamic correction tick failed (non-fatal): %s", exc)
+
+        # ── Sprint 3: Periodic budget reallocation ───────────────────
+        try:
+            if (
+                self.economic_spine is not None
+                and self._cycle % self._reallocation_interval == 0
+            ):
+                self.economic_spine.reallocate_budgets(self._total_token_pool)
+        except Exception as exc:
+            logger.debug("Budget reallocation failed (non-fatal): %s", exc)
+
         scaling_rec = self._check_scaling_needs(pulse)
 
         try:
@@ -466,6 +542,51 @@ class Organism:
     def stop(self) -> None:
         """Request graceful shutdown."""
         self._running = False
+
+    # ── Sprint 3: Economic / correction helpers ──────────────────────
+
+    def set_economic_spine(self, spine: Any) -> None:
+        """Attach an EconomicSpine instance for budget tracking."""
+        self.economic_spine = spine
+        if self.correction_engine is not None:
+            self.correction_engine.economic_spine = spine
+
+    def set_correction_engine(self, engine: Any) -> None:
+        """Attach a DynamicCorrectionEngine instance."""
+        self.correction_engine = engine
+
+    def _get_active_agent_ids(self) -> list[str]:
+        """Collect IDs of currently active agents from VSM viability."""
+        try:
+            agents = self.vsm.viability.get_all_agents()
+            return [a.agent_id for a in agents if getattr(a, "is_active", True)]
+        except Exception:
+            return []
+
+    def _get_agent_state_for_correction(self, agent_id: str) -> dict[str, Any]:
+        """Build agent state dict for the correction engine."""
+        state: dict[str, Any] = {"agent_id": agent_id}
+
+        # Budget from economic spine
+        if self.economic_spine is not None:
+            try:
+                budget = self.economic_spine.get_or_create_budget(agent_id)
+                state["budget"] = budget
+            except Exception:
+                pass
+
+        # Alignment from attractor
+        if self.attractor is not None:
+            try:
+                # Use a lightweight probe as the alignment check
+                verdict = self.attractor.gnani_checkpoint(
+                    f"routine check for agent {agent_id}"
+                )
+                state["alignment_score"] = 1.0 if verdict.proceed else 0.3
+            except Exception:
+                pass
+
+        return state
 
     # ── Phase 7b: Semantic Graph helpers ──────────────────────────────
 

@@ -960,6 +960,19 @@ class AgentRunner:
         self._lock = asyncio.Lock()
         self._background_tasks: set[asyncio.Task[Any]] = set()
 
+        # Sprint 3: Economic tracking
+        self._economic_spine: Any = None
+        self._tokens_used_total: int = 0
+
+    def set_economic_spine(self, spine: Any) -> None:
+        """Attach an EconomicSpine for cost tracking."""
+        self._economic_spine = spine
+
+    @property
+    def tokens_used(self) -> int:
+        """Total tokens consumed by this agent across all tasks."""
+        return self._tokens_used_total
+
     # -- properties ---------------------------------------------------------
 
     @property
@@ -1322,6 +1335,21 @@ class AgentRunner:
             logger.info(
                 "Agent %s finished task %s", self._config.name, task.id
             )
+
+            # Sprint 3: Track token consumption via EconomicSpine
+            try:
+                step_tokens = _response_total_tokens(response)
+                self._tokens_used_total += step_tokens
+                if self._economic_spine is not None and step_tokens > 0:
+                    mission_id = (
+                        meta.get("mission_id", "") if isinstance(meta, dict) else ""
+                    )
+                    self._economic_spine.spend_tokens(
+                        self._config.id, step_tokens, mission_id
+                    )
+            except Exception:
+                logger.debug("Economic token tracking failed", exc_info=True)
+
             # Close outer task span (success)
             try:
                 _task_tracer.end(_task_span, success=True, latency_ms=completion_latency_ms)
