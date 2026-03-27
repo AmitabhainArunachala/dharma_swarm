@@ -271,6 +271,15 @@ class Orchestrator:
             )
             await self._assign_dispatch(td)
 
+            # Sprint 3: Create economic mission for tracking
+            try:
+                mission = await self._create_mission_for_dispatch(task, agent.id)
+                if mission is not None:
+                    td.metadata = td.metadata or {}
+                    td.metadata["mission_id"] = mission.id
+            except Exception:
+                logger.debug("Economic mission tracking failed", exc_info=True)
+
             # Record dispatch in YogaNode usage tracker
             if self._yoga is not None:
                 cost = self._yoga.estimate_cost(task)
@@ -374,6 +383,80 @@ class Orchestrator:
     def set_hibernation_manager(self, manager: Any) -> None:
         """Attach a HibernationManager for resume-on-tick integration."""
         self._hibernation_manager = manager
+
+    # ── Sprint 3: Economic Spine integration ─────────────────────────
+
+    def set_economic_spine(self, spine: Any) -> None:
+        """Attach an EconomicSpine for mission lifecycle tracking."""
+        self._economic_spine = spine
+
+    def _estimate_task_tokens(self, task: Task) -> int:
+        """Estimate token cost for a task based on description length."""
+        text = "\n".join(
+            part for part in (task.title, task.description) if part
+        ).strip()
+        if not text:
+            return 1000
+        # Rough estimate: ~1.3 tokens per word, minimum 500
+        return max(int(len(text.split()) * 1.3), 500)
+
+    async def _create_mission_for_dispatch(
+        self, task: Task, agent_id: str
+    ) -> Any:
+        """Create and advance a mission record through early lifecycle."""
+        spine = getattr(self, "_economic_spine", None)
+        if spine is None:
+            return None
+
+        try:
+            from dharma_swarm.economic_spine import MissionState
+
+            estimated = self._estimate_task_tokens(task)
+
+            # Check budget
+            budget = spine.get_or_create_budget(agent_id)
+            if budget.tokens_remaining < estimated:
+                logger.warning(
+                    "Agent %s insufficient budget (%d < %d) for task %s",
+                    agent_id,
+                    budget.tokens_remaining,
+                    estimated,
+                    task.id,
+                )
+                # Continue anyway — don't block dispatch, just log
+
+            mission = spine.create_mission(
+                agent_id, task.title or task.description or "", estimated
+            )
+            spine.transition_mission(mission.id, MissionState.QUOTED)
+            spine.transition_mission(mission.id, MissionState.ACCEPTED)
+            spine.transition_mission(mission.id, MissionState.EXECUTING)
+            return mission
+        except Exception as exc:
+            logger.debug("Mission creation failed (non-fatal): %s", exc)
+            return None
+
+    async def _complete_mission(
+        self, mission: Any, tokens_used: int = 0
+    ) -> None:
+        """Advance a mission to DELIVERED after task completion."""
+        spine = getattr(self, "_economic_spine", None)
+        if spine is None or mission is None:
+            return
+
+        try:
+            from dharma_swarm.economic_spine import MissionState
+
+            spine.transition_mission(
+                mission.id,
+                MissionState.DELIVERED,
+                tokens_actual=tokens_used or mission.tokens_quoted,
+            )
+            # Track spending
+            actual = tokens_used or mission.tokens_quoted
+            spine.spend_tokens(mission.agent_id, actual, mission.id)
+        except Exception as exc:
+            logger.debug("Mission completion failed (non-fatal): %s", exc)
 
     async def _resume_hibernated_jobs(self) -> int:
         """Re-queue READY_TO_RESUME jobs for agent dispatch.

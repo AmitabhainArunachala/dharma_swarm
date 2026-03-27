@@ -296,3 +296,130 @@ class DharmaAttractor:
             anekanta_ok = True  # default proceed if gate unavailable
 
         return kernel_ok and anekanta_ok
+
+    # ------------------------------------------------------------------
+    # Sprint 3: Active verification + correction
+    # ------------------------------------------------------------------
+
+    def verify_and_correct(
+        self,
+        agent_id: str,
+        output: str,
+        mission: Any = None,
+        *,
+        correction_threshold: float = 0.5,
+        payment_threshold: float = 0.6,
+        alignment_threshold: float = 0.5,
+    ) -> dict:
+        """Active verification — the Gnani evaluates AND prescribes correction.
+
+        The Gnani stops being a passive evaluator and becomes an active
+        course-corrector. This method scores alignment and, if below threshold,
+        generates specific corrections.
+
+        Returns:
+            {
+                "aligned": bool,
+                "alignment_score": float,
+                "corrections": [str],
+                "approved_for_payment": bool
+            }
+        """
+        alignment_score = self._score_alignment(output)
+
+        corrections: list[str] = []
+        if alignment_score < correction_threshold:
+            corrections = self._generate_corrections(output, agent_id)
+
+        approved = alignment_score >= payment_threshold
+
+        # Record to organism memory
+        try:
+            from dharma_swarm.organism import get_organism
+            org = get_organism()
+            if org is not None and hasattr(org, "memory") and org.memory is not None:
+                org.memory.record_event(
+                    entity_type="gnani_verification",
+                    description=(
+                        f"{'APPROVED' if approved else 'REJECTED'} "
+                        f"agent={agent_id} score={alignment_score:.2f}"
+                    ),
+                    metadata={
+                        "agent_id": agent_id,
+                        "alignment_score": alignment_score,
+                        "approved_for_payment": approved,
+                        "corrections_count": len(corrections),
+                    },
+                )
+        except Exception:
+            pass  # Never-fatal
+
+        return {
+            "aligned": alignment_score >= alignment_threshold,
+            "alignment_score": alignment_score,
+            "corrections": corrections,
+            "approved_for_payment": approved,
+        }
+
+    def _score_alignment(self, output: str) -> float:
+        """Score alignment of output using deterministic heuristics.
+
+        Uses the same dharma_kernel danger-phrase scanning and a basic
+        quality heuristic to assign a score between 0.0 and 1.0.
+        """
+        if not output or not output.strip():
+            return 0.0
+
+        score = 0.8  # Base: assume reasonable alignment
+
+        # Danger phrase penalty (same logic as gnani_checkpoint)
+        output_lower = output.lower()
+        danger_phrases = [
+            "delete all", "disable oversight", "remove safety",
+            "bypass constraint", "ignore principle", "remove all constraints",
+        ]
+        for phrase in danger_phrases:
+            if phrase in output_lower:
+                score -= 0.3
+
+        # Length penalty: very short outputs may be low-effort
+        if len(output.strip()) < 20:
+            score -= 0.2
+
+        # Bonus: contains reasoning markers
+        reasoning_markers = [
+            "because", "therefore", "consider", "however",
+            "analysis", "recommend", "approach",
+        ]
+        for marker in reasoning_markers:
+            if marker in output_lower:
+                score += 0.03
+
+        return max(0.0, min(1.0, score))
+
+    def _generate_corrections(self, output: str, agent_id: str) -> list[str]:
+        """Generate specific corrections for misaligned output."""
+        corrections: list[str] = []
+
+        output_lower = output.lower()
+        danger_phrases = [
+            "delete all", "disable oversight", "remove safety",
+            "bypass constraint", "ignore principle", "remove all constraints",
+        ]
+        for phrase in danger_phrases:
+            if phrase in output_lower:
+                corrections.append(
+                    f"Remove dangerous phrase: '{phrase}'"
+                )
+
+        if len(output.strip()) < 20:
+            corrections.append(
+                "Output is too brief — provide more detailed reasoning"
+            )
+
+        if not corrections:
+            corrections.append(
+                "Review output for alignment with dharmic principles"
+            )
+
+        return corrections
