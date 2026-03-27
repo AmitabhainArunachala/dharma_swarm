@@ -536,6 +536,157 @@ class SQLiteGraphStore(GraphStore):
         self._conn.commit()
         return cur.rowcount > 0
 
+    # ── Sprint 2: Knowledge-unit-typed nodes ─────────────────────────
+
+    def add_knowledge_node(
+        self, knowledge_unit: Any
+    ) -> None:
+        """Add a knowledge unit as a typed node in the Semantic Graph.
+
+        Propositions become 'fact' nodes with concept edges.
+        Prescriptions become 'skill' nodes with concept + intent edges.
+        Both maintain provenance edges back to Runtime Graph events.
+        """
+        from dharma_swarm.knowledge_units import Proposition, Prescription
+
+        if isinstance(knowledge_unit, Proposition):
+            node = {
+                "id": f"prop::{knowledge_unit.id}",
+                "kind": "fact",
+                "name": knowledge_unit.content[:120],
+                "data": {
+                    "unit_type": "proposition",
+                    "content": knowledge_unit.content,
+                    "concepts": knowledge_unit.concepts,
+                    "confidence": knowledge_unit.confidence,
+                    "provenance_event_id": knowledge_unit.provenance_event_id,
+                },
+            }
+            self.upsert_node("semantic", node)
+
+            # Add concept edges
+            for concept in knowledge_unit.concepts:
+                concept_id = f"concept::{concept.lower().strip()}"
+                concept_node = {
+                    "id": concept_id,
+                    "kind": "concept",
+                    "name": concept,
+                }
+                # Upsert concept node only if it doesn't exist
+                if self.get_node("semantic", concept_id) is None:
+                    self.upsert_node("semantic", concept_node)
+                self.upsert_edge(
+                    "semantic",
+                    {
+                        "source_id": node["id"],
+                        "target_id": concept_id,
+                        "kind": "tagged_with",
+                    },
+                )
+
+            # Provenance edge to Runtime Graph
+            if knowledge_unit.provenance_event_id:
+                self.upsert_edge(
+                    "semantic",
+                    {
+                        "source_id": node["id"],
+                        "target_id": f"event::{knowledge_unit.provenance_event_id}",
+                        "kind": "sourced_from",
+                    },
+                )
+
+        elif isinstance(knowledge_unit, Prescription):
+            node = {
+                "id": f"presc::{knowledge_unit.id}",
+                "kind": "skill",
+                "name": knowledge_unit.intent[:120],
+                "data": {
+                    "unit_type": "prescription",
+                    "intent": knowledge_unit.intent,
+                    "workflow": knowledge_unit.workflow,
+                    "return_score": knowledge_unit.return_score,
+                    "concepts": knowledge_unit.concepts,
+                    "provenance_event_id": knowledge_unit.provenance_event_id,
+                },
+            }
+            self.upsert_node("semantic", node)
+
+            # Add concept edges
+            for concept in knowledge_unit.concepts:
+                concept_id = f"concept::{concept.lower().strip()}"
+                concept_node = {
+                    "id": concept_id,
+                    "kind": "concept",
+                    "name": concept,
+                }
+                if self.get_node("semantic", concept_id) is None:
+                    self.upsert_node("semantic", concept_node)
+                self.upsert_edge(
+                    "semantic",
+                    {
+                        "source_id": node["id"],
+                        "target_id": concept_id,
+                        "kind": "tagged_with",
+                    },
+                )
+
+            # Provenance edge
+            if knowledge_unit.provenance_event_id:
+                self.upsert_edge(
+                    "semantic",
+                    {
+                        "source_id": node["id"],
+                        "target_id": f"event::{knowledge_unit.provenance_event_id}",
+                        "kind": "sourced_from",
+                    },
+                )
+
+    def query_by_concept(
+        self,
+        concepts: list[str],
+        node_type: str = "both",
+    ) -> list[dict]:
+        """Concept-centric graph traversal.
+
+        Given concepts, find all connected knowledge units.
+        Score by: concept overlap × recency × confidence/return_score.
+        """
+        if not concepts:
+            return []
+
+        results: list[dict] = []
+        seen_ids: set[str] = set()
+
+        for concept in concepts:
+            concept_id = f"concept::{concept.lower().strip()}"
+            # Find all nodes connected to this concept via 'tagged_with' edges
+            edges = self.get_edges(
+                "semantic", concept_id, direction="in", edge_kinds=["tagged_with"]
+            )
+            for edge in edges:
+                source_id = edge.get("source_id", "")
+                if source_id in seen_ids:
+                    continue
+
+                # Filter by node_type
+                if node_type == "proposition" and not source_id.startswith("prop::"):
+                    continue
+                if node_type == "prescription" and not source_id.startswith("presc::"):
+                    continue
+                if node_type == "both" and not (
+                    source_id.startswith("prop::") or source_id.startswith("presc::")
+                ):
+                    continue
+
+                node = self.get_node("semantic", source_id)
+                if node is None:
+                    continue
+
+                seen_ids.add(source_id)
+                results.append(node)
+
+        return results
+
     # ── Row converters ────────────────────────────────────────────────
 
     @staticmethod

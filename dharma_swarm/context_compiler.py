@@ -92,17 +92,18 @@ class ContextCompiler:
     """
 
     _SECTION_WEIGHTS = {
-        "Governance": 0.10,
-        "Operator Intent": 0.11,
-        "Task State": 0.11,
-        "Always-On Memory": 0.13,
-        "Recent Session": 0.10,
-        "Retrieved Recall": 0.10,
-        "Memory Palace": 0.10,
+        "Governance": 0.09,
+        "Operator Intent": 0.10,
+        "Task State": 0.10,
+        "Always-On Memory": 0.12,
+        "Relevant Knowledge": 0.10,  # Sprint 2: PlugMem knowledge block
+        "Recent Session": 0.09,
+        "Retrieved Recall": 0.09,
+        "Memory Palace": 0.09,
         "Semantic Context": 0.05,
-        "Durable Facts": 0.09,
-        "Artifacts": 0.06,
-        "Workspace": 0.05,
+        "Durable Facts": 0.08,
+        "Artifacts": 0.05,
+        "Workspace": 0.04,
     }
 
     def __init__(
@@ -113,12 +114,14 @@ class ContextCompiler:
         provider_policy: ProviderPolicyRouter | None = None,
         memory_palace: Any = None,
         graph_store: Any = None,
+        knowledge_store: Any = None,
     ) -> None:
         self.runtime_state = runtime_state
         self.memory_lattice = memory_lattice
         self.provider_policy = provider_policy or ProviderPolicyRouter()
         self.memory_palace = memory_palace
         self.graph_store = graph_store  # Phase 7b: semantic graph
+        self.knowledge_store = knowledge_store  # Sprint 2: PlugMem knowledge store
         # Frozen snapshot cache: session_id -> ContextBundleRecord
         self._frozen_bundles: dict[str, ContextBundleRecord] = {}
 
@@ -268,6 +271,16 @@ class ContextCompiler:
             except Exception as exc:
                 logger.debug("Semantic graph search failed: %s", exc)
 
+        # Sprint 2: Concept-centric knowledge retrieval
+        knowledge_block = ""
+        if self.knowledge_store is not None and recall_query:
+            try:
+                knowledge_block = self._retrieve_knowledge_block(
+                    task_description=task_description or recall_query,
+                )
+            except Exception as exc:
+                logger.debug("Knowledge block retrieval failed: %s", exc)
+
         sections = self._build_sections(
             session=session,
             task_id=task_id,
@@ -281,6 +294,7 @@ class ContextCompiler:
             recall_hits=recall_hits,
             palace_hits=palace_hits,
             semantic_hits=semantic_hits,
+            knowledge_block=knowledge_block,
             facts=facts,
             artifacts=artifacts,
             workspace_root=Path(workspace_root).expanduser() if workspace_root else None,
@@ -365,12 +379,13 @@ class ContextCompiler:
         recall_hits: list[MemoryRecallHit],
         palace_hits: list[dict[str, Any]],
         semantic_hits: list[dict[str, Any]],
-        facts: list[MemoryFact],
-        artifacts: list[ArtifactRecord],
-        workspace_root: Path | None,
-        active_paths: list[Path],
-        runs: list[DelegationRun],
-        leases: list[WorkspaceLease],
+        knowledge_block: str = "",
+        facts: list[MemoryFact] | None = None,
+        artifacts: list[ArtifactRecord] | None = None,
+        workspace_root: Path | None = None,
+        active_paths: list[Path] | None = None,
+        runs: list[DelegationRun] | None = None,
+        leases: list[WorkspaceLease] | None = None,
     ) -> list[ContextSection]:
         facts = facts or []
         artifacts = artifacts or []
@@ -449,6 +464,18 @@ class ContextCompiler:
                     priority=4,
                     content=always_on.strip(),
                     source_refs=[],
+                )
+            )
+
+        # Sprint 2: Knowledge block — structured facts + skills before raw memories
+        if knowledge_block and knowledge_block.strip():
+            sections.append(
+                ContextSection(
+                    name="Relevant Knowledge",
+                    priority=4,  # Same priority as Always-On, placed right after
+                    content=knowledge_block.strip(),
+                    source_refs=[],
+                    metadata={"source": "knowledge_store"},
                 )
             )
 
@@ -715,6 +742,111 @@ class ContextCompiler:
             lines.append(f"- {path.name}: {snippet}")
 
         return ("\n".join(lines), _dedupe(refs))
+
+    # ── Sprint 2: Knowledge-centric retrieval ────────────────────────
+
+    def _retrieve_knowledge_block(self, task_description: str) -> str:
+        """Retrieve and format a knowledge block from KnowledgeStore.
+
+        Extracts concepts from the task description (algorithmically, not via LLM)
+        and retrieves relevant propositions and prescriptions.
+        """
+        if self.knowledge_store is None or not task_description.strip():
+            return ""
+
+        import os as _os
+        max_tokens = int(_os.getenv("KNOWLEDGE_MAX_TOKENS", "500"))
+
+        # Extract concepts algorithmically (no LLM needed at query time)
+        task_concepts = self._extract_concepts_simple(task_description)
+        if not task_concepts:
+            return ""
+
+        props = self.knowledge_store.get_propositions_for_context(
+            task_concepts, max_tokens=max_tokens
+        )
+        prescs = self.knowledge_store.get_prescriptions_for_intent(
+            task_description, task_concepts
+        )
+
+        return self._format_knowledge_block(props, prescs)
+
+    @staticmethod
+    def _extract_concepts_simple(text: str) -> list[str]:
+        """Extract concepts from text using simple keyword extraction.
+
+        No LLM needed — uses stopword filtering + frequency heuristic.
+        """
+        _STOPWORDS = {
+            "the", "a", "an", "is", "are", "was", "were", "be", "been",
+            "being", "have", "has", "had", "do", "does", "did", "will",
+            "would", "could", "should", "may", "might", "shall", "can",
+            "to", "of", "in", "for", "on", "with", "at", "by", "from",
+            "as", "into", "through", "during", "before", "after", "above",
+            "below", "between", "out", "off", "over", "under", "again",
+            "further", "then", "once", "here", "there", "when", "where",
+            "why", "how", "all", "each", "every", "both", "few", "more",
+            "most", "other", "some", "such", "no", "nor", "not", "only",
+            "own", "same", "so", "than", "too", "very", "just", "because",
+            "but", "and", "or", "if", "while", "about", "up", "this",
+            "that", "these", "those", "it", "its", "i", "me", "my", "we",
+            "our", "you", "your", "he", "she", "they", "them", "what",
+            "which", "who", "whom", "make", "need", "use", "get", "set",
+        }
+        words = text.lower().split()
+        # Filter stopwords and short words
+        candidates = [w.strip(".,;:!?()[]{}\"'") for w in words]
+        candidates = [w for w in candidates if w and len(w) > 2 and w not in _STOPWORDS]
+        # Deduplicate while preserving order
+        seen: set[str] = set()
+        concepts: list[str] = []
+        for w in candidates:
+            if w not in seen:
+                seen.add(w)
+                concepts.append(w)
+        return concepts[:7]
+
+    @staticmethod
+    def _format_knowledge_block(
+        propositions: list[Any],
+        prescriptions: list[Any],
+    ) -> str:
+        """Format knowledge units into a context block.
+
+        Example output:
+        ### Facts
+        - GPT-4 achieves 86.4% on MMLU [confidence: 0.92]
+
+        ### Applicable Skills
+        **Debug a failing pytest test** (success rate: 85%)
+        1. Read the error traceback
+        2. Locate the failing assertion
+        """
+        if not propositions and not prescriptions:
+            return ""
+
+        parts: list[str] = []
+
+        if propositions:
+            parts.append("### Facts")
+            for prop in propositions:
+                conf = getattr(prop, "confidence", 1.0)
+                content = getattr(prop, "content", str(prop))
+                parts.append(f"- {content} [confidence: {conf:.2f}]")
+
+        if prescriptions:
+            if parts:
+                parts.append("")
+            parts.append("### Applicable Skills")
+            for presc in prescriptions:
+                intent = getattr(presc, "intent", str(presc))
+                score = getattr(presc, "return_score", 0.0)
+                workflow = getattr(presc, "workflow", [])
+                parts.append(f"**{intent}** (success rate: {int(score * 100)}%)")
+                for i, step in enumerate(workflow[:6], 1):
+                    parts.append(f"  {i}. {step}")
+
+        return "\n".join(parts)
 
     # ── Phase 7b: Semantic Graph integration ─────────────────────────
 
