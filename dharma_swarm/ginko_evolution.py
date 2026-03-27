@@ -309,9 +309,10 @@ class PromptTournament:
             The mutated prompt text.  On error, returns the original
             prompt unchanged (safe fallback).
         """
-        api_key = os.getenv("OPENROUTER_API_KEY", "")
+        from dharma_swarm.api_keys import get_llm_key
+        api_key = get_llm_key("openrouter") or ""
         if not api_key:
-            logger.warning("OPENROUTER_API_KEY not set -- skipping mutation")
+            logger.warning("No LLM API key configured -- skipping mutation")
             return current_prompt
 
         fitness_summary = (

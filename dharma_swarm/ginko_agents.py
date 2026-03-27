@@ -545,10 +545,11 @@ async def _call_openrouter(
         No exceptions — errors are returned in the content field with
         tokens=0 for graceful downstream handling.
     """
-    api_key = os.getenv("OPENROUTER_API_KEY", "")
+    from dharma_swarm.api_keys import get_llm_key
+    api_key = get_llm_key("openrouter") or ""
     if not api_key:
         return {
-            "content": "ERROR: OPENROUTER_API_KEY not set",
+            "content": "ERROR: No LLM API key configured (need OPENROUTER_API_KEY or similar)",
             "tokens": 0,
             "latency_ms": 0.0,
             "model": model,

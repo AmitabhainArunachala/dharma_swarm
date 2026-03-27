@@ -18,6 +18,8 @@ import threading
 import time
 from datetime import datetime, timezone
 from pathlib import Path
+
+from dharma_swarm.api_keys import provider_available
 from typing import Any
 
 from rich.text import Text
@@ -306,7 +308,7 @@ def _get_backup_models() -> str:
     parts = []
     if os.getenv("MOONSHOT_API_KEY"):
         parts.append("moonshot")
-    if os.getenv("OPENROUTER_API_KEY"):
+    if provider_available("openrouter"):
         parts.append("openrouter")
     if os.getenv("OLLAMA_API_KEY"):
         parts.append("ollama")

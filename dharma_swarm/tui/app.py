@@ -25,6 +25,8 @@ from pathlib import Path
 from typing import Any
 
 from textual import events, work
+
+from dharma_swarm.api_keys import provider_available
 from textual.app import App, ComposeResult
 from textual.binding import Binding
 from textual.timer import Timer
@@ -524,7 +526,7 @@ class DGCApp(App):
         if provider_id == "codex":
             return shutil.which("codex") is not None
         if provider_id == "openrouter":
-            return bool(os.getenv("OPENROUTER_API_KEY"))
+            return provider_available("openrouter")
         return True
 
     def _expire_model_cooldowns(self, *, now_ts: float | None = None) -> None:

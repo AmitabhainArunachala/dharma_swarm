@@ -62,13 +62,13 @@ async def process_recent_dreams(
     max_dreams: int = 10,
 ) -> dict[str, Any]:
     """Read recent high-salience dreams and develop them in hypnagogic mode."""
-    import os
+    from dharma_swarm.api_keys import has_any_llm, get_llm_key
 
-    openrouter_key = os.getenv("OPENROUTER_API_KEY")
-    anthropic_key = os.getenv("ANTHROPIC_API_KEY")
+    openrouter_key = get_llm_key("openrouter")
+    anthropic_key = get_llm_key("anthropic")
 
-    if not openrouter_key and not anthropic_key:
-        return {"error": "No API keys available (need OPENROUTER_API_KEY or ANTHROPIC_API_KEY)"}
+    if not has_any_llm():
+        return {"error": "No LLM API keys available"}
 
     # Load recent dreams
     dreams = await _load_recent_dreams(hours_back, min_salience, max_dreams)

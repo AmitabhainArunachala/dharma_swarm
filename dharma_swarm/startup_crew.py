@@ -65,8 +65,8 @@ _OR_MID = "mistralai/mistral-small-3.1-24b-instruct"
 
 
 def _has_openrouter_key() -> bool:
-    import os
-    return bool(os.environ.get("OPENROUTER_API_KEY", "").strip())
+    from dharma_swarm.api_keys import provider_available
+    return provider_available("openrouter")
 
 
 def _resolve_default_crew() -> list[dict]:

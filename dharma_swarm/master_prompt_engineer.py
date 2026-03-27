@@ -411,6 +411,7 @@ def gather_system_state() -> dict[str, Any]:
 
     # Check API keys (existence only, not values)
     api_status = {}
+    from dharma_swarm.api_keys import PROVIDER_ENV_KEYS, provider_available
     for key_name in ("OPENROUTER_API_KEY", "ANTHROPIC_API_KEY", "OPENAI_API_KEY"):
         val = os.getenv(key_name, "")
         if val:
@@ -497,9 +498,10 @@ async def generate_evolved_prompt(
     """
     import httpx
 
-    openrouter_key = os.getenv("OPENROUTER_API_KEY")
+    from dharma_swarm.api_keys import get_llm_key
+    openrouter_key = get_llm_key("openrouter")
     if not openrouter_key:
-        raise RuntimeError("OPENROUTER_API_KEY not set")
+        raise RuntimeError("No LLM API key configured (need OPENROUTER_API_KEY or similar)")
 
     # Auto-calculate COLM days if not provided
     if colm_days is None:
