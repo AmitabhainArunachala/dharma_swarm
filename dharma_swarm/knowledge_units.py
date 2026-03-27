@@ -518,6 +518,46 @@ class KnowledgeStore:
         )
         self._conn.commit()
 
+    # ── Provenance-based retrieval (Darwin Engine) ─────────────────
+
+    def get_by_agent_provenance(
+        self,
+        agent_id: str,
+        unit_type: str = "both",
+        limit: int = 100,
+    ) -> List[Union[Proposition, Prescription]]:
+        """Get knowledge units that trace back to a specific agent.
+
+        Searches provenance_event_id and provenance_context for the agent_id
+        string.  Used by the Darwin Engine to measure an agent's knowledge
+        production for fitness scoring.
+        """
+        results: List[Union[Proposition, Prescription]] = []
+
+        if unit_type in ("both", "proposition"):
+            rows = self._conn.execute(
+                """
+                SELECT * FROM propositions
+                WHERE provenance_event_id LIKE ? OR provenance_context LIKE ?
+                ORDER BY created_at DESC LIMIT ?
+                """,
+                (f"%{agent_id}%", f"%{agent_id}%", limit),
+            ).fetchall()
+            results.extend(self._row_to_proposition(r) for r in rows)
+
+        if unit_type in ("both", "prescription"):
+            rows = self._conn.execute(
+                """
+                SELECT * FROM prescriptions
+                WHERE provenance_event_id LIKE ? OR provenance_context LIKE ?
+                ORDER BY created_at DESC LIMIT ?
+                """,
+                (f"%{agent_id}%", f"%{agent_id}%", limit),
+            ).fetchall()
+            results.extend(self._row_to_prescription(r) for r in rows)
+
+        return results[:limit]
+
     # ── Internal helpers ──────────────────────────────────────────────
 
     def _load_unit(

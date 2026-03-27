@@ -271,14 +271,23 @@ class EconomicSpine:
         self._conn.commit()
 
     def spend_tokens(self, agent_id: str, amount: int, mission_id: str = "") -> bool:
-        """Deduct tokens. Returns False if insufficient budget."""
+        """Record token spending. ALWAYS succeeds — tracking only, no enforcement.
+
+        Returns True always. Negative balance is tracked but not prevented.
+        """
         budget = self.get_or_create_budget(agent_id)
-        if budget.tokens_remaining < amount:
-            return False
         budget.tokens_spent += amount
         self._save_budget(budget)
         self._log_event(agent_id, "spend", amount, mission_id)
-        return True
+
+        if budget.tokens_remaining < 0:
+            logger.info(
+                "Agent %s over budget by %d tokens (tracking only, not blocking)",
+                agent_id,
+                abs(budget.tokens_remaining),
+            )
+
+        return True  # Always succeed — no enforcement
 
     def earn_tokens(self, agent_id: str, amount: int, mission_id: str = "") -> None:
         """Credit tokens for successful mission completion."""

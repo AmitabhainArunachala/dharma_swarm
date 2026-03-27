@@ -485,6 +485,115 @@ class SwarmManager:
             self._ginko_fleet = None
             self._ginko_enabled = False
 
+        # --- Wire Sprint 1-3 subsystems ---
+
+        # 1. HibernationManager → Orchestrator + OrganismRuntime
+        try:
+            from dharma_swarm.hibernation import HibernationManager
+
+            hib_db = str(self.state_dir / "db" / "hibernation.db")
+            (self.state_dir / "db").mkdir(parents=True, exist_ok=True)
+            self._hibernation_manager = HibernationManager(db_path=hib_db)
+            if self._orchestrator is not None:
+                self._orchestrator.set_hibernation_manager(self._hibernation_manager)
+            if self._organism is not None and hasattr(self._organism, "set_hibernation_manager"):
+                self._organism.set_hibernation_manager(self._hibernation_manager)
+            logger.info("HibernationManager wired")
+        except Exception as exc:
+            self._hibernation_manager = None
+            logger.debug("HibernationManager wiring skipped: %s", exc)
+
+        # 2. EconomicSpine → Orchestrator + Organism + agents
+        #    IMPORTANT: tracking only, no budget enforcement
+        try:
+            from dharma_swarm.economic_spine import EconomicSpine
+
+            econ_db = str(self.state_dir / "db" / "economic_spine.db")
+            (self.state_dir / "db").mkdir(parents=True, exist_ok=True)
+            self._economic_spine = EconomicSpine(db_path=econ_db)
+            if self._orchestrator is not None:
+                self._orchestrator.set_economic_spine(self._economic_spine)
+            if self._organism is not None and hasattr(self._organism, "set_economic_spine"):
+                self._organism.set_economic_spine(self._economic_spine)
+            # Wire to each agent in the pool
+            if self._agent_pool is not None:
+                try:
+                    agents = getattr(self._agent_pool, "agents", {})
+                    for agent in agents.values():
+                        if hasattr(agent, "set_economic_spine"):
+                            agent.set_economic_spine(self._economic_spine)
+                except Exception:
+                    pass
+            logger.info("EconomicSpine wired (tracking mode, no enforcement)")
+        except Exception as exc:
+            self._economic_spine = None
+            logger.debug("EconomicSpine wiring skipped: %s", exc)
+
+        # 3. Ensure CorrectionEngine has economic_spine reference
+        try:
+            if (
+                self._organism is not None
+                and hasattr(self._organism, "correction_engine")
+                and self._organism.correction_engine is not None
+                and hasattr(self, "_economic_spine")
+                and self._economic_spine is not None
+            ):
+                self._organism.correction_engine.economic_spine = self._economic_spine
+        except Exception as exc:
+            logger.debug("CorrectionEngine economic_spine wiring skipped: %s", exc)
+
+        # 4. KnowledgeStore → ContextCompiler + Orchestrator
+        try:
+            from dharma_swarm.knowledge_units import KnowledgeStore
+
+            knowledge_db = str(self.state_dir / "db" / "knowledge.db")
+            (self.state_dir / "db").mkdir(parents=True, exist_ok=True)
+            self._knowledge_store = KnowledgeStore(db_path=knowledge_db)
+            # Wire to context compiler
+            compiler = getattr(self, "_compiler", None)
+            if compiler is not None and hasattr(compiler, "set_knowledge_store"):
+                compiler.set_knowledge_store(self._knowledge_store)
+            # Wire to orchestrator for consolidation pass-through
+            if self._orchestrator is not None and hasattr(self._orchestrator, "set_knowledge_store"):
+                self._orchestrator.set_knowledge_store(self._knowledge_store)
+            logger.info("KnowledgeStore wired")
+        except Exception as exc:
+            self._knowledge_store = None
+            logger.debug("KnowledgeStore wiring skipped: %s", exc)
+
+        # 5. Create SleepTimeAgent and wire to orchestrator for post-task consolidation
+        try:
+            from dharma_swarm.sleep_time_agent import SleepTimeAgent
+
+            self._sleep_time_agent = SleepTimeAgent(tick_interval=5)
+            if self._orchestrator is not None:
+                self._orchestrator._sleep_time_agent = self._sleep_time_agent
+            # Also wire organism if available, for redundant access
+            if self._orchestrator is not None and self._organism is not None:
+                if hasattr(self._orchestrator, "set_organism"):
+                    self._orchestrator.set_organism(self._organism)
+            logger.info("SleepTimeAgent wired to orchestrator")
+        except Exception as exc:
+            self._sleep_time_agent = None
+            logger.debug("SleepTimeAgent wiring skipped: %s", exc)
+
+        # 6. Wire KnowledgeStore + EconomicSpine + CorrectionEngine to DarwinEngine
+        try:
+            if self._engine is not None:
+                if hasattr(self, "_knowledge_store") and self._knowledge_store is not None:
+                    self._engine.set_knowledge_store(self._knowledge_store)
+                if hasattr(self, "_economic_spine") and self._economic_spine is not None:
+                    self._engine.set_economic_spine(self._economic_spine)
+                if (
+                    self._organism is not None
+                    and hasattr(self._organism, "correction_engine")
+                    and self._organism.correction_engine is not None
+                ):
+                    self._engine.set_correction_engine(self._organism.correction_engine)
+                logger.info("DarwinEngine extended fitness signals wired")
+        except Exception as exc:
+            logger.debug("DarwinEngine signal wiring skipped: %s", exc)
+
         # v0.9.1: Telos Substrate — seed ConceptGraph + TelosGraph with pillar data
         # Deferred to first tick() to avoid heavyweight I/O during init.
         self._telos_substrate_seeded = False
@@ -509,6 +618,9 @@ class SwarmManager:
             ("witness", self._witness),
             ("decision_log", self._decision_log),
             ("ginko_fleet", self._ginko_fleet),
+            ("hibernation_manager", getattr(self, "_hibernation_manager", None)),
+            ("economic_spine", getattr(self, "_economic_spine", None)),
+            ("knowledge_store", getattr(self, "_knowledge_store", None)),
         ]:
             if attr is not None:
                 self._initialized.add(name)
@@ -605,6 +717,12 @@ class SwarmManager:
             )
             self._agent_configs[runner.state.id] = config
             await self._sync_agent_contracts(runner.state)
+
+            # Wire Sprint 1-3 subsystems to newly spawned agent
+            if hasattr(self, "_economic_spine") and self._economic_spine is not None:
+                if hasattr(runner, "set_economic_spine"):
+                    runner.set_economic_spine(self._economic_spine)
+
             await self._memory.remember(
                 f"Agent spawned: {name} ({role.value})"
                 + (f" [thread: {thread}]" if thread else ""),

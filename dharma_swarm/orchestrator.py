@@ -518,6 +518,56 @@ class Orchestrator:
                 )
         return resumed
 
+    # ── Sprint 2 Integration: auto-consolidate knowledge ────────────
+
+    def _get_sleep_time_agent(self) -> Any:
+        """Get the SleepTimeAgent instance from the organism or swarm."""
+        organism = getattr(self, "_organism", None)
+        if organism is not None:
+            sta = getattr(organism, "sleep_time_agent", None)
+            if sta is not None:
+                return sta
+        return getattr(self, "_sleep_time_agent", None)
+
+    def _build_consolidation_context(self, task: Any, td: Any, result: Any) -> str:
+        """Build a text context for SleepTimeAgent from task execution data."""
+        parts = [
+            f"Task: {getattr(task, 'title', '')}",
+            f"Description: {str(getattr(task, 'description', ''))[:500]}",
+            f"Agent: {td.agent_id}",
+            f"Status: {getattr(td, 'status', 'completed')}",
+        ]
+        if hasattr(result, "content") and result.content:
+            parts.append(f"Result: {str(result.content)[:2000]}")
+        elif isinstance(result, str):
+            parts.append(f"Result: {result[:2000]}")
+        return "\n".join(parts)
+
+    async def _safe_consolidate(
+        self, sleep_agent: Any, context: str, outcome: dict
+    ) -> None:
+        """Consolidate knowledge without blocking or crashing the orchestrator."""
+        try:
+            knowledge_store = getattr(self, "_knowledge_store", None)
+            result = await sleep_agent.consolidate_knowledge(
+                context, outcome, knowledge_store=knowledge_store,
+            )
+            logger.info(
+                "Knowledge consolidated: %d propositions, %d prescriptions",
+                result.get("propositions", 0),
+                result.get("prescriptions", 0),
+            )
+        except Exception:
+            logger.debug("Knowledge consolidation failed (non-fatal)", exc_info=True)
+
+    def set_organism(self, organism: Any) -> None:
+        """Attach an organism for SleepTimeAgent access."""
+        self._organism = organism
+
+    def set_knowledge_store(self, store: Any) -> None:
+        """Attach a KnowledgeStore for consolidation pass-through."""
+        self._knowledge_store = store
+
     async def graceful_stop(self, timeout: float = 30.0) -> dict[str, int]:
         """Cancel all in-flight tasks, gather with timeout, then stop.
 
@@ -1952,6 +2002,23 @@ class Orchestrator:
                 task=task,
                 result=result,
             )
+
+            # --- Sprint 2 Integration: Auto-consolidate knowledge ---
+            try:
+                sleep_agent = self._get_sleep_time_agent()
+                if sleep_agent is not None and hasattr(sleep_agent, "consolidate_knowledge"):
+                    task_context = self._build_consolidation_context(task, td, result)
+                    task_outcome = {
+                        "success": True,
+                        "agent_id": td.agent_id,
+                        "task_title": getattr(task, "title", ""),
+                        "tokens_used": getattr(result, "tokens_used", 0),
+                    }
+                    asyncio.create_task(
+                        self._safe_consolidate(sleep_agent, task_context, task_outcome)
+                    )
+            except Exception:
+                logger.debug("Knowledge consolidation trigger failed", exc_info=True)
 
         except asyncio.TimeoutError:
             error = f"Task execution timed out after {timeout_seconds:.1f}s"

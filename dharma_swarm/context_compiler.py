@@ -125,6 +125,12 @@ class ContextCompiler:
         # Frozen snapshot cache: session_id -> ContextBundleRecord
         self._frozen_bundles: dict[str, ContextBundleRecord] = {}
 
+    # ── Knowledge store injection ────────────────────────────────────
+
+    def set_knowledge_store(self, store: Any) -> None:
+        """Attach a KnowledgeStore for concept-centric retrieval."""
+        self.knowledge_store = store
+
     # ── Frozen snapshot API ─────────────────────────────────────────
 
     def freeze(self, session_id: str, bundle: ContextBundleRecord) -> None:
