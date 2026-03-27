@@ -286,6 +286,14 @@ class Orchestrator:
     async def tick(self) -> dict[str, int]:
         """One orchestration cycle: collect completed, then route pending."""
         settled, recovered = await self._collect_completed()
+
+        # Check for hibernated jobs that are ready to resume
+        hibernation_resumed = 0
+        try:
+            hibernation_resumed = await self._resume_hibernated_jobs()
+        except Exception as exc:
+            logger.debug("Hibernation resume check failed (non-critical): %s", exc)
+
         dispatches = await self.route_next()
         coordination = self._empty_coordination_summary()
         try:
@@ -297,6 +305,7 @@ class Orchestrator:
             "settled": settled,
             "recovered": recovered,
             "dispatched": len(dispatches),
+            "hibernation_resumed": hibernation_resumed,
             "coordination_global_truths": int(coordination.get("global_truths", 0) or 0),
             "coordination_disagreements": int(
                 coordination.get("productive_disagreements", 0) or 0
@@ -359,6 +368,72 @@ class Orchestrator:
     def stop(self) -> None:
         """Signal the run loop to exit after the current tick."""
         self._running = False
+
+    # ── Hibernation integration ──────────────────────────────────────
+
+    def set_hibernation_manager(self, manager: Any) -> None:
+        """Attach a HibernationManager for resume-on-tick integration."""
+        self._hibernation_manager = manager
+
+    async def _resume_hibernated_jobs(self) -> int:
+        """Re-queue READY_TO_RESUME jobs for agent dispatch.
+
+        Called at the start of each tick, before ``route_next()``.
+        For each ready job, creates a new task on the board with the
+        job's context snapshot so the agent can resume seamlessly.
+        Returns the number of jobs resumed.
+        """
+        mgr = getattr(self, "_hibernation_manager", None)
+        if mgr is None:
+            return 0
+
+        ready_jobs = await mgr.get_ready_jobs()
+        if not ready_jobs:
+            return 0
+
+        resumed = 0
+        for job in ready_jobs:
+            try:
+                from dharma_swarm.hibernation import JobState
+
+                # Transition from READY_TO_RESUME → RUNNING
+                await mgr.transition(job.job_id, JobState.RUNNING)
+
+                # Re-queue as a task on the board if we have one
+                if self._board is not None:
+                    from dharma_swarm.models import Task, TaskStatus, TaskPriority
+
+                    task = Task(
+                        title=f"Resume hibernated job {job.job_id}",
+                        description=job.metadata.get(
+                            "original_description",
+                            f"Resumed from hibernation (agent={job.agent_id})",
+                        ),
+                        status=TaskStatus.PENDING,
+                        priority=TaskPriority.HIGH,
+                        metadata={
+                            "hibernation_job_id": job.job_id,
+                            "context_snapshot": job.context_snapshot,
+                            "resumed_from_hibernation": True,
+                        },
+                    )
+                    add_task = getattr(self._board, "add_task", None)
+                    if add_task is not None:
+                        result = add_task(task)
+                        if asyncio.iscoroutine(result):
+                            await result
+
+                resumed += 1
+                logger.info(
+                    "Resumed hibernated job %s (agent=%s)",
+                    job.job_id,
+                    job.agent_id,
+                )
+            except Exception as exc:
+                logger.debug(
+                    "Failed to resume job %s: %s", job.job_id, exc,
+                )
+        return resumed
 
     async def graceful_stop(self, timeout: float = 30.0) -> dict[str, int]:
         """Cancel all in-flight tasks, gather with timeout, then stop.

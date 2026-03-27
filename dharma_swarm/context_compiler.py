@@ -152,7 +152,59 @@ class ContextCompiler:
         active_paths: list[Path | str] | None = None,
         metadata: dict[str, Any] | None = None,
         force_refresh: bool = False,
+        previous_mem: Any = None,
     ) -> ContextBundleRecord:
+        # ── MemPO-style truncation ──────────────────────────────────
+        # When ENABLE_MEM_TRUNCATION is set and a previous_mem is provided,
+        # replace the full context assembly with a compact summary.
+        import os as _os
+        _mem_truncation = _os.getenv("ENABLE_MEM_TRUNCATION", "false").strip().lower()
+        if (
+            _mem_truncation in ("1", "true", "yes", "on")
+            and previous_mem is not None
+            and getattr(previous_mem, "content", "")
+        ):
+            from dharma_swarm.mem_action import build_truncated_context
+
+            truncated = build_truncated_context(
+                system_prompt=operator_intent,
+                previous_mem=previous_mem,
+                current_query=task_description,
+            )
+            if truncated:
+                created_at = _utc_now()
+                section = ContextSection(
+                    name="MemPO Truncated Context",
+                    priority=1,
+                    content=truncated,
+                    metadata={"mem_truncated": True},
+                )
+                checksum = _sha256(
+                    _canonical_json({
+                        "session_id": session_id,
+                        "task_id": task_id,
+                        "run_id": run_id,
+                        "rendered_text": truncated,
+                        "source_refs": [],
+                    })
+                )
+                bundle = ContextBundleRecord(
+                    bundle_id=self.runtime_state.new_bundle_id(),
+                    session_id=session_id,
+                    task_id=task_id,
+                    run_id=run_id,
+                    token_budget=int(token_budget),
+                    rendered_text=truncated,
+                    sections=[section.as_dict()],
+                    source_refs=[],
+                    checksum=checksum,
+                    created_at=created_at,
+                    metadata={**(metadata or {}), "mem_truncated": True},
+                )
+                await self.runtime_state.init_db()
+                saved = await self.runtime_state.record_context_bundle(bundle)
+                return saved
+
         # Return frozen snapshot if available (preserves prompt cache)
         if not force_refresh and session_id in self._frozen_bundles:
             return self._frozen_bundles[session_id]

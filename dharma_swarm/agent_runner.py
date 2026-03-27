@@ -668,7 +668,16 @@ def _build_system_prompt(config: AgentConfig) -> str:
             parts.append(ctx)
         parts.append(SHAKTI_HOOK)
 
-    return "\n\n".join(parts)
+    prompt = "\n\n".join(parts)
+
+    # Inject MemPO-style <mem> action instructions
+    try:
+        from dharma_swarm.mem_action import inject_mem_instruction
+        prompt = inject_mem_instruction(prompt)
+    except Exception:
+        logger.debug("Mem instruction injection failed", exc_info=True)
+
+    return prompt
 
 
 def _resolve_config_state_dir(config: AgentConfig) -> Path | None:
@@ -1223,6 +1232,31 @@ class AgentRunner:
                 ))
             except Exception:
                 logger.debug("Lineage recording failed", exc_info=True)
+
+            # ── MemPO: extract and store <mem> actions from response ──
+            try:
+                from dharma_swarm.mem_action import parse_mem_actions, store_mem_action
+                mem_actions = parse_mem_actions(
+                    result or "",
+                    agent_id=self._config.name,
+                    task_id=task.id,
+                    step_number=self._state.turns_used,
+                )
+                if mem_actions:
+                    # Store the latest <mem> on the runner for context truncation
+                    self._last_mem_action = mem_actions[-1]
+                    # Persist to Memory Palace
+                    palace = getattr(self, "_memory_palace", None)
+                    for ma in mem_actions:
+                        await store_mem_action(palace, ma)
+                    logger.debug(
+                        "Extracted %d <mem> action(s) from %s/%s",
+                        len(mem_actions),
+                        self._config.name,
+                        task.id,
+                    )
+            except Exception:
+                logger.debug("Mem action extraction failed", exc_info=True)
 
             # Record task result in agent memory
             await self._record_task_memory(task, result)
