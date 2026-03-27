@@ -4,7 +4,7 @@ Borrowed from Letta's sleep-time compute pattern:
     The organism does memory hygiene between active tasks rather than
     burning context window during agent runs.
 
-Does NOT use an LLM — all operations are algorithmic:
+Phases (original algorithmic pipeline):
 1. Entity extraction: scan recent pulse history → OrganismMemory
 2. Knowledge consolidation: merge duplicate/near-duplicate entities
 3. Confidence decay: age-based decay on all entities
@@ -12,18 +12,26 @@ Does NOT use an LLM — all operations are algorithmic:
 5. Learned context generation: briefing block from high-confidence entities
 6. Memory garbage collection: soft-delete very low confidence entities
 
+Sprint 2 addition — PlugMem-inspired knowledge extraction:
+7. Knowledge extraction: decompose context into Propositions + Prescriptions
+   via LLM-driven KnowledgeExtractor, then store in KnowledgeStore.
+   Controlled by ENABLE_KNOWLEDGE_EXTRACTION env var (default: true).
+
 The Gnani provides wisdom. This agent provides plumbing.
 
 Design:
 - tick_interval: int = 5 (run every 5th heartbeat, configurable)
 - tick() returns a stats dict so the organism can track what was done
 - learned_context() returns precomputed briefing for agent prompt injection
+- consolidate_knowledge() async method for post-task knowledge extraction
 - Never-fatal: all failures caught and logged
 """
 
 from __future__ import annotations
 
+import asyncio
 import logging
+import os
 import time
 from datetime import datetime, timezone
 from typing import Any, TYPE_CHECKING
@@ -516,6 +524,84 @@ class SleepTimeAgent:
             "context_length": len(self._learned_context_block),
             "recent_ticks": self._stats_history[-5:] if self._stats_history else [],
         }
+
+    # ------------------------------------------------------------------
+    # Sprint 2: Knowledge extraction (PlugMem-inspired)
+    # ------------------------------------------------------------------
+
+    async def consolidate_knowledge(
+        self,
+        task_context: str,
+        task_outcome: dict[str, Any] | None = None,
+        llm_client: Any = None,
+        knowledge_store: Any = None,
+    ) -> dict[str, Any]:
+        """Extract structured knowledge from task context.
+
+        Decomposes episodic task context into Propositions (facts) and
+        Prescriptions (skills), scores them based on outcome, and stores
+        in KnowledgeStore.  This is the PlugMem-inspired consolidation
+        pipeline that runs after task completion.
+
+        Controlled by ENABLE_KNOWLEDGE_EXTRACTION env var (default: true).
+
+        Returns stats dict with counts of extracted knowledge units.
+        """
+        # Check if knowledge extraction is enabled
+        enabled = os.getenv("ENABLE_KNOWLEDGE_EXTRACTION", "true").strip().lower()
+        if enabled not in ("1", "true", "yes", "on"):
+            return {"skipped": True, "reason": "knowledge_extraction_disabled"}
+
+        if not task_context or not task_context.strip():
+            return {"skipped": True, "reason": "empty_context"}
+
+        task_outcome = task_outcome or {}
+        result: dict[str, Any] = {
+            "propositions": 0,
+            "prescriptions": 0,
+            "errors": [],
+        }
+
+        try:
+            from dharma_swarm.knowledge_extractor import KnowledgeExtractor
+            from dharma_swarm.knowledge_units import KnowledgeStore, get_default_knowledge_db_path
+
+            extractor = KnowledgeExtractor(llm_client)
+
+            # Extract both knowledge types in parallel
+            propositions, prescriptions = await extractor.extract_all(task_context)
+
+            # Score prescriptions based on task outcome
+            for presc in prescriptions:
+                if task_outcome.get("success"):
+                    presc.return_score = max(presc.return_score, 0.7)
+                else:
+                    presc.return_score = min(presc.return_score, 0.3)
+
+            # Store in KnowledgeStore
+            if knowledge_store is None:
+                db_path = get_default_knowledge_db_path()
+                knowledge_store = KnowledgeStore(db_path)
+
+            for prop in propositions:
+                try:
+                    knowledge_store.store_proposition(prop)
+                    result["propositions"] += 1
+                except Exception as exc:
+                    result["errors"].append(f"prop_store: {exc}")
+
+            for presc in prescriptions:
+                try:
+                    knowledge_store.store_prescription(presc)
+                    result["prescriptions"] += 1
+                except Exception as exc:
+                    result["errors"].append(f"presc_store: {exc}")
+
+        except Exception as exc:
+            logger.debug("Knowledge consolidation failed: %s", exc)
+            result["errors"].append(str(exc))
+
+        return result
 
 
 __all__ = ["SleepTimeAgent"]
