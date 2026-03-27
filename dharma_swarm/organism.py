@@ -958,6 +958,18 @@ class OrganismRuntime:
         # 4. Algedonic channel — fire pain signals if thresholds crossed
         signals = self._check_algedonic(blended, live_score, tcs)
 
+        # 4b. Check hibernating jobs for wake conditions
+        try:
+            hibernation_woken = await self._check_hibernating_jobs()
+            if hibernation_woken > 0:
+                logger.info(
+                    "Reawakened %d hibernating job(s) (cycle %d)",
+                    hibernation_woken,
+                    self._cycle,
+                )
+        except Exception as exc:
+            logger.debug("Hibernation check failed (non-fatal): %s", exc)
+
         # 5. Gnani verdict
         verdict = self._gnani_verdict(blended, signals)
 
@@ -1076,6 +1088,31 @@ class OrganismRuntime:
             self._on_gnani(verdict)
 
         return verdict
+
+    # -- Hibernation integration --------------------------------------------
+
+    async def _check_hibernating_jobs(self) -> int:
+        """Check hibernating jobs for wake conditions.
+
+        Delegates to the HibernationManager if available.  Returns the
+        number of jobs woken (0 if no manager is configured).
+        """
+        mgr = getattr(self, "_hibernation_manager", None)
+        if mgr is None:
+            return 0
+        woken = await mgr.check_conditions()
+        timed_out = await mgr.timeout_check()
+        if timed_out > 0:
+            logger.warning(
+                "Timed out %d hibernating job(s) (cycle %d)",
+                timed_out,
+                self._cycle,
+            )
+        return woken
+
+    def set_hibernation_manager(self, manager: Any) -> None:
+        """Attach a HibernationManager for heartbeat-driven condition checks."""
+        self._hibernation_manager = manager
 
     # -- Status -------------------------------------------------------------
 
