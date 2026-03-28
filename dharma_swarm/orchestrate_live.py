@@ -751,6 +751,17 @@ def _stop_old_daemon() -> None:
     pid_file.unlink(missing_ok=True)
 
 
+def _reap_stale_pid_files() -> None:
+    """Remove PID files that point to dead processes."""
+    for pid_file in STATE_DIR.glob("*.pid"):
+        try:
+            pid = int(pid_file.read_text().strip())
+            os.kill(pid, 0)  # Still alive — leave it
+        except (ValueError, OSError):
+            _log("orchestrator", f"Reaped stale PID file: {pid_file.name}")
+            pid_file.unlink(missing_ok=True)
+
+
 CONSOLIDATION_INTERVAL = _ll.consolidation_interval_seconds
 
 WITNESS_INTERVAL = 3600  # 60 minutes between S3* sporadic audits
@@ -1370,6 +1381,7 @@ async def orchestrate(background: bool = False) -> None:
 
     # Stop any existing daemon to avoid DB conflicts
     _stop_old_daemon()
+    _reap_stale_pid_files()
 
     # Write PID -- use daemon.pid for consistency with _stop_old_daemon()
     pid_file = STATE_DIR / "daemon.pid"
