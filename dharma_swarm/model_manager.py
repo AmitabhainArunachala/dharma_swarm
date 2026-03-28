@@ -13,6 +13,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Literal
 
+from dharma_swarm.model_hierarchy import DEFAULT_MODELS
 from dharma_swarm.models import ProviderType
 
 logger = logging.getLogger(__name__)
@@ -114,6 +115,73 @@ MODELS: dict[str, ModelInfo] = {
         speed="medium",
         capability="medium",
     ),
+    # Free tier frontier models (from model_hierarchy.py)
+    "glm-5": ModelInfo(
+        id="glm-5:cloud",
+        name="GLM-5 (744B MoE)",
+        provider=ProviderType.OLLAMA,
+        description="Zhipu AI frontier model via Ollama Cloud, free",
+        context_window=128_000,
+        cost_per_1m_input=0.0,
+        cost_per_1m_output=0.0,
+        speed="medium",
+        capability="high",
+    ),
+    "deepseek-v3.2": ModelInfo(
+        id="deepseek-v3.2:cloud",
+        name="DeepSeek V3.2",
+        provider=ProviderType.OLLAMA,
+        description="DeepSeek frontier model via Ollama Cloud, free",
+        context_window=128_000,
+        cost_per_1m_input=0.0,
+        cost_per_1m_output=0.0,
+        speed="medium",
+        capability="high",
+    ),
+    "kimi-k2.5": ModelInfo(
+        id="kimi-k2.5:cloud",
+        name="Kimi K2.5",
+        provider=ProviderType.OLLAMA,
+        description="Moonshot AI frontier model via Ollama Cloud, free",
+        context_window=128_000,
+        cost_per_1m_input=0.0,
+        cost_per_1m_output=0.0,
+        speed="medium",
+        capability="high",
+    ),
+    "minimax-m2.7": ModelInfo(
+        id="minimax-m2.7:cloud",
+        name="MiniMax M2.7",
+        provider=ProviderType.OLLAMA,
+        description="MiniMax frontier model via Ollama Cloud, free",
+        context_window=128_000,
+        cost_per_1m_input=0.0,
+        cost_per_1m_output=0.0,
+        speed="medium",
+        capability="high",
+    ),
+    "llama-3.3-70b": ModelInfo(
+        id="meta/llama-3.3-70b-instruct",
+        name="Llama 3.3 70B",
+        provider=ProviderType.NVIDIA_NIM,
+        description="Meta Llama via NVIDIA NIM, free (50 req/day)",
+        context_window=128_000,
+        cost_per_1m_input=0.0,
+        cost_per_1m_output=0.0,
+        speed="fast",
+        capability="high",
+    ),
+    "nemotron-120b": ModelInfo(
+        id="nvidia/nemotron-3-super-120b-a12b:free",
+        name="Nemotron 3 Super 120B",
+        provider=ProviderType.OPENROUTER_FREE,
+        description="NVIDIA Nemotron via OpenRouter free tier",
+        context_window=128_000,
+        cost_per_1m_input=0.0,
+        cost_per_1m_output=0.0,
+        speed="medium",
+        capability="high",
+    ),
 }
 
 # Extra alias variants (normalized from user input)
@@ -124,7 +192,10 @@ _ALIAS_VARIANTS: dict[str, str] = {
     "sonnet-4.6": "sonnet",
     "sonnet 4.6": "sonnet",
     "claude-sonnet-4-6": "sonnet",
-    "claude": "sonnet",  # generic "claude" → sonnet (default)
+    "claude": "opus",  # generic "claude" → canonical primary Claude runner
+    "minimax": "minimax-m2.7",
+    "minimax m2.7": "minimax-m2.7",
+    "minimax-m2.7:cloud": "minimax-m2.7",
 }
 
 
@@ -147,7 +218,7 @@ def get_current_model() -> str:
             logger.debug("Model config read failed", exc_info=True)
 
     # Default from environment info
-    return "claude-sonnet-4-5"
+    return DEFAULT_MODELS.get(ProviderType.ANTHROPIC, "claude-opus-4-6")
 
 
 def list_models(provider: ProviderType | None = None) -> list[ModelInfo]:
@@ -203,7 +274,7 @@ def resolve_model_request(request: str) -> tuple[ModelInfo | None, str | None]:
             if m and m.provider == ProviderType.ANTHROPIC:
                 return m, f"Using existing config model {m.id}"
         # Fall through to default
-        default = MODELS.get("sonnet")
+        default = MODELS.get("opus")
         return default, f"Defaulting to {default.id}" if default else None
 
     m = get_model_info(request)

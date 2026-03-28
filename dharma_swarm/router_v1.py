@@ -20,6 +20,7 @@ from dharma_swarm.ollama_config import (
     ollama_prefers_cloud,
 )
 from dharma_swarm.provider_policy import ProviderRouteRequest
+from dharma_swarm.tiny_router_shadow import infer_tiny_router_shadow_from_messages
 
 
 _RE_CODE = re.compile(r"```|`[^`]+`|\b(def|class|import|api|sql|json)\b", re.IGNORECASE)
@@ -98,6 +99,16 @@ class RoutingSignals:
     reasoning_markers: int
     has_code: bool
     has_multi_step: bool
+    relation_to_previous: str | None
+    relation_confidence: float | None
+    actionability: str | None
+    actionability_confidence: float | None
+    retention: str | None
+    retention_confidence: float | None
+    ingress_urgency_label: str | None
+    ingress_urgency_confidence: float | None
+    tiny_router_overall_confidence: float | None
+    tiny_router_source: str | None
 
 
 def detect_language_profile(text: str) -> tuple[str, float, float]:
@@ -271,6 +282,7 @@ def build_routing_signals(request: LLMRequest) -> RoutingSignals:
     score, tier, reasoning_markers, has_code, has_multi_step = classify_complexity(text)
     token_est = _estimate_tokens(text)
     context_tier = classify_context_tier(token_est)
+    transition = infer_tiny_router_shadow_from_messages(request.messages)
     return RoutingSignals(
         language_code=language_code,
         language_confidence=lang_confidence,
@@ -282,6 +294,28 @@ def build_routing_signals(request: LLMRequest) -> RoutingSignals:
         reasoning_markers=reasoning_markers,
         has_code=has_code,
         has_multi_step=has_multi_step,
+        relation_to_previous=(
+            transition.relation_to_previous.label if transition is not None else None
+        ),
+        relation_confidence=(
+            transition.relation_to_previous.confidence if transition is not None else None
+        ),
+        actionability=transition.actionability.label if transition is not None else None,
+        actionability_confidence=(
+            transition.actionability.confidence if transition is not None else None
+        ),
+        retention=transition.retention.label if transition is not None else None,
+        retention_confidence=(
+            transition.retention.confidence if transition is not None else None
+        ),
+        ingress_urgency_label=transition.urgency.label if transition is not None else None,
+        ingress_urgency_confidence=(
+            transition.urgency.confidence if transition is not None else None
+        ),
+        tiny_router_overall_confidence=(
+            transition.overall_confidence if transition is not None else None
+        ),
+        tiny_router_source=transition.source if transition is not None else None,
     )
 
 
@@ -306,8 +340,30 @@ def enrich_route_request(
             "has_multi_step": signals.has_multi_step,
             # Explicit policy hints consumed by provider_policy.
             "prefer_japanese_quality": signals.language_code in {"ja", "en_ja_mixed"},
+            "relation_to_previous": signals.relation_to_previous,
+            "actionability": signals.actionability,
+            "retention": signals.retention,
+            "ingress_urgency_label": signals.ingress_urgency_label,
+            "tiny_router_source": signals.tiny_router_source,
+            "tiny_router_overall_confidence": signals.tiny_router_overall_confidence,
+            "tiny_router_shadow": bool(signals.tiny_router_source),
+            "updates_existing_thread": signals.relation_to_previous in {
+                "follow_up",
+                "correction",
+                "confirmation",
+                "cancellation",
+                "closure",
+            },
         }
     )
+    if signals.relation_confidence is not None:
+        ctx["relation_confidence"] = round(signals.relation_confidence, 4)
+    if signals.actionability_confidence is not None:
+        ctx["actionability_confidence"] = round(signals.actionability_confidence, 4)
+    if signals.retention_confidence is not None:
+        ctx["retention_confidence"] = round(signals.retention_confidence, 4)
+    if signals.ingress_urgency_confidence is not None:
+        ctx["ingress_urgency_confidence"] = round(signals.ingress_urgency_confidence, 4)
 
     prefer_low_cost = route_request.preferred_low_cost
     requires_frontier = route_request.requires_frontier_precision

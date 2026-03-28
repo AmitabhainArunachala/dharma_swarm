@@ -27,7 +27,7 @@ def test_resolve_model_request_claude_prefers_existing_46_config(
     assert "claude-opus-4-6" in note
 
 
-def test_switch_model_claude_defaults_to_sonnet_46_when_unset(
+def test_switch_model_claude_defaults_to_opus_when_unset(
     monkeypatch,
     tmp_path,
 ) -> None:
@@ -39,12 +39,22 @@ def test_switch_model_claude_defaults_to_sonnet_46_when_unset(
     success, message = model_manager.switch_model("claude")
 
     assert success is True
-    assert "claude-sonnet-4-6" in message
+    assert "claude-opus-4-6" in message
     config_path = tmp_path / ".claude" / "config.json"
     saved = json.loads(config_path.read_text(encoding="utf-8"))
-    assert saved["model"] == "claude-sonnet-4-6"
+    assert saved["model"] == "claude-opus-4-6"
 
 
 def test_get_model_info_accepts_46_alias_variants() -> None:
     assert model_manager.get_model_info("opus-4.6") is not None
     assert model_manager.get_model_info("sonnet 4.6") is not None
+
+
+def test_get_model_info_accepts_minimax_alias_variants() -> None:
+    model = model_manager.get_model_info("minimax")
+    assert model is not None
+    assert model.id == "minimax-m2.7:cloud"
+
+    model = model_manager.get_model_info("minimax-m2.7")
+    assert model is not None
+    assert model.id == "minimax-m2.7:cloud"

@@ -9,6 +9,7 @@ from dharma_swarm.provider_smoke import (
     run_provider_smoke,
     strongest_ollama_model,
 )
+from dharma_swarm.telemetry_plane import TelemetryPlaneStore
 
 
 def test_strongest_ollama_model_prefers_largest_model_size() -> None:
@@ -55,12 +56,45 @@ def test_run_provider_smoke_reports_success_with_monkeypatched_probes(monkeypatc
     assert payload["ollama"]["strongest_installed"] is None
     assert payload["ollama"]["status"] == "ok"
     assert "kimi-k2.5:cloud" in payload["ollama"]["catalog_models"]
+    assert "minimax-m2.7:cloud" in payload["ollama"]["catalog_models"]
     assert payload["nvidia_nim"]["status"] == "ok"
     assert payload["nvidia_nim"]["deployment_mode"] == "hosted_api"
     assert "moonshotai/kimi-k2.5" in payload["nvidia_nim"]["catalog_models"]["self_hosted"]
     assert payload["nvidia_nim"]["strongest_verified"]
     assert payload["openrouter"]["status"] == "ok"
     assert payload["openrouter"]["strongest_verified"]
+
+
+def test_run_provider_smoke_skips_empty_openrouter_outputs(monkeypatch) -> None:
+    async def _fake_ollama(model: str):
+        return {"status": "ok", "model": model, "response_preview": "OK", "usage": {}}
+
+    async def _fake_nim(model: str):
+        return {"status": "ok", "model": model, "response_preview": "OK", "usage": {}}
+
+    async def _fake_openrouter(model: str):
+        if model == "moonshotai/kimi-k2.5":
+            return {
+                "status": "empty_response",
+                "model": model,
+                "response_preview": "",
+                "usage": {},
+            }
+        return {
+            "status": "ok",
+            "model": model,
+            "response_preview": "OK",
+            "usage": {},
+        }
+
+    monkeypatch.setattr("dharma_swarm.provider_smoke._probe_ollama", _fake_ollama)
+    monkeypatch.setattr("dharma_swarm.provider_smoke._probe_nim", _fake_nim)
+    monkeypatch.setattr("dharma_swarm.provider_smoke._probe_openrouter", _fake_openrouter)
+
+    payload = run_provider_smoke()
+
+    assert payload["openrouter"]["status"] == "ok"
+    assert payload["openrouter"]["strongest_verified"] != "moonshotai/kimi-k2.5"
 
 
 def test_run_provider_smoke_includes_qwen_dashboard_when_requested(monkeypatch) -> None:
@@ -92,6 +126,62 @@ def test_run_provider_smoke_includes_qwen_dashboard_when_requested(monkeypatch) 
     assert payload["qwen_dashboard"]["status"] == "ok"
     assert payload["qwen_dashboard"]["requested_provider"] == "together"
     assert payload["qwen_dashboard"]["tool_names"] == ["read_file", "grep_search"]
+
+
+def test_run_provider_smoke_persists_probe_outcomes_when_telemetry_db_requested(
+    monkeypatch,
+    tmp_path,
+) -> None:
+    telemetry_db = tmp_path / "runtime.db"
+
+    async def _fake_ollama(model: str):
+        return {"status": "ok", "model": model, "response_preview": "OK", "usage": {}}
+
+    async def _fake_nim(model: str):
+        return {"status": "timeout", "model": model, "response_preview": "", "usage": {}}
+
+    async def _fake_openrouter(model: str):
+        return {"status": "ok", "model": model, "response_preview": "OK", "usage": {}}
+
+    async def _fake_qwen(provider_name: str, task: str):
+        return {
+            "status": "ok",
+            "requested_provider": provider_name,
+            "resolved_provider": provider_name,
+            "task": task,
+            "tool_names": ["read_file", "grep_search"],
+        }
+
+    monkeypatch.setattr("dharma_swarm.provider_smoke._probe_ollama", _fake_ollama)
+    monkeypatch.setattr("dharma_swarm.provider_smoke._probe_nim", _fake_nim)
+    monkeypatch.setattr("dharma_swarm.provider_smoke._probe_openrouter", _fake_openrouter)
+    monkeypatch.setattr("dharma_swarm.provider_smoke._probe_qwen_dashboard", _fake_qwen)
+
+    payload = run_provider_smoke(
+        qwen_provider="together",
+        telemetry_db_path=telemetry_db,
+    )
+
+    telemetry = payload["_telemetry"]
+    assert telemetry["status"] == "persisted"
+    assert telemetry["db_path"] == str(telemetry_db)
+    assert telemetry["outcome_count"] == 4
+
+    store = TelemetryPlaneStore(telemetry_db)
+    outcomes = asyncio.run(
+        store.list_external_outcomes(
+            session_id=telemetry["session_id"],
+            limit=10,
+        )
+    )
+
+    assert len(outcomes) == 4
+    assert {item.outcome_kind for item in outcomes} == {"provider_smoke_probe"}
+    probe_names = {item.metadata["probe_name"] for item in outcomes}
+    assert probe_names == {"ollama", "nvidia_nim", "openrouter", "qwen_dashboard"}
+    qwen_outcome = next(item for item in outcomes if item.metadata["probe_name"] == "qwen_dashboard")
+    assert qwen_outcome.subject_id == "together"
+    assert qwen_outcome.status == "ok"
 
 
 def test_probe_qwen_dashboard_reports_missing_config(monkeypatch) -> None:

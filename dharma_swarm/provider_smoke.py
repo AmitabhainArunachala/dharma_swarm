@@ -9,6 +9,7 @@ import os
 import re
 from pathlib import Path
 from typing import Any
+from uuid import uuid4
 
 from dharma_swarm.models import LLMRequest, ProviderType
 from dharma_swarm.ollama_config import (
@@ -19,6 +20,10 @@ from dharma_swarm.runtime_provider import (
     OPENROUTER_BASE_URL,
     create_runtime_provider,
     resolve_runtime_provider_config,
+)
+from dharma_swarm.telemetry_plane import (
+    ExternalOutcomeRecord,
+    TelemetryPlaneStore,
 )
 
 
@@ -45,6 +50,7 @@ _OPENROUTER_FRONTIER_MODELS = (
     "deepseek/deepseek-r1",
     "qwen/qwen3-235b-a22b",
 )
+_PROVIDER_SMOKE_OUTCOME_KIND = "provider_smoke_probe"
 _QWEN_DASHBOARD_SMOKE_PROVIDERS = {
     ProviderType.GROQ,
     ProviderType.SILICONFLOW,
@@ -83,6 +89,10 @@ def _classify_error(exc: Exception | str) -> str:
     if "timed out" in text or "timeout" in text:
         return "timeout"
     return "error"
+
+
+def _response_status(content: str | None) -> str:
+    return "ok" if str(content or "").strip() else "empty_response"
 
 
 def _strength_score(model_name: str) -> tuple[float, int]:
@@ -193,10 +203,11 @@ async def _probe_ollama(model: str) -> dict[str, Any]:
                 temperature=0.0,
             )
         )
+        content = str(response.content or "")
         return {
-            "status": "ok",
+            "status": _response_status(content),
             "model": response.model or model,
-            "response_preview": (response.content or "")[:120],
+            "response_preview": content[:120],
             "usage": response.usage,
             "base_url": config.base_url,
             "transport_mode": config.transport_mode,
@@ -228,10 +239,11 @@ async def _probe_nim(model: str) -> dict[str, Any]:
                 temperature=0.0,
             )
         )
+        content = str(response.content or "")
         return {
-            "status": "ok",
+            "status": _response_status(content),
             "model": response.model or model,
-            "response_preview": (response.content or "")[:120],
+            "response_preview": content[:120],
             "usage": response.usage,
             "base_url": config.base_url,
         }
@@ -261,10 +273,11 @@ async def _probe_openrouter(model: str) -> dict[str, Any]:
                 temperature=0.0,
             )
         )
+        content = str(response.content or "")
         return {
-            "status": "ok",
+            "status": _response_status(content),
             "model": response.model or model,
-            "response_preview": (response.content or "")[:120],
+            "response_preview": content[:120],
             "usage": response.usage,
             "base_url": config.base_url,
         }
@@ -290,6 +303,101 @@ def _dedupe_models(models: list[str]) -> list[str]:
             seen.add(name)
             out.append(name)
     return out
+
+
+def _resolve_provider_smoke_telemetry_db(
+    telemetry_db_path: str | Path | None,
+) -> Path | None:
+    if telemetry_db_path not in (None, ""):
+        return Path(telemetry_db_path).expanduser()
+    for env_name in ("DGC_ROUTER_TELEMETRY_DB", "DHARMA_RUNTIME_DB"):
+        raw = os.environ.get(env_name, "").strip()
+        if raw:
+            return Path(raw).expanduser()
+    return None
+
+
+def _provider_smoke_subject_id(label: str, block: dict[str, Any]) -> str:
+    if label == "qwen_dashboard":
+        return str(
+            block.get("resolved_provider")
+            or block.get("requested_provider")
+            or label
+        )
+    return label
+
+
+def _provider_smoke_value(status: str) -> float:
+    return 1.0 if status == "ok" else 0.0
+
+
+async def _persist_provider_smoke_telemetry(
+    payload: dict[str, Any],
+    *,
+    telemetry_db_path: str | Path,
+) -> dict[str, Any]:
+    store = TelemetryPlaneStore(Path(telemetry_db_path).expanduser())
+    session_id = f"provider-smoke-{uuid4().hex[:12]}"
+    run_id = f"provider-smoke-{uuid4().hex[:12]}"
+    errors: list[str] = []
+    outcome_count = 0
+
+    await store.init_db()
+    for label, block in payload.items():
+        if not isinstance(block, dict):
+            continue
+        status = str(block.get("status") or "").strip()
+        if not status:
+            continue
+
+        subject_id = _provider_smoke_subject_id(label, block)
+        model = str(block.get("model") or block.get("configured_model") or "").strip()
+        summary = f"{label} {status}"
+        if model:
+            summary += f" ({model})"
+        record = ExternalOutcomeRecord(
+            outcome_id=f"outcome_{uuid4().hex[:16]}",
+            outcome_kind=_PROVIDER_SMOKE_OUTCOME_KIND,
+            subject_id=subject_id,
+            value=_provider_smoke_value(status),
+            unit="success_ratio",
+            confidence=1.0 if status == "ok" else 0.0,
+            status=status,
+            summary=summary,
+            session_id=session_id,
+            task_id="provider_smoke",
+            run_id=run_id,
+            metadata={
+                "probe_name": label,
+                "provider": subject_id,
+                "status": status,
+                **dict(block),
+            },
+        )
+        try:
+            await store.record_external_outcome(record)
+            outcome_count += 1
+        except Exception as exc:
+            errors.append(f"{label}: {exc}")
+
+    if errors and outcome_count:
+        status = "partial"
+    elif errors:
+        status = "error"
+    else:
+        status = "persisted"
+
+    result = {
+        "status": status,
+        "db_path": str(store.db_path),
+        "session_id": session_id,
+        "run_id": run_id,
+        "outcome_kind": _PROVIDER_SMOKE_OUTCOME_KIND,
+        "outcome_count": outcome_count,
+    }
+    if errors:
+        result["errors"] = errors
+    return result
 
 
 @contextmanager
@@ -487,6 +595,7 @@ def run_provider_smoke(
     nim_model: str | None = None,
     qwen_provider: str | None = None,
     qwen_task: str | None = None,
+    telemetry_db_path: str | Path | None = None,
 ) -> dict[str, Any]:
     """Run best-effort smoke tests for cloud and external provider lanes."""
     ollama_config = resolve_runtime_provider_config(ProviderType.OLLAMA)
@@ -572,6 +681,14 @@ def run_provider_smoke(
             _probe_qwen_dashboard(
                 qwen_provider,
                 qwen_task or _DEFAULT_QWEN_DASHBOARD_TASK,
+            )
+        )
+    resolved_telemetry_db = _resolve_provider_smoke_telemetry_db(telemetry_db_path)
+    if resolved_telemetry_db is not None:
+        payload["_telemetry"] = asyncio.run(
+            _persist_provider_smoke_telemetry(
+                payload,
+                telemetry_db_path=resolved_telemetry_db,
             )
         )
     return payload

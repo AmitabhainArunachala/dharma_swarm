@@ -5,6 +5,7 @@ from unittest.mock import AsyncMock, patch
 
 import pytest
 
+from dharma_swarm.model_hierarchy import default_model
 from dharma_swarm.models import LLMRequest, LLMResponse, ProviderType
 from dharma_swarm.providers import (
     AnthropicProvider,
@@ -113,6 +114,20 @@ def test_nvidia_nim_provider_no_key():
     p._api_key = None
     with pytest.raises(RuntimeError, match="NVIDIA_NIM_API_KEY"):
         p._headers_or_raise()
+
+
+def test_nvidia_nim_provider_uses_canonical_default_model():
+    p = NVIDIANIMProvider(api_key="test-key")
+    assert p._default_model == default_model(ProviderType.NVIDIA_NIM)
+
+
+def test_nvidia_nim_provider_resolves_default_via_canonical_helper(monkeypatch):
+    monkeypatch.setattr(
+        "dharma_swarm.providers.canonical_default_model",
+        lambda provider: "nim-from-helper",
+    )
+    p = NVIDIANIMProvider(api_key="test-key")
+    assert p._default_model == "nim-from-helper"
 
 
 # --- ClaudeCodeProvider tests ---
@@ -266,7 +281,10 @@ def test_codex_provider_init():
 def test_codex_provider_cli_args():
     p = CodexProvider()
     args = p._build_cli_args("test prompt")
-    assert args[:2] == ["codex", "exec"]
+    # The resolved command may be an absolute path (e.g. /usr/local/bin/codex)
+    assert args[0].endswith("codex")
+    assert args[1] == "exec"
+    assert "--dangerously-bypass-approvals-and-sandbox" in args
     assert "test prompt" in args
 
 

@@ -5,6 +5,14 @@ import asyncio
 import pytest
 
 from dharma_swarm.decision_router import CollaborationMode, RoutePath
+from dharma_swarm.model_hierarchy import (
+    DELEGATED_RESEARCH_PRIORITY,
+    LaneRole,
+    PRIMARY_DRIVER_LANES,
+    PRIMARY_REASONING_PRIORITY,
+    PRIMARY_TOOLING_PRIORITY,
+    provider_lane_role,
+)
 from dharma_swarm.models import LLMRequest, LLMResponse, ProviderType
 from dharma_swarm.provider_policy import (
     ProviderPolicyRouter,
@@ -19,6 +27,26 @@ from dharma_swarm.telemetry_plane import (
     RoutingDecisionRecord,
     TelemetryPlaneStore,
 )
+
+
+def test_model_hierarchy_exposes_primary_driver_and_support_lane_contract() -> None:
+    assert PRIMARY_DRIVER_LANES == (
+        ProviderType.CODEX,
+        ProviderType.CLAUDE_CODE,
+        ProviderType.ANTHROPIC,
+    )
+    assert PRIMARY_TOOLING_PRIORITY[:2] == (
+        ProviderType.CODEX,
+        ProviderType.CLAUDE_CODE,
+    )
+    assert PRIMARY_REASONING_PRIORITY[0] == ProviderType.ANTHROPIC
+    assert ProviderType.OPENROUTER in DELEGATED_RESEARCH_PRIORITY
+    assert ProviderType.OLLAMA in DELEGATED_RESEARCH_PRIORITY
+    assert ProviderType.NVIDIA_NIM in DELEGATED_RESEARCH_PRIORITY
+    assert provider_lane_role(ProviderType.CODEX) == LaneRole.PRIMARY_DRIVER
+    assert provider_lane_role(ProviderType.ANTHROPIC) == LaneRole.PRIMARY_DRIVER
+    assert provider_lane_role(ProviderType.OPENROUTER) == LaneRole.RESEARCH_DELEGATE
+    assert provider_lane_role(ProviderType.NVIDIA_NIM) == LaneRole.CHALLENGER
 
 
 def test_provider_policy_prefers_low_cost_provider_for_reflex_path() -> None:
@@ -71,6 +99,35 @@ def test_provider_policy_escalates_for_frontier_precision() -> None:
     assert decision.path == RoutePath.ESCALATE
     assert decision.selected_provider == ProviderType.ANTHROPIC
     assert "frontier_precision_requested" in decision.reasons
+
+
+def test_provider_policy_deliberative_reasoning_prefers_delegated_research_before_primaries() -> None:
+    router = ProviderPolicyRouter()
+    decision = router.route(
+        ProviderRouteRequest(
+            action_name="architecture_scout",
+            risk_score=0.34,
+            uncertainty=0.46,
+            novelty=0.44,
+            urgency=0.58,
+            expected_impact=0.48,
+            preferred_low_cost=False,
+            context={
+                "complexity_tier": "REASONING",
+                "last_user_message": "Analyze the architecture and compare alternatives carefully.",
+            },
+        ),
+        available_providers=[
+            ProviderType.OPENROUTER,
+            ProviderType.OLLAMA,
+            ProviderType.ANTHROPIC,
+            ProviderType.CODEX,
+        ],
+    )
+
+    assert decision.path == RoutePath.DELIBERATIVE
+    assert decision.selected_provider == ProviderType.OPENROUTER
+    assert ProviderType.ANTHROPIC in decision.fallback_providers
 
 
 def test_provider_policy_prefers_tooling_lanes_when_requested() -> None:

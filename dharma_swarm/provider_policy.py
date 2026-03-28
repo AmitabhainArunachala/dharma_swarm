@@ -2,19 +2,36 @@
 
 from __future__ import annotations
 
+import asyncio
 from dataclasses import dataclass, field
+import logging
 import os
 from pathlib import Path
 import time
 from typing import Any, Iterable
 
 from dharma_swarm.decision_router import DecisionInput, DecisionRouter, RoutePath
-from dharma_swarm.models import ProviderType
+from dharma_swarm.model_hierarchy import (
+    CANONICAL_SEED_ORDER,
+    DELIBERATIVE_EXECUTION_PRIORITY,
+    DELIBERATIVE_REASONING_PRIORITY,
+    DEFAULT_MODELS,
+    ESCALATION_PRIORITY,
+    PRIMARY_TOOLING_PRIORITY,
+    TIER_CHEAP,
+    TIER_FREE,
+    TIER_PAID,
+    heuristic_score,
+)
+from dharma_swarm.models import LLMRequest, LLMResponse, ProviderType
+from dharma_swarm.smart_router import SmartRouter, SmartRouterConfig
 from dharma_swarm.telemetry_optimizer import (
     ProviderOptimizationRecommendation,
     TelemetryOptimizer,
 )
 from dharma_swarm.telemetry_plane import TelemetryPlaneStore
+
+_race_logger = logging.getLogger(__name__ + ".race")
 
 
 def _dedupe_keep_order(items: Iterable[ProviderType]) -> list[ProviderType]:
@@ -47,111 +64,38 @@ class ProviderRouteRequest:
 
 @dataclass(frozen=True)
 class ProviderRoutingConfig:
-    # FREE FIRST — hard constraint. Ollama Cloud, NVIDIA NIM, OpenRouter Free
-    # MUST precede paid providers. Only escalation overrides this.
-    reflex_candidates: tuple[ProviderType, ...] = (
-        ProviderType.OLLAMA,
-        ProviderType.NVIDIA_NIM,
-        ProviderType.OPENROUTER_FREE,
-        ProviderType.GROQ,
-        ProviderType.SILICONFLOW,
-        ProviderType.TOGETHER,
-        ProviderType.FIREWORKS,
-        ProviderType.OPENROUTER,
-        ProviderType.OPENAI,
-        ProviderType.CODEX,
-        ProviderType.ANTHROPIC,
-        ProviderType.CLAUDE_CODE,
-    )
-    deliberative_candidates: tuple[ProviderType, ...] = (
-        ProviderType.OLLAMA,
-        ProviderType.NVIDIA_NIM,
-        ProviderType.OPENROUTER_FREE,
-        ProviderType.GROQ,
-        ProviderType.SILICONFLOW,
-        ProviderType.TOGETHER,
-        ProviderType.FIREWORKS,
-        ProviderType.OPENROUTER,
-        ProviderType.OPENAI,
-        ProviderType.ANTHROPIC,
-        ProviderType.CODEX,
-        ProviderType.CLAUDE_CODE,
-    )
-    escalate_candidates: tuple[ProviderType, ...] = (
-        ProviderType.ANTHROPIC,
-        ProviderType.OPENAI,
-        ProviderType.CLAUDE_CODE,
-        ProviderType.CODEX,
-        ProviderType.OPENROUTER,
-        ProviderType.OLLAMA,
-        ProviderType.NVIDIA_NIM,
-        ProviderType.OPENROUTER_FREE,
-        ProviderType.TOGETHER,
-        ProviderType.FIREWORKS,
-        ProviderType.GROQ,
-        ProviderType.SILICONFLOW,
-    )
-    tooling_candidates: tuple[ProviderType, ...] = (
-        ProviderType.CODEX,
-        ProviderType.CLAUDE_CODE,
-    )
+    # All candidate lists source from model_hierarchy.CANONICAL_SEED_ORDER.
+    # This is the ONLY place these tuples are defined.  Editing
+    # model_hierarchy.py propagates everywhere.
+    reflex_candidates: tuple[ProviderType, ...] = CANONICAL_SEED_ORDER
+    deliberative_candidates: tuple[ProviderType, ...] = DELIBERATIVE_EXECUTION_PRIORITY
+    escalate_candidates: tuple[ProviderType, ...] = ESCALATION_PRIORITY
+    tooling_candidates: tuple[ProviderType, ...] = PRIMARY_TOOLING_PRIORITY
     low_cost_priority: tuple[ProviderType, ...] = (
-        ProviderType.OLLAMA,
-        ProviderType.NVIDIA_NIM,
-        ProviderType.OPENROUTER_FREE,
-        ProviderType.GROQ,
-        ProviderType.SILICONFLOW,
-        ProviderType.TOGETHER,
-        ProviderType.FIREWORKS,
-        ProviderType.OPENROUTER,
-        ProviderType.OPENAI,
-        ProviderType.ANTHROPIC,
-        ProviderType.CODEX,
-        ProviderType.CLAUDE_CODE,
+        TIER_FREE + TIER_CHEAP + TIER_PAID
     )
     japanese_quality_priority: tuple[ProviderType, ...] = (
+        ProviderType.OPENROUTER,
+        ProviderType.OLLAMA,
+        ProviderType.NVIDIA_NIM,
         ProviderType.SILICONFLOW,
         ProviderType.TOGETHER,
         ProviderType.FIREWORKS,
-        ProviderType.OPENROUTER,
         ProviderType.ANTHROPIC,
-        ProviderType.OPENAI,
-        ProviderType.NVIDIA_NIM,
-        ProviderType.GROQ,
-        ProviderType.CODEX,
         ProviderType.CLAUDE_CODE,
-        ProviderType.OLLAMA,
-        ProviderType.OPENROUTER_FREE,
-    )
-    reasoning_priority: tuple[ProviderType, ...] = (
-        ProviderType.ANTHROPIC,
-        ProviderType.OPENAI,
         ProviderType.CODEX,
-        ProviderType.CLAUDE_CODE,
-        ProviderType.OPENROUTER,
-        ProviderType.TOGETHER,
-        ProviderType.FIREWORKS,
-        ProviderType.SILICONFLOW,
+        ProviderType.OPENAI,
         ProviderType.GROQ,
-        ProviderType.NVIDIA_NIM,
-        ProviderType.OLLAMA,
         ProviderType.OPENROUTER_FREE,
+        ProviderType.GOOGLE_AI,
+        ProviderType.MISTRAL,
+        ProviderType.CHUTES,
+        ProviderType.CEREBRAS,
+        ProviderType.SAMBANOVA,
     )
+    reasoning_priority: tuple[ProviderType, ...] = DELIBERATIVE_REASONING_PRIORITY
     default_model_hints: dict[ProviderType, str] = field(
-        default_factory=lambda: {
-            ProviderType.ANTHROPIC: "claude-sonnet-4-6",
-            ProviderType.OPENAI: "gpt-4o",
-            ProviderType.OPENROUTER: "openai/gpt-5-codex",
-            ProviderType.OPENROUTER_FREE: "meta-llama/llama-3.3-70b-instruct:free",
-            ProviderType.NVIDIA_NIM: "meta/llama-3.3-70b-instruct",
-            ProviderType.GROQ: "qwen/qwen3-32b",
-            ProviderType.SILICONFLOW: "Qwen/Qwen3-Coder-480B-A35B-Instruct",
-            ProviderType.TOGETHER: "Qwen/Qwen3-Coder-480B-A35B-Instruct-FP8",
-            ProviderType.FIREWORKS: "accounts/fireworks/models/qwen3-coder-480b-a35b-instruct",
-            ProviderType.CLAUDE_CODE: "claude-code",
-            ProviderType.CODEX: "codex",
-            ProviderType.OLLAMA: "llama3.2",
-        }
+        default_factory=lambda: dict(DEFAULT_MODELS)
     )
     telemetry_optimization_enabled: bool | None = None
     telemetry_db_path: str | Path | None = None
@@ -181,9 +125,11 @@ class ProviderPolicyRouter:
         *,
         config: ProviderRoutingConfig | None = None,
         decision_router: DecisionRouter | None = None,
+        smart_router: SmartRouter | None = None,
     ) -> None:
         self.config = config or ProviderRoutingConfig()
         self.decision_router = decision_router or DecisionRouter()
+        self._smart_router = smart_router or self._build_smart_router()
         self._telemetry_enabled = self._resolve_telemetry_enabled()
         self._telemetry_cache: dict[ProviderType, ProviderOptimizationRecommendation] = {}
         self._telemetry_cache_loaded_at = 0.0
@@ -196,6 +142,13 @@ class ProviderPolicyRouter:
                 else TelemetryPlaneStore()
             )
             self._telemetry_optimizer = TelemetryOptimizer(telemetry)
+
+    @staticmethod
+    def _build_smart_router() -> SmartRouter:
+        enabled = os.environ.get("DGC_SMART_ROUTER_ENABLED", "").strip().lower()
+        if enabled in {"0", "false", "no", "off"}:
+            return SmartRouter(SmartRouterConfig(log_decisions=False))
+        return SmartRouter()
 
     def route(
         self,
@@ -241,6 +194,25 @@ class ProviderPolicyRouter:
                 filtered = available
         else:
             filtered = candidates
+
+        # SmartRouter cost-aware re-ranking: promotes cheaper providers for
+        # simple tasks without overriding escalation, frontier, or tooling requests.
+        requires_tooling = bool(request.context.get("requires_tooling"))
+        if (
+            self._smart_router is not None
+            and path != RoutePath.ESCALATE
+            and not request.requires_frontier_precision
+            and not requires_tooling
+            and request.preferred_low_cost
+        ):
+            task_text = str(request.context.get("last_user_message", request.action_name))
+            smart_decision = self._smart_router.route(task_text, available=filtered)
+            if smart_decision.selected_providers:
+                filtered = self._smart_router.rerank_candidates(
+                    filtered, smart_decision.cost_tier,
+                )
+                reasons.append(f"smart_router_tier={smart_decision.cost_tier.value}")
+
         filtered, telemetry_reasons = self._apply_telemetry_overlay(
             candidates=filtered,
             path=path,
@@ -388,6 +360,15 @@ class ProviderPolicyRouter:
             ],
         )
 
+    @property
+    def smart_router(self) -> SmartRouter:
+        """Expose the SmartRouter instance for direct access / stats."""
+        return self._smart_router
+
+    def smart_router_stats(self) -> str:
+        """Return human-readable SmartRouter statistics."""
+        return self._smart_router.stats_summary()
+
     def plan_swarm(
         self,
         request: ProviderRouteRequest,
@@ -454,3 +435,137 @@ class ProviderPolicyRouter:
             candidates = tooling + non_tooling
 
         return _dedupe_keep_order(candidates)
+
+
+# ─── Parallel Racing ─────────────────────────────────────────────────────
+
+class RaceError(Exception):
+    """All providers in a race failed."""
+
+
+async def race_providers(
+    request: LLMRequest,
+    providers: dict[ProviderType, Any],
+    candidates: list[ProviderType],
+    *,
+    width: int = 3,
+    timeout: float = 90.0,
+    routing_memory: Any | None = None,
+    task_signature: str = "*",
+) -> tuple[LLMResponse, ProviderType]:
+    """Fire top N providers in parallel, return first good response.
+
+    Uses asyncio.wait(FIRST_COMPLETED).  Cancels losers on success.
+    Records outcome to routing_memory EWMA if provided.
+
+    Args:
+        request: The LLM request to dispatch.
+        providers: Map of ProviderType → instantiated provider objects.
+        candidates: Ordered list of providers to try (EWMA-ranked).
+        width: How many to fire simultaneously (default 3).
+        timeout: Max seconds to wait for any response.
+        routing_memory: Optional RoutingMemoryStore for EWMA feedback.
+        task_signature: Routing bucket for EWMA recording.
+
+    Returns:
+        (response, winning_provider_type) tuple.
+
+    Raises:
+        RaceError: If all providers fail.
+    """
+    # Select top N candidates that have an available provider instance
+    racers: list[ProviderType] = []
+    for pt in candidates:
+        if pt in providers and len(racers) < width:
+            racers.append(pt)
+    if not racers:
+        raise RaceError("No providers available for racing")
+
+    _race_logger.info(
+        "Racing %d providers: %s",
+        len(racers),
+        [p.value for p in racers],
+    )
+
+    # Launch concurrent tasks
+    task_map: dict[asyncio.Task, ProviderType] = {}
+    start_time = time.monotonic()
+    for pt in racers:
+        provider = providers[pt]
+        task = asyncio.create_task(provider.complete(request))
+        task_map[task] = pt
+
+    errors: dict[ProviderType, str] = {}
+
+    while task_map:
+        remaining_timeout = max(0.1, timeout - (time.monotonic() - start_time))
+        done, pending = await asyncio.wait(
+            task_map.keys(),
+            return_when=asyncio.FIRST_COMPLETED,
+            timeout=remaining_timeout,
+        )
+
+        if not done:
+            # Timeout — cancel all
+            for t in pending:
+                t.cancel()
+            break
+
+        for task in done:
+            pt = task_map.pop(task)
+            elapsed_ms = (time.monotonic() - start_time) * 1000
+
+            if task.exception():
+                error_msg = str(task.exception())
+                errors[pt] = error_msg
+                _race_logger.debug("Race loser %s: %s", pt.value, error_msg)
+                continue
+
+            response = task.result()
+            quality = heuristic_score(
+                response,
+                latency_ms=elapsed_ms,
+            )
+
+            if quality < 0.1:
+                errors[pt] = f"quality_too_low={quality:.3f}"
+                _race_logger.debug(
+                    "Race reject %s: quality=%.3f", pt.value, quality,
+                )
+                continue
+
+            # Winner! Cancel remaining tasks.
+            for t in task_map:
+                t.cancel()
+
+            _race_logger.info(
+                "Race winner: %s in %.0fms (quality=%.3f)",
+                pt.value, elapsed_ms, quality,
+            )
+
+            # Record to EWMA
+            if routing_memory is not None:
+                try:
+                    model = getattr(response, "model", "") or DEFAULT_MODELS.get(pt, "")
+                    routing_memory.record_outcome(
+                        provider=pt,
+                        model=model,
+                        task_signature=task_signature,
+                        action_name="race",
+                        route_path="race",
+                        success=True,
+                        latency_ms=elapsed_ms,
+                        total_tokens=(
+                            response.usage.get("input_tokens", 0)
+                            + response.usage.get("output_tokens", 0)
+                        ) if response.usage else 0,
+                        quality_score=quality,
+                    )
+                except Exception:
+                    _race_logger.debug("EWMA record failed", exc_info=True)
+
+            return response, pt
+
+    # All failed
+    error_summary = "; ".join(f"{p.value}: {e}" for p, e in errors.items())
+    raise RaceError(f"All {len(racers)} providers failed: {error_summary}")

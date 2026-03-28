@@ -4,14 +4,20 @@ from __future__ import annotations
 
 import os
 
+from dharma_swarm.model_hierarchy import DEFAULT_MODELS
+from dharma_swarm.models import ProviderType
+
 
 OLLAMA_LOCAL_BASE_URL = "http://localhost:11434"
 OLLAMA_CLOUD_BASE_URL = "https://ollama.com"
 OLLAMA_DEFAULT_LOCAL_MODEL = "llama3.2"
-OLLAMA_DEFAULT_CLOUD_MODEL = "kimi-k2.5:cloud"
+OLLAMA_DEFAULT_CLOUD_MODEL = DEFAULT_MODELS[ProviderType.OLLAMA]
 OLLAMA_CLOUD_FRONTIER_MODELS = (
-    "kimi-k2.5:cloud",
     "glm-5:cloud",
+    "deepseek-v3.2:cloud",
+    "kimi-k2.5:cloud",
+    "minimax-m2.7:cloud",
+    "qwen3-coder:480b-cloud",
 )
 
 _LOCAL_BASE_URLS = {
@@ -114,6 +120,15 @@ def build_ollama_headers(
     return {"Authorization": f"Bearer {token}"}
 
 
+def get_ollama_cloud_frontier_chain() -> tuple[str, ...]:
+    """Return Ollama Cloud frontier models in priority order for fallback rotation.
+
+    When the primary model (GLM-5) fails, callers should try the next model
+    in this chain.  All models are FREE on Ollama Cloud.
+    """
+    return OLLAMA_CLOUD_FRONTIER_MODELS
+
+
 __all__ = [
     "OLLAMA_CLOUD_BASE_URL",
     "OLLAMA_CLOUD_FRONTIER_MODELS",
@@ -121,6 +136,7 @@ __all__ = [
     "OLLAMA_DEFAULT_LOCAL_MODEL",
     "OLLAMA_LOCAL_BASE_URL",
     "build_ollama_headers",
+    "get_ollama_cloud_frontier_chain",
     "is_ollama_cloud_base_url",
     "ollama_prefers_cloud",
     "ollama_transport_mode",

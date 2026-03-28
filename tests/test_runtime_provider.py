@@ -2,11 +2,13 @@ from __future__ import annotations
 
 import pytest
 
+from dharma_swarm.model_hierarchy import DEFAULT_MODELS
 from dharma_swarm.models import LLMResponse, ProviderType
 from dharma_swarm.runtime_provider import (
     DEFAULT_GROQ_MODEL,
     DEFAULT_SILICONFLOW_MODEL,
     DEFAULT_FIREWORKS_MODEL,
+    DEFAULT_OPENROUTER_MODEL,
     DEFAULT_TOGETHER_MODEL,
     FIREWORKS_BASE_URL,
     GROQ_BASE_URL,
@@ -45,7 +47,7 @@ def test_resolve_runtime_provider_config_for_ollama_prefers_cloud_with_api_key(m
 
     assert cfg.base_url == "https://ollama.com"
     assert cfg.transport_mode == "cloud_api"
-    assert cfg.default_model == "kimi-k2.5:cloud"
+    assert cfg.default_model == DEFAULT_MODELS[ProviderType.OLLAMA]
 
 
 def test_resolve_runtime_provider_config_for_openrouter_uses_canonical_base(monkeypatch) -> None:
@@ -56,6 +58,27 @@ def test_resolve_runtime_provider_config_for_openrouter_uses_canonical_base(monk
     assert cfg.api_key == "or-key"
     assert cfg.base_url == OPENROUTER_BASE_URL
     assert cfg.available is True
+
+
+def test_resolve_runtime_provider_config_for_codex_uses_npm_global_fallback(
+    monkeypatch,
+    tmp_path,
+) -> None:
+    codex_path = tmp_path / ".npm-global" / "bin" / "codex"
+    codex_path.parent.mkdir(parents=True)
+    codex_path.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
+
+    monkeypatch.setattr("dharma_swarm.runtime_provider.shutil.which", lambda _name: None)
+    monkeypatch.setattr("dharma_swarm.runtime_provider.Path.home", lambda: tmp_path)
+
+    cfg = resolve_runtime_provider_config(ProviderType.CODEX)
+
+    assert cfg.binary_path == str(codex_path)
+    assert cfg.available is True
+
+
+def test_runtime_provider_openrouter_default_model_matches_canonical_hierarchy() -> None:
+    assert DEFAULT_OPENROUTER_MODEL == DEFAULT_MODELS[ProviderType.OPENROUTER]
 
 
 def test_resolve_runtime_provider_config_for_groq_uses_env_base_and_model(monkeypatch) -> None:
@@ -79,6 +102,16 @@ def test_resolve_runtime_provider_config_for_groq_uses_default_model(monkeypatch
     cfg = resolve_runtime_provider_config(ProviderType.GROQ)
 
     assert cfg.default_model == DEFAULT_GROQ_MODEL
+
+
+def test_resolve_runtime_provider_config_for_cerebras_uses_canonical_default_model(
+    monkeypatch,
+) -> None:
+    monkeypatch.setenv("CEREBRAS_API_KEY", "cerebras-key")
+
+    cfg = resolve_runtime_provider_config(ProviderType.CEREBRAS)
+
+    assert cfg.default_model == DEFAULT_MODELS[ProviderType.CEREBRAS]
 
 
 def test_resolve_runtime_provider_config_for_siliconflow_uses_canonical_base(monkeypatch) -> None:

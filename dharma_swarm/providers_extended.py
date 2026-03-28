@@ -16,7 +16,16 @@ from typing import AsyncIterator
 
 import httpx
 
+from dharma_swarm.api_keys import (
+    MOONSHOT_API_KEY_ENV,
+    MOONSHOT_BASE_URL_ENV,
+    NVIDIA_NIM_API_KEY_ENV,
+    NVIDIA_NIM_BASE_URL_ENV,
+    OLLAMA_BASE_URL_ENV,
+)
+from dharma_swarm.model_hierarchy import default_model as canonical_default_model
 from dharma_swarm.models import LLMRequest, LLMResponse
+from dharma_swarm.models import ProviderType
 from dharma_swarm.providers import LLMProvider
 
 
@@ -33,7 +42,7 @@ class OllamaProvider(LLMProvider):
         model: str = "llama3.2",
     ):
         self.base_url = base_url or os.environ.get(
-            "OLLAMA_BASE_URL", "http://localhost:11434"
+            OLLAMA_BASE_URL_ENV, "http://localhost:11434"
         )
         self.default_model = model
 
@@ -102,20 +111,20 @@ class NVIDIANIMProvider(LLMProvider):
         api_key: str | None = None,
         base_url: str | None = None,
     ):
-        self._api_key = api_key or os.environ.get("NVIDIA_NIM_API_KEY")
+        self._api_key = api_key or os.environ.get(NVIDIA_NIM_API_KEY_ENV)
         self.base_url = base_url or os.environ.get(
-            "NVIDIA_NIM_BASE_URL",
+            NVIDIA_NIM_BASE_URL_ENV,
             "https://integrate.api.nvidia.com/v1",
         )
 
     async def complete(self, request: LLMRequest) -> LLMResponse:
         """Call NVIDIA NIM API (OpenAI-compatible)."""
         if not self._api_key:
-            raise RuntimeError("NVIDIA_NIM_API_KEY not set")
+            raise RuntimeError(f"{NVIDIA_NIM_API_KEY_ENV} not set")
 
         # NIM uses OpenAI-compatible API
         payload = {
-            "model": request.model or "meta/llama-3.3-70b-instruct",
+            "model": request.model or canonical_default_model(ProviderType.NVIDIA_NIM),
             "messages": request.messages,
             "temperature": request.temperature,
             "max_tokens": request.max_tokens,
@@ -164,16 +173,16 @@ class MoonshotProvider(LLMProvider):
         api_key: str | None = None,
         base_url: str | None = None,
     ):
-        self._api_key = api_key or os.environ.get("MOONSHOT_API_KEY")
+        self._api_key = api_key or os.environ.get(MOONSHOT_API_KEY_ENV)
         self.base_url = base_url or os.environ.get(
-            "MOONSHOT_BASE_URL",
+            MOONSHOT_BASE_URL_ENV,
             "https://api.moonshot.cn/v1",
         )
 
     async def complete(self, request: LLMRequest) -> LLMResponse:
         """Call Moonshot API (OpenAI-compatible)."""
         if not self._api_key:
-            raise RuntimeError("MOONSHOT_API_KEY not set")
+            raise RuntimeError(f"{MOONSHOT_API_KEY_ENV} not set")
 
         payload = {
             "model": request.model or "moonshot-v1-8k",
