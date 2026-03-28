@@ -93,7 +93,9 @@ async def build_sovereign_runtime_layer(
     resolved_state_dir = Path(state_dir)
     resolved_state_dir.mkdir(parents=True, exist_ok=True)
 
-    message_bus_path = resolved_state_dir / "db" / "messages.db"
+    db_dir = resolved_state_dir / "db"
+    db_dir.mkdir(parents=True, exist_ok=True)
+    message_bus_path = db_dir / "messages.db"
     runtime_db_path = resolved_state_dir / "state" / "runtime.db"
     checkpoint_dir = resolved_state_dir / "state" / "checkpoints"
     ledger_dir = resolved_state_dir / "ledgers"

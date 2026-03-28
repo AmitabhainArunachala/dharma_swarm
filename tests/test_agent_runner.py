@@ -9,11 +9,12 @@ import sqlite3
 import pytest
 from unittest.mock import AsyncMock
 
-from dharma_swarm.models import AgentConfig, AgentRole, AgentStatus, Task
+from dharma_swarm.models import AgentConfig, AgentRole, AgentStatus, LLMResponse, ProviderType, Task
 from dharma_swarm.agent_runner import AgentPool, AgentRunner, _build_prompt
 from dharma_swarm.lineage import LineageGraph
 from dharma_swarm.message_bus import MessageBus
 from dharma_swarm.ontology import OntologyRegistry
+from dharma_swarm.stigmergy import StigmergicMark, StigmergyStore
 from dharma_swarm.telic_seam import TelicSeam
 
 
@@ -87,6 +88,51 @@ async def test_runner_mock_task(config, fast_gate, tmp_path: Path):
     assert "Write tests" in result
     assert runner.state.status == AgentStatus.IDLE
     assert runner.state.tasks_completed == 1
+
+
+@pytest.mark.asyncio
+async def test_runner_injects_stigmergy_recall_into_prompt(
+    config,
+    fast_gate,
+    tmp_path: Path,
+):
+    provider = AsyncMock()
+    provider.complete = AsyncMock(return_value=LLMResponse(content="done", model="test"))
+    isolated_config = _with_state_dir(config, tmp_path)
+    state_dir = Path(str(isolated_config.metadata["state_dir"]))
+    stig = StigmergyStore(base_path=state_dir / "stigmergy")
+    await stig.leave_mark(
+        StigmergicMark(
+            agent="ginko-scout",
+            file_path="core.py",
+            action="observe",
+            observation="Retry budget guard needs review before the next run.",
+            salience=0.9,
+        )
+    )
+
+    runner = AgentRunner(
+        isolated_config,
+        provider=provider,
+        ontology_path=_ontology_path(tmp_path),
+    )
+    await runner.start()
+
+    await runner.run_task(
+        Task(
+            title="Inspect retry budget",
+            description="Review core.py retry budget behavior before execution.",
+        )
+    )
+
+    request = provider.complete.await_args.args[0]
+    content = request.messages[0]["content"]
+    assert "## Stigmergy Recall" in content
+    assert "core.py" in content
+    assert "Retry budget guard" in content
+
+    mark_payload = json.loads((state_dir / "stigmergy" / "marks.jsonl").read_text().splitlines()[0])
+    assert mark_payload["access_count"] >= 1
 
 
 @pytest.mark.asyncio
@@ -269,8 +315,6 @@ async def test_runner_without_state_dir_skips_shared_memory_surfaces(
 @pytest.mark.asyncio
 @pytest.mark.timeout(180)
 async def test_runner_provider_error_string_marks_failure(config, fast_gate, tmp_path: Path):
-    from dharma_swarm.models import LLMResponse
-
     isolated_config = _with_state_dir(config, tmp_path)
     for text in ("ERROR: upstream unavailable", "API Error: Unable to connect to API (ENOTFOUND)"):
         provider = AsyncMock()
@@ -295,8 +339,6 @@ async def test_runner_provider_error_string_marks_failure(config, fast_gate, tmp
 
 @pytest.mark.asyncio
 async def test_runner_blocks_harmful_task_before_provider_call(config):
-    from dharma_swarm.models import LLMResponse
-
     provider = AsyncMock()
     provider.complete = AsyncMock(return_value=LLMResponse(content="ok", model="test"))
     runner = AgentRunner(config, provider=provider)
@@ -308,6 +350,174 @@ async def test_runner_blocks_harmful_task_before_provider_call(config):
     provider.complete.assert_not_awaited()
     assert runner.state.status == AgentStatus.IDLE
     assert runner.state.tasks_completed == 0
+
+
+@pytest.mark.asyncio
+async def test_runner_fails_closed_for_tooling_task_on_api_only_provider(
+    config,
+    fast_gate,
+    tmp_path: Path,
+):
+    isolated_config = _with_state_dir(
+        config.model_copy(update={"provider": ProviderType.OLLAMA}),
+        tmp_path,
+    )
+    provider = AsyncMock()
+    provider.complete = AsyncMock(return_value=LLMResponse(content="pretend success", model="test"))
+    runner = AgentRunner(
+        isolated_config,
+        provider=provider,
+        ontology_path=_ontology_path(tmp_path),
+    )
+    await runner.start()
+
+    with pytest.raises(RuntimeError, match="cannot execute local tooling task"):
+        await runner.run_task(
+            Task(
+                title="Write artifact",
+                description="Run pytest and write the report file",
+                metadata={"target_file": str(tmp_path / "report.md")},
+            )
+        )
+
+    provider.complete.assert_not_awaited()
+    assert runner.state.tasks_completed == 0
+
+
+@pytest.mark.asyncio
+async def test_runner_auto_executes_tool_loop_for_api_provider_shell_task(
+    config,
+    fast_gate,
+    tmp_path: Path,
+):
+    isolated_config = _with_state_dir(
+        config.model_copy(
+            update={
+                "provider": ProviderType.OPENROUTER,
+                "metadata": {
+                    **config.metadata,
+                    "working_dir": str(tmp_path),
+                },
+            }
+        ),
+        tmp_path,
+    )
+    target = tmp_path / "report.md"
+    provider = AsyncMock()
+
+    async def _complete(request):
+        call_index = provider.complete.await_count
+        if call_index == 1:
+            assert request.tools, "tool-capable API providers should receive tool definitions"
+            return LLMResponse(
+                content="",
+                model="test-openrouter",
+                tool_calls=[
+                    {
+                        "id": "call-shell-1",
+                        "name": "shell_exec",
+                        "parameters": {
+                            "command": f"printf 'hello from api lane\\n' > {target.name}",
+                            "timeout": 10,
+                        },
+                    }
+                ],
+                stop_reason="tool_calls",
+            )
+
+        tool_messages = [msg for msg in request.messages if msg.get("role") == "tool"]
+        assert tool_messages, "tool loop should append tool results before the next turn"
+        return LLMResponse(
+            content="artifact created",
+            model="test-openrouter",
+            stop_reason="stop",
+        )
+
+    provider.complete = AsyncMock(side_effect=_complete)
+    runner = AgentRunner(
+        isolated_config,
+        provider=provider,
+        ontology_path=_ontology_path(tmp_path),
+    )
+    await runner.start()
+
+    result = await runner.run_task(
+        Task(
+            title="Write artifact",
+            description="Run a shell command and create the report file",
+            metadata={"target_file": str(target)},
+        )
+    )
+
+    assert result == "artifact created"
+    assert target.read_text(encoding="utf-8") == "hello from api lane\n"
+    assert runner.state.tasks_completed == 1
+    assert provider.complete.await_count == 2
+
+
+@pytest.mark.asyncio
+async def test_runner_requires_declared_artifact_before_completion(
+    config,
+    fast_gate,
+    tmp_path: Path,
+):
+    isolated_config = _with_state_dir(
+        config.model_copy(update={"provider": ProviderType.CLAUDE_CODE}),
+        tmp_path,
+    )
+    provider = AsyncMock()
+    provider.complete = AsyncMock(return_value=LLMResponse(content="done", model="test"))
+    runner = AgentRunner(
+        isolated_config,
+        provider=provider,
+        ontology_path=_ontology_path(tmp_path),
+    )
+    await runner.start()
+
+    with pytest.raises(RuntimeError, match="Completion contract failed"):
+        await runner.run_task(
+            Task(
+                title="Write artifact",
+                description="Create the declared artifact",
+                metadata={"target_file": str(tmp_path / "missing.md")},
+            )
+        )
+
+    provider.complete.assert_awaited_once()
+    assert runner.state.tasks_completed == 0
+
+
+@pytest.mark.asyncio
+async def test_runner_accepts_completion_when_declared_artifact_exists(
+    config,
+    fast_gate,
+    tmp_path: Path,
+):
+    isolated_config = _with_state_dir(
+        config.model_copy(update={"provider": ProviderType.CLAUDE_CODE}),
+        tmp_path,
+    )
+    target = tmp_path / "report.md"
+    target.write_text("ready", encoding="utf-8")
+    provider = AsyncMock()
+    provider.complete = AsyncMock(return_value=LLMResponse(content="artifact ready", model="test"))
+    runner = AgentRunner(
+        isolated_config,
+        provider=provider,
+        ontology_path=_ontology_path(tmp_path),
+    )
+    await runner.start()
+
+    result = await runner.run_task(
+        Task(
+            title="Use existing artifact",
+            description="Artifact should satisfy completion contract",
+            metadata={"target_file": str(target)},
+        )
+    )
+
+    assert result == "artifact ready"
+    assert runner.state.tasks_completed == 1
 
 
 @pytest.mark.asyncio

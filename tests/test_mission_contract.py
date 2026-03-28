@@ -7,7 +7,9 @@ import pytest
 from dharma_swarm.mission_contract import (
     CampaignArtifact,
     CampaignState,
+    CompletionContract,
     ExecutionBrief,
+    HonorsCheckpoint,
     MISSION_CONTRACT_VERSION,
     MissionState,
     SemanticBrief,
@@ -17,6 +19,9 @@ from dharma_swarm.mission_contract import (
     load_campaign_state,
     default_latest_snapshot_path,
     default_mission_state_path,
+    honors_checkpoint_passed,
+    load_completion_contract,
+    load_honors_checkpoint,
     load_active_mission_state,
     render_mission_brief,
     save_campaign_state,
@@ -241,3 +246,82 @@ def test_execution_brief_promotion_fields_roundtrip(tmp_path):
     assert loaded.execution_briefs[0].promotion_count == 3
     assert loaded.execution_briefs[0].last_promoted_at == 1711000000.0
     assert loaded.execution_briefs[0].status == "exhausted"
+
+
+def test_load_completion_contract_normalizes_honors_requirements():
+    contract = load_completion_contract(
+        {
+            "completion_contract": {
+                "mode": " honors ",
+                "stakeholders": ["operator", "operator", "witness"],
+                "required_sections": "Findings",
+                "required_context_refs": ["CT-VSM", "active inference"],
+                "required_evidence_paths": ["reports/trace.json", "reports/trace.json"],
+                "required_file_references": [
+                    "dharma_swarm/agent_runner.py",
+                    "dharma_swarm/agent_runner.py",
+                    "dharma_swarm/orchestrator.py",
+                ],
+                "required_test_references": "tests/test_orchestrator.py",
+                "minimum_file_references": "2",
+                "minimum_test_references": 1,
+                "minimum_fix_proposals": "3",
+                "minimum_context_references": "1",
+                "minimum_meta_observations": "2",
+                "minimum_supported_claim_count": "2",
+                "maximum_unsupported_claim_ratio": "0.25",
+                "require_system_effects": "true",
+            }
+        }
+    )
+
+    assert isinstance(contract, CompletionContract)
+    assert contract is not None
+    assert contract.mode == "honors"
+    assert contract.stakeholders == ["operator", "witness"]
+    assert contract.required_sections == ["Findings"]
+    assert contract.required_context_refs == ["CT-VSM", "active inference"]
+    assert contract.required_evidence_paths == ["reports/trace.json"]
+    assert contract.required_file_references == [
+        "dharma_swarm/agent_runner.py",
+        "dharma_swarm/orchestrator.py",
+    ]
+    assert contract.required_test_references == ["tests/test_orchestrator.py"]
+    assert contract.minimum_file_references == 2
+    assert contract.minimum_test_references == 1
+    assert contract.minimum_fix_proposals == 3
+    assert contract.minimum_context_references == 1
+    assert contract.minimum_meta_observations == 2
+    assert contract.minimum_supported_claim_count == 2
+    assert contract.maximum_unsupported_claim_ratio == pytest.approx(0.25)
+    assert contract.require_system_effects is True
+
+
+def test_load_honors_checkpoint_and_pass_state_from_metadata():
+    metadata = {
+        "completion_contract": {
+            "mode": "honors",
+            "stakeholders": ["operator"],
+        },
+        "honors_checkpoint": {
+            "defense_packet": {
+                "files_listed": ["dharma_swarm/agent_runner.py"],
+                "tests_flagged": ["tests/test_agent_runner_semantic_acceptance.py"],
+                "fix_proposals": ["Tighten the gate."],
+            },
+            "judge_pack": {
+                "accepted": True,
+                "final_score": 0.91,
+                "gate_failures": [],
+            },
+        },
+    }
+
+    checkpoint = load_honors_checkpoint(metadata)
+
+    assert isinstance(checkpoint, HonorsCheckpoint)
+    assert checkpoint is not None
+    assert checkpoint.contract.mode == "honors"
+    assert checkpoint.judge_pack.accepted is True
+    assert checkpoint.judge_pack.final_score == pytest.approx(0.91)
+    assert honors_checkpoint_passed(metadata) is True

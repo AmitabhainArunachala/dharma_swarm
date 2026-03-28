@@ -10,6 +10,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Iterable
 
+from dharma_swarm.certified_lanes import CertifiedLane, match_certified_lane
 from dharma_swarm.integrations import KaizenOpsClient
 from dharma_swarm.models import AgentState
 from dharma_swarm.telemetry_plane import (
@@ -181,12 +182,44 @@ def _ordered_unique(values: Iterable[str]) -> tuple[str, ...]:
     return tuple(ordered)
 
 
+def _registered_lane(
+    agent: AgentState,
+    *,
+    metadata: dict[str, Any] | None = None,
+) -> CertifiedLane | None:
+    meta = metadata or {}
+    provider = (
+        _normalize_text(meta.get("provider"))
+        or _normalize_text(getattr(agent, "provider", None))
+    )
+    model = (
+        _normalize_text(meta.get("model"))
+        or _normalize_text(getattr(agent, "model", None))
+    )
+    profile_id = (
+        _normalize_text(meta.get("profile_id"))
+        or _normalize_text(meta.get("registered_lane_profile_id"))
+    )
+    alias = (
+        _normalize_text(meta.get("registered_lane_codename"))
+        or _normalize_text(meta.get("name"))
+        or bus_agent_id(agent)
+    )
+    return match_certified_lane(
+        profile_id=profile_id,
+        provider=provider or None,
+        model=model or None,
+        alias=alias or None,
+    )
+
+
 def _identity_metadata(
     agent: AgentState,
     *,
     thread: str | None = None,
     metadata: dict[str, Any] | None = None,
     bus_observation: dict[str, Any] | None = None,
+    registered_lane: CertifiedLane | None = None,
 ) -> dict[str, Any]:
     meta = dict(metadata or {})
     topics = communication_topics(meta.get("communication_topics") or ())
@@ -207,6 +240,17 @@ def _identity_metadata(
             "source": meta.get("source") or "contracts.intelligence_agents",
         }
     )
+    if registered_lane is not None:
+        meta.update(
+            {
+                "registered_lane_id": registered_lane.registration_id,
+                "registered_lane_profile_id": registered_lane.profile_id,
+                "registered_lane_codename": registered_lane.codename,
+                "registered_lane_display_name": registered_lane.display_name,
+                "registered_lane_label": registered_lane.label,
+                "registered_lane_certified": True,
+            }
+        )
     return meta
 
 
@@ -221,6 +265,7 @@ def agent_state_to_telemetry_identity(
 ) -> AgentIdentityRecord:
     observed_at = now or _utc_now()
     role_name = _role_name(agent)
+    registered_lane = _registered_lane(agent, metadata=metadata)
     last_active = (
         getattr(agent, "last_heartbeat", None)
         or getattr(agent, "started_at", None)
@@ -228,7 +273,7 @@ def agent_state_to_telemetry_identity(
     )
     return AgentIdentityRecord(
         agent_id=bus_agent_id(agent),
-        codename=bus_agent_id(agent),
+        codename=registered_lane.codename if registered_lane is not None else bus_agent_id(agent),
         serial=_normalize_text(getattr(agent, "id", None)),
         department=_normalize_text((metadata or {}).get("department")) or DEFAULT_DEPARTMENT,
         squad_id=resolve_squad_id(agent, thread=thread, metadata=metadata),
@@ -242,6 +287,7 @@ def agent_state_to_telemetry_identity(
             thread=thread,
             metadata=metadata,
             bus_observation=bus_observation,
+            registered_lane=registered_lane,
         ),
         created_at=observed_at,
         updated_at=observed_at,
@@ -260,11 +306,13 @@ def agent_state_to_team_roster(
     team_id = resolve_team_id(thread=thread, metadata=metadata)
     agent_name = bus_agent_id(agent)
     roster_id = f"roster:{_slug(team_id)}:{_slug(agent_name)}"
+    registered_lane = _registered_lane(agent, metadata=metadata)
     identity_meta = _identity_metadata(
         agent,
         thread=thread,
         metadata=metadata,
         bus_observation=bus_observation,
+        registered_lane=registered_lane,
     )
     identity_meta["team_id"] = team_id
     return TeamRosterRecord(
@@ -308,6 +356,18 @@ def agent_registration_to_kaizenops_events(
                 "status": identity.status,
                 "provider": str(identity.metadata.get("provider") or ""),
                 "model": str(identity.metadata.get("model") or ""),
+                "registered_lane_id": str(
+                    identity.metadata.get("registered_lane_id") or ""
+                ),
+                "registered_lane_profile_id": str(
+                    identity.metadata.get("registered_lane_profile_id") or ""
+                ),
+                "registered_lane_codename": str(
+                    identity.metadata.get("registered_lane_codename") or ""
+                ),
+                "registered_lane_label": str(
+                    identity.metadata.get("registered_lane_label") or ""
+                ),
                 "communication_topics": list(
                     identity.metadata.get("communication_topics") or []
                 ),
@@ -330,6 +390,15 @@ def agent_registration_to_kaizenops_events(
                 "team_id": roster.team_id,
                 "roster_id": roster.roster_id,
                 "active": roster.active,
+                "registered_lane_id": str(
+                    roster.metadata.get("registered_lane_id") or ""
+                ),
+                "registered_lane_profile_id": str(
+                    roster.metadata.get("registered_lane_profile_id") or ""
+                ),
+                "registered_lane_codename": str(
+                    roster.metadata.get("registered_lane_codename") or ""
+                ),
             },
             "raw_payload": payload,
         },
@@ -367,6 +436,18 @@ class AgentRegistrationSyncResult:
             "kaizenops_response": self.kaizenops_response,
             "communication_topics": list(
                 self.agent_identity.metadata.get("communication_topics") or []
+            ),
+            "registered_lane_id": str(
+                self.agent_identity.metadata.get("registered_lane_id") or ""
+            ),
+            "registered_lane_profile_id": str(
+                self.agent_identity.metadata.get("registered_lane_profile_id") or ""
+            ),
+            "registered_lane_codename": str(
+                self.agent_identity.metadata.get("registered_lane_codename") or ""
+            ),
+            "registered_lane_label": str(
+                self.agent_identity.metadata.get("registered_lane_label") or ""
             ),
             "observed_topics": list(
                 self.agent_identity.metadata.get("observed_topics") or []
