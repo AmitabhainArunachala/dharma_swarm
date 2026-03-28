@@ -123,6 +123,7 @@ async def _wait_or_shutdown(shutdown_event: asyncio.Event, delay: float) -> bool
 async def run_swarm_loop(
     shutdown_event: asyncio.Event,
     signal_bus: "Any | None" = None,
+    supervisor: "Any | None" = None,
 ) -> None:
     """Primary loop: SwarmManager.tick() -- the ONE control path.
 
@@ -204,6 +205,15 @@ async def run_swarm_loop(
                     logger.debug("Swarm: instinct drain failed", exc_info=True)
 
                 activity = await swarm.tick()
+
+                # Liveness watchdog: record healthy tick + check all loops
+                if supervisor is not None:
+                    supervisor.record_tick("swarm")
+                    alerts = supervisor.tick()
+                    for alert in alerts:
+                        _log("watchdog", f"{alert.severity.upper()} [{alert.loop_name}]: "
+                             f"{alert.message} → {alert.intervention}")
+
                 swarm_state = await swarm.status()
                 _update_runtime_health_state(
                     agent_count=len(swarm_state.agents),
@@ -1432,8 +1442,22 @@ async def orchestrate(background: bool = False) -> None:
         os.environ["DHARMA_SELF_IMPROVE"] = "1"
         _log("orchestrator", "Auto-enabled DHARMA_SELF_IMPROVE (autonomy >= 1)")
 
+    # Liveness watchdog — the #1 convergent finding from the 20-agent audit.
+    # Detects "alive but not progressing" loops before they compound.
+    from dharma_swarm.loop_supervisor import LoopSupervisor
+    _supervisor = LoopSupervisor()
+    _loop_intervals = {
+        "swarm": SWARM_TICK, "pulse": PULSE_INTERVAL, "health": 120,
+        "zeitgeist": ZEITGEIST_INTERVAL, "witness": WITNESS_INTERVAL,
+        "consolidation": CONSOLIDATION_INTERVAL, "recognition": 7200,
+        "replication": 3600, "self-improve": 3600, "free-grind": 600,
+        "flywheel": 300, "conductors": 120, "context-agent": 60,
+    }
+    for loop_name, interval in _loop_intervals.items():
+        _supervisor.register_loop(loop_name, expected_interval=float(interval))
+
     task_factories: dict[str, Any] = {
-        "swarm": lambda: run_swarm_loop(shutdown_event, signal_bus=bus),
+        "swarm": lambda: run_swarm_loop(shutdown_event, signal_bus=bus, supervisor=_supervisor),
         "pulse": lambda: run_pulse_loop(shutdown_event),
         "recognition": lambda: _run_recognition_loop(shutdown_event),
         "conductors": lambda: run_conductor_loop(shutdown_event),
