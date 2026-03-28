@@ -450,8 +450,9 @@ async def exec_shell(args: dict) -> str:
     # Gate check (S3 control — telos gates evaluate before execution)
     try:
         from dharma_swarm.telos_gates import check_action
+        from dharma_swarm.models import GateDecision
         gate = check_action(action=f"shell_exec: {command[:200]}", content=command)
-        if gate.decision.value == "BLOCK":
+        if gate.decision == GateDecision.BLOCK:
             logger.warning("Gate blocked shell command: %s — %s", command[:100], gate.reason)
             return f"ERROR: Gate blocked command: {gate.reason}"
     except Exception:
