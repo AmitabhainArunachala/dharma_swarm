@@ -649,6 +649,19 @@ class AutonomousAgent:
         if name not in self.identity.allowed_tools:
             return f"Error: tool '{name}' not allowed for agent '{self.identity.name}'"
 
+        # S3 telos gate — check side-effect tools before execution
+        _SIDE_EFFECT_TOOLS = {"bash", "write_file", "search_content", "message_agent"}
+        if name in _SIDE_EFFECT_TOOLS:
+            try:
+                from dharma_swarm.telos_gates import check_action
+                from dharma_swarm.models import GateDecision
+                action_desc = f"autonomous_agent.{name}: {str(inputs)[:200]}"
+                gate = check_action(action=action_desc, content=str(inputs))
+                if gate.decision == GateDecision.BLOCK:
+                    return f"GATE BLOCKED: {gate.reason}"
+            except Exception:
+                pass  # gate failure should not prevent tool execution
+
         handler = {
             "read_file": self._tool_read_file,
             "write_file": self._tool_write_file,
@@ -697,8 +710,9 @@ class AutonomousAgent:
                 return f"BLOCKED: dangerous pattern '{pattern}'"
 
         try:
-            proc = await asyncio.create_subprocess_shell(
-                command,
+            import shlex
+            proc = await asyncio.create_subprocess_exec(
+                *shlex.split(command),
                 stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.PIPE,
                 cwd=self.identity.working_directory,
@@ -734,14 +748,14 @@ class AutonomousAgent:
         directory = inputs.get("directory", self.identity.working_directory)
         file_glob = inputs.get("file_glob", "")
 
-        cmd = f"rg --max-count 5 --max-filesize 1M -n"
+        cmd_args = ["rg", "--max-count", "5", "--max-filesize", "1M", "-n"]
         if file_glob:
-            cmd += f" --glob '{file_glob}'"
-        cmd += f" '{pattern}' '{directory}'"
+            cmd_args.extend(["--glob", file_glob])
+        cmd_args.extend([pattern, directory])
 
         try:
-            proc = await asyncio.create_subprocess_shell(
-                cmd, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE,
+            proc = await asyncio.create_subprocess_exec(
+                *cmd_args, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE,
             )
             stdout, _ = await asyncio.wait_for(proc.communicate(), timeout=15)
             result = stdout.decode(errors="replace")
