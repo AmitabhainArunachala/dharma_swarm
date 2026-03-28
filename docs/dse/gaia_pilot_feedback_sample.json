@@ -1,0 +1,18 @@
+[
+  {
+    "actor_id": "bayou-community-steward-01",
+    "role": "community_steward",
+    "satisfaction": 4.7,
+    "confidence": 0.91,
+    "summary": "The pilot report makes the verification state understandable for field stewards and funders.",
+    "requested_follow_up": "Keep the shoreline survival trend visible in the next review."
+  },
+  {
+    "actor_id": "bayou-science-review-01",
+    "role": "scientific_reviewer",
+    "satisfaction": 4.3,
+    "confidence": 0.88,
+    "summary": "Evidence paths are auditable and the monitoring snapshots preserve uncertainty instead of flattening it.",
+    "requested_follow_up": "Add a note on seasonal storm exposure in the 90-day checkpoint."
+  }
+]

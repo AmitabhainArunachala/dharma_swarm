@@ -221,6 +221,8 @@ These two should have equal standing on high-impact decisions.
   ontology mapper, external source compressor, domain synthesis.
 - `kimi-challenger`
   counterargument miner, failure mode finder, objection pressure.
+- `minimax-challenger`
+  long-context challenge lane, failure-mode expansion, and low-cost frontier pressure.
 - `qwen-taxonomist`
   schema normalization, interface discipline, low-cost type and rule drafting.
 - `nim-validator`
@@ -233,12 +235,26 @@ These two should have equal standing on high-impact decisions.
 For any high-impact decision:
 
 1. `Codex + Opus` define the decision object and required quality case.
-2. `GLM + Kimi + Qwen` expand evidence, objections, and ontology fit.
+2. `GLM + Kimi + MiniMax + Qwen` expand evidence, objections, and ontology fit.
 3. `NIM` validates gates, metrics, and failure boundaries.
 4. Cheap coding lanes implement only after the decision is typed and scored.
 5. The system records outcome data and recalibrates routing later.
 
 That is a real swarm cognition loop.
+
+### Ingress transition layer
+
+Add a shadow ingress classifier before the provider router, but do not let it replace the provider router.
+
+- `tiny-router` style labels belong at the message-transition layer:
+  `relation_to_previous`, `actionability`, `retention`, and `urgency`.
+- The classifier should enrich routing and memory metadata so DGC can tell the
+  difference between a new request, a correction, a cancellation, a closure,
+  and a normal follow-up.
+- In shadow mode it should not override the sovereign model contract.
+- `Codex + Opus` remain the primary decision-makers; transition labels only
+  help the system update the right task, preserve the right memory, and carry
+  urgency truthfully across turns.
 
 ## Concrete DGC Upgrade Path
 
