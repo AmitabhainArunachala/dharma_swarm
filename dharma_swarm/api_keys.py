@@ -175,6 +175,14 @@ def present_api_key_envs(
     return [env_var for env_var in ordered if env_has_value(env_var, env)]
 
 
+def provider_available(provider: str, env: Mapping[str, str] | None = None) -> bool:
+    """Return True if the named provider has a configured API key."""
+    env_var = PROVIDER_API_KEY_ENV_KEYS.get(provider)
+    if env_var is None:
+        return False
+    return env_has_value(env_var, env)
+
+
 __all__ = [
     "ALL_API_KEY_ENV_KEYS",
     "ANTHROPIC_API_KEY_ENV",
@@ -224,6 +232,7 @@ __all__ = [
     "env_value",
     "present_api_key_envs",
     "provider_api_key_env",
+    "provider_available",
     "provider_base_url_env",
     "service_api_key_env",
 ]
