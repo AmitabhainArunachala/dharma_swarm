@@ -47,7 +47,7 @@ TASK_TYPES = frozenset(
 )
 
 # Valid status values
-STATUSES = frozenset({"pending", "in_progress", "completed", "failed", "dead_cycle"})
+STATUSES = frozenset({"pending", "in_progress", "waiting", "completed", "failed", "dead_cycle"})
 
 
 @dataclass
@@ -155,6 +155,7 @@ class OvernightTaskStager:
             "total": len(self._tasks),
             "pending": counts.get("pending", 0),
             "in_progress": counts.get("in_progress", 0),
+            "waiting": counts.get("waiting", 0),
             "completed": counts.get("completed", 0),
             "failed": counts.get("failed", 0),
             "dead_cycle": counts.get("dead_cycle", 0),

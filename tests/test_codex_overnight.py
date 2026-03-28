@@ -27,7 +27,10 @@ def test_build_codex_exec_command_includes_model_and_state_dir(tmp_path: Path) -
         model="gpt-5.4",
     )
 
-    assert cmd[:4] == ["codex", "exec", "-m", "gpt-5.4"]
+    assert cmd[:2] == ["codex", "exec"]
+    assert "--dangerously-bypass-approvals-and-sandbox" in cmd
+    assert "-m" in cmd
+    assert "gpt-5.4" in cmd
     assert "--add-dir" in cmd
     assert str(state_dir) in cmd
     assert "-o" in cmd

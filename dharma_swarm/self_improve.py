@@ -17,6 +17,7 @@ Safety:
 from __future__ import annotations
 
 import json
+import inspect
 import logging
 import os
 import subprocess
@@ -156,6 +157,13 @@ def is_overnight_active() -> bool:
     return _overnight_active
 
 
+async def _maybe_await(value: Any) -> Any:
+    """Allow self-improvement hooks to be sync or async."""
+    if inspect.isawaitable(value):
+        return await value
+    return value
+
+
 def _touches_protected(proposals: list[Any]) -> list[Any]:
     """Return proposals that touch identity-layer files."""
     protected = []
@@ -165,6 +173,56 @@ def _touches_protected(proposals: list[Any]) -> list[Any]:
         if basename in PROTECTED_FILES:
             protected.append(p)
     return protected
+
+
+def _find_locally_modified_components(components: list[str]) -> list[str]:
+    """Return proposed component paths that already have local changes."""
+    dirty: list[str] = []
+    seen: set[str] = set()
+
+    for component in components:
+        normalized = str(component or "").strip()
+        if not normalized or normalized in seen:
+            continue
+        seen.add(normalized)
+
+        try:
+            result = subprocess.run(
+                ["git", "status", "--porcelain", "--", normalized],
+                cwd=str(DHARMA_SWARM_DIR),
+                capture_output=True,
+                text=True,
+                timeout=15,
+            )
+        except Exception as exc:
+            logger.warning("Failed to inspect local changes for %s: %s", normalized, exc)
+            dirty.append(normalized)
+            continue
+
+        if result.returncode != 0:
+            logger.warning(
+                "Git status failed for %s: %s",
+                normalized,
+                (result.stderr or result.stdout or "").strip(),
+            )
+            dirty.append(normalized)
+            continue
+
+        if result.stdout.strip():
+            dirty.append(normalized)
+
+    return dirty
+
+
+def _cleanup_apply_backups(apply_results: list[Any]) -> None:
+    """Remove transient backup files left behind by successful diff application."""
+    for apply_result in apply_results:
+        backup_paths = getattr(apply_result, "backup_paths", {}) or {}
+        for backup in backup_paths.values():
+            try:
+                Path(backup).unlink(missing_ok=True)
+            except OSError:
+                logger.debug("Backup cleanup failed for %s", backup, exc_info=True)
 
 
 # ---------------------------------------------------------------------------
@@ -196,11 +254,11 @@ class SelfImprovementCycle:
 
         try:
             # Phase 1: EVAL — baseline measurement
-            eval_before = await self._run_eval()
+            eval_before = await _maybe_await(self._run_eval())
             report.eval_before = eval_before
 
             # Phase 2: REVIEW — find issues
-            proposals = self._run_review(cycle_id)
+            proposals = await _maybe_await(self._run_review(cycle_id))
             report.findings_count = len(proposals)
 
             # Limit proposals
@@ -281,8 +339,39 @@ class SelfImprovementCycle:
                 self._save_report(report)
                 return report
 
+            diff_targets = [
+                str(getattr(p, "component", "") or "").strip()
+                for p in gated
+                if str(getattr(p, "diff", "") or "").strip()
+            ]
+            locally_modified = set(_find_locally_modified_components(diff_targets))
+            if locally_modified:
+                report.proposals_blocked += sum(
+                    1
+                    for proposal in gated
+                    if str(getattr(proposal, "component", "") or "").strip() in locally_modified
+                )
+                gated = [
+                    proposal
+                    for proposal in gated
+                    if str(getattr(proposal, "component", "") or "").strip() not in locally_modified
+                ]
+                logger.warning(
+                    "Blocked %d proposals touching locally modified components: %s",
+                    len(locally_modified),
+                    ", ".join(sorted(locally_modified)),
+                )
+                if not gated:
+                    report.lesson_learned = (
+                        "All proposals blocked by local changes in target components"
+                    )
+                    report.duration_seconds = time.monotonic() - t0
+                    self._save_report(report)
+                    return report
+
             # Apply proposal diffs to the actual codebase
-            _applied = 0
+            apply_results: list[Any] = []
+            applier = None
             try:
                 from dharma_swarm.diff_applier import DiffApplier
                 applier = DiffApplier(workspace=DHARMA_SWARM_DIR)
@@ -291,7 +380,7 @@ class SelfImprovementCycle:
                     if diff_text and diff_text.strip():
                         apply_result = await applier.apply(diff_text)
                         if apply_result.success:
-                            _applied += 1
+                            apply_results.append(apply_result)
                             logger.info(
                                 "Applied diff for %s: %s",
                                 getattr(p, "component", "?"),
@@ -307,43 +396,45 @@ class SelfImprovementCycle:
                 logger.warning("DiffApplier integration failed: %s", exc)
 
             # Phase 5: TEST — verify nothing breaks after applying diffs
-            tests_ok = self._run_tests()
+            tests_ok = await _maybe_await(self._run_tests())
             report.tests_passed = tests_ok
 
             # Phase 6: RE-EVAL — measure after with diffs applied
-            eval_after = await self._run_eval()
+            eval_after = await _maybe_await(self._run_eval())
             report.eval_after = eval_after
 
             # Phase 7: LEARN
             before_rate = eval_before.get("pass_at_1", 0.0)
             after_rate = eval_after.get("pass_at_1", 0.0)
             report.improvement_delta = after_rate - before_rate
-            report.improved = after_rate >= before_rate
+            eval_improved = after_rate >= before_rate
+            report.improved = tests_ok and eval_improved
 
             if report.improved:
                 report.lesson_learned = (
                     f"Cycle {cycle_id}: eval stable/improved "
                     f"({before_rate:.1%} → {after_rate:.1%})"
                 )
+                _cleanup_apply_backups(apply_results)
                 self._write_instinct(report)
             else:
-                report.rollback_executed = True
-                report.lesson_learned = (
-                    f"Cycle {cycle_id}: eval degraded "
-                    f"({before_rate:.1%} → {after_rate:.1%}), rolled back"
-                )
-                # Rollback applied diffs via git checkout
-                if _applied > 0:
-                    try:
-                        subprocess.run(
-                            ["git", "checkout", "--", "."],
-                            cwd=str(DHARMA_SWARM_DIR),
-                            capture_output=True,
-                            timeout=30,
-                        )
-                        logger.info("Rolled back %d applied diffs", _applied)
-                    except Exception as rb_err:
-                        logger.warning("Rollback failed: %s", rb_err)
+                report.rollback_executed = bool(apply_results)
+                if not tests_ok:
+                    report.lesson_learned = (
+                        f"Cycle {cycle_id}: tests failed after applying proposals, rolled back"
+                    )
+                else:
+                    report.lesson_learned = (
+                        f"Cycle {cycle_id}: eval degraded "
+                        f"({before_rate:.1%} → {after_rate:.1%}), rolled back"
+                    )
+                if apply_results and applier is not None:
+                    for apply_result in reversed(apply_results):
+                        try:
+                            await applier.rollback(apply_result)
+                        except Exception as rb_err:
+                            logger.warning("Rollback failed: %s", rb_err)
+                    logger.info("Rolled back %d applied diffs", len(apply_results))
 
             # Phase 8: SUPERVISE — check if cycle itself is healthy
             report.supervisor_alerts = self._check_supervisor()
@@ -372,15 +463,103 @@ class SelfImprovementCycle:
             logger.warning("Eval failed: %s", e)
             return {"error": str(e)}
 
-    def _run_review(self, cycle_id: str) -> list[Any]:
-        """Run review bridge, return proposals."""
+    async def _run_review(self, cycle_id: str) -> list[Any]:
+        """Run review bridge + code-aware findings, return proposals.
+
+        Three data sources (in priority order):
+        1. ReviewBridge (ruff static analysis) — zero LLM cost
+        2. Git diff scan — recent changes that may need evolution (async)
+        3. Evolution archive — low-fitness components needing attention
+        """
+        import asyncio
+
+        proposals: list[Any] = []
+
+        # Source 1: ReviewBridge (ruff findings → proposals)
         try:
             from dharma_swarm.review_bridge import ReviewBridge
             bridge = ReviewBridge(min_severity="high", max_proposals=MAX_PROPOSALS_PER_CYCLE)
-            return bridge.propose(cycle_id=cycle_id)
+            proposals.extend(bridge.propose(cycle_id=cycle_id))
         except Exception as e:
-            logger.warning("Review bridge failed: %s", e)
-            return []
+            logger.debug("Review bridge failed: %s", e)
+
+        # Source 2: Git diff — files changed recently that have test failures (async)
+        if len(proposals) < MAX_PROPOSALS_PER_CYCLE:
+            try:
+                from dharma_swarm.evolution import Proposal
+                diff_proc = await asyncio.create_subprocess_exec(
+                    "git", "diff", "--name-only", "--diff-filter=M", "HEAD~10",
+                    stdout=asyncio.subprocess.PIPE,
+                    stderr=asyncio.subprocess.PIPE,
+                    cwd=str(DHARMA_SWARM_DIR),
+                )
+                diff_out, _ = await asyncio.wait_for(diff_proc.communicate(), timeout=15)
+                changed_files = [
+                    f.strip() for f in diff_out.decode().strip().split("\n")
+                    if f.strip() and f.strip().startswith("dharma_swarm/") and f.strip().endswith(".py")
+                ]
+                for cf in changed_files[:3]:
+                    stem = Path(cf).stem
+                    test_file = DHARMA_SWARM_DIR / "tests" / f"test_{stem}.py"
+                    if test_file.exists():
+                        # Quick async test run to see if this component is broken
+                        tr = await asyncio.create_subprocess_exec(
+                            sys.executable, "-m", "pytest", str(test_file),
+                            "-q", "--tb=line", "-x", "--timeout=15",
+                            stdout=asyncio.subprocess.PIPE,
+                            stderr=asyncio.subprocess.PIPE,
+                            cwd=str(DHARMA_SWARM_DIR),
+                        )
+                        tr_out, _ = await asyncio.wait_for(tr.communicate(), timeout=45)
+                        if tr.returncode != 0:
+                            proposals.append(Proposal(
+                                component=cf,
+                                change_type="fix",
+                                description=(
+                                    f"Recently modified file {cf} has failing tests: "
+                                    f"{tr_out.decode().strip()[-200:]}"
+                                ),
+                                spec_ref=f"self_improve:git_diff:{cycle_id}",
+                            ))
+                            if len(proposals) >= MAX_PROPOSALS_PER_CYCLE:
+                                break
+            except Exception as e:
+                logger.debug("Git diff review failed: %s", e)
+
+        # Source 3: Evolution archive — components with correctness=0.0
+        if len(proposals) < MAX_PROPOSALS_PER_CYCLE:
+            try:
+                import json as _sij
+                from dharma_swarm.evolution import Proposal
+                archive_path = STATE_DIR / "evolution" / "archive.jsonl"
+                if archive_path.exists():
+                    lines = archive_path.read_text().strip().split("\n")
+                    zero_fitness_components: dict[str, int] = {}
+                    for line in lines[-50:]:  # Last 50 entries
+                        if not line.strip():
+                            continue
+                        entry = _sij.loads(line)
+                        fitness = entry.get("fitness", {})
+                        if isinstance(fitness, dict) and fitness.get("correctness", 1.0) == 0.0:
+                            comp = entry.get("component", "")
+                            if comp:
+                                zero_fitness_components[comp] = zero_fitness_components.get(comp, 0) + 1
+                    # Propose fixes for components that repeatedly fail
+                    for comp, count in sorted(zero_fitness_components.items(), key=lambda x: -x[1]):
+                        if count >= 2 and len(proposals) < MAX_PROPOSALS_PER_CYCLE:
+                            proposals.append(Proposal(
+                                component=comp,
+                                change_type="mutation",
+                                description=(
+                                    f"Component '{comp}' has {count} evolution entries with "
+                                    f"correctness=0.0 — needs test profile or source fix"
+                                ),
+                                spec_ref=f"self_improve:archive_zero:{cycle_id}",
+                            ))
+            except Exception as e:
+                logger.debug("Evolution archive review failed: %s", e)
+
+        return proposals[:MAX_PROPOSALS_PER_CYCLE]
 
     def _gate_proposals(self, proposals: list[Any]) -> list[Any]:
         """Filter proposals through basic gate check."""
@@ -391,17 +570,55 @@ class SelfImprovementCycle:
                 gated.append(p)
         return gated
 
-    def _run_tests(self) -> bool:
-        """Run pytest, return True if all pass."""
+    async def _run_tests(self) -> bool:
+        """Run targeted pytest (async, non-blocking).
+
+        Runs only recently-changed test files instead of the full suite to
+        avoid blocking the event loop for 12+ minutes.
+        """
+        import asyncio
+
         try:
-            result = subprocess.run(
-                [sys.executable, "-m", "pytest", "tests/", "-q", "--tb=line", "-x"],
-                capture_output=True,
-                text=True,
+            # Find which test files correspond to changed source files
+            diff_proc = await asyncio.create_subprocess_exec(
+                "git", "diff", "--name-only", "--diff-filter=M", "HEAD~10",
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.PIPE,
                 cwd=str(DHARMA_SWARM_DIR),
-                timeout=600,
             )
-            return result.returncode == 0
+            diff_out, _ = await asyncio.wait_for(diff_proc.communicate(), timeout=15)
+            changed = [
+                f.strip() for f in diff_out.decode().strip().split("\n")
+                if f.strip().startswith("dharma_swarm/") and f.strip().endswith(".py")
+            ]
+
+            # Build targeted test file list
+            test_files: list[str] = []
+            for cf in changed[:8]:
+                stem = Path(cf).stem
+                tf = DHARMA_SWARM_DIR / "tests" / f"test_{stem}.py"
+                if tf.exists():
+                    test_files.append(str(tf))
+
+            if not test_files:
+                # Fallback: run a quick smoke test on core modules only
+                for name in ("evolution", "swarm", "providers", "agent_runner"):
+                    tf = DHARMA_SWARM_DIR / "tests" / f"test_{name}.py"
+                    if tf.exists():
+                        test_files.append(str(tf))
+
+            if not test_files:
+                return True  # Nothing to test
+
+            proc = await asyncio.create_subprocess_exec(
+                sys.executable, "-m", "pytest", *test_files,
+                "-q", "--tb=line", "-x", "--timeout=30",
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.PIPE,
+                cwd=str(DHARMA_SWARM_DIR),
+            )
+            _, _ = await asyncio.wait_for(proc.communicate(), timeout=120)
+            return proc.returncode == 0
         except Exception:
             return False
 

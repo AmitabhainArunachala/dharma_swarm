@@ -23,9 +23,17 @@ import subprocess
 import sys
 import time
 from dataclasses import asdict, dataclass, field
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
+
+from dharma_swarm.rea_runtime import (
+    TemporalRunStore,
+    WaitState,
+    WaitStateKind,
+    WaitStateStatus,
+    get_run_profile,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -58,6 +66,11 @@ class OvernightConfig:
     consolidation_interval_seconds: float = 14400.0  # 4 hours
     min_cycles: int = 1
     max_dead_cycles_before_halt: int = 10
+    run_profile: str = "all_night_build"
+    enable_hibernate_wake: bool = True
+    external_wait_handoff: bool = False
+    run_date: str = ""
+    resume_temporal_run: bool = False
 
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)
@@ -251,7 +264,7 @@ class OvernightDirector:
 
     def __init__(self, config: OvernightConfig | None = None) -> None:
         self.config = config or OvernightConfig()
-        self.date = _utc_stamp()
+        self.date = self.config.run_date or _utc_stamp()
         self.run_dir = STATE_DIR / "overnight" / self.date
         self.run_dir.mkdir(parents=True, exist_ok=True)
         self.state = DurableState(run_dir=self.run_dir)
@@ -260,6 +273,21 @@ class OvernightDirector:
         self._dead_cycle_streak = 0
         self._tokens_spent = 0
         self._start_time = 0.0
+        self._profile = None
+        self._temporal_store: TemporalRunStore | None = None
+        self._wait_handoff: dict[str, Any] | None = None
+
+    def _init_temporal_runtime(self) -> None:
+        """Initialize the REA-style temporal state for this run."""
+        self._temporal_store = TemporalRunStore(self.run_dir)
+        if self.config.resume_temporal_run and self._temporal_store.manifest_path.exists():
+            manifest = self._temporal_store.load_manifest(self.date)
+            self._profile = manifest.profile
+            return
+        profile = get_run_profile(self.config.run_profile)
+        profile = profile.model_copy(update={"horizon_hours": float(self.config.hours)})
+        self._profile = profile
+        self._temporal_store.start_run(self.date, profile=profile)
 
     async def run(self) -> dict[str, Any]:
         """Execute the full overnight loop.
@@ -279,6 +307,7 @@ class OvernightDirector:
 
         self._start_time = time.monotonic()
         deadline = self._start_time + (self.config.hours * 3600)
+        self._init_temporal_runtime()
 
         # --- STAGE ---
         _log("director", f"Starting overnight run ({self.config.hours}h, "
@@ -313,7 +342,7 @@ class OvernightDirector:
         self.state.append_audit({"event": "baseline", "data": baseline})
 
         # --- INNER LOOP ---
-        while time.monotonic() < deadline and stager.has_tasks():
+        while time.monotonic() < deadline and (stager.has_tasks() or self._has_pending_waits()):
             # Budget check
             if self._tokens_spent >= self.config.max_tokens_budget:
                 _log("director", "Token budget exhausted")
@@ -324,13 +353,26 @@ class OvernightDirector:
                 _log("director", f"Halting: {self._dead_cycle_streak} consecutive dead cycles")
                 break
 
-            task = stager.next_task()
+            task = self._resume_ready_task()
             if task is None:
+                task = stager.next_task()
+            if task is None:
+                hibernate_result = await self._hibernate_until_next_wait(deadline)
+                if hibernate_result == "slept":
+                    continue
+                if hibernate_result == "handoff":
+                    break
                 break
 
             self._cycle_counter += 1
             cycle_id = f"cycle_{self._cycle_counter:04d}"
             supervisor.reset_cycle()
+            if self._temporal_store is not None:
+                self._temporal_store.update_manifest(
+                    self.date,
+                    current_cycle=self._cycle_counter,
+                    current_phase="executing",
+                )
 
             self.state.update_runbook(
                 cycle_id, "executing",
@@ -340,7 +382,11 @@ class OvernightDirector:
             _log("director", f"[{cycle_id}] Task: {task.task_id} — {task.goal[:80]}")
 
             # --- SELF-IMPROVEMENT INTERLEAVE (every 4th cycle, eval-gated) ---
-            if self._cycle_counter % 4 == 0:
+            si_interval = max(
+                1,
+                int(getattr(self._profile, "self_evolution_interval_cycles", 4) or 4),
+            )
+            if self._cycle_counter % si_interval == 0:
                 # Gate: check latest eval pass rate before allowing self-improvement
                 si_allowed = True
                 try:
@@ -466,57 +512,101 @@ class OvernightDirector:
 
             supervisor.record_tick("overnight")
 
-        # --- TRAINING FLYWHEEL (Sprint 5, Item 12) ---
-        try:
-            from dharma_swarm.training_flywheel import FlywheelState, _run_reinforcement
-            _log("director", "Running training flywheel reinforcement sub-cycle...")
-            _fw_state = FlywheelState()
-            flywheel_result = _run_reinforcement(_fw_state)
-            self.state.append_audit({
-                "event": "flywheel_tick",
-                "result": {
-                    "status": "completed",
-                    "trajectories_scored": getattr(flywheel_result, "trajectories_scored", 0)
-                    if flywheel_result else 0,
-                },
-            })
-            _log("director", f"Flywheel reinforcement complete")
-        except ImportError:
-            _log("director", "Training flywheel not available, skipping")
-        except Exception as e:
-            _log("director", f"Training flywheel error: {e}")
-            self.state.append_audit({"event": "flywheel_tick", "error": str(e)})
+        if self._wait_handoff is not None:
+            disable_overnight()
+            waiting_summary = {
+                "status": "waiting",
+                "date": self.date,
+                "run_dir": str(self.run_dir),
+                "total_cycles": len(self.outcomes),
+                "tokens_spent": self._tokens_spent,
+                **self._wait_handoff,
+            }
+            self.state.append_audit({"event": "external_wait_handoff", "data": waiting_summary})
+            return waiting_summary
 
-        # --- REPLICATION GAP DETECTION (Sprint 5, Item 13) ---
-        try:
-            failed_types: dict[str, int] = {}
-            for o in self.outcomes:
-                if o.status == "failed":
-                    task_type = o.task_goal.split()[0] if o.task_goal else "unknown"
-                    failed_types[task_type] = failed_types.get(task_type, 0) + 1
+        # --- POST-LOOP PHASES (wrapped to guarantee verdict output) ---
+        night_eval: NightEvaluation | None = None
+        verdict_report = None
+        verdict = OperatorVerdict.HOLD  # Safe default
 
-            persistent_gaps = {k: v for k, v in failed_types.items() if v >= 3}
-            if persistent_gaps:
-                _log("director", f"Persistent capability gaps detected: {persistent_gaps}")
-                # Generate replication proposals (observation-only for now)
-                gap_proposals = []
-                for gap_type, count in persistent_gaps.items():
-                    gap_proposals.append({
-                        "proposed_role": f"overnight_{gap_type}_specialist",
-                        "capability_gap": f"Repeated failure ({count}x) on {gap_type} tasks",
-                        "severity": min(count / 10.0, 0.8),
-                        "status": "proposed",  # Morning review required
-                    })
+        try:
+            # --- TRAINING FLYWHEEL (Sprint 5, Item 12) ---
+            try:
+                from dharma_swarm.training_flywheel import FlywheelState, _run_reinforcement
+                _log("director", "Running training flywheel reinforcement sub-cycle...")
+                _fw_state = FlywheelState()
+                flywheel_result = _run_reinforcement(_fw_state)
                 self.state.append_audit({
-                    "event": "replication_proposals",
-                    "proposals": gap_proposals,
+                    "event": "flywheel_tick",
+                    "result": {
+                        "status": "completed",
+                        "trajectories_scored": getattr(flywheel_result, "trajectories_scored", 0)
+                        if flywheel_result else 0,
+                    },
                 })
-                _log("director", f"Generated {len(gap_proposals)} replication proposals for morning review")
-        except Exception as e:
-            _log("director", f"Gap detection error: {e}")
+                _log("director", f"Flywheel reinforcement complete")
+            except ImportError:
+                _log("director", "Training flywheel not available, skipping")
+            except Exception as e:
+                _log("director", f"Training flywheel error: {e}")
+                self.state.append_audit({"event": "flywheel_tick", "error": str(e)})
 
-        # --- EVALUATE NIGHT (canonical control signal) ---
-        night_eval: NightEvaluation = evaluator.evaluate_night()
+            # --- REPLICATION GAP DETECTION (Sprint 5, Item 13) ---
+            try:
+                failed_types: dict[str, int] = {}
+                for o in self.outcomes:
+                    if o.status == "failed":
+                        task_type = o.task_goal.split()[0] if o.task_goal else "unknown"
+                        failed_types[task_type] = failed_types.get(task_type, 0) + 1
+
+                persistent_gaps = {k: v for k, v in failed_types.items() if v >= 3}
+                if persistent_gaps:
+                    _log("director", f"Persistent capability gaps detected: {persistent_gaps}")
+                    gap_proposals = []
+                    for gap_type, count in persistent_gaps.items():
+                        gap_proposals.append({
+                            "proposed_role": f"overnight_{gap_type}_specialist",
+                            "capability_gap": f"Repeated failure ({count}x) on {gap_type} tasks",
+                            "severity": min(count / 10.0, 0.8),
+                            "status": "proposed",
+                        })
+                    self.state.append_audit({
+                        "event": "replication_proposals",
+                        "proposals": gap_proposals,
+                    })
+                    _log("director", f"Generated {len(gap_proposals)} replication proposals for morning review")
+            except Exception as e:
+                _log("director", f"Gap detection error: {e}")
+
+            # --- EVALUATE NIGHT (canonical control signal) ---
+            night_eval = evaluator.evaluate_night()
+
+        except Exception as post_loop_err:
+            _log("director", f"Post-loop phase crashed: {post_loop_err}")
+            self.state.append_audit({
+                "event": "post_loop_crash",
+                "error": str(post_loop_err),
+            })
+            # Fallback: construct minimal NightEvaluation from what we have
+            if night_eval is None:
+                completed = sum(1 for o in self.outcomes if o.status == "completed")
+                failed = sum(1 for o in self.outcomes if o.status == "failed")
+                night_eval = NightEvaluation(
+                    date=self.date,
+                    total_cycles=len(self.outcomes),
+                    verified_completions=sum(1 for o in self.outcomes if o.acceptance_passed),
+                    total_state_changes=sum(len(o.files_modified) for o in self.outcomes),
+                    test_delta=0,
+                    coverage_delta=0.0,
+                    total_tokens_spent=self._tokens_spent,
+                    cost_per_verified_improvement=float(self._tokens_spent) / max(completed, 1),
+                    dead_loop_ratio=1.0 if completed == 0 else failed / max(len(self.outcomes), 1),
+                    dead_loop_time=0.0,
+                    total_time=time.monotonic() - self._start_time,
+                    token_efficiency=0.0,
+                    morning_capability_delta=0.0,
+                )
         verdict_report = compute_verdict(night_eval)
         verdict = verdict_report.verdict
 
@@ -607,15 +697,23 @@ class OvernightDirector:
         )
         _log("director", f"Morning brief: {brief_path}")
 
-        # Persist verdict for downstream consumers
-        verdict_path = self.run_dir / "verdict.json"
-        verdict_path.write_text(json.dumps({
+        # Persist verdict for downstream consumers (two locations)
+        verdict_data = json.dumps({
             "date": self.date,
             "verdict": verdict.value,
             "reasons": verdict_report.reasons,
             "scores": verdict_report.scores,
             "night_eval": verdict_report.night_eval,
-        }, indent=2) + "\n", encoding="utf-8")
+        }, indent=2) + "\n"
+
+        # 1. Run-specific directory
+        verdict_path = self.run_dir / "verdict.json"
+        verdict_path.write_text(verdict_data, encoding="utf-8")
+
+        # 2. Canonical overnight directory (where self-improve + orchestrate_live look)
+        canonical_verdict_dir = STATE_DIR / "overnight" / self.date
+        canonical_verdict_dir.mkdir(parents=True, exist_ok=True)
+        (canonical_verdict_dir / "verdict.json").write_text(verdict_data, encoding="utf-8")
 
         self.state.append_audit({"event": "run_complete", "eval_summary": eval_summary})
 
@@ -642,6 +740,116 @@ class OvernightDirector:
              f"VERDICT={verdict.value.upper()}")
         return summary
 
+    def _has_pending_waits(self) -> bool:
+        if self._temporal_store is None:
+            return False
+        return any(
+            wait_state.status.value == "pending"
+            for wait_state in self._temporal_store.list_wait_states(self.date)
+        )
+
+    def _resume_ready_task(self) -> Any | None:
+        if self._temporal_store is None:
+            return None
+        ready = self._temporal_store.ready_wait_states(self.date)
+        if not ready:
+            return None
+        wait_state = ready[0]
+        self._temporal_store.mark_resumed(
+            self.date,
+            wait_state.wait_id,
+            reason="resume-ready wait state",
+        )
+
+        from dharma_swarm.overnight_task_stager import OvernightTask
+
+        return OvernightTask(
+            task_id=wait_state.resume_task_id,
+            goal=wait_state.resume_goal,
+            task_type="custom",
+            acceptance_criterion=f"Resume wait state {wait_state.wait_id}",
+            timeout_seconds=self.config.cycle_timeout_seconds,
+            metadata={"resumed_wait_state": wait_state.model_dump(mode="json")},
+        )
+
+    def _next_pending_wait_state(self) -> WaitState | None:
+        if self._temporal_store is None:
+            return None
+        pending = [
+            wait_state
+            for wait_state in self._temporal_store.list_wait_states(self.date)
+            if wait_state.status is WaitStateStatus.PENDING
+        ]
+        if not pending:
+            return None
+        pending.sort(key=lambda item: item.wake_at)
+        return pending[0]
+
+    async def _hibernate_until_next_wait(self, deadline: float) -> str | None:
+        if not (self.config.enable_hibernate_wake and self._temporal_store):
+            return None
+        next_wait = self._next_pending_wait_state()
+        if next_wait is None:
+            return None
+        delay = self._temporal_store.next_wake_delay_seconds(self.date)
+        if delay is None:
+            return None
+        remaining = max(deadline - time.monotonic(), 0.0)
+        sleep_for = min(delay, remaining)
+        if sleep_for <= 0:
+            return None
+        self.state.update_runbook(
+            "hibernate",
+            "hibernating",
+            f"No runnable tasks. Sleeping {sleep_for:.1f}s until next wake condition.",
+        )
+        self._temporal_store.record_hibernate(
+            self.date,
+            phase="hibernating",
+            reason="waiting for resumable task",
+        )
+        if self.config.external_wait_handoff:
+            self._wait_handoff = {
+                "wake_at": next_wait.wake_at.isoformat(),
+                "next_action": next_wait.resume_goal,
+                "resume_task_id": next_wait.resume_task_id,
+                "wait_id": next_wait.wait_id,
+                "reason": next_wait.reason,
+            }
+            return "handoff"
+        await asyncio.sleep(sleep_for)
+        return "slept"
+
+    def _register_wait_state_if_requested(self, cycle_id: str, task: Any) -> WaitState | None:
+        if self._temporal_store is None:
+            return None
+        metadata = getattr(task, "metadata", {}) or {}
+        raw_wait = metadata.get("wait_state")
+        if not isinstance(raw_wait, dict):
+            return None
+
+        raw_kind = str(raw_wait.get("kind", WaitStateKind.SLEEP_UNTIL.value)).strip().lower()
+        kind = WaitStateKind(raw_kind)
+        if raw_wait.get("wake_at"):
+            wake_at = datetime.fromisoformat(str(raw_wait["wake_at"]))
+            if wake_at.tzinfo is None:
+                wake_at = wake_at.replace(tzinfo=timezone.utc)
+        else:
+            wake_after_seconds = max(0.0, float(raw_wait.get("wake_after_seconds", 60.0)))
+            wake_at = datetime.now(timezone.utc) + timedelta(seconds=wake_after_seconds)
+
+        wait_state = WaitState(
+            kind=kind,
+            reason=str(raw_wait.get("reason", "waiting for external signal")),
+            wake_at=wake_at,
+            resume_task_id=str(raw_wait.get("resume_task_id", f"{task.task_id}__resume")),
+            resume_goal=str(raw_wait.get("resume_goal", f"Resume {task.goal}")),
+            payload=dict(raw_wait.get("payload", {})),
+            cycle_id=cycle_id,
+        )
+        self._temporal_store.add_wait_state(self.date, wait_state)
+        return wait_state
+
     async def _execute_cycle(self, cycle_id: str, task: Any) -> CycleOutcome:
         """Execute a single task within the overnight loop.
 
@@ -653,6 +861,18 @@ class OvernightDirector:
             task_goal=task.goal,
             started_at=time.time(),
         )
+
+        wait_state = self._register_wait_state_if_requested(cycle_id, task)
+        if wait_state is not None:
+            outcome.completed_at = time.time()
+            outcome.status = "waiting"
+            outcome.error = f"wait_state:{wait_state.kind.value}"
+            outcome.handoff = {
+                "wait_state_id": wait_state.wait_id,
+                "resume_task_id": wait_state.resume_task_id,
+                "wake_at": wait_state.wake_at.isoformat(),
+            }
+            return outcome
 
         if self.config.dry_run:
             await asyncio.sleep(0.01)
@@ -840,6 +1060,7 @@ class OvernightDirector:
             f"Run pytest after changes to verify nothing breaks."
         )
 
+        proc = None
         try:
             from dharma_swarm.pulse import _resolve_claude_binary
             claude_bin = _resolve_claude_binary()
@@ -849,7 +1070,7 @@ class OvernightDirector:
                 stderr=asyncio.subprocess.PIPE,
                 cwd=str(DHARMA_SWARM_ROOT),
             )
-            stdout, stderr = await asyncio.wait_for(
+            stdout, _stderr = await asyncio.wait_for(
                 proc.communicate(), timeout=timeout,
             )
             output = stdout.decode("utf-8", errors="replace")
@@ -865,6 +1086,13 @@ class OvernightDirector:
         except asyncio.TimeoutError:
             outcome.status = "failed"
             outcome.error = f"Task execution timed out ({timeout}s)"
+            # Kill the stalled subprocess to prevent zombie accumulation
+            if proc is not None and proc.returncode is None:
+                try:
+                    proc.kill()
+                    await asyncio.wait_for(proc.wait(), timeout=5.0)
+                except Exception:
+                    pass
         except Exception as e:
             outcome.status = "failed"
             outcome.error = f"Execution error: {e}"
@@ -893,6 +1121,10 @@ async def run_overnight(
     autonomy_level: int = 1,
     max_tokens: int = 500_000,
     cycle_timeout: float = 900.0,
+    run_profile: str = "all_night_build",
+    external_wait_handoff: bool = False,
+    run_date: str | None = None,
+    resume_temporal_run: bool = False,
 ) -> dict[str, Any]:
     """Top-level entry point for ``dgc overnight``."""
 
@@ -902,9 +1134,32 @@ async def run_overnight(
         cycle_timeout_seconds=cycle_timeout,
         max_tokens_budget=max_tokens,
         autonomy_level=autonomy_level,
+        run_profile=run_profile,
+        external_wait_handoff=external_wait_handoff,
+        run_date=run_date or "",
+        resume_temporal_run=resume_temporal_run,
     )
     director = OvernightDirector(config=config)
     return await director.run()
+
+
+async def run_self_evolution_72h(
+    *,
+    dry_run: bool = False,
+    autonomy_level: int = 2,
+    max_tokens: int = 2_000_000,
+    cycle_timeout: float = 1800.0,
+) -> dict[str, Any]:
+    """Run the hardwired 72-hour self-evolution campaign."""
+
+    return await run_overnight(
+        hours=72.0,
+        dry_run=dry_run,
+        autonomy_level=autonomy_level,
+        max_tokens=max_tokens,
+        cycle_timeout=cycle_timeout,
+        run_profile="self_evolution_72h",
+    )
 
 
 def main() -> None:

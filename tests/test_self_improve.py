@@ -124,6 +124,93 @@ class TestSelfImprovementCycle:
         assert report.proposals_generated == 1
         assert report.proposals_gated == 1
 
+    @pytest.mark.asyncio
+    async def test_blocks_locally_modified_target_components(self, monkeypatch, tmp_path):
+        monkeypatch.setenv("DHARMA_SELF_IMPROVE", "1")
+        monkeypatch.setattr("dharma_swarm.self_improve.CYCLE_DIR", tmp_path)
+        monkeypatch.setattr(
+            "dharma_swarm.self_improve._find_locally_modified_components",
+            lambda components: ["dharma_swarm/foo.py"],
+            raising=False,
+        )
+
+        async def mock_eval():
+            return {"total": 9, "passed": 9, "failed": 0, "pass_at_1": 1.0}
+
+        mock_proposal = MagicMock()
+        mock_proposal.component = "dharma_swarm/foo.py"
+        mock_proposal.description = "fix thing"
+        mock_proposal.diff = "--- a/dharma_swarm/foo.py\n+++ b/dharma_swarm/foo.py\n"
+
+        cycle = SelfImprovementCycle()
+        cycle._run_eval = mock_eval
+        cycle._run_review = lambda cid: [mock_proposal]
+        cycle._run_tests = lambda: pytest.fail("tests should not run when target component is dirty")
+
+        report = await cycle.run_cycle()
+        assert report.proposals_generated == 1
+        assert report.proposals_blocked == 1
+        assert "local changes" in report.lesson_learned.lower()
+
+    @pytest.mark.asyncio
+    async def test_failed_tests_force_targeted_rollback(self, monkeypatch, tmp_path):
+        monkeypatch.setenv("DHARMA_SELF_IMPROVE", "1")
+        monkeypatch.setattr("dharma_swarm.self_improve.CYCLE_DIR", tmp_path)
+        monkeypatch.setattr(
+            "dharma_swarm.self_improve._find_locally_modified_components",
+            lambda components: [],
+            raising=False,
+        )
+
+        eval_steps = [
+            {"total": 9, "passed": 9, "failed": 0, "pass_at_1": 1.0},
+            {"total": 9, "passed": 9, "failed": 0, "pass_at_1": 1.0},
+        ]
+
+        mock_proposal = MagicMock()
+        mock_proposal.component = "dharma_swarm/foo.py"
+        mock_proposal.description = "fix thing"
+        mock_proposal.diff = (
+            "--- a/dharma_swarm/foo.py\n"
+            "+++ b/dharma_swarm/foo.py\n"
+            "@@ -1 +1 @@\n"
+            "-old\n"
+            "+new\n"
+        )
+
+        apply_result = MagicMock(
+            success=True,
+            files_changed=["dharma_swarm/foo.py"],
+            backup_paths={
+                str(tmp_path / "foo.py"): str(tmp_path / "foo.py.bak"),
+            },
+            error="",
+        )
+        mock_applier = MagicMock()
+        mock_applier.apply = AsyncMock(return_value=apply_result)
+        mock_applier.rollback = AsyncMock()
+
+        monkeypatch.setattr(
+            "dharma_swarm.diff_applier.DiffApplier",
+            lambda workspace: mock_applier,
+        )
+
+        with patch("dharma_swarm.self_improve.subprocess.run") as checkout_run:
+            cycle = SelfImprovementCycle()
+            cycle._run_eval = AsyncMock(side_effect=eval_steps)
+            cycle._run_review = lambda cid: [mock_proposal]
+            cycle._run_tests = AsyncMock(return_value=False)
+            cycle._write_instinct = lambda r: None
+
+            report = await cycle.run_cycle()
+
+        assert report.tests_passed is False
+        assert report.improved is False
+        assert report.rollback_executed is True
+        assert "tests failed" in report.lesson_learned.lower()
+        assert mock_applier.rollback.await_count == 1
+        checkout_run.assert_not_called()
+
     def test_load_history_empty(self, tmp_path, monkeypatch):
         monkeypatch.setattr("dharma_swarm.self_improve.CYCLE_DIR", tmp_path)
         assert SelfImprovementCycle.load_history() == []

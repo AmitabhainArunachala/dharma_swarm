@@ -13,6 +13,7 @@ from dharma_swarm.overnight_director import (
     DurableState,
     OvernightConfig,
     OvernightDirector,
+    run_self_evolution_72h,
     write_morning_brief,
 )
 
@@ -29,6 +30,7 @@ class TestOvernightConfig:
         assert cfg.dry_run is False
         assert cfg.cycle_timeout_seconds == 900.0
         assert cfg.autonomy_level == 1
+        assert cfg.run_profile == "all_night_build"
 
     def test_to_dict(self) -> None:
         cfg = OvernightConfig(hours=2.0, dry_run=True)
@@ -211,6 +213,7 @@ class TestOvernightDirector:
             assert result["verdict"] in ("advance", "hold", "rollback")
             assert "verdict_reasons" in result
             assert isinstance(result["verdict_reasons"], list)
+            assert (director.run_dir / "temporal_manifest.json").exists()
             # Verdict file should be written
             assert (director.run_dir / "verdict.json").exists()
             assert (state_dir / "shared" / "overnight_morning_brief.md").exists()
@@ -253,6 +256,128 @@ class TestOvernightDirector:
 
             result = asyncio.run(director.run())
             assert result["total_cycles"] == 0
+        finally:
+            director_mod.STATE_DIR = orig_state
+            director_mod.DHARMA_SWARM_ROOT = orig_root
+            stager_mod.STATE_DIR = orig_stager_state
+            stager_mod.DHARMA_SWARM_ROOT = orig_stager_root
+
+    @pytest.mark.asyncio
+    async def test_execute_cycle_wait_state_records_temporal_resume(self, tmp_path: Path) -> None:
+        import dharma_swarm.overnight_director as director_mod
+
+        orig_state = director_mod.STATE_DIR
+        orig_root = director_mod.DHARMA_SWARM_ROOT
+
+        state_dir = tmp_path / ".dharma"
+        repo_dir = tmp_path / "repo"
+        state_dir.mkdir()
+        repo_dir.mkdir()
+
+        director_mod.STATE_DIR = state_dir
+        director_mod.DHARMA_SWARM_ROOT = repo_dir
+
+        try:
+            director = OvernightDirector(
+                OvernightConfig(hours=0.1, dry_run=False),
+            )
+            director.run_dir = state_dir / "overnight" / director.date
+            director.run_dir.mkdir(parents=True, exist_ok=True)
+            director.state = DurableState(run_dir=director.run_dir)
+            director._init_temporal_runtime()
+
+            from dharma_swarm.overnight_task_stager import OvernightTask
+
+            task = OvernightTask(
+                task_id="wait_benchmark",
+                goal="Launch benchmark and wait for completion",
+                task_type="custom",
+                acceptance_criterion="Resume when job completes",
+                metadata={
+                    "wait_state": {
+                        "kind": "external_job",
+                        "reason": "waiting for benchmark worker",
+                        "wake_after_seconds": 30,
+                        "resume_goal": "Collect benchmark outputs",
+                        "payload": {"job_id": "bench-123"},
+                    }
+                },
+            )
+
+            outcome = await director._execute_cycle("cycle_0001", task)
+
+            assert outcome.status == "waiting"
+            waits_path = director.run_dir / "temporal_waits.jsonl"
+            assert waits_path.exists()
+            waits_text = waits_path.read_text(encoding="utf-8")
+            assert "bench-123" in waits_text
+            assert "Collect benchmark outputs" in waits_text
+        finally:
+            director_mod.STATE_DIR = orig_state
+            director_mod.DHARMA_SWARM_ROOT = orig_root
+
+    def test_external_wait_handoff_returns_waiting_summary(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+        import dharma_swarm.overnight_director as director_mod
+        import dharma_swarm.overnight_task_stager as stager_mod
+
+        orig_state = director_mod.STATE_DIR
+        orig_root = director_mod.DHARMA_SWARM_ROOT
+        orig_stager_state = stager_mod.STATE_DIR
+        orig_stager_root = stager_mod.DHARMA_SWARM_ROOT
+
+        state_dir = tmp_path / ".dharma"
+        repo_dir = tmp_path / "repo"
+        state_dir.mkdir()
+        repo_dir.mkdir()
+
+        director_mod.STATE_DIR = state_dir
+        director_mod.DHARMA_SWARM_ROOT = repo_dir
+        stager_mod.STATE_DIR = state_dir
+        stager_mod.DHARMA_SWARM_ROOT = repo_dir
+
+        try:
+            from dharma_swarm.overnight_task_stager import OvernightTask
+
+            def _fake_compile_queue(self):
+                task = OvernightTask(
+                    task_id="wait_benchmark",
+                    goal="Launch benchmark and wait for completion",
+                    task_type="custom",
+                    acceptance_criterion="Resume when job completes",
+                    metadata={
+                        "wait_state": {
+                            "kind": "external_job",
+                            "reason": "waiting for benchmark worker",
+                            "wake_after_seconds": 30,
+                            "resume_goal": "Collect benchmark outputs",
+                            "payload": {"job_id": "bench-123"},
+                        }
+                    },
+                )
+                self._tasks = [task]
+                self._task_index = {task.task_id: task}
+                return [task]
+
+            monkeypatch.setattr(stager_mod.OvernightTaskStager, "compile_queue", _fake_compile_queue)
+
+            config = OvernightConfig(
+                hours=0.1,
+                dry_run=False,
+                autonomy_level=0,
+                external_wait_handoff=True,
+            )
+            director = OvernightDirector(config=config)
+            director.run_dir = state_dir / "overnight" / director.date
+            director.run_dir.mkdir(parents=True, exist_ok=True)
+            director.state = DurableState(run_dir=director.run_dir)
+
+            result = asyncio.run(director.run())
+
+            assert result["status"] == "waiting"
+            assert result["date"] == director.date
+            assert result["next_action"] == "Collect benchmark outputs"
+            assert result["resume_task_id"] == "wait_benchmark__resume"
+            assert result["wake_at"]
         finally:
             director_mod.STATE_DIR = orig_state
             director_mod.DHARMA_SWARM_ROOT = orig_root
@@ -309,3 +434,23 @@ class TestOvernightDirector:
             director_mod.DHARMA_SWARM_ROOT = orig_root
             stager_mod.STATE_DIR = orig_stager_state
             stager_mod.DHARMA_SWARM_ROOT = orig_stager_root
+
+
+class TestSelfEvolution72H:
+    @pytest.mark.asyncio
+    async def test_helper_uses_self_evolution_profile(self, monkeypatch) -> None:
+        captured: dict[str, object] = {}
+
+        async def fake_run(self) -> dict[str, object]:
+            captured["config"] = self.config
+            return {"ok": True}
+
+        monkeypatch.setattr("dharma_swarm.overnight_director.OvernightDirector.run", fake_run)
+
+        result = await run_self_evolution_72h(dry_run=True)
+
+        assert result == {"ok": True}
+        config = captured["config"]
+        assert isinstance(config, OvernightConfig)
+        assert config.run_profile == "self_evolution_72h"
+        assert config.hours == 72.0
