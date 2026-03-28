@@ -777,7 +777,27 @@ def check_action(action: str, content: str = "") -> GateCheckResult:
     Returns:
         GateCheckResult with decision and per-gate details.
     """
-    return DEFAULT_GATEKEEPER.check(action=action, content=content)
+    result = DEFAULT_GATEKEEPER.check(action=action, content=content)
+    # Feed result into VSM S3 pattern aggregator (closes the severed wire)
+    try:
+        from dharma_swarm.organism import get_organism
+        org = get_organism()
+        if org is not None and hasattr(org, "vsm") and org.vsm is not None:
+            # Map GateDecision → GateResult for VSM compatibility
+            _decision_to_result = {
+                GateDecision.ALLOW: GateResult.PASS,
+                GateDecision.BLOCK: GateResult.FAIL,
+                GateDecision.REVIEW: GateResult.WARN,
+            }
+            gate_result = _decision_to_result.get(result.decision, GateResult.WARN)
+            org.vsm.on_gate_check(
+                gate_name="telos_composite",
+                result=gate_result,
+                action_description=action[:200],
+            )
+    except Exception:
+        pass  # VSM feedback is best-effort, must not break gate checks
+    return result
 
 
 def check_with_reflective_reroute(
