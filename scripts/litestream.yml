@@ -1,0 +1,61 @@
+# Litestream configuration for dharma_swarm state backup
+#
+# Replicates the 5 most critical databases to DigitalOcean Spaces.
+# Install: brew install litestream
+# Run: litestream replicate -config scripts/litestream.yml
+# Or use the launchd plist for automatic startup.
+#
+# Required env vars:
+#   LITESTREAM_ACCESS_KEY_ID     — DO Spaces access key
+#   LITESTREAM_SECRET_ACCESS_KEY — DO Spaces secret key
+
+dbs:
+  # 1. memory_plane.db — 3.5GB, the knowledge base
+  - path: ${HOME}/.dharma/db/memory_plane.db
+    replicas:
+      - type: s3
+        bucket: dharma-backups
+        path: memory_plane.db
+        endpoint: https://sgp1.digitaloceanspaces.com
+        region: sgp1
+        sync-interval: 60s
+
+  # 2. temporal_graph.db — 1.2GB, the graph store
+  - path: ${HOME}/.dharma/db/temporal_graph.db
+    replicas:
+      - type: s3
+        bucket: dharma-backups
+        path: temporal_graph.db
+        endpoint: https://sgp1.digitaloceanspaces.com
+        region: sgp1
+        sync-interval: 120s
+
+  # 3. ecosystem_index.db — 328MB, ecosystem search index
+  - path: ${HOME}/.dharma/db/ecosystem_index.db
+    replicas:
+      - type: s3
+        bucket: dharma-backups
+        path: ecosystem_index.db
+        endpoint: https://sgp1.digitaloceanspaces.com
+        region: sgp1
+        sync-interval: 300s
+
+  # 4. runtime.db — 63MB, telemetry + session events
+  - path: ${HOME}/.dharma/state/runtime.db
+    replicas:
+      - type: s3
+        bucket: dharma-backups
+        path: runtime.db
+        endpoint: https://sgp1.digitaloceanspaces.com
+        region: sgp1
+        sync-interval: 60s
+
+  # 5. ontology.db — 76MB, the self-model
+  - path: ${HOME}/.dharma/ontology.db
+    replicas:
+      - type: s3
+        bucket: dharma-backups
+        path: ontology.db
+        endpoint: https://sgp1.digitaloceanspaces.com
+        region: sgp1
+        sync-interval: 300s

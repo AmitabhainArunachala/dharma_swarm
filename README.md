@@ -61,3 +61,9 @@ That report is the fastest way to answer:
 - Start at [run_operator.sh](run_operator.sh) for the canonical local backend boot path.
 - Start at [dashboard/package.json](dashboard/package.json) for frontend commands.
 - Start at [scripts/repo_xray.py](scripts/repo_xray.py) for repo-wide static indexing.
+
+## GAIA Docs
+
+- `gaia_ui.md`: current user manual for the tracked GAIA runtime surface
+- `docs/dse/GAIA_TRAINING_WORKBOOK.md`: hands-on onboarding exercises for new GAIA users
+- `docs/dse/GAIA_FACILITATOR_GUIDE.md`: facilitator notes, review keys, and assessment rubric

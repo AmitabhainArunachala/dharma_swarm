@@ -47,6 +47,7 @@ Distilled from the Persistent-Semantic-Memory-Vault (8K+ files) into 9 layered d
 |------|-------|
 | [../architecture/PRINCIPLES.md](../architecture/PRINCIPLES.md) | 11 engineering principles, each traced to specific pillars and code modules |
 | [../architecture/BLUEPRINTS.md](../architecture/BLUEPRINTS.md) | Implementable engineering specifications from PSMV empirical results |
+| [../architecture/CYBERNETIC_TRANSCENDENCE_PROTOCOL.md](../architecture/CYBERNETIC_TRANSCENDENCE_PROTOCOL.md) | Operational bridge unifying Beer/VSM, Computational Transcendence, and current multi-agent coordination research |
 
 ## Domain Mapping (for context.py agent orientation)
 

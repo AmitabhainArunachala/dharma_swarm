@@ -4,7 +4,17 @@
     "name": "DGC Pulse",
     "trigger": "interval",
     "interval_seconds": 1800,
-    "model": "opus",
+    "model": "flash",
+    "execution_surface": "claude_bare_with_hosted_fallback",
+    "available_provider_types": [
+      "ollama",
+      "nvidia_nim",
+      "groq",
+      "cerebras",
+      "openrouter_free",
+      "openrouter"
+    ],
+    "fallback_mode": "local_pulse",
     "prompt": "You are DGC Pulse. Check the system state:\n1. Read ~/agni-workspace/WORKING.md \u2014 is AGNI stuck?\n2. Read ~/.dharma/shared/ \u2014 any developments worth noting?\n3. Check ~/trishula/inbox/ for unprocessed messages\n4. Check ~/.dharma/assurance/scans/ for any CRITICAL findings\n5. If anything needs action, take it. Otherwise, log a brief witness observation.\nBe real. No theater. Max 200 words.",
     "enabled": true
   },
@@ -14,6 +24,15 @@
     "trigger": "interval",
     "interval_seconds": 3600,
     "model": "flash",
+    "execution_surface": "claude_bare_with_hosted_fallback",
+    "available_provider_types": [
+      "ollama",
+      "nvidia_nim",
+      "groq",
+      "cerebras",
+      "openrouter_free",
+      "openrouter"
+    ],
     "prompt": "Check ~/agni-workspace/WORKING.md and report any blocked items or stale state. Be brief.",
     "enabled": true
   },
@@ -26,6 +45,15 @@
       "minute": 30
     },
     "model": "opus",
+    "execution_surface": "claude_bare_with_hosted_fallback",
+    "available_provider_types": [
+      "ollama",
+      "nvidia_nim",
+      "groq",
+      "cerebras",
+      "openrouter_free",
+      "openrouter"
+    ],
     "prompt": "Generate a morning briefing for Dhyana (4:30 AM WITA). Check:\n1. AGNI state (~/agni-workspace/WORKING.md)\n2. Trishula inbox count and any non-ack messages\n3. DGC memory developments from overnight\n4. R_V paper status (~/mech-interp-latent-lab-phase1/R_V_PAPER/)\n5. Any blocked items anywhere in the system\n6. DREAM JOURNAL: read ~/.dharma/subconscious/journal/LATEST_JOURNAL.md — if it exists, include the HOT-temperature ideas from last night's subconscious layer as a section called 'From the Subconscious'. Flag any publishable-relevant or experiment-relevant seeds.\n7. JAGAT KALYAN: Read ~/.dharma/shared/jk_pulse.md for momentum status. Read ~/.dharma/shared/jk_alert.md if it exists — include any HIGH URGENCY items (grant deadlines, partner moves). Check ~/jagat_kalyan/EVOLUTION_LOG.md for overnight codebase changes. Include a 'Jagat Kalyan' section in the brief.\n\nWrite brief, actionable summary to ~/dgc-core/daemon/morning_brief.md",
     "enabled": true
   },
@@ -62,6 +90,15 @@
       "minute": 0
     },
     "model": "flash",
+    "execution_surface": "claude_bare_with_hosted_fallback",
+    "available_provider_types": [
+      "ollama",
+      "nvidia_nim",
+      "groq",
+      "cerebras",
+      "openrouter_free",
+      "openrouter"
+    ],
     "prompt": "Count messages in ~/trishula/inbox/. Separate into categories: ack messages (filename contains 'ack'), substantive messages, diagnostic tests. Report counts only. If there are substantive messages newer than 24h, list their filenames. Max 100 words.",
     "enabled": true
   },
@@ -143,7 +180,56 @@
     "trigger": "interval",
     "interval_seconds": 21600,
     "model": "flash",
+    "execution_surface": "claude_bare_with_hosted_fallback",
+    "available_provider_types": [
+      "ollama",
+      "nvidia_nim",
+      "groq",
+      "cerebras",
+      "openrouter_free",
+      "openrouter"
+    ],
     "enabled": true,
     "prompt": "You are the Jagat Kalyan Pulse. Quick health check:\n\n1. Does ~/jagat_kalyan/ exist with app.py, matching.py, models.py? (basic sanity)\n2. Is ~/jagat_kalyan/jagat_kalyan.db present and has data? (sqlite3 ... 'SELECT COUNT(*) FROM projects')\n3. When was ~/jagat_kalyan/SCOUT_LOG.md last modified? (days since last scout)\n4. When was ~/jagat_kalyan/EVOLUTION_LOG.md last modified? (days since last evolution)\n5. Any files in ~/.dharma/shared/jk_alert.md? (unread alerts)\n\nCompute MOMENTUM SCORE:\n- days_since_scout + days_since_evolution + days_since_any_jk_file_changed / 3\n- GREEN: <3 days avg | YELLOW: 3-7 days | RED: >7 days\n\nWrite one-line status to ~/.dharma/shared/jk_pulse.md:\nJK PULSE [DATE] [GREEN/YELLOW/RED] — [one sentence summary]\n\nMax 50 words total. This is a heartbeat, not a report."
+  },
+  {
+    "id": "overnight_director",
+    "name": "Overnight Director",
+    "trigger": "cron",
+    "schedule": {
+      "hour": 22,
+      "minute": 30
+    },
+    "handler": "overnight_director",
+    "hours": 8,
+    "autonomy": 1,
+    "max_tokens": 500000,
+    "enabled": true,
+    "prompt": "Overnight director placeholder — actual execution handled by overnight_director handler."
+  },
+  {
+    "id": "scout_sweep",
+    "name": "Scout Sweep — All Domains",
+    "trigger": "cron",
+    "schedule": {
+      "hour": 1,
+      "minute": 0
+    },
+    "handler": "scout_sweep",
+    "scout_model": "xiaomi/mimo-v2-pro",
+    "enabled": true,
+    "prompt": "Scout sweep placeholder — execution handled by scout_sweep handler."
+  },
+  {
+    "id": "scout_synthesis",
+    "name": "Scout Synthesis",
+    "trigger": "cron",
+    "schedule": {
+      "hour": 1,
+      "minute": 30
+    },
+    "handler": "scout_synthesis",
+    "enabled": true,
+    "prompt": "Scout synthesis placeholder — execution handled by scout_synthesis handler."
   }
 ]

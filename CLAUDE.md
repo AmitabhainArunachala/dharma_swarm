@@ -42,6 +42,42 @@
 - **CatalyticGraph** (`dharma_swarm/catalytic_graph.py`): Autocatalytic set detection (Tarjan SCC).
 - **StrangeLoop** (`dharma_swarm/strange_loop.py`): Organism self-modification engine.
 
+## The Transcendence Principle (Engineering Axiom)
+
+**The claim**: Diverse competent agents, with decorrelated errors and quality aggregation, provably outperform any individual agent. This is not aspirational — it is proven mathematics (Zhang et al., NeurIPS 2024; Condorcet 1785; Krogh-Vedelsby 1995; Breiman 2001).
+
+**The mechanism**: When multiple experts each make correct decisions on their specialties but make different errors elsewhere, a system that learns the mixture distribution and concentrates toward high-confidence outputs (low-temperature sampling, majority voting, quality-weighted aggregation) will exceed every individual expert. The errors cancel. The knowledge compounds.
+
+**Three modes of transcendence** (Abreu et al. 2025):
+1. **Skill denoising** — filtering idiosyncratic errors across agents
+2. **Skill selection** — routing to the best agent per sub-problem
+3. **Skill generalization** — recombining capabilities beyond any single agent
+
+**Three necessary conditions** (all must hold, or transcendence fails):
+1. **Diversity of competence** — agents must have genuinely different capabilities, trained on different data, using different approaches. Same model prompted differently may NOT suffice. Different model families, different specializations, different error profiles. Measured via MAP-Elites behavioral diversity (`diversity_archive.py`).
+2. **Error decorrelation** — agent errors must be independent. If agents fail on the same inputs in the same way, aggregation provides no benefit. Correlated errors compound; decorrelated errors cancel. This is arithmetic: `E_ensemble = E_mean - E_diversity` (Krogh-Vedelsby). The diversity term directly subtracts from ensemble error.
+3. **Quality aggregation** — the mechanism that combines agent outputs must amplify agreement and suppress noise. Temperature concentration, weighted voting, Brier-scored selection, telos-gated filtering. Bad aggregation (simple averaging, loudest-voice-wins) kills the signal.
+
+**The critical tradeoff**: Governance (Beer's VSM: coordination, control, identity) is necessary for sustained operation. But governance can reduce diversity through standardization, shared protocols, convergence pressure. **Every governance mechanism must be evaluated against its diversity cost.** Light coordination (System 2 damping) preserves diversity. Heavy control (System 3 mandates) may destroy it.
+
+**What this means for every session**:
+- When adding agents: maximize behavioral diversity, not count. The 5th agent from a different model family adds more than the 50th agent from the same family.
+- When designing orchestration: route by specialty (skill selection), aggregate by quality weighting (skill denoising), recombine in cascade loops (skill generalization).
+- When evolving agents: DarwinEngine MUST preserve diversity. Pure fitness pressure → convergence → transcendence death. Use diversity-preserving selection (MAP-Elites in `diversity_archive.py`).
+- When measuring success: track the Krogh-Vedelsby diversity term, not just individual agent fitness. If diversity is falling, transcendence is dying regardless of individual performance.
+- When governing: telos gates and VSM channels are necessary but must be LIGHT. System 2 (damping) > System 3 (mandates). The governance cost of a gate is measured in diversity loss.
+
+**Where this lives in the codebase**:
+- `diversity_archive.py` — MAP-Elites quality-diversity optimization
+- `orchestrator.py` — topology-based routing (fan-out/fan-in/pipeline/broadcast)
+- `evolution.py` — DarwinEngine with diversity-preserving selection
+- `vsm_channels.py` — Beer's S1-S5 nervous system (light governance)
+- `ginko_brier.py` — Brier scoring as aggregation quality measurement
+- `signal_bus.py` — decorrelated loop-to-loop signaling (not opinion sharing)
+- `handoff.py` — typed artifact handoff preserving agent independence
+
+**Research reference**: Full 9-phase literature review at `spec-forge/transcendence-multi-agent-coordination/research/`
+
 ## Build & Test
 
 ```bash
