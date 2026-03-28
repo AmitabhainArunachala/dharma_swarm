@@ -468,8 +468,9 @@ async def exec_shell(args: dict) -> str:
     logger.info("shell_exec: %s", command[:300])
 
     try:
-        proc = await asyncio.create_subprocess_shell(
-            command,
+        import shlex
+        proc = await asyncio.create_subprocess_exec(
+            *shlex.split(command),
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.PIPE,
             cwd=str(PROJECT_ROOT),
