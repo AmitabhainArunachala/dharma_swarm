@@ -47,6 +47,8 @@ node_modules/
 
 # Temp files
 *.rej
+/api_keys.py
+/api_keys.local.py
 
 # Large generated graph files
 reports/psmv_hyperfiles_20260313/graphs/*.json

@@ -7,8 +7,6 @@ import { useTimeline } from "@/hooks/useTimeline";
 import { useVizSnapshot } from "@/hooks/useVizSnapshot";
 import { TimelineControls } from "@/components/timeline/TimelineControls";
 import { colors } from "@/lib/theme";
-import type { VizEvent } from "@/hooks/useVizEvents";
-
 // Time range presets
 const RANGES = [
   { label: "1h", seconds: 3600 },
@@ -39,16 +37,16 @@ function eventColor(type: string): string {
 }
 
 export default function TimelinePage() {
-  const now = useMemo(() => Math.floor(Date.now() / 1000), []);
+  const [anchorTime] = useState(() => Math.floor(Date.now() / 1000));
   const [rangeIdx, setRangeIdx] = useState(0);
-  const [currentTime, setCurrentTime] = useState(now);
+  const [currentTime, setCurrentTime] = useState(anchorTime);
   const [playing, setPlaying] = useState(false);
   const [speed, setSpeed] = useState(1);
   const playRef = useRef<ReturnType<typeof setInterval> | null>(null);
 
   const rangeSeconds = RANGES[rangeIdx].seconds;
-  const startTime = now - rangeSeconds;
-  const endTime = now;
+  const startTime = anchorTime - rangeSeconds;
+  const endTime = anchorTime;
 
   const { data: timeline } = useTimeline(startTime, endTime, true);
   const { data: liveSnapshot } = useVizSnapshot(30_000);
@@ -111,7 +109,7 @@ export default function TimelinePage() {
         {RANGES.map((range, idx) => (
           <button
             key={range.label}
-            onClick={() => { setRangeIdx(idx); setCurrentTime(now - range.seconds); }}
+            onClick={() => { setRangeIdx(idx); setCurrentTime(anchorTime - range.seconds); }}
             className={`rounded-md px-3 py-1.5 text-xs font-medium transition-colors ${
               idx === rangeIdx
                 ? "border border-kinpaku/40 bg-kinpaku/10 text-kinpaku"

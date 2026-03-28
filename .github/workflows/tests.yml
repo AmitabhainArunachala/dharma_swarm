@@ -31,3 +31,29 @@ jobs:
       - name: Run tests
         run: |
           python -m pytest tests/ -q --tb=short
+
+  dashboard:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: dashboard
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+          cache: npm
+          cache-dependency-path: dashboard/package-lock.json
+
+      - name: Install dashboard deps
+        run: npm ci
+
+      - name: Lint dashboard
+        run: npm run lint -- --quiet
+
+      - name: Build dashboard
+        run: npm run build

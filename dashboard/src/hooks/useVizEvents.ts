@@ -7,7 +7,7 @@
  */
 
 import { useQuery } from "@tanstack/react-query";
-import { useRef } from "react";
+import { useRef, useState } from "react";
 import { apiFetch } from "@/lib/api";
 
 export interface VizEvent {
@@ -19,7 +19,8 @@ export interface VizEvent {
 }
 
 export function useVizEvents(refetchInterval = 5_000, limit = 50) {
-  const sinceRef = useRef<number>(Date.now() / 1000 - 3600); // Start: last hour
+  const [initialSince] = useState(() => Date.now() / 1000 - 3600);
+  const sinceRef = useRef<number>(initialSince); // Start: last hour
 
   const query = useQuery<VizEvent[]>({
     queryKey: ["viz-events", limit],

@@ -204,6 +204,14 @@ class SwarmManager:
             "yes",
             "on",
         }
+        self._read_only_boot = str(
+            os.environ.get("DHARMA_READ_ONLY_BOOT", "")
+        ).strip().lower() in {
+            "1",
+            "true",
+            "yes",
+            "on",
+        }
 
         # Daemon state
         self._last_contribution: datetime | None = None
@@ -563,6 +571,15 @@ class SwarmManager:
 
         self._running = True
 
+        if self._read_only_boot:
+            logger.info(
+                "Read-only boot enabled — skipping manifest refresh, stale task reaping, "
+                "startup crews, seed tasks, and optional subsystem init"
+            )
+            self._telos_substrate_seeded = False
+            self._refresh_initialized_registry()
+            return
+
         # Load ecosystem awareness on every init
         from dharma_swarm.ecosystem_bridge import MANIFEST_PATH, update_manifest
 
@@ -681,6 +698,8 @@ class SwarmManager:
         are applied for role, model, provider, and system_prompt (caller values
         override only when explicitly non-default).
         """
+        spec = None
+        spec_metadata: dict[str, Any] = {}
         # Constitutional roster check: apply spec defaults for stable agents
         try:
             from dharma_swarm.agent_constitution import get_runtime_agent_spec
@@ -696,6 +715,22 @@ class SwarmManager:
                     provider_type = spec.default_provider
                 if not system_prompt and spec.system_prompt:
                     system_prompt = spec.system_prompt
+                spec_metadata = dict(spec.metadata or {})
+                if not any(
+                    key in spec_metadata
+                    for key in (
+                        "allow_provider_routing",
+                        "available_provider_types",
+                        "provider_allowlist",
+                    )
+                ):
+                    spec_metadata["allow_provider_routing"] = True
+                try:
+                    from dharma_swarm.model_catalog import apply_model_pack_metadata
+
+                    spec_metadata = apply_model_pack_metadata(spec_metadata)
+                except Exception:
+                    logger.debug("Model catalog resolution failed for %s", name, exc_info=True)
                 logger.info(
                     "Constitutional agent %s: role=%s, model=%s, gates=%s",
                     name, role.value, model, spec.constitutional_gates,
@@ -732,7 +767,10 @@ class SwarmManager:
                 provider=provider_type,
                 system_prompt=system_prompt + extra_prompt if system_prompt else extra_prompt,
                 thread=thread,
-                metadata={"state_dir": str(self.state_dir)},
+                metadata={
+                    **spec_metadata,
+                    "state_dir": str(self.state_dir),
+                },
             )
             # Route through the shared ModelRouter so live agent tasks contribute
             # to routing memory, retries, and audit trails while staying pinned
@@ -1517,6 +1555,104 @@ class SwarmManager:
             return "timeout"
         return "execution_error"
 
+    @staticmethod
+    def _coerce_int(value: object, default: int = 0) -> int:
+        try:
+            return int(value)
+        except (TypeError, ValueError):
+            return default
+
+    @staticmethod
+    def _parse_iso_datetime(raw: object) -> datetime | None:
+        if not isinstance(raw, str) or not raw.strip():
+            return None
+        try:
+            return datetime.fromisoformat(raw)
+        except ValueError:
+            return None
+
+    @staticmethod
+    def _failure_class_supports_auto_rescue(failure_class: str) -> bool:
+        return failure_class in {"connection_transient", "long_timeout"}
+
+    def _classify_failed_dependency(
+        self,
+        *,
+        dep_meta: dict[str, Any],
+        dep_result: str | None,
+    ) -> str:
+        failure_class = str(dep_meta.get("last_failure_class", "")).strip()
+        if failure_class:
+            return failure_class
+
+        result_text = str(dep_result or "").strip().lower()
+        if not result_text:
+            return ""
+        if "timed out" in result_text or result_text.startswith("timeout:"):
+            return "long_timeout"
+        if "connection error" in result_text or "rate limit" in result_text:
+            return "connection_transient"
+        if result_text.startswith("blocked:") or "telos blocked" in result_text:
+            return "policy_block"
+        return ""
+
+    def _failed_dependency_is_terminal(
+        self,
+        *,
+        dep_meta: dict[str, Any],
+        dep_result: str | None,
+        dep_updated_at_raw: object,
+        now: datetime,
+    ) -> bool:
+        failure_class = self._classify_failed_dependency(
+            dep_meta=dep_meta,
+            dep_result=dep_result,
+        )
+
+        retry_count_raw = dep_meta.get("retry_count")
+        max_retries_raw = dep_meta.get("max_retries")
+        retry_budget_known = (
+            retry_count_raw is not None and max_retries_raw is not None
+        )
+        retry_budget_open = False
+        if retry_budget_known:
+            retry_count = self._coerce_int(retry_count_raw, 0)
+            max_retries = self._coerce_int(max_retries_raw, 0)
+            retry_budget_open = retry_count < max_retries
+            if retry_budget_open:
+                return False
+
+        rescue_count = self._coerce_int(dep_meta.get("auto_rescue_count"), 0)
+        rescue_count_recorded = "auto_rescue_count" in dep_meta
+        rescue_limit_reached = rescue_count >= self._auto_rescue_max_attempts
+        auto_rescue_disabled = bool(dep_meta.get("auto_rescue_disabled"))
+        dep_updated_at = self._parse_iso_datetime(dep_updated_at_raw)
+        rescue_window_expired = (
+            dep_updated_at is not None
+            and now - dep_updated_at > self._auto_rescue_max_age
+        )
+        auto_rescue_eligible = (
+            failure_class != ""
+            and self._failure_class_supports_auto_rescue(failure_class)
+            and not auto_rescue_disabled
+            and not rescue_limit_reached
+            and not rescue_window_expired
+        )
+        if auto_rescue_eligible:
+            return False
+
+        if retry_budget_known:
+            return True
+        if rescue_count_recorded and rescue_limit_reached:
+            return True
+        if failure_class and not self._failure_class_supports_auto_rescue(failure_class):
+            return True
+        if failure_class and (
+            auto_rescue_disabled or rescue_limit_reached or rescue_window_expired
+        ):
+            return True
+        return False
+
     async def reap_orphaned_tasks(self, *, stale_minutes: int = 30) -> list[Task]:
         """Requeue ASSIGNED/RUNNING tasks whose agents no longer exist in the pool.
 
@@ -1601,7 +1737,7 @@ class SwarmManager:
             try:
                 async with self._task_board._open() as db:
                     cur = await db.execute(
-                        "SELECT d.depends_on_id, dep.status, dep.metadata "
+                        "SELECT d.depends_on_id, dep.status, dep.metadata, dep.result, dep.updated_at "
                         "FROM task_dependencies d "
                         "JOIN tasks dep ON dep.id = d.depends_on_id "
                         "WHERE d.task_id = ?",
@@ -1617,20 +1753,23 @@ class SwarmManager:
             # Check if ALL blocking deps are permanently failed
             all_blocking_failed = True
             has_blocking = False
-            for _dep_id, dep_status, dep_meta_raw in deps:
+            for _dep_id, dep_status, dep_meta_raw, dep_result, dep_updated_at in deps:
                 if dep_status == TaskStatus.COMPLETED.value:
                     continue  # This dep is satisfied
                 has_blocking = True
                 if dep_status != TaskStatus.FAILED.value:
                     all_blocking_failed = False
                     break
-                # Check if the failed dep has exhausted retries
                 try:
                     dep_meta = __import__("json").loads(dep_meta_raw) if dep_meta_raw else {}
                 except Exception:
                     dep_meta = {}
-                rescue_count = int(dep_meta.get("auto_rescue_count", 0) or 0)
-                if rescue_count < 2:  # Still has rescue attempts left
+                if not self._failed_dependency_is_terminal(
+                    dep_meta=dep_meta,
+                    dep_result=dep_result,
+                    dep_updated_at_raw=dep_updated_at,
+                    now=datetime.now(timezone.utc),
+                ):
                     all_blocking_failed = False
                     break
 
@@ -1652,6 +1791,30 @@ class SwarmManager:
                     logger.debug("Dependency propagation failed for %s: %s", task.id[:12], exc)
 
         return propagated
+
+    async def _task_queue_snapshot(self) -> dict[str, int]:
+        """Return queue truthfulness metrics for runtime reporting."""
+        if self._task_board is None:
+            return {
+                "pending": 0,
+                "ready": 0,
+                "blocked_pending": 0,
+                "running": 0,
+                "failed": 0,
+                "completed": 0,
+            }
+
+        stats = await self._task_board.stats()
+        ready_count = len(await self._task_board.get_ready_tasks())
+        pending_count = int(stats.get("pending", 0))
+        return {
+            "pending": pending_count,
+            "ready": ready_count,
+            "blocked_pending": max(0, pending_count - ready_count),
+            "running": int(stats.get("running", 0)),
+            "failed": int(stats.get("failed", 0)),
+            "completed": int(stats.get("completed", 0)),
+        }
 
     async def rescue_recent_failures(
         self,
@@ -2008,6 +2171,16 @@ class SwarmManager:
             except Exception:
                 logger.debug("Orphan reaper error", exc_info=True)
 
+        queue_snapshot: dict[str, int] = {}
+        try:
+            queue_snapshot = await asyncio.wait_for(
+                self._task_queue_snapshot(), timeout=5.0
+            )
+            result["tasks_ready"] = queue_snapshot.get("ready", 0)
+            result["tasks_blocked_pending"] = queue_snapshot.get("blocked_pending", 0)
+        except asyncio.TimeoutError:
+            logger.warning("_task_queue_snapshot timed out after 5s")
+
         reopened: list[Any] = []
         if allow_autonomous_generation:
             import time as _t; _t0 = _t.monotonic()
@@ -2028,17 +2201,17 @@ class SwarmManager:
         try:
             if not gnani_holds:
                 activity = await asyncio.wait_for(
-                    self._orchestrator.tick(), timeout=25.0
+                    self._orchestrator.tick(), timeout=45.0
                 )
                 result["dispatched"] = activity.get("dispatched", 0)
                 result["settled"] = activity.get("settled", 0)
             else:
                 # Still settle completed tasks, just don't dispatch new ones
                 activity = await asyncio.wait_for(
-                    self._orchestrator.tick_settle_only(), timeout=25.0
+                    self._orchestrator.tick_settle_only(), timeout=45.0
                 )
         except asyncio.TimeoutError:
-            logger.warning("orchestrator.tick timed out after 25s")
+            logger.warning("orchestrator.tick timed out after 45s")
         _orch_dur = _time.monotonic() - _orch_t0
         if _orch_dur > 5.0:
             logger.warning("orchestrator.tick took %.1fs", _orch_dur)
@@ -2128,10 +2301,12 @@ class SwarmManager:
         _tick_dur = _time.monotonic() - _tick_t0
         logger.info(
             "tick-%d done (%.1fs): dispatched=%d settled=%d rescued=%d reopened=%d "
-            "organism=%s meta=%s",
+            "ready=%d blocked=%d organism=%s meta=%s",
             self._tick_count, _tick_dur,
             result.get("dispatched", 0), result.get("settled", 0),
             len(rescued), len(reopened),
+            queue_snapshot.get("ready", -1),
+            queue_snapshot.get("blocked_pending", -1),
             result.get("organism_verdict", "-"),
             result.get("meta_fitness", "-"),
         )
@@ -2156,6 +2331,7 @@ class SwarmManager:
         while self._running:
             try:
                 activity = await self.tick()
+                await self._publish_runtime_health_snapshot()
                 if activity.get("paused"):
                     await asyncio.sleep(60)
                     continue
@@ -2194,6 +2370,28 @@ class SwarmManager:
         if self._organism is not None:
             state.organism = self._organism.status()
         return state
+
+    async def _publish_runtime_health_snapshot(self) -> None:
+        """Persist a best-effort control-plane snapshot for operator surfaces."""
+        from dharma_swarm.runtime_artifacts import write_dgc_health_snapshot
+
+        try:
+            state = await self.status()
+            write_dgc_health_snapshot(
+                self.state_dir,
+                daemon_pid=os.getpid(),
+                agent_count=len(state.agents),
+                task_count=(
+                    state.tasks_pending
+                    + state.tasks_running
+                    + state.tasks_completed
+                    + state.tasks_failed
+                ),
+                anomaly_count=0,
+                source="swarm.run",
+            )
+        except Exception as exc:
+            logger.debug("Runtime health snapshot publish failed: %s", exc)
 
     async def coordination_status(
         self,
@@ -2706,14 +2904,19 @@ class SwarmManager:
         except Exception as exc:
             logger.debug("Provider close failed (non-fatal): %s", exc)
 
-        # 5. Record shutdown in memory
+        # 5. Record shutdown in memory and close persistent connection
         if self._memory:
             try:
-                await self._memory.remember(
-                    "Swarm shutdown", layer=MemoryLayer.SESSION, source="swarm"
-                )
+                if not self._read_only_boot:
+                    await self._memory.remember(
+                        "Swarm shutdown", layer=MemoryLayer.SESSION, source="swarm"
+                    )
             except Exception:
                 logger.debug("Shutdown memory write failed", exc_info=True)
+            try:
+                await self._memory.close()
+            except Exception:
+                logger.debug("Memory close failed", exc_info=True)
 
         self._initialized.clear()
         logger.info("Swarm shutdown complete")
