@@ -130,13 +130,39 @@ def test_task_list_with_status_filter(tmp_path):
 
 
 def test_status_shows_default_agents(tmp_path):
-    """Status on an initialized swarm should list the default startup crew."""
-    state_dir = str(tmp_path / ".dharma")
-    runner.invoke(app, ["init", "--state-dir", state_dir])
-    result = runner.invoke(app, ["status", "--state-dir", state_dir])
+    """Status should use read-only boot instead of spawning startup crews."""
+    import dharma_swarm.cli as cli
+
+    seen: dict[str, bool] = {}
+
+    class _State:
+        uptime_seconds = 0.1
+        agents = []
+        tasks_pending = 0
+        tasks_running = 0
+        tasks_completed = 0
+        tasks_failed = 0
+
+    class _FakeSwarm:
+        async def status(self):
+            return _State()
+
+        async def shutdown(self):
+            return None
+
+    async def _fake_get_swarm(state_dir: str = ".dharma", *, read_only_boot: bool = False):
+        seen["read_only_boot"] = read_only_boot
+        return _FakeSwarm()
+
+    cli_get_swarm = cli._get_swarm
+    cli._get_swarm = _fake_get_swarm
+    try:
+        result = runner.invoke(app, ["status", "--state-dir", str(tmp_path / ".dharma")])
+    finally:
+        cli._get_swarm = cli_get_swarm
+
     assert result.exit_code == 0
-    # SwarmManager.init() creates a default startup crew; verify at least one appears
-    assert "Agents" in result.stdout
+    assert seen["read_only_boot"] is True
 
 
 def test_status_on_fresh_swarm(tmp_path):
@@ -146,7 +172,7 @@ def test_status_on_fresh_swarm(tmp_path):
     result = runner.invoke(app, ["status", "--state-dir", state_dir])
     assert result.exit_code == 0
     # Should contain the metric labels
-    assert "Agents" in result.stdout
+    assert "Uptime" in result.stdout
     assert "Tasks Pending" in result.stdout
 
 

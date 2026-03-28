@@ -47,10 +47,16 @@ async def test_model_router_uses_persistent_routing_memory_to_reorder(tmp_path) 
         },
     )
 
+    # Record outcomes using the DEFAULT_MODELS hints that will be looked up
+    from dharma_swarm.model_hierarchy import DEFAULT_MODELS
+
+    anthropic_model = DEFAULT_MODELS.get(ProviderType.ANTHROPIC, "claude-opus-4-6")
+    orfree_model = DEFAULT_MODELS.get(ProviderType.OPENROUTER_FREE, "meta-llama/llama-3.3-70b-instruct:free")
+
     for _ in range(4):
         store.record_outcome(
             provider=ProviderType.ANTHROPIC,
-            model="claude-sonnet-4-6",
+            model=anthropic_model,
             task_signature=task_signature,
             action_name=route_request.action_name,
             route_path="reflex",
@@ -61,7 +67,7 @@ async def test_model_router_uses_persistent_routing_memory_to_reorder(tmp_path) 
     for _ in range(3):
         store.record_outcome(
             provider=ProviderType.OPENROUTER_FREE,
-            model="meta-llama/llama-3.3-70b-instruct:free",
+            model=orfree_model,
             task_signature=task_signature,
             action_name=route_request.action_name,
             route_path="reflex",
@@ -124,7 +130,7 @@ async def test_model_router_posthoc_feedback_reorders_future_routes(tmp_path) ->
             selected_provider=ProviderType.OPENROUTER_FREE,
             selected_model_hint="meta-llama/llama-3.3-70b-instruct:free",
             fallback_providers=[ProviderType.ANTHROPIC],
-            fallback_model_hints=["claude-sonnet-4-6"],
+            fallback_model_hints=["claude-opus-4-6"],
             confidence=0.8,
             requires_human=False,
             reasons=["seed_feedback"],
@@ -140,7 +146,7 @@ async def test_model_router_posthoc_feedback_reorders_future_routes(tmp_path) ->
         decision=ProviderRouteDecision(
             path=RoutePath.DELIBERATIVE,
             selected_provider=ProviderType.ANTHROPIC,
-            selected_model_hint="claude-sonnet-4-6",
+            selected_model_hint="claude-opus-4-6",
             fallback_providers=[ProviderType.OPENROUTER_FREE],
             fallback_model_hints=["meta-llama/llama-3.3-70b-instruct:free"],
             confidence=0.8,

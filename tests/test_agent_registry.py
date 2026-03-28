@@ -197,6 +197,36 @@ class TestRegistration:
         assert log[0]["generation"] == 0
         assert log[0]["reason"] == "initial registration"
 
+    def test_register_persists_runtime_field_manifest(self, tmp_path):
+        reg = AgentRegistry(agents_dir=tmp_path / "agents")
+        fields = [
+            {
+                "name": "system_prompt",
+                "path": "system_prompt",
+                "value_type": "str",
+                "current_value": "You code.",
+            },
+            {
+                "name": "temperature",
+                "path": "metadata['sampler']['temperature']",
+                "value_type": "float",
+                "current_value": 0.2,
+            },
+        ]
+
+        reg.register_agent("alice", "coder", "gpt-4", "You code.", runtime_fields=fields)
+
+        assert reg.get_runtime_fields("alice") == fields
+
+    def test_register_updates_runtime_field_manifest_for_existing_agent(self, tmp_path):
+        reg = AgentRegistry(agents_dir=tmp_path / "agents")
+        reg.register_agent("alice", "coder", "gpt-4", "prompt v1")
+        fields = [{"name": "system_prompt", "path": "system_prompt", "value_type": "str"}]
+
+        reg.register_agent("alice", "reviewer", "gpt-3.5", "prompt v2", runtime_fields=fields)
+
+        assert reg.get_runtime_fields("alice") == fields
+
 
 # ---------------------------------------------------------------------------
 # AgentRegistry — loading and listing

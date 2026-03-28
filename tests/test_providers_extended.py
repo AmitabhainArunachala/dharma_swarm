@@ -1,8 +1,11 @@
 """Tests for dharma_swarm.providers_extended -- Ollama, NVIDIA NIM, Moonshot providers."""
 
+from types import SimpleNamespace
+
 import pytest
 
-from dharma_swarm.models import LLMRequest
+from dharma_swarm.model_hierarchy import default_model
+from dharma_swarm.models import LLMRequest, ProviderType
 from dharma_swarm.providers_extended import (
     MoonshotProvider,
     NVIDIANIMProvider,
@@ -58,6 +61,51 @@ def test_nvidia_nim_defaults():
     p = NVIDIANIMProvider(api_key="test-key")
     assert p.base_url == "https://integrate.api.nvidia.com/v1"
     assert p._api_key == "test-key"
+
+
+@pytest.mark.asyncio
+async def test_nvidia_nim_complete_uses_canonical_default_model(monkeypatch):
+    monkeypatch.setattr(
+        "dharma_swarm.providers_extended.canonical_default_model",
+        lambda provider: "nim-from-helper",
+    )
+    provider = NVIDIANIMProvider(api_key="test-key")
+    request = LLMRequest(
+        model="",
+        messages=[{"role": "user", "content": "hi"}],
+    )
+    captured: dict[str, object] = {}
+
+    class _Resp:
+        status_code = 200
+
+        @staticmethod
+        def json():
+            return {
+                "choices": [{"message": {"content": "OK"}, "finish_reason": "stop"}],
+                "model": "nim-model",
+                "usage": {"prompt_tokens": 1, "completion_tokens": 1, "total_tokens": 2},
+            }
+
+    class _Client:
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, exc_type, exc, tb):
+            return False
+
+        async def post(self, url, json, headers=None):
+            captured["url"] = url
+            captured["json"] = json
+            captured["headers"] = headers
+            return _Resp()
+
+    monkeypatch.setattr("dharma_swarm.providers_extended.httpx.AsyncClient", lambda timeout=120.0: _Client())
+
+    response = await provider.complete(request)
+
+    assert response.content == "OK"
+    assert captured["json"]["model"] == "nim-from-helper"
 
 
 def test_nvidia_nim_custom_url():

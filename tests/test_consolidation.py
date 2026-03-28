@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import json
 from pathlib import Path
+from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
@@ -27,6 +28,8 @@ from dharma_swarm.consolidation import (
     SystemObserver,
     SystemStateReport,
 )
+from dharma_swarm.models import LLMRequest, ProviderType
+from dharma_swarm.runtime_provider import RuntimeProviderConfig
 
 
 # ---------------------------------------------------------------------------
@@ -361,3 +364,75 @@ class TestConsolidationCycle:
         )
         # Should not raise even without signal bus
         cycle._emit_signal(outcome)
+
+    @pytest.mark.asyncio
+    async def test_default_provider_prefers_ollama_then_nim_before_openrouter(
+        self,
+        tmp_path: Path,
+        monkeypatch,
+    ):
+        calls: list[tuple[str, str]] = []
+
+        class _FakeProvider:
+            def __init__(self, label: str, *, fail: bool = False):
+                self.label = label
+                self.fail = fail
+
+            async def complete(self, request):
+                calls.append((self.label, request.model))
+                if self.fail:
+                    raise RuntimeError(f"{self.label} failed")
+                return SimpleNamespace(content=f"{self.label} ok")
+
+            async def close(self):
+                return None
+
+        def _fake_preferred_configs(**kwargs):
+            return [
+                RuntimeProviderConfig(
+                    provider=ProviderType.OLLAMA,
+                    available=True,
+                    default_model="ollama-local",
+                ),
+                RuntimeProviderConfig(
+                    provider=ProviderType.NVIDIA_NIM,
+                    available=True,
+                    default_model="nim-local",
+                ),
+                RuntimeProviderConfig(
+                    provider=ProviderType.OPENROUTER,
+                    available=True,
+                    default_model="openrouter-fallback",
+                ),
+            ]
+
+        def _fake_create_provider(config):
+            return _FakeProvider(
+                config.provider.value,
+                fail=config.provider == ProviderType.OLLAMA,
+            )
+
+        monkeypatch.setattr(
+            "dharma_swarm.consolidation.preferred_runtime_provider_configs",
+            _fake_preferred_configs,
+        )
+        monkeypatch.setattr(
+            "dharma_swarm.consolidation.create_runtime_provider",
+            _fake_create_provider,
+        )
+
+        cycle = ConsolidationCycle(state_dir=tmp_path)
+        provider = cycle._get_default_provider()
+        response = await provider.complete(
+            LLMRequest(
+                model="meta-llama/llama-3.3-70b-instruct:free",
+                system="sys",
+                messages=[{"role": "user", "content": "hello"}],
+            )
+        )
+
+        assert response.content == "nvidia_nim ok"
+        assert calls == [
+            ("ollama", "ollama-local"),
+            ("nvidia_nim", "nim-local"),
+        ]

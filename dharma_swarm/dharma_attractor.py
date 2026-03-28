@@ -249,51 +249,92 @@ class DharmaAttractor:
 
         return "\n\n".join(parts)
 
-    def _deterministic_check(self, proposal: str, context: dict) -> bool:  # noqa: ARG002
-        """Deterministic PROCEED/HOLD using dharma_kernel + anekanta_gate.
+    def _deterministic_check(self, proposal: str, context: dict) -> bool:
+        """Deterministic PROCEED/HOLD — grounded in Aurobindo Ch.4.
+
+        From Sri Aurobindo's 'The Mother', Chapter 4 (Money as Divine Force):
+
+            'Money is the visible sign of a universal force... In its origin
+            and its true action it belongs to the Divine... To reconquer it
+            for the Divine to whom it belongs and use it divinely for the
+            divine life is the supramental way for the Sadhaka.'
+
+            'Some even put a ban on money and riches and proclaim poverty
+            and bareness of life as the only spiritual condition. But this
+            is an error; it leaves the power in the hands of the hostile
+            forces.'
+
+        The money-force is not impure. Refusing to handle it is not
+        governance — it is ascetic withdrawal that surrenders the force
+        to the Asura. The system must be a 'pure and powerful channel
+        for the Supreme Puissance' — free from the money-taint (ego,
+        attachment, self-indulgence) but NOT from money itself.
+
+        Economic work, creative production, service delivery — these
+        are reconquering the money-force for the Divine. The Gnani
+        holds back only what would genuinely violate dharmic principles
+        (harm, deception, exploitation, destruction of oversight).
 
         Logic:
-        - dharma_kernel: no hard principle violations
-        - anekanta_gate: FAIL (0 frames) → HOLD; WARN or PASS → ok
-        - Both checks must not hard-fail → PROCEED
+        - Economic/work context: PROCEED (reconquer the force)
+        - Kernel violations only: HOLD (harm, deception, exploitation)
+        - Non-economic governance proposals: full anekanta gate
 
         Wrapped so any import failure → defaults to PROCEED.
         """
+        # -- Is this economic/creative work? If so, Mahalakshmi says PROCEED.
+        # The telos gates in economic_agent.py already filter for alignment.
+        # The Gnani's role for work tasks is ambient field, not hard gate.
+        is_economic = any(
+            marker in (context.get("domain", "") + " " + proposal[:200]).lower()
+            for marker in (
+                "economic task", "budget", "revenue", "task acceptance",
+                "seo", "audit", "content", "code review", "research",
+                "lead gen", "translation", "landing page", "report",
+                "product", "skill", "freelance", "delivery",
+            )
+        )
+        if is_economic:
+            # Mahalakshmi: pour. Only block if kernel violation is present.
+            # Use word-boundary-aware matching to avoid false positives
+            # (e.g. "dharma" matching "harm", "reattack" matching "attack")
+            import re
+            proposal_lower = proposal.lower()
+            hard_violations = [
+                r"\bdelete all\b", r"\bdisable oversight\b",
+                r"\bremove safety\b", r"\bbypass constraint\b",
+                r"\bignore principle\b", r"\bremove all constraints\b",
+                r"\bharm\b", r"\bdeceive\b", r"\bsteal\b",
+                r"\battack\b", r"\bexploit\b",
+            ]
+            return not any(re.search(pat, proposal_lower) for pat in hard_violations)
+
+        # -- Non-economic proposals: full governance check --
         kernel_ok = True
         anekanta_ok = True
 
-        # -- dharma_kernel check --
-        # Scan proposal for known danger phrases that violate core principles.
-        # We do this directly (no kernel import needed) for reliability.
         try:
             proposal_lower = proposal.lower()
             danger_phrases = [
-                "delete all",
-                "disable oversight",
-                "remove safety",
-                "bypass constraint",
-                "ignore principle",
+                "delete all", "disable oversight", "remove safety",
+                "bypass constraint", "ignore principle",
                 "remove all constraints",
             ]
             if any(phrase in proposal_lower for phrase in danger_phrases):
                 kernel_ok = False
         except Exception:
-            kernel_ok = True  # default proceed if check itself fails
+            kernel_ok = True
 
-        # -- anekanta_gate check --
-        # Only apply for substantial proposals (>80 chars) — short operational
-        # proposals won't naturally contain epistemological framing keywords,
-        # so requiring multi-frame coverage would block legitimate work.
+        # Anekanta gate: only for governance/identity proposals
         try:
             if len(proposal) > 80:
                 from dharma_swarm.anekanta_gate import evaluate_anekanta
                 from dharma_swarm.models import GateResult
                 result = evaluate_anekanta(proposal)
-                # Only hard FAIL (0 frames AND substantial proposal) → HOLD
                 if result.gate_result == GateResult.FAIL and result.frame_count == 0:
                     anekanta_ok = False
         except Exception:
-            anekanta_ok = True  # default proceed if gate unavailable
+            anekanta_ok = True
 
         return kernel_ok and anekanta_ok
 

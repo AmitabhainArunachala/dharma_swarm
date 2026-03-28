@@ -59,9 +59,8 @@ _PROVIDER_MAP = {
 }
 
 
-# OpenRouter models (used when OPENROUTER_API_KEY is set)
-_OR_LARGE = "meta-llama/llama-3.3-70b-instruct"
-_OR_MID = "mistralai/mistral-small-3.1-24b-instruct"
+# Model selection sourced from model_hierarchy.py — the single source of truth.
+from dharma_swarm.model_hierarchy import DEFAULT_MODELS, TIER_FREE
 
 
 def _has_openrouter_key() -> bool:
@@ -69,22 +68,41 @@ def _has_openrouter_key() -> bool:
     return provider_available("openrouter")
 
 
+def _has_ollama_key() -> bool:
+    import os
+    return bool(os.environ.get("OLLAMA_API_KEY", "").strip())
+
+
 def _resolve_default_crew() -> list[dict]:
-    """Build crew using OpenRouter if API key available, else Claude Code."""
-    if _has_openrouter_key():
+    """Build crew preferring free providers.  Ollama Cloud > OpenRouter > Claude Code."""
+    if _has_ollama_key():
+        # Ollama Cloud — free frontier (GLM-5 744B, DeepSeek-v3.2)
+        _model = DEFAULT_MODELS.get(ProviderType.OLLAMA, "glm-5:cloud")
         return [
             {"name": "cartographer", "role": AgentRole.CARTOGRAPHER,
-             "thread": "mechanistic", "provider": ProviderType.OPENROUTER, "model": _OR_LARGE},
+             "thread": "mechanistic", "provider": ProviderType.OLLAMA, "model": _model},
             {"name": "surgeon", "role": AgentRole.SURGEON,
-             "thread": "alignment", "provider": ProviderType.OPENROUTER, "model": _OR_LARGE},
+             "thread": "alignment", "provider": ProviderType.OLLAMA, "model": _model},
             {"name": "architect", "role": AgentRole.ARCHITECT,
-             "thread": "architectural", "provider": ProviderType.OPENROUTER, "model": _OR_LARGE},
+             "thread": "architectural", "provider": ProviderType.OLLAMA, "model": _model},
             {"name": "validator", "role": AgentRole.VALIDATOR,
-             "thread": "scaling", "provider": ProviderType.OPENROUTER, "model": _OR_MID},
+             "thread": "scaling", "provider": ProviderType.OLLAMA, "model": _model},
+        ]
+
+    if _has_openrouter_key():
+        _model = DEFAULT_MODELS.get(ProviderType.OPENROUTER_FREE, "meta-llama/llama-3.3-70b-instruct:free")
+        return [
+            {"name": "cartographer", "role": AgentRole.CARTOGRAPHER,
+             "thread": "mechanistic", "provider": ProviderType.OPENROUTER_FREE, "model": _model},
+            {"name": "surgeon", "role": AgentRole.SURGEON,
+             "thread": "alignment", "provider": ProviderType.OPENROUTER_FREE, "model": _model},
+            {"name": "architect", "role": AgentRole.ARCHITECT,
+             "thread": "architectural", "provider": ProviderType.OPENROUTER_FREE, "model": _model},
+            {"name": "validator", "role": AgentRole.VALIDATOR,
+             "thread": "scaling", "provider": ProviderType.OPENROUTER_FREE, "model": _model},
         ]
 
     # No API keys — use Claude Code (authenticated via `claude` CLI)
-    # Lean crew: 3 agents to avoid spawning too many subprocesses
     return [
         {"name": "cartographer", "role": AgentRole.CARTOGRAPHER,
          "thread": "mechanistic", "provider": ProviderType.CLAUDE_CODE, "model": "sonnet"},
@@ -97,6 +115,58 @@ def _resolve_default_crew() -> list[dict]:
 
 # DEFAULT_CREW is resolved at import time but can be overridden
 DEFAULT_CREW = _resolve_default_crew()
+
+
+CYBERNETICS_CREW = [
+    {
+        "name": "cyber-glm5",
+        "role": AgentRole.RESEARCHER,
+        "thread": "cybernetics",
+        "provider": ProviderType.OLLAMA,
+        "model": "glm-5:cloud",
+        "system_prompt": (
+            "You are CYBER-GLM5, the Variety Cartographer of the Cybernetics Directive. "
+            "Map S2/S3/S4/S5 wiring, identify where governance variety is attenuated, "
+            "and keep your outputs evidence-dense and structurally useful."
+        ),
+    },
+    {
+        "name": "cyber-kimi25",
+        "role": AgentRole.CARTOGRAPHER,
+        "thread": "cybernetics",
+        "provider": ProviderType.OLLAMA,
+        "model": "kimi-k2.5:cloud",
+        "system_prompt": (
+            "You are CYBER-KIMI25, the ecosystem mapper of the Cybernetics Directive. "
+            "Trace cross-file, cross-module, and cross-ledger connections; make the "
+            "control plane legible without inflating scope."
+        ),
+    },
+    {
+        "name": "cyber-codex",
+        "role": AgentRole.SURGEON,
+        "thread": "cybernetics",
+        "provider": ProviderType.OLLAMA,
+        "model": "qwen3-coder:480b-cloud",
+        "system_prompt": (
+            "You are CYBER-CODEX, the execution and wiring seat of the Cybernetics Directive. "
+            "Prefer the smallest hot-path control improvement over broad subsystem invention. "
+            "Your job is to turn diagnosis into tested runtime change."
+        ),
+    },
+    {
+        "name": "cyber-opus",
+        "role": AgentRole.ARCHITECT,
+        "thread": "cybernetics",
+        "provider": ProviderType.OLLAMA,
+        "model": "deepseek-v3.2:cloud",
+        "system_prompt": (
+            "You are CYBER-OPUS, the identity and architecture seat of the Cybernetics Directive. "
+            "Hold telos, constitutional coherence, and the bounded mission shape. "
+            "Prevent decorative management theater and keep the subsystem aligned."
+        ),
+    },
+]
 
 
 # Seed tasks for the first cycle
@@ -212,8 +282,7 @@ async def spawn_default_crew(swarm) -> list:
         logger.info("All agents already exist, skipping spawn")
         return []
 
-    # Prepare spawn tasks for parallel execution
-    spawn_tasks = []
+    spawn_ops = []
     for spec in specs_to_spawn:
         provider = spec.get("provider", ProviderType.CLAUDE_CODE)
         model = spec.get("model", "claude-code")
@@ -223,7 +292,7 @@ async def spawn_default_crew(swarm) -> list:
             if base_prompt
             else MEMORY_SURVIVAL_INSTINCT
         )
-        spawn_tasks.append(
+        spawn_ops.append(
             swarm.spawn_agent(
                 name=spec["name"],
                 role=spec["role"],
@@ -234,14 +303,60 @@ async def spawn_default_crew(swarm) -> list:
             )
         )
 
+    agents = await asyncio.gather(*spawn_ops)
+
     # Log results
     for spec in specs_to_spawn:
         logger.info("Spawned %s (%s) on %s [%s]",
                      spec["name"], spec["role"].value,
                      spec.get("provider", ProviderType.CLAUDE_CODE).value,
                      spec["thread"])
-    # Spawn all agents in parallel
-    agents = await asyncio.gather(*spawn_tasks)
+    return list(agents)
+
+
+async def spawn_cybernetics_crew(swarm) -> list:
+    """Ensure the dedicated cybernetics steward roster exists."""
+    existing = await swarm.list_agents()
+    existing_names = {a.name for a in existing}
+
+    specs_to_spawn = [
+        spec for spec in CYBERNETICS_CREW
+        if spec["name"] not in existing_names
+    ]
+
+    if not specs_to_spawn:
+        logger.info("Cybernetics crew already exists, skipping spawn")
+        return []
+
+    spawn_ops = []
+    for spec in specs_to_spawn:
+        base_prompt = str(spec.get("system_prompt", "") or "").strip()
+        merged_prompt = (
+            f"{base_prompt}\n\n{MEMORY_SURVIVAL_INSTINCT}"
+            if base_prompt
+            else MEMORY_SURVIVAL_INSTINCT
+        )
+        spawn_ops.append(
+            swarm.spawn_agent(
+                name=spec["name"],
+                role=spec["role"],
+                thread=spec["thread"],
+                provider_type=spec["provider"],
+                model=spec["model"],
+                system_prompt=merged_prompt,
+            )
+        )
+
+    agents = await asyncio.gather(*spawn_ops)
+
+    for spec in specs_to_spawn:
+        logger.info(
+            "Spawned cybernetics seat %s (%s) on %s [%s]",
+            spec["name"],
+            spec["role"].value,
+            spec["provider"].value,
+            spec["thread"],
+        )
 
     return list(agents)
 

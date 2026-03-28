@@ -453,6 +453,65 @@ def format_dashboard_report() -> str:
 
 
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+# TRANSCENDENCE MEASUREMENT
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+
+def ensemble_brier_report() -> dict[str, Any]:
+    """Compare ensemble predictions against individual agent predictions.
+
+    Returns a dict with transcendence metrics:
+    - ensemble_brier: Brier score for source="ensemble"
+    - individual_briers: {source: brier} for all non-ensemble sources
+    - best_individual_brier: lowest individual Brier (best performer)
+    - transcendence_margin: best_individual - ensemble (positive = transcendence)
+    - aggregation_lift: mean_individual - ensemble (positive = aggregation helps)
+    """
+    dashboard = build_dashboard()
+
+    ensemble_brier = dashboard.brier_by_source.get("ensemble")
+    if ensemble_brier is None:
+        return {
+            "status": "no_ensemble_predictions",
+            "ensemble_brier": None,
+            "individual_briers": dashboard.brier_by_source,
+            "transcendence_margin": None,
+        }
+
+    # Separate ensemble from individual sources
+    individual_briers = {
+        src: score
+        for src, score in dashboard.brier_by_source.items()
+        if src != "ensemble"
+    }
+
+    if not individual_briers:
+        return {
+            "status": "no_individual_predictions",
+            "ensemble_brier": ensemble_brier,
+            "individual_briers": {},
+            "transcendence_margin": None,
+        }
+
+    best_individual = min(individual_briers.values())
+    mean_individual = sum(individual_briers.values()) / len(individual_briers)
+
+    t_margin = best_individual - ensemble_brier  # Positive = transcendence
+    a_lift = mean_individual - ensemble_brier  # Positive = aggregation helps
+
+    return {
+        "status": "measured",
+        "ensemble_brier": round(ensemble_brier, 4),
+        "individual_briers": {k: round(v, 4) for k, v in individual_briers.items()},
+        "best_individual_brier": round(best_individual, 4),
+        "mean_individual_brier": round(mean_individual, 4),
+        "transcendence_margin": round(t_margin, 4),
+        "aggregation_lift": round(a_lift, 4),
+        "transcended": t_margin > 0,
+    }
+
+
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 # RESOLUTION NOTIFICATIONS
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 

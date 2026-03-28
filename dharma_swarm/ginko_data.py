@@ -23,18 +23,19 @@ from typing import Any
 
 import httpx
 
+from dharma_swarm.api_keys import (
+    FINNHUB_API_KEY_ENV,
+    FRED_API_KEY_ENV,
+    GINKO_API_KEY_ENV_VARS,
+)
+
 logger = logging.getLogger(__name__)
 
 GINKO_DIR = Path(os.getenv("DHARMA_HOME", Path.home() / ".dharma")) / "ginko"
 DATA_DIR = GINKO_DIR / "data"
 
 # API key environment variable names mapped to short provider labels
-_API_KEY_ENV_VARS: dict[str, str] = {
-    "openrouter": "OPENROUTER_API_KEY",
-    "fred": "FRED_API_KEY",
-    "finnhub": "FINNHUB_API_KEY",
-    "ollama": "OLLAMA_API_KEY",
-}
+_API_KEY_ENV_VARS: dict[str, str] = dict(GINKO_API_KEY_ENV_VARS)
 
 
 def validate_api_keys() -> dict[str, bool]:
@@ -155,9 +156,9 @@ async def fetch_fred_series(
     Returns:
         Latest numeric value or None on failure.
     """
-    key = api_key or os.getenv("FRED_API_KEY")
+    key = api_key or os.getenv(FRED_API_KEY_ENV)
     if not key:
-        logger.warning("FRED_API_KEY not set — skipping %s", series_id)
+        logger.warning("%s not set — skipping %s", FRED_API_KEY_ENV, series_id)
         return None
 
     params = {
@@ -195,9 +196,9 @@ async def fetch_macro_snapshot(
     Returns None early (with a warning) when no FRED API key is available,
     instead of making doomed HTTP calls for every series.
     """
-    key = api_key or os.getenv("FRED_API_KEY")
+    key = api_key or os.getenv(FRED_API_KEY_ENV)
     if not key:
-        logger.warning("Skipping FRED macro snapshot: no FRED_API_KEY")
+        logger.warning("Skipping FRED macro snapshot: no %s", FRED_API_KEY_ENV)
         return None
 
     now = _utc_now().isoformat()
@@ -237,9 +238,9 @@ async def fetch_stock_quote(
     Returns:
         StockQuote or None on failure.
     """
-    key = api_key or os.getenv("FINNHUB_API_KEY")
+    key = api_key or os.getenv(FINNHUB_API_KEY_ENV)
     if not key:
-        logger.warning("FINNHUB_API_KEY not set — skipping %s", symbol)
+        logger.warning("%s not set — skipping %s", FINNHUB_API_KEY_ENV, symbol)
         return None
 
     params = {"symbol": symbol, "token": key}
@@ -282,9 +283,9 @@ async def fetch_stock_quotes(
     Returns an empty list early (with a warning) when no finnhub API key
     is available.
     """
-    key = api_key or os.getenv("FINNHUB_API_KEY")
+    key = api_key or os.getenv(FINNHUB_API_KEY_ENV)
     if not key:
-        logger.warning("Skipping stock quotes: no FINNHUB_API_KEY")
+        logger.warning("Skipping stock quotes: no %s", FINNHUB_API_KEY_ENV)
         return []
 
     symbols = symbols or DEFAULT_SYMBOLS

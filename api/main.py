@@ -23,6 +23,8 @@ from fastapi.responses import JSONResponse
 from starlette.middleware.base import BaseHTTPMiddleware
 from starlette.requests import Request
 
+from dharma_swarm.api_keys import DASHBOARD_API_KEY_ENV
+
 logger = logging.getLogger(__name__)
 
 # ── Singleton State ───────────────────────────────────────────────
@@ -53,6 +55,16 @@ def _clear_operator_pid(pid: int | None = None) -> None:
         _OPERATOR_PID_FILE.unlink(missing_ok=True)
     except OSError as exc:
         logger.warning("Failed to clear operator pid file: %s", exc)
+
+
+def _log_auth_mode() -> None:
+    if _get_api_key() is None:
+        logger.warning(
+            f"⚠ {DASHBOARD_API_KEY_ENV} not set — ALL API routes are open (dev mode). "
+            f"Set {DASHBOARD_API_KEY_ENV} in environment to enable Bearer auth."
+        )
+    else:
+        logger.info("Bearer token auth enabled for /api/* routes.")
 
 
 def get_swarm():
@@ -113,6 +125,7 @@ async def lifespan(app: FastAPI):
     except Exception as e:
         logger.warning("Swarm init partial: %s", e)
 
+    _log_auth_mode()
     logger.info("DHARMA COMMAND API ready on port 8420")
     try:
         yield
@@ -132,21 +145,23 @@ async def lifespan(app: FastAPI):
 
 def _get_api_key() -> str | None:
     """Read DASHBOARD_API_KEY from environment (per-request, supports rotation)."""
-    return os.environ.get("DASHBOARD_API_KEY")
+    return os.environ.get(DASHBOARD_API_KEY_ENV)
 
 
 # Routes that never require authentication (method, path).
 _PUBLIC_ROUTES: set[tuple[str, str]] = {
     ("GET", "/"),
     ("GET", "/api/health"),
+    ("GET", "/api/verify/health"),
     ("GET", "/docs"),
     ("GET", "/openapi.json"),
     ("GET", "/redoc"),
+    ("POST", "/api/verify/webhook"),
 }
 
 _AUTH_FAILURE_RESPONSE = {
     "error": "unauthorized",
-    "detail": "Invalid or missing API key. Set DASHBOARD_API_KEY env var and pass as 'Bearer <key>' header.",
+    "detail": f"Invalid or missing API key. Set {DASHBOARD_API_KEY_ENV} env var and pass as 'Bearer <key>' header.",
 }
 
 
@@ -227,45 +242,43 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-@app.on_event("startup")
-def _warn_if_no_api_key():
-    if _get_api_key() is None:
-        logger.warning(
-            "⚠ DASHBOARD_API_KEY not set — ALL API routes are open (dev mode). "
-            "Set DASHBOARD_API_KEY in environment to enable Bearer auth."
-        )
-    else:
-        logger.info("Bearer token auth enabled for /api/* routes.")
-
 
 # ── Register Routers ─────────────────────────────────────────────
 
-from api.routers.health import router as health_router
-from api.routers.agents import router as agents_router
-from api.routers.evolution import router as evolution_router
-from api.routers.ontology import router as ontology_router
-from api.routers.lineage import router as lineage_router
-from api.routers.stigmergy import router as stigmergy_router
-from api.routers.commands import router as commands_router
-from api.routers.chat import router as chat_router, ws_router as chat_ws_router
-from api.routers.modules import router as modules_router
-from api.routers.dashboard_new import router as dashboard_new_router
-from api.routers.telemetry import router as telemetry_router
-from api.routers.graphql_router import router as graphql_router
+def _register_routers(api_app: FastAPI) -> None:
+    from api.routers.health import router as health_router
+    from api.routers.agents import router as agents_router
+    from api.routers.evolution import router as evolution_router
+    from api.routers.ontology import router as ontology_router
+    from api.routers.lineage import router as lineage_router
+    from api.routers.stigmergy import router as stigmergy_router
+    from api.routers.commands import router as commands_router
+    from api.routers.modules import router as modules_router
+    from api.routers.dashboard_new import router as dashboard_new_router
+    from api.routers.telemetry import router as telemetry_router
+    from api.routers.graphql_router import router as graphql_router
+    from api.routers.verify import router as verify_router
 
-app.include_router(health_router)
-app.include_router(agents_router)
-app.include_router(evolution_router)
-app.include_router(ontology_router)
-app.include_router(lineage_router)
-app.include_router(stigmergy_router)
-app.include_router(commands_router)
-app.include_router(chat_router)
-app.include_router(chat_ws_router)
-app.include_router(modules_router)
-app.include_router(dashboard_new_router)
-app.include_router(telemetry_router)
-app.include_router(graphql_router)
+    api_app.include_router(health_router)
+    api_app.include_router(agents_router)
+    api_app.include_router(evolution_router)
+    api_app.include_router(ontology_router)
+    api_app.include_router(lineage_router)
+    api_app.include_router(stigmergy_router)
+    api_app.include_router(commands_router)
+    api_app.include_router(modules_router)
+    api_app.include_router(dashboard_new_router)
+    api_app.include_router(telemetry_router)
+    api_app.include_router(graphql_router)
+    api_app.include_router(verify_router)
+
+    from api.routers.chat import router as chat_router, ws_router as chat_ws_router
+
+    api_app.include_router(chat_router)
+    api_app.include_router(chat_ws_router)
+
+
+_register_routers(app)
 
 
 # ── Root ──────────────────────────────────────────────────────────

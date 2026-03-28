@@ -185,3 +185,71 @@ class TraceStore:
                 os.replace(fp, dest)
                 count += 1
         return count
+
+
+def auto_research_trace_entry(
+    *,
+    agent: str,
+    task_id: str,
+    workflow_name: str,
+    step_name: str,
+    output: Any,
+    runtime_fields: list[str] | None = None,
+) -> TraceEntry:
+    """Build a trace entry for one AutoResearch workflow step."""
+    metadata: dict[str, Any] = {
+        "task_id": task_id,
+        "workflow_name": workflow_name,
+        "step_name": step_name,
+        "runtime_fields": list(runtime_fields or []),
+    }
+    if isinstance(output, list):
+        metadata["output_count"] = len(output)
+        if output and hasattr(output[0], "query_id"):
+            metadata["query_count"] = len(output)
+        elif output and hasattr(output[0], "source_id"):
+            metadata["source_count"] = len(output)
+        elif output and hasattr(output[0], "claim_id"):
+            metadata["claim_count"] = len(output)
+    elif hasattr(output, "report_id"):
+        metadata["report_id"] = getattr(output, "report_id", "")
+        if hasattr(output, "source_ids"):
+            metadata["source_count"] = len(getattr(output, "source_ids", []))
+        if hasattr(output, "grade_card"):
+            metadata["final_score"] = getattr(output.grade_card, "final_score", 0.0)
+    return TraceEntry(
+        agent=agent,
+        action="auto_research_step",
+        state="completed",
+        metadata=metadata,
+    )
+
+
+def topology_trace_entry(
+    *,
+    agent: str,
+    workflow_name: str,
+    genome_id: str,
+    step: TraceEntry | Any,
+    output: Any,
+) -> TraceEntry:
+    """Build a trace entry for one topology-genome workflow step."""
+    checkpoint = getattr(step, "checkpoint", {}) or {}
+    metadata: dict[str, Any] = {
+        "workflow_name": workflow_name,
+        "step_name": getattr(step, "name", ""),
+        "topology_genome_id": genome_id,
+        "topology_node_id": checkpoint.get("topology_node_id", getattr(step, "step_id", "")),
+        "topology_edge_ids": list(checkpoint.get("topology_edge_ids", [])),
+        "runtime_fields": list(checkpoint.get("runtime_fields", [])),
+    }
+    if isinstance(output, list):
+        metadata["output_count"] = len(output)
+    elif isinstance(output, dict):
+        metadata["output_keys"] = sorted(output.keys())
+    return TraceEntry(
+        agent=agent,
+        action="topology_step",
+        state="completed",
+        metadata=metadata,
+    )

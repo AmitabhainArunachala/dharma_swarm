@@ -2,7 +2,11 @@
 
 from __future__ import annotations
 
+import asyncio
+from datetime import datetime, timedelta, timezone
 import json
+import os
+import subprocess
 import sys
 from pathlib import Path
 from unittest.mock import AsyncMock, patch
@@ -96,6 +100,72 @@ def test_dgc_cli_status_command():
         with patch("dharma_swarm.dgc_cli.cmd_status") as mock:
             main()
             mock.assert_called_once()
+
+
+def test_cmd_status_reports_canonical_pulse_artifacts(monkeypatch, tmp_path, capsys):
+    """cmd_status should use canonical ~/.dharma pulse artifacts when legacy state is absent."""
+    import subprocess
+    from dharma_swarm import dgc_cli as cli
+
+    dharma = tmp_path / ".dharma"
+    cron_dir = dharma / "cron"
+    cron_dir.mkdir(parents=True)
+    (cron_dir / "pulse_20260326_125100.md").write_text("pulse ok", encoding="utf-8")
+
+    monkeypatch.setattr(cli, "HOME", tmp_path)
+    monkeypatch.setattr(cli, "DHARMA_STATE", dharma)
+    monkeypatch.setattr(cli, "DGC_CORE", tmp_path / "dgc-core")
+
+    def _fake_run(coro):
+        coro.close()
+        return 0
+
+    monkeypatch.setattr(cli, "_run", _fake_run)
+    monkeypatch.setattr(
+        cli.subprocess,
+        "run",
+        lambda *args, **kwargs: subprocess.CompletedProcess(args[0], 0, "2.1.84 (Claude Code)\n", ""),
+    )
+
+    cli.cmd_status()
+
+    out = capsys.readouterr().out
+    assert "Pulse: not yet run" not in out
+    assert "Pulse:" in out
+    assert "2026-03-26" in out
+
+
+def test_cmd_status_uses_canonical_dharma_state(monkeypatch, tmp_path, capsys):
+    """cmd_status should read pulse and witness state from ~/.dharma, not absorbed dgc-core paths."""
+    from dharma_swarm import dgc_cli
+
+    state_dir = tmp_path / ".dharma"
+    witness_dir = state_dir / "witness"
+    witness_dir.mkdir(parents=True)
+    pulse_log = state_dir / "pulse.log"
+    pulse_log.write_text(
+        "\n--- PULSE @ 2026-03-26T01:23:45+00:00 [architectural] ---\nPulse complete.\n",
+        encoding="utf-8",
+    )
+    witness_file = witness_dir / "witness_20260326.jsonl"
+    witness_file.write_text('{"gate":"a"}\n{"gate":"b"}\n', encoding="utf-8")
+
+    monkeypatch.setattr(dgc_cli, "HOME", tmp_path)
+    monkeypatch.setattr(dgc_cli, "DHARMA_STATE", state_dir)
+    monkeypatch.setattr(dgc_cli, "DGC_CORE", tmp_path / "dgc-core")
+
+    def fake_run(coro):
+        coro.close()
+        return 0
+
+    monkeypatch.setattr(dgc_cli, "_run", fake_run)
+
+    dgc_cli.cmd_status()
+
+    out = capsys.readouterr().out
+    assert "Pulse: not yet run" not in out
+    assert "2026-03-26T01:23:45+00:00" in out
+    assert "Gates today: 2 checks" in out
 
 
 def test_dgc_cli_runtime_status_command():
@@ -217,6 +287,100 @@ def test_dgc_cli_health_command():
         with patch("dharma_swarm.dgc_cli.cmd_health") as mock:
             main()
             mock.assert_called_once()
+
+
+def test_cmd_orchestrate_live_checks_daemon_pid(monkeypatch, tmp_path, capsys):
+    """The live orchestrator CLI should honor the runtime-owned daemon PID file."""
+    from dharma_swarm import dgc_cli
+
+    (tmp_path / "daemon.pid").write_text(str(os.getpid()), encoding="utf-8")
+    (tmp_path / "orchestrator.pid").write_text("999999", encoding="utf-8")
+    monkeypatch.setattr(dgc_cli, "DHARMA_STATE", tmp_path)
+
+    called = False
+
+    def fake_run(_coro):
+        nonlocal called
+        called = True
+        raise AssertionError("asyncio.run should not be called when daemon.pid is live")
+
+    monkeypatch.setattr(asyncio, "run", fake_run)
+
+    dgc_cli.cmd_orchestrate_live(background=False)
+
+    out = capsys.readouterr().out
+    assert "Orchestrator already running" in out
+    assert called is False
+
+
+def test_cmd_orchestrate_live_checks_existing_process_without_pid(
+    monkeypatch,
+    tmp_path,
+    capsys,
+):
+    """The live orchestrator CLI should refuse a duplicate launch on live process evidence alone."""
+    from dharma_swarm import dgc_cli
+
+    monkeypatch.setattr(dgc_cli, "DHARMA_STATE", tmp_path)
+    monkeypatch.setattr(
+        dgc_cli.subprocess,
+        "run",
+        lambda *args, **kwargs: subprocess.CompletedProcess(
+            args[0],
+            0,
+            "73119 python3 -m dharma_swarm.orchestrate_live --background\n",
+            "",
+        ),
+    )
+
+    called = False
+
+    def fake_popen(*args, **kwargs):
+        nonlocal called
+        called = True
+        raise AssertionError("Popen should not be called when a live orchestrator exists")
+
+    monkeypatch.setattr(subprocess, "Popen", fake_popen)
+
+    dgc_cli.cmd_orchestrate_live(background=True)
+
+    out = capsys.readouterr().out
+    assert "already running" in out.lower()
+    assert "73119" in out
+    assert called is False
+
+
+def test_cmd_up_checks_existing_process_without_pid(monkeypatch, tmp_path, capsys):
+    """The daemon launcher should refuse a duplicate start on live process evidence alone."""
+    from dharma_swarm import dgc_cli
+
+    monkeypatch.setattr(dgc_cli, "DHARMA_STATE", tmp_path)
+    monkeypatch.setattr(
+        dgc_cli.subprocess,
+        "run",
+        lambda *args, **kwargs: subprocess.CompletedProcess(
+            args[0],
+            0,
+            "88221 /bin/bash /Users/dhyana/dharma_swarm/run_daemon.sh\n",
+            "",
+        ),
+    )
+
+    called = False
+
+    def fake_popen(*args, **kwargs):
+        nonlocal called
+        called = True
+        raise AssertionError("Popen should not be called when a live daemon exists")
+
+    monkeypatch.setattr(subprocess, "Popen", fake_popen)
+
+    dgc_cli.cmd_up(background=True)
+
+    out = capsys.readouterr().out
+    assert "already running" in out.lower()
+    assert "88221" in out
+    assert called is False
 
 
 def test_cmd_ui_list_mentions_swarmlens_and_next(capsys):
@@ -843,6 +1007,127 @@ def test_cmd_runtime_status_prints_runtime_control_plane(capsys, monkeypatch):
     out = capsys.readouterr().out
     assert "Runtime Control Plane" in out
     assert "Sessions=2" in out
+
+
+def test_cmd_status_prefers_canonical_runtime_artifacts(monkeypatch, tmp_path, capsys):
+    """status should prefer live ~/.dharma pulse evidence over absorbed legacy state."""
+    import dharma_swarm.dgc_cli as cli
+
+    dharma_state = tmp_path / ".dharma"
+    pulse_log = dharma_state / "logs" / "pulse.log"
+    pulse_log.parent.mkdir(parents=True)
+    pulse_log.write_text("OK: pulse -> /tmp/pulse_1.md\n", encoding="utf-8")
+    (dharma_state / "daemon.pid").write_text(str(os.getpid()), encoding="utf-8")
+
+    stale_snapshot = {
+        "daemon_pid": 999999,
+        "timestamp": (datetime.now(timezone.utc) - timedelta(days=2)).isoformat(),
+        "source": "dgc_orchestrator",
+    }
+    stigmergy_dir = dharma_state / "stigmergy"
+    stigmergy_dir.mkdir(parents=True)
+    (stigmergy_dir / "dgc_health.json").write_text(
+        json.dumps(stale_snapshot),
+        encoding="utf-8",
+    )
+
+    legacy_daemon_dir = tmp_path / "dgc-core" / "daemon"
+    legacy_daemon_dir.mkdir(parents=True)
+    (legacy_daemon_dir / "state.json").write_text(
+        json.dumps({"pulse_count": 7, "last_pulse": "1999-01-01T00:00:00+00:00"}),
+        encoding="utf-8",
+    )
+
+    monkeypatch.setattr(cli, "HOME", tmp_path)
+    monkeypatch.setattr(cli, "DHARMA_STATE", dharma_state)
+    monkeypatch.setattr(cli, "DGC_CORE", tmp_path / "dgc-core")
+
+    def _fake_run(coro):
+        coro.close()
+        return 0
+
+    monkeypatch.setattr(cli, "_run", _fake_run)
+    monkeypatch.setattr(
+        cli.subprocess,
+        "run",
+        lambda *args, **kwargs: subprocess.CompletedProcess(args[0], 0, "claude 1.2.3\n", ""),
+    )
+
+    cli.cmd_status()
+
+    out = capsys.readouterr().out
+    assert "1999-01-01" not in out
+    assert "logs/pulse.log" in out
+    assert "Control plane snapshot:" in out
+    assert "stale" in out.lower()
+
+
+def test_cmd_status_prefers_fresher_pulse_source(monkeypatch, tmp_path, capsys):
+    """status should favor the freshest canonical pulse evidence when sources disagree."""
+    import subprocess
+    from dharma_swarm import dgc_cli as cli
+
+    dharma_state = tmp_path / ".dharma"
+    historical_pulse = dharma_state / "pulse.log"
+    historical_pulse.parent.mkdir(parents=True)
+    historical_pulse.write_text(
+        "\n--- PULSE @ 2026-03-21T21:12:22.446492+00:00 [mechanistic] ---\nPulse complete.\n",
+        encoding="utf-8",
+    )
+    fresh_runner_log = dharma_state / "logs" / "pulse.log"
+    fresh_runner_log.parent.mkdir(parents=True)
+    fresh_runner_log.write_text(
+        "OK: pulse -> /Users/dhyana/.dharma/cron/pulse_20260326_125100.md\n",
+        encoding="utf-8",
+    )
+
+    monkeypatch.setattr(cli, "HOME", tmp_path)
+    monkeypatch.setattr(cli, "DHARMA_STATE", dharma_state)
+    monkeypatch.setattr(cli, "DGC_CORE", tmp_path / "dgc-core")
+
+    def _fake_run(coro):
+        coro.close()
+        return 0
+
+    monkeypatch.setattr(cli, "_run", _fake_run)
+    monkeypatch.setattr(
+        cli.subprocess,
+        "run",
+        lambda *args, **kwargs: subprocess.CompletedProcess(args[0], 0, "2.1.84 (Claude Code)\n", ""),
+    )
+
+    cli.cmd_status()
+
+    out = capsys.readouterr().out
+    assert "2026-03-26T12:51:00+00:00" in out
+    assert "logs/pulse.log" in out
+
+
+def test_cmd_daemon_status_prefers_fresher_pulse_source(monkeypatch, tmp_path, capsys):
+    """daemon-status should use the same canonical pulse summary as status."""
+    from dharma_swarm import dgc_cli as cli
+
+    dharma_state = tmp_path / ".dharma"
+    historical_pulse = dharma_state / "pulse.log"
+    historical_pulse.parent.mkdir(parents=True)
+    historical_pulse.write_text(
+        "\n--- PULSE @ 2026-03-21T21:12:22.446492+00:00 [architectural] ---\nPulse complete.\n",
+        encoding="utf-8",
+    )
+    fresh_runner_log = dharma_state / "logs" / "pulse.log"
+    fresh_runner_log.parent.mkdir(parents=True)
+    fresh_runner_log.write_text(
+        "OK: pulse -> /Users/dhyana/.dharma/cron/pulse_20260326_125100.md\n",
+        encoding="utf-8",
+    )
+
+    monkeypatch.setattr(cli, "DHARMA_STATE", dharma_state)
+
+    cli.cmd_daemon_status()
+
+    out = capsys.readouterr().out
+    assert "2026-03-26T12:51:00+00:00" in out
+    assert "logs/pulse.log" in out
 
 
 def test_cmd_reciprocity_summary_prints_ledger_summary(capsys, monkeypatch):
@@ -1774,6 +2059,34 @@ def test_dgc_cli_stress_dispatch():
             assert kwargs["external_timeout_sec"] == 120
 
 
+def test_dgc_cli_provider_matrix_dispatch():
+    """main() dispatches provider-matrix flags to cmd_provider_matrix."""
+    from dharma_swarm.dgc_cli import main
+
+    with patch(
+        "sys.argv",
+        [
+            "dgc",
+            "provider-matrix",
+            "--profile",
+            "live25",
+            "--max-targets",
+            "12",
+            "--budget-units",
+            "7",
+            "--json",
+        ],
+    ):
+        with patch("dharma_swarm.dgc_cli.cmd_provider_matrix", return_value=0) as mock_cmd:
+            main()
+            mock_cmd.assert_called_once()
+            kwargs = mock_cmd.call_args.kwargs
+            assert kwargs["profile"] == "live25"
+            assert kwargs["max_targets"] == 12
+            assert kwargs["budget_units"] == 7
+            assert kwargs["as_json"] is True
+
+
 def test_dgc_cli_full_power_probe_dispatch():
     """main() dispatches full-power-probe flags to cmd_full_power_probe."""
     from dharma_swarm.dgc_cli import main
@@ -1833,6 +2146,35 @@ def test_cmd_stress_invokes_harness_subprocess(tmp_path):
             assert "--external-research" in cmd
             assert "--external-timeout-sec" in cmd
             assert "45" in cmd
+
+
+def test_cmd_provider_matrix_emits_json(capsys) -> None:
+    """cmd_provider_matrix should proxy the harness payload."""
+    import dharma_swarm.dgc_cli as cli
+
+    payload = {"profile": "quick", "leaderboard": [{"provider": "codex"}]}
+    with patch("dharma_swarm.provider_matrix.run_provider_matrix", return_value=payload) as mock_run:
+        rc = cli.cmd_provider_matrix(
+            profile="quick",
+            corpus="deployment",
+            max_targets=3,
+            max_prompts=2,
+            timeout_seconds=9.0,
+            concurrency=2,
+            budget_units=4,
+            artifact_dir="/tmp/provider-matrix",
+            include_unavailable=False,
+            write_artifacts=False,
+            as_json=True,
+        )
+
+    assert rc == 0
+    kwargs = mock_run.call_args.kwargs
+    assert kwargs["profile"] == "quick"
+    assert kwargs["corpus"] == "deployment"
+    assert kwargs["budget_units"] == 4
+    out = capsys.readouterr().out
+    assert '"provider": "codex"' in out
 
 
 def test_cmd_full_power_probe_invokes_runner(capsys):

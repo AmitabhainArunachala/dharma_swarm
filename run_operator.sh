@@ -16,6 +16,7 @@ LOG_FILE="${STATE_DIR}/logs/operator.log"
 PORT="${OPERATOR_PORT:-8420}"
 HOST="${OPERATOR_HOST:-127.0.0.1}"
 PYTHON_BIN="${PYTHON_BIN:-python3}"
+RUNTIME_ENV_HELPER="${SCRIPT_DIR}/scripts/load_runtime_env.sh"
 
 mkdir -p "${STATE_DIR}/logs" "${STATE_DIR}/db"
 
@@ -52,14 +53,10 @@ wait_for_operator_ready() {
     return 1
 }
 
-for envfile in "${HOME}/.env" "${HOME}/.dharma/.env" "${HOME}/.dharma/daemon.env"; do
-    if [[ -f "$envfile" ]]; then
-        set -a
-        # shellcheck disable=SC1090
-        source "$envfile"
-        set +a
-    fi
-done
+if [[ -f "$RUNTIME_ENV_HELPER" ]]; then
+    # shellcheck disable=SC1090
+    source "$RUNTIME_ENV_HELPER"
+fi
 
 export DGC_ROUTER_TELEMETRY_ENABLE="${DGC_ROUTER_TELEMETRY_ENABLE:-1}"
 export DGC_ROUTER_TELEMETRY_DB="${DGC_ROUTER_TELEMETRY_DB:-${STATE_DIR}/state/runtime.db}"

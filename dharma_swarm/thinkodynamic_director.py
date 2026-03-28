@@ -34,7 +34,9 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Iterable, Mapping, Sequence
 
+from dharma_swarm.codex_cli import dgc_codex_exec_prefix
 from dharma_swarm.jikoku_samaya import JikokuTracer
+from dharma_swarm.model_hierarchy import default_model as canonical_default_model
 from dharma_swarm.mission_contract import (
     CampaignArtifact,
     ExecutionBrief,
@@ -199,6 +201,22 @@ META_TASKS: dict[str, dict[str, Any]] = {
             "Write implementation spec for top finding",
         ],
     },
+    "cybernetics_directive": {
+        "title": "Activate the Cybernetics Directive",
+        "thesis": (
+            "Install a living governance layer that turns cybernetic theory, "
+            "telos policy, context engineering, and audit signals into a real "
+            "hot-path control plane instead of disconnected documents."
+        ),
+        "domain": "cybernetics",
+        "estimated_hours": 6,
+        "subtask_hints": [
+            "Map the live S2/S3/S4/S5 control plane and its gaps",
+            "Define a directive activation spine with one hot-path lever",
+            "Wire the smallest governance improvement that reaches runtime behavior",
+            "Audit the activation and reroute the next cybernetics iteration",
+        ],
+    },
     "jagat_kalyan": {
         "title": "GAIA: Ecological Restoration Coordination System",
         "thesis": (
@@ -252,6 +270,31 @@ THEME_KEYWORDS: dict[str, dict[str, float]] = {
         "task board": 3.0,
         "thinkodynamic": 6.0,
         "daemon": 2.0,
+    },
+    "cybernetics": {
+        "cybernetic": 6.0,
+        "cybernetics": 6.0,
+        "ashby": 4.0,
+        "beer": 4.0,
+        "vsm": 5.0,
+        "variety": 4.0,
+        "governance": 5.0,
+        "policycompiler": 5.0,
+        "policy compiler": 5.0,
+        "constitution": 4.0,
+        "constitutional": 4.0,
+        "directive": 3.0,
+        "coordination": 3.0,
+        "control plane": 4.0,
+        "s2": 2.0,
+        "s3": 2.0,
+        "s4": 2.0,
+        "s5": 2.0,
+        "ontology": 3.0,
+        "witness": 2.0,
+        "telos": 2.0,
+        "graph nexus": 3.0,
+        "context engine": 3.0,
     },
     "research": {
         "research": 4.0,
@@ -358,6 +401,16 @@ ROLE_BRIEFS = {
     ),
 }
 
+CYBERNETICS_STEWARD_AGENTS: dict[str, list[str]] = {
+    "map-state": ["cyber-glm5", "cyber-kimi25", "cyber-opus"],
+    "execution-spine": ["cyber-opus", "cyber-codex", "cyber-glm5"],
+    "highest-leverage-slice": ["cyber-codex", "cyber-opus", "cyber-glm5"],
+    "validation-and-reroute": ["cyber-opus", "cyber-glm5", "cyber-kimi25", "cyber-codex"],
+}
+
+CYBERNETICS_PREFERRED_BACKENDS: list[str] = ["provider-fallback", "codex-cli", "claude-cli"]
+CYBERNETICS_PROVIDER_ALLOWLIST: list[str] = [ProviderType.OLLAMA.value]
+
 
 @dataclass(frozen=True, slots=True)
 class ThemeTemplate:
@@ -382,6 +435,21 @@ THEME_TEMPLATES: dict[str, ThemeTemplate] = {
             "selection and recursive redirection."
         ),
         expected_duration_min=480,
+        roles=("cartographer", "architect", "general", "validator"),
+    ),
+    "cybernetics": ThemeTemplate(
+        title="Install the Cybernetics Directive as a living governance layer",
+        thesis=(
+            "Turn cybernetic theory, telos policy, context engineering, and "
+            "audit pressure into an active control-plane subsystem that can "
+            "continuously diagnose, steer, and upgrade dharma_swarm."
+        ),
+        why_now=(
+            "The intellectual genome has started to populate, but the repo's "
+            "own audits say the ontology, corpus, and governance families are "
+            "still decoupled from the hot path. Cybernetics is the wiring layer."
+        ),
+        expected_duration_min=360,
         roles=("cartographer", "architect", "general", "validator"),
     ),
     "research": ThemeTemplate(
@@ -1943,10 +2011,20 @@ class ThinkodynamicDirector:
                 cost_tier="efficient",
             ),
             DirectorMindSpec(
+                name="minimax-challenger",
+                role="researcher",
+                provider=ProviderType.NVIDIA_NIM.value,
+                model=os.getenv("DGC_DIRECTOR_MINIMAX_MODEL", "").strip() or "minimaxai/minimax-m2.5",
+                backend="provider-fallback",
+                purpose="Counterargument mining, failure-mode pressure, and long-context challenge generation with a cheap frontier lane.",
+                focus=("researcher", "validator", "architect"),
+                cost_tier="efficient",
+            ),
+            DirectorMindSpec(
                 name="qwen-builder",
                 role="general",
                 provider=ProviderType.OPENROUTER.value,
-                model=os.getenv("DGC_DIRECTOR_QWEN_MODEL", "").strip() or "qwen/qwen2.5-coder-32b-instruct",
+                model=os.getenv("DGC_DIRECTOR_QWEN_MODEL", "").strip() or "qwen/qwen3-coder",
                 backend="provider-fallback",
                 purpose="Commodity implementation, mechanical coding, and parallel draft execution.",
                 focus=("surgeon", "general"),
@@ -1966,7 +2044,8 @@ class ThinkodynamicDirector:
                 name="nim-generalist",
                 role="general",
                 provider=ProviderType.NVIDIA_NIM.value,
-                model=os.getenv("DGC_DIRECTOR_NIM_GENERAL_MODEL", "").strip() or "meta/llama-3.3-70b-instruct",
+                model=os.getenv("DGC_DIRECTOR_NIM_GENERAL_MODEL", "").strip()
+                or canonical_default_model(ProviderType.NVIDIA_NIM),
                 backend="provider-fallback",
                 purpose="General low-cost support lane for summaries, drafts, and broad execution support.",
                 focus=("general", "researcher", "cartographer"),
@@ -1996,7 +2075,7 @@ class ThinkodynamicDirector:
             )
         if role == "validator":
             return (
-                ["opus-primus", "nim-validator", "codex-primus", "glm-researcher"],
+                ["opus-primus", "nim-validator", "minimax-challenger", "codex-primus", "glm-researcher"],
                 ["claude-cli", "codex-cli", "provider-fallback"],
                 [
                     ProviderType.CLAUDE_CODE.value,
@@ -2006,7 +2085,7 @@ class ThinkodynamicDirector:
                 ],
             )
         return (
-            ["opus-primus", "glm-researcher", "kimi-cartographer", "nim-generalist", "codex-primus"],
+            ["opus-primus", "glm-researcher", "kimi-cartographer", "minimax-challenger", "nim-generalist", "codex-primus"],
             ["claude-cli", "provider-fallback", "codex-cli"],
             [
                 ProviderType.CLAUDE_CODE.value,
@@ -2018,6 +2097,14 @@ class ThinkodynamicDirector:
 
     def _decorate_workflow_execution(self, workflow: WorkflowPlan) -> WorkflowPlan:
         for task in workflow.tasks:
+            if workflow.theme == "cybernetics":
+                task.preferred_backends = self._dedupe_preserve(
+                    [*task.preferred_backends, *CYBERNETICS_PREFERRED_BACKENDS]
+                )
+                task.provider_allowlist = self._dedupe_preserve(
+                    [*task.provider_allowlist, *CYBERNETICS_PROVIDER_ALLOWLIST]
+                )
+                continue
             preferred_agents, preferred_backends, provider_allowlist = self._preferred_execution_profile(
                 task.role_hint
             )
@@ -2542,72 +2629,143 @@ class ThinkodynamicDirector:
             if opportunity.evidence_paths
             else "- No direct evidence paths surfaced in this cycle."
         )
-        step_specs = [
-            (
-                "map-state",
-                opportunity.role_sequence[0],
-                f"Map current leverage for {opportunity.title}",
+        if opportunity.theme == "cybernetics":
+            step_specs = [
                 (
-                    "Read the evidence paths, identify active modules, reports, "
-                    "and unfinished work related to this mission, then produce a "
-                    "concrete map of leverage points and constraints."
+                    "map-state",
+                    opportunity.role_sequence[0],
+                    "Map the live cybernetics control plane",
+                    (
+                        "Read the evidence paths and the current hot-path modules. "
+                        "Identify where S2/S3/S4/S5 are actually wired, where the "
+                        "ontology or corpus still sits off-path, and which missing "
+                        "connection is the smallest real activation lever."
+                    ),
+                    [],
+                    [
+                        "Control-plane map written to a durable markdown artifact.",
+                        "Hot-path vs off-path modules are explicit.",
+                        "One smallest viable activation lever is identified.",
+                    ],
                 ),
-                [],
-                [
-                    "State map written to a durable markdown artifact.",
-                    "Leverage points and risks are explicit.",
-                    "References include exact file paths.",
-                ],
-            ),
-            (
-                "execution-spine",
-                opportunity.role_sequence[1],
-                f"Define execution spine for {opportunity.title}",
                 (
-                    "Turn the mapped state into a precise workflow with "
-                    "acceptance criteria, dependencies, success metrics, and "
-                    "clear escalation points."
+                    "execution-spine",
+                    opportunity.role_sequence[1],
+                    "Define the cybernetics activation spine",
+                    (
+                        "Turn the map into a concrete directive: steward seats, "
+                        "interfaces, runtime levers, and a bounded sequence for "
+                        "wiring the cybernetics layer into actual swarm behavior."
+                    ),
+                    ["map-state"],
+                    [
+                        "Directive has named stewardship seats and runtime interfaces.",
+                        "Dependencies, risks, and fallback paths are explicit.",
+                        "The next hot-path wiring step is concrete and testable.",
+                    ],
                 ),
-                ["map-state"],
-                [
-                    "Workflow has phases, deliverables, and acceptance checks.",
-                    "Dependencies and blockers are explicit.",
-                    "Open questions are captured for escalation.",
-                ],
-            ),
-            (
-                "highest-leverage-slice",
-                opportunity.role_sequence[2],
-                f"Implement the highest-leverage slice of {opportunity.title}",
                 (
-                    "Execute the most compounding part of the workflow. If the "
-                    "work resolves faster than expected, write what was proven "
-                    "and what new frontier opened."
+                    "highest-leverage-slice",
+                    opportunity.role_sequence[2],
+                    "Wire the smallest live cybernetics lever",
+                    (
+                        "Implement the smallest change that makes cybernetic "
+                        "governance more real in runtime behavior. Prefer hot-path "
+                        "wiring, task-board seeding, context activation, or audit "
+                        "bridges over new theory documents."
+                    ),
+                    ["execution-spine"],
+                    [
+                        "A real runtime or tasking artifact exists.",
+                        "The result moves one governance pathway closer to the hot path.",
+                        "If blocked, the blocker is logged with exact evidence.",
+                    ],
                 ),
-                ["execution-spine"],
-                [
-                    "A real artifact, code change, or executable packet exists.",
-                    "Result references the governing execution spine.",
-                    "If blocked, the blocker is logged with evidence.",
-                ],
-            ),
-            (
-                "validation-and-reroute",
-                opportunity.role_sequence[3],
-                f"Validate and reroute {opportunity.title}",
                 (
-                    "Test the slice, challenge unsupported claims, and decide "
-                    "whether the workflow should continue, resynthesize, or "
-                    "escalate to the human with a concise blocker note."
+                    "validation-and-reroute",
+                    opportunity.role_sequence[3],
+                    "Audit the cybernetics directive and reroute the next cycle",
+                    (
+                        "Challenge the activation for theater, drift, and false "
+                        "closure. Decide whether the subsystem is now alive, what "
+                        "still remains decorative, and what the next bounded "
+                        "iteration should be."
+                    ),
+                    ["highest-leverage-slice"],
+                    [
+                        "Alive vs decorative paths are distinguished explicitly.",
+                        "Evidence and tests are cited.",
+                        "A next bounded iteration is written for the director.",
+                    ],
                 ),
-                ["highest-leverage-slice"],
-                [
-                    "Validation outcome is explicit: continue, close, or escalate.",
-                    "Evidence paths and tests are cited.",
-                    "Human-facing blockers are written if needed.",
-                ],
-            ),
-        ]
+            ]
+        else:
+            step_specs = [
+                (
+                    "map-state",
+                    opportunity.role_sequence[0],
+                    f"Map current leverage for {opportunity.title}",
+                    (
+                        "Read the evidence paths, identify active modules, reports, "
+                        "and unfinished work related to this mission, then produce a "
+                        "concrete map of leverage points and constraints."
+                    ),
+                    [],
+                    [
+                        "State map written to a durable markdown artifact.",
+                        "Leverage points and risks are explicit.",
+                        "References include exact file paths.",
+                    ],
+                ),
+                (
+                    "execution-spine",
+                    opportunity.role_sequence[1],
+                    f"Define execution spine for {opportunity.title}",
+                    (
+                        "Turn the mapped state into a precise workflow with "
+                        "acceptance criteria, dependencies, success metrics, and "
+                        "clear escalation points."
+                    ),
+                    ["map-state"],
+                    [
+                        "Workflow has phases, deliverables, and acceptance checks.",
+                        "Dependencies and blockers are explicit.",
+                        "Open questions are captured for escalation.",
+                    ],
+                ),
+                (
+                    "highest-leverage-slice",
+                    opportunity.role_sequence[2],
+                    f"Implement the highest-leverage slice of {opportunity.title}",
+                    (
+                        "Execute the most compounding part of the workflow. If the "
+                        "work resolves faster than expected, write what was proven "
+                        "and what new frontier opened."
+                    ),
+                    ["execution-spine"],
+                    [
+                        "A real artifact, code change, or executable packet exists.",
+                        "Result references the governing execution spine.",
+                        "If blocked, the blocker is logged with evidence.",
+                    ],
+                ),
+                (
+                    "validation-and-reroute",
+                    opportunity.role_sequence[3],
+                    f"Validate and reroute {opportunity.title}",
+                    (
+                        "Test the slice, challenge unsupported claims, and decide "
+                        "whether the workflow should continue, resynthesize, or "
+                        "escalate to the human with a concise blocker note."
+                    ),
+                    ["highest-leverage-slice"],
+                    [
+                        "Validation outcome is explicit: continue, close, or escalate.",
+                        "Evidence paths and tests are cited.",
+                        "Human-facing blockers are written if needed.",
+                    ],
+                ),
+            ]
 
         tasks: list[WorkflowTaskPlan] = []
         for index, (key, role, title, brief, deps, acceptance) in enumerate(step_specs):
@@ -2630,6 +2788,9 @@ class ThinkodynamicDirector:
                     role_hint=role,
                     depends_on_keys=deps,
                     acceptance=acceptance,
+                    preferred_agents=list(CYBERNETICS_STEWARD_AGENTS.get(key, []))
+                    if opportunity.theme == "cybernetics"
+                    else [],
                 )
             )
 
@@ -2890,8 +3051,8 @@ class ThinkodynamicDirector:
         return {
             "meta": ["codex-primus", "opus-primus"],
             "coding": ["codex-primus", "qwen-builder", "nim-generalist"],
-            "research": ["opus-primus", "glm-researcher", "kimi-cartographer"],
-            "validation": ["opus-primus", "nim-validator", "codex-primus"],
+            "research": ["opus-primus", "glm-researcher", "kimi-cartographer", "minimax-challenger"],
+            "validation": ["opus-primus", "nim-validator", "minimax-challenger", "codex-primus"],
             "fallback_backends": ["codex-cli", "claude-cli", "provider-fallback"],
         }
 
@@ -2928,7 +3089,7 @@ class ThinkodynamicDirector:
             ]
         if not delegations:
             delegations = [
-                "Use Kimi and GLM for scanning, synthesis, and contradiction hunting; use Qwen and NIM lanes for broad low-cost execution and validation.",
+                "Use Kimi, GLM, and MiniMax for scanning, synthesis, and contradiction hunting; use Qwen and NIM lanes for broad low-cost execution and validation.",
             ]
         if not costs:
             costs = [
@@ -3419,26 +3580,55 @@ class ThinkodynamicDirector:
             ))
 
         # Fallback: campaign execution briefs (below vision, above meta-tasks)
+        # Round-robin with promotion tracking to prevent stuck loops
         try:
             active_campaign = load_active_campaign_state(state_dir=self.state_dir)
         except ValueError:
             active_campaign = None
         if active_campaign and active_campaign.state.execution_briefs:
-            ranked_briefs = sorted(
-                active_campaign.state.execution_briefs,
-                key=lambda brief: brief.readiness_score,
-                reverse=True,
-            )
-            promoted = next(
-                (brief for brief in ranked_briefs if brief.task_titles or brief.goal or brief.title),
-                None,
-            )
-            if promoted is not None:
-                logger.info(
-                    "Campaign-driven workflow (fallback): promoting execution brief %s",
-                    promoted.brief_id or promoted.title,
+            import time as _time
+            # Filter to active briefs only, deprioritize recently promoted
+            active_briefs = [
+                b for b in active_campaign.state.execution_briefs
+                if getattr(b, "status", "active") == "active"
+                and (b.task_titles or b.goal or b.title)
+            ]
+            if active_briefs:
+                # Sort by: lowest promotion_count first, then highest readiness
+                ranked_briefs = sorted(
+                    active_briefs,
+                    key=lambda brief: (
+                        getattr(brief, "promotion_count", 0),
+                        -brief.readiness_score,
+                    ),
                 )
-                return self.workflow_from_execution_brief(promoted, cycle_id=cycle_id)
+                # Also skip briefs promoted more than 3x without completing
+                promoted = next(
+                    (b for b in ranked_briefs if getattr(b, "promotion_count", 0) < 4),
+                    None,
+                )
+                # If all briefs exhausted, mark lowest-promoted as exhausted and pick next
+                if promoted is None and ranked_briefs:
+                    ranked_briefs[0].status = "exhausted"
+                    promoted = ranked_briefs[1] if len(ranked_briefs) > 1 else None
+                if promoted is not None:
+                    promoted.promotion_count = getattr(promoted, "promotion_count", 0) + 1
+                    promoted.last_promoted_at = _time.time()
+                    # Persist updated counts back to campaign state
+                    try:
+                        from dharma_swarm.mission_contract import (
+                            save_campaign_state, default_campaign_state_path,
+                        )
+                        _cpath = default_campaign_state_path(self.state_dir)
+                        save_campaign_state(_cpath, active_campaign.state)
+                    except Exception:
+                        pass  # Best-effort persistence
+                    logger.info(
+                        "Campaign-driven workflow (fallback): promoting execution brief %s (count=%d)",
+                        promoted.brief_id or promoted.title,
+                        promoted.promotion_count,
+                    )
+                    return self.workflow_from_execution_brief(promoted, cycle_id=cycle_id)
 
         # Fallback to theme-based planner
         if primary:
@@ -3551,23 +3741,23 @@ class ThinkodynamicDirector:
         output_file: Path,
         model: str,
     ) -> list[str]:
-        cmd = [
-            "codex",
-            "exec",
-            "--full-auto",
-            "-C",
-            str(self.repo_root),
-            "--add-dir",
-            str(self.state_dir),
-            "-o",
-            str(output_file),
-            "-",
-        ]
+        cmd = dgc_codex_exec_prefix()
         requested_model = os.getenv("DGC_DIRECTOR_CODEX_MODEL", "").strip()
         if not requested_model and "codex" in model.lower():
             requested_model = model.strip()
         if requested_model:
-            cmd[2:2] = ["-m", requested_model]
+            cmd.extend(["-m", requested_model])
+        cmd.extend(
+            [
+                "-C",
+                str(self.repo_root),
+                "--add-dir",
+                str(self.state_dir),
+                "-o",
+                str(output_file),
+                "-",
+            ]
+        )
         return cmd
 
     async def _spawn_via_codex(

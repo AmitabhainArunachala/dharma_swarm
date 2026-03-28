@@ -121,6 +121,15 @@ class ProviderType(str, Enum):
     CODEX = "codex"
     OPENROUTER_FREE = "openrouter_free"
     OLLAMA = "ollama"
+    GROQ = "groq"
+    CEREBRAS = "cerebras"
+    SILICONFLOW = "siliconflow"
+    TOGETHER = "together"
+    FIREWORKS = "fireworks"
+    GOOGLE_AI = "google_ai"
+    SAMBANOVA = "sambanova"
+    MISTRAL = "mistral"
+    CHUTES = "chutes"
 
 
 # === Utility ===
@@ -201,6 +210,7 @@ class GateCheckResult(BaseModel):
     """Result of running telos gates on an action."""
     decision: GateDecision
     reason: str
+    gate: str = ""
     gate_results: dict[str, tuple[GateResult, str]] = Field(default_factory=dict)
     timestamp: datetime = Field(default_factory=_utc_now)
 
@@ -261,6 +271,7 @@ class LLMResponse(BaseModel):
     """Response from an LLM provider."""
     content: str
     model: str
+    provider: str = ""
     usage: dict[str, int] = Field(default_factory=dict)
     tool_calls: list[dict[str, Any]] = Field(default_factory=list)
     stop_reason: Optional[str] = None

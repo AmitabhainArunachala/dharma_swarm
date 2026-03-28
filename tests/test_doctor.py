@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from datetime import datetime, timedelta, timezone
+import json
 from pathlib import Path
 import sqlite3
 
@@ -8,7 +9,9 @@ import pytest
 import subprocess
 
 from dharma_swarm.doctor import (
+    _check_claude_unattended_auth,
     _check_daemon_integrity,
+    _check_dgc_health_snapshot,
     _check_doctor_schedule,
     _check_message_bus_integrity,
     create_doctor_job,
@@ -129,6 +132,43 @@ def test_write_and_load_doctor_artifacts(tmp_path: Path) -> None:
     assert loaded["status"] == "WARN"
 
 
+def test_write_doctor_artifacts_populates_generated_at(tmp_path: Path) -> None:
+    report = {
+        "status": "PASS",
+        "summary": {"pass": 1, "warn": 0, "fail": 0},
+        "checks": [],
+        "recommended_fixes": [],
+        "assurance": {},
+        "artifacts": {},
+        "generated_at": None,
+    }
+
+    write_doctor_artifacts(report, output_dir=tmp_path)
+
+    loaded = load_latest_doctor_report(output_dir=tmp_path)
+    assert loaded is not None
+    assert isinstance(loaded["generated_at"], str)
+    assert loaded["generated_at"]
+
+
+def test_write_doctor_artifacts_normalizes_legacy_timestamp_utc(tmp_path: Path) -> None:
+    report = {
+        "status": "PASS",
+        "summary": {"pass": 1, "warn": 0, "fail": 0},
+        "checks": [],
+        "recommended_fixes": [],
+        "assurance": {},
+        "artifacts": {},
+        "timestamp_utc": "2026-03-26T13:15:18+00:00",
+    }
+
+    write_doctor_artifacts(report, output_dir=tmp_path)
+
+    loaded = load_latest_doctor_report(output_dir=tmp_path)
+    assert loaded is not None
+    assert loaded["generated_at"] == "2026-03-26T13:15:18+00:00"
+
+
 def test_daemon_integrity_warns_on_stale_pid_file(monkeypatch, tmp_path: Path) -> None:
     state_dir = tmp_path / ".dharma"
     state_dir.mkdir(parents=True)
@@ -147,6 +187,36 @@ def test_daemon_integrity_warns_on_stale_pid_file(monkeypatch, tmp_path: Path) -
     assert checks[0].name == "daemon_integrity"
     assert checks[0].status == "WARN"
     assert "stale pid files" in checks[0].detail
+
+
+def test_daemon_integrity_warns_on_legacy_orchestrator_pid_with_live_daemon(
+    monkeypatch,
+    tmp_path: Path,
+) -> None:
+    state_dir = tmp_path / ".dharma"
+    state_dir.mkdir(parents=True)
+    (state_dir / "daemon.pid").write_text("111", encoding="utf-8")
+    (state_dir / "orchestrator.pid").write_text("222", encoding="utf-8")
+
+    monkeypatch.setattr("dharma_swarm.doctor.HOME", tmp_path)
+    monkeypatch.setattr("dharma_swarm.doctor._pid_alive", lambda pid: pid == 111)
+    monkeypatch.setattr(
+        "dharma_swarm.doctor.subprocess.run",
+        lambda *args, **kwargs: subprocess.CompletedProcess(
+            args[0],
+            0,
+            "111 python3 -m dharma_swarm.orchestrate_live --background",
+            "",
+        ),
+    )
+
+    checks = []
+    _check_daemon_integrity(checks, timeout_seconds=0.1)
+
+    assert checks[0].name == "daemon_integrity"
+    assert checks[0].status == "WARN"
+    assert "legacy pid file" in checks[0].summary.lower()
+    assert "orchestrator=222" in checks[0].detail
 
 
 def test_daemon_integrity_fails_on_multiple_processes(monkeypatch, tmp_path: Path) -> None:
@@ -171,6 +241,27 @@ def test_daemon_integrity_fails_on_multiple_processes(monkeypatch, tmp_path: Pat
     assert "multiple daemon-like processes" in checks[0].summary
 
 
+def test_daemon_integrity_ignores_stale_legacy_orchestrator_pid(monkeypatch, tmp_path: Path) -> None:
+    state_dir = tmp_path / ".dharma"
+    state_dir.mkdir(parents=True)
+    (state_dir / "daemon.pid").write_text("111", encoding="utf-8")
+    (state_dir / "orchestrator.pid").write_text("222", encoding="utf-8")
+
+    monkeypatch.setattr("dharma_swarm.doctor.HOME", tmp_path)
+    monkeypatch.setattr("dharma_swarm.doctor._pid_alive", lambda pid: pid == 111)
+    monkeypatch.setattr(
+        "dharma_swarm.doctor.subprocess.run",
+        lambda *args, **kwargs: subprocess.CompletedProcess(args[0], 0, "", ""),
+    )
+
+    checks = []
+    _check_daemon_integrity(checks, timeout_seconds=0.1)
+
+    assert checks[0].name == "daemon_integrity"
+    assert checks[0].status == "PASS"
+    assert "orchestrator" not in (checks[0].detail or "")
+
+
 def test_message_bus_integrity_warns_on_shadow_path_and_idle_runtime(monkeypatch, tmp_path: Path) -> None:
     canonical = tmp_path / ".dharma" / "db" / "messages.db"
     shadow = tmp_path / ".dharma" / "message_bus.db"
@@ -190,6 +281,137 @@ def test_message_bus_integrity_warns_on_shadow_path_and_idle_runtime(monkeypatch
     assert checks[0].status == "WARN"
     assert "message_bus.db" in checks[0].detail
     assert "heartbeats=0" in checks[0].detail
+
+
+def test_message_bus_integrity_reports_busy_timeout_and_heartbeat_window(
+    monkeypatch,
+    tmp_path: Path,
+) -> None:
+    canonical = tmp_path / ".dharma" / "db" / "messages.db"
+    _create_message_bus_db(canonical)
+
+    with sqlite3.connect(canonical) as conn:
+        conn.execute("DELETE FROM heartbeats")
+        conn.execute(
+            "INSERT INTO heartbeats (agent_id, last_seen) VALUES (?, ?)",
+            ("agent-stale", "2026-03-20T00:00:00+00:00"),
+        )
+        conn.execute(
+            "INSERT INTO heartbeats (agent_id, last_seen) VALUES (?, ?)",
+            ("agent-fresh", "2026-03-26T00:00:00+00:00"),
+        )
+        conn.commit()
+
+    monkeypatch.setattr("dharma_swarm.doctor.HOME", tmp_path)
+    monkeypatch.setattr(
+        "dharma_swarm.doctor._list_daemon_like_processes",
+        lambda timeout_seconds: [(111, "python3 -m dharma_swarm.orchestrate_live")],
+    )
+
+    checks = []
+    _check_message_bus_integrity(checks, timeout_seconds=0.1)
+
+    assert checks[0].name == "message_bus_integrity"
+    assert "busy_timeout_ms=" in checks[0].detail
+    assert "oldest_heartbeat=" in checks[0].detail
+    assert "latest_heartbeat=" in checks[0].detail
+
+
+def test_claude_unattended_auth_passes_with_api_key(monkeypatch, tmp_path: Path) -> None:
+    monkeypatch.setattr("dharma_swarm.doctor.HOME", tmp_path)
+    monkeypatch.setattr("dharma_swarm.doctor.shutil.which", lambda _: "/usr/local/bin/claude")
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-ant-test")
+
+    checks = []
+    _check_claude_unattended_auth(checks)
+
+    assert checks[0].name == "claude_unattended_auth"
+    assert checks[0].status == "PASS"
+    assert "bare-mode auth configured" in checks[0].summary
+
+
+def test_claude_unattended_auth_fails_with_recent_pulse_login_error(
+    monkeypatch,
+    tmp_path: Path,
+) -> None:
+    pulse_last_run = tmp_path / ".dharma" / "cron" / "last_run"
+    pulse_last_run.mkdir(parents=True, exist_ok=True)
+    (pulse_last_run / "pulse.json").write_text(
+        json.dumps({"error": "Error (rc=1): Not logged in · Please run /login\n"}),
+        encoding="utf-8",
+    )
+
+    monkeypatch.setattr("dharma_swarm.doctor.HOME", tmp_path)
+    monkeypatch.setattr("dharma_swarm.doctor.shutil.which", lambda _: "/usr/local/bin/claude")
+    monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
+
+    checks = []
+    _check_claude_unattended_auth(checks)
+
+    assert checks[0].name == "claude_unattended_auth"
+    assert checks[0].status == "FAIL"
+    assert "actively failing" in checks[0].summary
+    assert "pulse=" in checks[0].detail
+
+
+def test_claude_unattended_auth_fails_with_recent_fast_fail_error(
+    monkeypatch,
+    tmp_path: Path,
+) -> None:
+    pulse_last_run = tmp_path / ".dharma" / "cron" / "last_run"
+    pulse_last_run.mkdir(parents=True, exist_ok=True)
+    (pulse_last_run / "pulse.json").write_text(
+        json.dumps(
+            {
+                "error": (
+                    "ERROR: unattended Claude bare mode requires ANTHROPIC_API_KEY; "
+                    "OAuth/login is ignored in --bare mode"
+                )
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    monkeypatch.setattr("dharma_swarm.doctor.HOME", tmp_path)
+    monkeypatch.setattr("dharma_swarm.doctor.shutil.which", lambda _: "/usr/local/bin/claude")
+    monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
+
+    checks = []
+    _check_claude_unattended_auth(checks)
+
+    assert checks[0].status == "FAIL"
+    assert "pulse=" in checks[0].detail
+
+
+def test_dgc_health_snapshot_warns_when_stale_and_pid_mismatched(
+    monkeypatch,
+    tmp_path: Path,
+) -> None:
+    state_dir = tmp_path / ".dharma"
+    stigmergy_dir = state_dir / "stigmergy"
+    stigmergy_dir.mkdir(parents=True)
+    (state_dir / "daemon.pid").write_text("111", encoding="utf-8")
+    stale_snapshot = {
+        "daemon_pid": 999999,
+        "timestamp": (datetime.now(timezone.utc) - timedelta(days=2)).isoformat(),
+        "agent_count": 15,
+        "source": "legacy-health-publisher",
+    }
+    (stigmergy_dir / "dgc_health.json").write_text(
+        json.dumps(stale_snapshot),
+        encoding="utf-8",
+    )
+
+    monkeypatch.setattr("dharma_swarm.doctor.HOME", tmp_path)
+    monkeypatch.setattr("dharma_swarm.doctor._pid_alive", lambda pid: pid == 111)
+
+    checks = []
+    _check_dgc_health_snapshot(checks)
+
+    assert checks[0].name == "dgc_health_snapshot"
+    assert checks[0].status == "WARN"
+    assert "stale" in checks[0].summary.lower()
+    assert "daemon_pid_mismatch" in checks[0].detail
 
 
 def test_doctor_schedule_passes_when_job_is_armed(monkeypatch, tmp_path: Path) -> None:

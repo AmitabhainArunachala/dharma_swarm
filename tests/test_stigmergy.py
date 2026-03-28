@@ -1,6 +1,7 @@
 """Tests for dharma_swarm.stigmergy -- StigmergicMark, StigmergyStore."""
 
 import asyncio
+import json
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
@@ -119,6 +120,28 @@ async def test_high_salience(store: StigmergyStore):
     assert len(high) == 2
     assert high[0].salience == 0.9
     assert high[1].salience == 0.8
+
+
+async def test_access_count_increments_on_reads(store: StigmergyStore):
+    await store.leave_mark(
+        _make_mark(
+            file_path="core.py",
+            observation="Retry budget guard needs review",
+            salience=0.9,
+        )
+    )
+
+    recent = await store.read_marks(limit=1)
+    assert recent[0].access_count == 1
+
+    high = await store.high_salience(threshold=0.7, limit=1)
+    assert high[0].access_count == 2
+
+    relevant = await store.query_relevant(["retry budget"], limit=1)
+    assert relevant[0].access_count == 3
+
+    payload = json.loads(store._marks_file.read_text(encoding="utf-8").splitlines()[0])
+    assert payload["access_count"] == 3
 
 
 # ---------------------------------------------------------------------------

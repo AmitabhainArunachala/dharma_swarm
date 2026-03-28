@@ -71,4 +71,11 @@ async def test_sandbox_manager():
 def test_sandbox_manager_invalid_type():
     mgr = SandboxManager()
     with pytest.raises(SandboxError, match="Unknown sandbox type"):
+        mgr.create(sandbox_type="nonexistent")
+
+
+def test_sandbox_manager_docker_sync_raises():
+    """Docker sandbox requires async creation via create_async()."""
+    mgr = SandboxManager()
+    with pytest.raises(SandboxError, match="async creation"):
         mgr.create(sandbox_type="docker")

@@ -4,10 +4,12 @@ from __future__ import annotations
 
 import json
 from pathlib import Path
+from types import SimpleNamespace
 from unittest.mock import AsyncMock, patch
 
 import pytest
 
+from dharma_swarm.models import LLMResponse, ProviderType
 from dharma_swarm.master_prompt_engineer import (
     _detect_loops,
     _format_cycle_history,
@@ -322,58 +324,53 @@ def test_generate_local_prompt_with_looping_history(tmp_path: Path):
 
 
 @pytest.mark.asyncio
-async def test_generate_evolved_prompt_no_key():
+async def test_generate_evolved_prompt_no_available_providers():
     with patch.dict("os.environ", {}, clear=True):
-        from dharma_swarm.master_prompt_engineer import generate_evolved_prompt
+        with patch(
+            "dharma_swarm.master_prompt_engineer.complete_via_preferred_runtime_providers",
+            new=AsyncMock(side_effect=RuntimeError("No preferred providers available")),
+        ):
+            from dharma_swarm.master_prompt_engineer import generate_evolved_prompt
 
-        with pytest.raises(RuntimeError, match="OPENROUTER_API_KEY"):
-            await generate_evolved_prompt()
+            with pytest.raises(RuntimeError, match="No preferred providers available"):
+                await generate_evolved_prompt()
 
 
 @pytest.mark.asyncio
 async def test_generate_evolved_prompt_mocked():
-    from unittest.mock import MagicMock
-
-    mock_response = {
-        "choices": [{"message": {"content": "EVOLVED PROMPT: do the thing"}}],
-    }
-
-    with patch.dict("os.environ", {"OPENROUTER_API_KEY": "test-key-1234"}):
-        with patch("httpx.AsyncClient") as MockClient:
-            mock_client = AsyncMock()
-            mock_resp = MagicMock()  # Use MagicMock so .json() is sync
-            mock_resp.status_code = 200
-            mock_resp.json.return_value = mock_response
-            mock_client.post.return_value = mock_resp
-            mock_client.__aenter__ = AsyncMock(return_value=mock_client)
-            mock_client.__aexit__ = AsyncMock(return_value=False)
-            MockClient.return_value = mock_client
-
-            from dharma_swarm.master_prompt_engineer import generate_evolved_prompt
-
-            result = await generate_evolved_prompt(
-                test_summary="Passed: 50",
-                cycle_number=3,
+    with patch(
+        "dharma_swarm.master_prompt_engineer.complete_via_preferred_runtime_providers",
+        new=AsyncMock(
+            return_value=(
+                LLMResponse(
+                    content="EVOLVED PROMPT: do the thing",
+                    model="nim-local",
+                ),
+                SimpleNamespace(provider=ProviderType.NVIDIA_NIM),
             )
-            assert "do the thing" in result
+        ),
+    ):
+        from dharma_swarm.master_prompt_engineer import generate_evolved_prompt
+
+        result = await generate_evolved_prompt(
+            test_summary="Passed: 50",
+            cycle_number=3,
+        )
+        assert "do the thing" in result
 
 
 @pytest.mark.asyncio
 async def test_generate_evolved_prompt_empty_choices():
-    from unittest.mock import MagicMock
+    with patch(
+        "dharma_swarm.master_prompt_engineer.complete_via_preferred_runtime_providers",
+        new=AsyncMock(
+            return_value=(
+                LLMResponse(content="", model="nim-local"),
+                SimpleNamespace(provider=ProviderType.NVIDIA_NIM),
+            )
+        ),
+    ):
+        from dharma_swarm.master_prompt_engineer import generate_evolved_prompt
 
-    with patch.dict("os.environ", {"OPENROUTER_API_KEY": "test-key-1234"}):
-        with patch("httpx.AsyncClient") as MockClient:
-            mock_client = AsyncMock()
-            mock_resp = MagicMock()  # Use MagicMock so .json() is sync
-            mock_resp.status_code = 200
-            mock_resp.json.return_value = {"choices": []}
-            mock_client.post.return_value = mock_resp
-            mock_client.__aenter__ = AsyncMock(return_value=mock_client)
-            mock_client.__aexit__ = AsyncMock(return_value=False)
-            MockClient.return_value = mock_client
-
-            from dharma_swarm.master_prompt_engineer import generate_evolved_prompt
-
-            with pytest.raises(RuntimeError, match="empty choices"):
-                await generate_evolved_prompt()
+        with pytest.raises(RuntimeError, match="empty prompt content"):
+            await generate_evolved_prompt()

@@ -9,12 +9,15 @@ flow through the session ledger.
 
 from __future__ import annotations
 
+import asyncio
+from contextlib import asynccontextmanager
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
 import json
 import logging
 import os
 from pathlib import Path
+import sqlite3
 from typing import Any
 
 import aiosqlite
@@ -223,6 +226,9 @@ def _row_to_task(row: aiosqlite.Row) -> OperatorBridgeTask:
 class OperatorBridge:
     """Stateful operator task bridge using canonical bus and ledger seams."""
 
+    _BUSY_TIMEOUT_S = 30
+    _LOCK_RETRY_DELAYS_S = (0.05, 0.1, 0.25, 0.5, 1.0)
+
     def __init__(
         self,
         *,
@@ -274,15 +280,52 @@ class OperatorBridge:
             else:
                 self._telemetry = None
 
+    def _open(self) -> aiosqlite.Connection:
+        return aiosqlite.connect(self._bus.db_path, timeout=self._BUSY_TIMEOUT_S)
+
+    @staticmethod
+    async def _configure_connection(db: aiosqlite.Connection) -> None:
+        await db.execute("PRAGMA busy_timeout=30000")
+        await db.execute("PRAGMA synchronous=NORMAL")
+
+    @asynccontextmanager
+    async def _connect(
+        self,
+        *,
+        row_factory: Any | None = None,
+    ):
+        async with self._open() as db:
+            await self._configure_connection(db)
+            if row_factory is not None:
+                db.row_factory = row_factory
+            yield db
+
+    @staticmethod
+    def _is_locked_error(exc: BaseException) -> bool:
+        return "database is locked" in str(exc).lower()
+
+    async def _run_with_lock_retry(self, operation):
+        for attempt, delay in enumerate((0.0, *self._LOCK_RETRY_DELAYS_S)):
+            try:
+                return await operation()
+            except sqlite3.OperationalError as exc:
+                if not self._is_locked_error(exc) or attempt == len(self._LOCK_RETRY_DELAYS_S):
+                    raise
+                await asyncio.sleep(delay)
+
     async def init_db(self) -> None:
         if self._initialized:
             return
         await self._bus.init_db()
-        async with aiosqlite.connect(self._bus.db_path) as db:
-            await db.execute(_TASKS_DDL)
-            for index in _INDEXES:
-                await db.execute(index)
-            await db.commit()
+
+        async def _init_tables() -> None:
+            async with self._connect() as db:
+                await db.execute(_TASKS_DDL)
+                for index in _INDEXES:
+                    await db.execute(index)
+                await db.commit()
+
+        await self._run_with_lock_retry(_init_tables)
         if self._runtime_state is not None:
             await self._runtime_state.init_db()
             await self._runtime_state.upsert_session(
@@ -321,31 +364,34 @@ class OperatorBridge:
         payload_dict = dict(payload or {})
         metadata_dict = dict(metadata or {})
 
-        async with aiosqlite.connect(self._bus.db_path) as db:
-            await db.execute(
-                "INSERT INTO operator_bridge_tasks"
-                " (id, created_at, updated_at, sender, task, scope, output,"
-                " constraints, payload, status, claim_timeout_seconds,"
-                " request_message_id, response, metadata)"
-                " VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
-                (
-                    record_id,
-                    now_iso,
-                    now_iso,
-                    sender,
-                    task,
-                    _json_dump(scope or []),
-                    _json_dump(output or []),
-                    _json_dump(constraints or []),
-                    _json_dump(payload_dict),
-                    BRIDGE_STATUS_QUEUED,
-                    int(claim_timeout_seconds),
-                    None,
-                    None,
-                    _json_dump(metadata_dict),
-                ),
-            )
-            await db.commit()
+        async def _insert_task() -> None:
+            async with self._connect() as db:
+                await db.execute(
+                    "INSERT INTO operator_bridge_tasks"
+                    " (id, created_at, updated_at, sender, task, scope, output,"
+                    " constraints, payload, status, claim_timeout_seconds,"
+                    " request_message_id, response, metadata)"
+                    " VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                    (
+                        record_id,
+                        now_iso,
+                        now_iso,
+                        sender,
+                        task,
+                        _json_dump(scope or []),
+                        _json_dump(output or []),
+                        _json_dump(constraints or []),
+                        _json_dump(payload_dict),
+                        BRIDGE_STATUS_QUEUED,
+                        int(claim_timeout_seconds),
+                        None,
+                        None,
+                        _json_dump(metadata_dict),
+                    ),
+                )
+                await db.commit()
+
+        await self._run_with_lock_retry(_insert_task)
 
         task_record = await self.get_task(record_id)
         assert task_record is not None
@@ -417,16 +463,16 @@ class OperatorBridge:
             params.append(sender)
         query += " ORDER BY created_at ASC LIMIT ?"
         params.append(limit)
-        async with aiosqlite.connect(self._bus.db_path) as db:
-            db.row_factory = aiosqlite.Row
+
+        async with self._connect(row_factory=aiosqlite.Row) as db:
             cursor = await db.execute(query, params)
             rows = await cursor.fetchall()
         return [_row_to_task(row) for row in rows]
 
     async def get_task(self, task_id: str) -> OperatorBridgeTask | None:
         await self.init_db()
-        async with aiosqlite.connect(self._bus.db_path) as db:
-            db.row_factory = aiosqlite.Row
+
+        async with self._connect(row_factory=aiosqlite.Row) as db:
             cursor = await db.execute(
                 "SELECT id, created_at, updated_at, sender, task, scope, output,"
                 " constraints, payload, status, claim_timeout_seconds, claimed_at,"
@@ -449,60 +495,65 @@ class OperatorBridge:
         claim_dt = now or _utc_now()
         claim_iso = claim_dt.isoformat()
 
-        async with aiosqlite.connect(self._bus.db_path) as db:
-            db.row_factory = aiosqlite.Row
-            await db.execute("BEGIN IMMEDIATE")
-            if task_id is not None:
+        async def _claim() -> aiosqlite.Row | None:
+            async with self._connect(row_factory=aiosqlite.Row) as db:
+                await db.execute("BEGIN IMMEDIATE")
+                if task_id is not None:
+                    cursor = await db.execute(
+                        "SELECT id, created_at, updated_at, sender, task, scope, output,"
+                        " constraints, payload, status, claim_timeout_seconds, claimed_at,"
+                        " claimed_by, retry_count, recovered_at, recovery_reason,"
+                        " completed_at, request_message_id, response, metadata"
+                        " FROM operator_bridge_tasks WHERE id = ? AND status = ?",
+                        (task_id, BRIDGE_STATUS_QUEUED),
+                    )
+                else:
+                    cursor = await db.execute(
+                        "SELECT id, created_at, updated_at, sender, task, scope, output,"
+                        " constraints, payload, status, claim_timeout_seconds, claimed_at,"
+                        " claimed_by, retry_count, recovered_at, recovery_reason,"
+                        " completed_at, request_message_id, response, metadata"
+                        " FROM operator_bridge_tasks WHERE status = ?"
+                        " ORDER BY created_at ASC LIMIT 1",
+                        (BRIDGE_STATUS_QUEUED,),
+                    )
+                row = await cursor.fetchone()
+                if row is None:
+                    await db.rollback()
+                    return None
+
+                result = await db.execute(
+                    "UPDATE operator_bridge_tasks"
+                    " SET status = ?, claimed_at = ?, claimed_by = ?, updated_at = ?"
+                    " WHERE id = ? AND status = ?",
+                    (
+                        BRIDGE_STATUS_IN_PROGRESS,
+                        claim_iso,
+                        claimed_by,
+                        claim_iso,
+                        row["id"],
+                        BRIDGE_STATUS_QUEUED,
+                    ),
+                )
+                if result.rowcount != 1:
+                    await db.rollback()
+                    return None
+
                 cursor = await db.execute(
                     "SELECT id, created_at, updated_at, sender, task, scope, output,"
                     " constraints, payload, status, claim_timeout_seconds, claimed_at,"
                     " claimed_by, retry_count, recovered_at, recovery_reason,"
                     " completed_at, request_message_id, response, metadata"
-                    " FROM operator_bridge_tasks WHERE id = ? AND status = ?",
-                    (task_id, BRIDGE_STATUS_QUEUED),
+                    " FROM operator_bridge_tasks WHERE id = ?",
+                    (row["id"],),
                 )
-            else:
-                cursor = await db.execute(
-                    "SELECT id, created_at, updated_at, sender, task, scope, output,"
-                    " constraints, payload, status, claim_timeout_seconds, claimed_at,"
-                    " claimed_by, retry_count, recovered_at, recovery_reason,"
-                    " completed_at, request_message_id, response, metadata"
-                    " FROM operator_bridge_tasks WHERE status = ?"
-                    " ORDER BY created_at ASC LIMIT 1",
-                    (BRIDGE_STATUS_QUEUED,),
-                )
-            row = await cursor.fetchone()
-            if row is None:
-                await db.rollback()
-                return None
+                claimed_row = await cursor.fetchone()
+                await db.commit()
+                return claimed_row
 
-            result = await db.execute(
-                "UPDATE operator_bridge_tasks"
-                " SET status = ?, claimed_at = ?, claimed_by = ?, updated_at = ?"
-                " WHERE id = ? AND status = ?",
-                (
-                    BRIDGE_STATUS_IN_PROGRESS,
-                    claim_iso,
-                    claimed_by,
-                    claim_iso,
-                    row["id"],
-                    BRIDGE_STATUS_QUEUED,
-                ),
-            )
-            if result.rowcount != 1:
-                await db.rollback()
-                return None
-
-            cursor = await db.execute(
-                "SELECT id, created_at, updated_at, sender, task, scope, output,"
-                " constraints, payload, status, claim_timeout_seconds, claimed_at,"
-                " claimed_by, retry_count, recovered_at, recovery_reason,"
-                " completed_at, request_message_id, response, metadata"
-                " FROM operator_bridge_tasks WHERE id = ?",
-                (row["id"],),
-            )
-            claimed_row = await cursor.fetchone()
-            await db.commit()
+        claimed_row = await self._run_with_lock_retry(_claim)
+        if claimed_row is None:
+            return None
 
         claimed_task = _row_to_task(claimed_row)
         claimed_task = await self._mirror_runtime_claimed(claimed_task)
@@ -703,47 +754,49 @@ class OperatorBridge:
         await self.init_db()
         recovery_dt = now or _utc_now()
         recovery_iso = recovery_dt.isoformat()
-        recovered_ids: list[str] = []
+        async def _recover() -> list[str]:
+            recovered_ids: list[str] = []
+            async with self._connect(row_factory=aiosqlite.Row) as db:
+                await db.execute("BEGIN IMMEDIATE")
+                cursor = await db.execute(
+                    "SELECT id, created_at, updated_at, sender, task, scope, output,"
+                    " constraints, payload, status, claim_timeout_seconds, claimed_at,"
+                    " claimed_by, retry_count, recovered_at, recovery_reason,"
+                    " completed_at, request_message_id, response, metadata"
+                    " FROM operator_bridge_tasks WHERE status = ?",
+                    (BRIDGE_STATUS_IN_PROGRESS,),
+                )
+                rows = await cursor.fetchall()
+                for row in rows:
+                    task_record = _row_to_task(row)
+                    if not self._is_stale(task_record, now=recovery_dt, timeout_seconds=timeout_seconds):
+                        continue
+                    reason = self._stale_reason(
+                        task_record,
+                        now=recovery_dt,
+                        timeout_seconds=timeout_seconds,
+                    )
+                    result = await db.execute(
+                        "UPDATE operator_bridge_tasks"
+                        " SET status = ?, claimed_at = NULL, claimed_by = NULL,"
+                        " retry_count = retry_count + 1, recovered_at = ?,"
+                        " recovery_reason = ?, updated_at = ?"
+                        " WHERE id = ? AND status = ?",
+                        (
+                            BRIDGE_STATUS_QUEUED,
+                            recovery_iso,
+                            reason,
+                            recovery_iso,
+                            task_record.id,
+                            BRIDGE_STATUS_IN_PROGRESS,
+                        ),
+                    )
+                    if result.rowcount == 1:
+                        recovered_ids.append(task_record.id)
+                await db.commit()
+            return recovered_ids
 
-        async with aiosqlite.connect(self._bus.db_path) as db:
-            db.row_factory = aiosqlite.Row
-            await db.execute("BEGIN IMMEDIATE")
-            cursor = await db.execute(
-                "SELECT id, created_at, updated_at, sender, task, scope, output,"
-                " constraints, payload, status, claim_timeout_seconds, claimed_at,"
-                " claimed_by, retry_count, recovered_at, recovery_reason,"
-                " completed_at, request_message_id, response, metadata"
-                " FROM operator_bridge_tasks WHERE status = ?",
-                (BRIDGE_STATUS_IN_PROGRESS,),
-            )
-            rows = await cursor.fetchall()
-            for row in rows:
-                task_record = _row_to_task(row)
-                if not self._is_stale(task_record, now=recovery_dt, timeout_seconds=timeout_seconds):
-                    continue
-                reason = self._stale_reason(
-                    task_record,
-                    now=recovery_dt,
-                    timeout_seconds=timeout_seconds,
-                )
-                result = await db.execute(
-                    "UPDATE operator_bridge_tasks"
-                    " SET status = ?, claimed_at = NULL, claimed_by = NULL,"
-                    " retry_count = retry_count + 1, recovered_at = ?,"
-                    " recovery_reason = ?, updated_at = ?"
-                    " WHERE id = ? AND status = ?",
-                    (
-                        BRIDGE_STATUS_QUEUED,
-                        recovery_iso,
-                        reason,
-                        recovery_iso,
-                        task_record.id,
-                        BRIDGE_STATUS_IN_PROGRESS,
-                    ),
-                )
-                if result.rowcount == 1:
-                    recovered_ids.append(task_record.id)
-            await db.commit()
+        recovered_ids = await self._run_with_lock_retry(_recover)
 
         recovered = [task for task_id in recovered_ids if (task := await self.get_task(task_id))]
         for task_record in recovered:
@@ -826,21 +879,24 @@ class OperatorBridge:
             responded_at=completed_dt,
         )
 
-        async with aiosqlite.connect(self._bus.db_path) as db:
-            await db.execute(
-                "UPDATE operator_bridge_tasks"
-                " SET status = ?, completed_at = ?, updated_at = ?, response = ?, metadata = ?"
-                " WHERE id = ?",
-                (
-                    status,
-                    completed_dt.isoformat(),
-                    completed_dt.isoformat(),
-                    _json_dump(response.as_dict()),
-                    _json_dump(task_metadata),
-                    task_id,
-                ),
-            )
-            await db.commit()
+        async def _persist_response() -> None:
+            async with self._connect() as db:
+                await db.execute(
+                    "UPDATE operator_bridge_tasks"
+                    " SET status = ?, completed_at = ?, updated_at = ?, response = ?, metadata = ?"
+                    " WHERE id = ?",
+                    (
+                        status,
+                        completed_dt.isoformat(),
+                        completed_dt.isoformat(),
+                        _json_dump(response.as_dict()),
+                        _json_dump(task_metadata),
+                        task_id,
+                    ),
+                )
+                await db.commit()
+
+        await self._run_with_lock_retry(_persist_response)
 
         response_message_id: str | None = None
         try:
@@ -924,12 +980,15 @@ class OperatorBridge:
         metadata = dict(existing.metadata)
         metadata["delivery_ack"] = ack
 
-        async with aiosqlite.connect(self._bus.db_path) as db:
-            await db.execute(
-                "UPDATE operator_bridge_tasks SET metadata = ?, updated_at = ? WHERE id = ?",
-                (_json_dump(metadata), _utc_now_iso(), task_id),
-            )
-            await db.commit()
+        async def _ack_response() -> None:
+            async with self._connect() as db:
+                await db.execute(
+                    "UPDATE operator_bridge_tasks SET metadata = ?, updated_at = ? WHERE id = ?",
+                    (_json_dump(metadata), _utc_now_iso(), task_id),
+                )
+                await db.commit()
+
+        await self._run_with_lock_retry(_ack_response)
 
         updated = await self.get_task(task_id)
         assert updated is not None
@@ -981,29 +1040,38 @@ class OperatorBridge:
         return pending
 
     async def _set_request_message_id(self, task_id: str, request_message_id: str) -> None:
-        async with aiosqlite.connect(self._bus.db_path) as db:
-            await db.execute(
-                "UPDATE operator_bridge_tasks"
-                " SET request_message_id = ?, updated_at = ? WHERE id = ?",
-                (request_message_id, _utc_now_iso(), task_id),
-            )
-            await db.commit()
+        async def _set() -> None:
+            async with self._connect() as db:
+                await db.execute(
+                    "UPDATE operator_bridge_tasks"
+                    " SET request_message_id = ?, updated_at = ? WHERE id = ?",
+                    (request_message_id, _utc_now_iso(), task_id),
+                )
+                await db.commit()
+
+        await self._run_with_lock_retry(_set)
 
     async def _set_response(self, task_id: str, response: OperatorBridgeResponse) -> None:
-        async with aiosqlite.connect(self._bus.db_path) as db:
-            await db.execute(
-                "UPDATE operator_bridge_tasks SET response = ?, updated_at = ? WHERE id = ?",
-                (_json_dump(response.as_dict()), _utc_now_iso(), task_id),
-            )
-            await db.commit()
+        async def _set() -> None:
+            async with self._connect() as db:
+                await db.execute(
+                    "UPDATE operator_bridge_tasks SET response = ?, updated_at = ? WHERE id = ?",
+                    (_json_dump(response.as_dict()), _utc_now_iso(), task_id),
+                )
+                await db.commit()
+
+        await self._run_with_lock_retry(_set)
 
     async def _set_metadata(self, task_id: str, metadata: dict[str, Any]) -> None:
-        async with aiosqlite.connect(self._bus.db_path) as db:
-            await db.execute(
-                "UPDATE operator_bridge_tasks SET metadata = ?, updated_at = ? WHERE id = ?",
-                (_json_dump(metadata), _utc_now_iso(), task_id),
-            )
-            await db.commit()
+        async def _set() -> None:
+            async with self._connect() as db:
+                await db.execute(
+                    "UPDATE operator_bridge_tasks SET metadata = ?, updated_at = ? WHERE id = ?",
+                    (_json_dump(metadata), _utc_now_iso(), task_id),
+                )
+                await db.commit()
+
+        await self._run_with_lock_retry(_set)
 
     async def _mirror_runtime_enqueued(self, task: OperatorBridgeTask) -> None:
         if self._runtime_state is None:

@@ -6,6 +6,8 @@ import httpx
 import pytest
 
 from dharma_swarm.contracts.intelligence_agents import (
+    agent_state_to_team_roster,
+    agent_state_to_telemetry_identity,
     agent_registration_to_kaizenops_events,
     sync_live_agent_registration,
 )
@@ -24,6 +26,18 @@ def _agent_state() -> AgentState:
         provider="ollama",
         model="qwen3-coder",
         tasks_completed=3,
+    )
+
+
+def _glm_agent_state() -> AgentState:
+    return AgentState(
+        id="agent-runtime-glm",
+        name="glm5-cartographer",
+        role=AgentRole.CARTOGRAPHER,
+        status=AgentStatus.IDLE,
+        provider="openrouter",
+        model="z-ai/glm-5",
+        tasks_completed=7,
     )
 
 
@@ -47,6 +61,29 @@ def test_agent_registration_to_kaizenops_events_includes_identity_and_roster() -
     assert events[0]["metadata"]["team_id"] == "dharma-core"
     assert events[1]["intent"] == "assign_agent_to_team"
     assert events[1]["raw_payload"]["identity"]["agent_id"] == "qwen35-surgeon"
+
+
+def test_certified_lane_registration_flows_into_identity_and_kaizenops_events() -> None:
+    identity = agent_state_to_telemetry_identity(
+        _glm_agent_state(),
+        thread="research",
+        metadata={"team_id": "dharma-core"},
+    )
+    roster = agent_state_to_team_roster(
+        _glm_agent_state(),
+        thread="research",
+        metadata={"team_id": "dharma-core"},
+    )
+
+    events = agent_registration_to_kaizenops_events(identity, roster)
+
+    assert identity.codename == "glm-researcher"
+    assert identity.metadata["registered_lane_id"] == "lane:glm-researcher"
+    assert identity.metadata["registered_lane_profile_id"] == "glm5_researcher"
+    assert identity.metadata["registered_lane_label"] == "GLM-5 Cartographer"
+    assert events[0]["metadata"]["registered_lane_id"] == "lane:glm-researcher"
+    assert events[0]["metadata"]["registered_lane_codename"] == "glm-researcher"
+    assert events[1]["metadata"]["registered_lane_profile_id"] == "glm5_researcher"
 
 
 @pytest.mark.asyncio
@@ -124,3 +161,26 @@ async def test_sync_live_agent_registration_does_not_claim_bus_readiness_without
     }
     assert result.as_dict()["communication_ready"] is False
     assert result.as_dict()["bus_status"] == "unavailable"
+
+
+@pytest.mark.asyncio
+async def test_sync_live_agent_registration_reports_certified_lane_metadata(
+    tmp_path,
+) -> None:
+    telemetry = TelemetryPlaneStore(tmp_path / "runtime.db")
+    await telemetry.init_db()
+
+    result = await sync_live_agent_registration(
+        _glm_agent_state(),
+        telemetry=telemetry,
+        thread="research",
+        metadata={"team_id": "dharma-core"},
+        include_kaizenops=False,
+    )
+
+    stored_identity = await telemetry.get_agent_identity("glm5-cartographer")
+
+    assert stored_identity is not None
+    assert stored_identity.codename == "glm-researcher"
+    assert stored_identity.metadata["registered_lane_id"] == "lane:glm-researcher"
+    assert result.as_dict()["registered_lane_profile_id"] == "glm5_researcher"

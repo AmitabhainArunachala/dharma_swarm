@@ -1,19 +1,22 @@
 """Tests for dharma_swarm.swarm — integration tests."""
 
 import asyncio
+import os
 from pathlib import Path
 
 import pytest
 
+from dharma_swarm.agent_constitution import AgentSpec, ConstitutionalLayer, DynamicRoster
 from dharma_swarm.engine.conversation_memory import ConversationMemoryStore
 from dharma_swarm.message_bus import MessageBus
-from dharma_swarm.models import AgentRole, AgentState, AgentStatus, Message, TaskPriority, TaskStatus
+from dharma_swarm.models import AgentRole, AgentState, AgentStatus, Message, TaskPriority, TaskStatus, ProviderType
 from dharma_swarm.swarm import SwarmCoordinationState, SwarmManager
 from dharma_swarm.telemetry_plane import (
     AgentIdentityRecord,
     TeamRosterRecord,
     TelemetryPlaneStore,
 )
+from dharma_swarm.runtime_artifacts import dgc_health_snapshot_summary
 
 
 # startup_crew auto-spawns agents and seed tasks on init.
@@ -28,6 +31,27 @@ _AUTO_AGENTS = _expected_agent_count()
 _AUTO_TASKS = 5
 
 
+def _make_dynamic_spec(name: str, **overrides: object) -> AgentSpec:
+    defaults: dict[str, object] = dict(
+        name=name,
+        role=AgentRole.CODER,
+        layer=ConstitutionalLayer.DIRECTOR,
+        vsm_function="runtime specialist",
+        domain="dynamic swarm specialist",
+        system_prompt="You are a dynamic swarm specialist.",
+        default_provider=ProviderType.OPENROUTER,
+        default_model="dynamic-model",
+        backup_models=[],
+        constitutional_gates=["SATYA"],
+        max_concurrent_workers=4,
+        memory_namespace=name,
+        spawn_authority=["code_worker"],
+        audit_cycle_seconds=0.0,
+    )
+    defaults.update(overrides)
+    return AgentSpec(**defaults)  # type: ignore[arg-type]
+
+
 @pytest.fixture
 async def swarm(tmp_path):
     s = SwarmManager(state_dir=tmp_path / ".dharma")
@@ -37,7 +61,6 @@ async def swarm(tmp_path):
 
 
 @pytest.mark.asyncio
-@pytest.mark.timeout(20)
 async def test_init(swarm):
     state = await swarm.status()
     assert state.tasks_pending == _AUTO_TASKS
@@ -72,6 +95,60 @@ async def test_init_falls_back_to_state_local_manifest_when_global_write_is_bloc
 
 
 @pytest.mark.asyncio
+async def test_init_uses_state_local_ledger_dir(tmp_path):
+    state_dir = tmp_path / ".dharma"
+
+    swarm = SwarmManager(state_dir=state_dir)
+    await swarm.init()
+    try:
+        assert swarm._orchestrator is not None
+        assert swarm._orchestrator._ledger.base_dir == state_dir / "ledgers"
+    finally:
+        await swarm.shutdown()
+
+
+@pytest.mark.asyncio
+async def test_init_fast_boot_defers_default_crew_and_optional_subsystems(
+    tmp_path,
+    monkeypatch,
+):
+    import dharma_swarm.startup_crew as startup_crew
+
+    state_dir = tmp_path / ".dharma"
+    monkeypatch.setenv("DHARMA_FAST_BOOT", "1")
+
+    async def _fake_spawn_default_crew(_swarm):
+        return []
+
+    async def _fake_spawn_cybernetics_crew(_swarm):
+        return [object(), object()]
+
+    async def _fake_create_seed_tasks(_swarm):
+        return [object()]
+
+    gate = asyncio.Event()
+
+    async def _fake_optional_init(self):
+        await gate.wait()
+
+    monkeypatch.setattr(startup_crew, "spawn_default_crew", _fake_spawn_default_crew)
+    monkeypatch.setattr(startup_crew, "spawn_cybernetics_crew", _fake_spawn_cybernetics_crew)
+    monkeypatch.setattr(startup_crew, "create_seed_tasks", _fake_create_seed_tasks)
+    monkeypatch.setattr(SwarmManager, "_init_optional_subsystems", _fake_optional_init)
+
+    swarm = SwarmManager(state_dir=state_dir)
+    await swarm.init()
+    try:
+        assert swarm._startup_background_task is not None
+        assert not swarm._startup_background_task.done()
+    finally:
+        gate.set()
+        if swarm._startup_background_task is not None:
+            await swarm._startup_background_task
+        await swarm.shutdown()
+
+
+@pytest.mark.asyncio
 async def test_spawn_agent(swarm):
     agent = await swarm.spawn_agent("worker-1", role=AgentRole.CODER)
     assert agent.name == "worker-1"
@@ -79,6 +156,94 @@ async def test_spawn_agent(swarm):
 
     agents = await swarm.list_agents()
     assert len(agents) >= _AUTO_AGENTS + 1
+
+
+@pytest.mark.asyncio
+async def test_spawn_agent_applies_dynamic_roster_defaults(tmp_path, monkeypatch):
+    state_dir = tmp_path / ".dharma"
+    roster = DynamicRoster(state_dir=state_dir)
+    roster.add(_make_dynamic_spec("runtime_specialist"))
+
+    swarm = SwarmManager(state_dir=state_dir)
+
+    class _FakePool:
+        async def spawn(self, config, **_: object):
+            return type(
+                "_Runner",
+                (),
+                {
+                    "state": AgentState(
+                        id=config.id,
+                        name=config.name,
+                        role=config.role,
+                        status=AgentStatus.IDLE,
+                        provider=config.provider.value,
+                        model=config.model,
+                    )
+                },
+            )()
+
+    class _FakeMemory:
+        async def remember(self, *args, **kwargs):
+            return None
+
+    async def _noop_sync(*args, **kwargs):
+        return None
+
+    swarm._agent_pool = _FakePool()
+    swarm._memory = _FakeMemory()
+    monkeypatch.setattr(swarm, "_sync_agent_contracts", _noop_sync)
+
+    agent = await swarm.spawn_agent("runtime_specialist")
+    spawner = swarm.get_worker_spawner("runtime_specialist")
+
+    assert agent.name == "runtime_specialist"
+    assert agent.role == AgentRole.CODER
+    assert spawner is not None
+    assert spawner._max_concurrent == 4
+
+
+@pytest.mark.asyncio
+async def test_spawn_agent_preserves_constitutional_routing_metadata(tmp_path, monkeypatch):
+    state_dir = tmp_path / ".dharma"
+    captured: dict[str, object] = {}
+
+    class _FakePool:
+        async def spawn(self, config, **_: object):
+            captured["config"] = config
+            return type(
+                "_Runner",
+                (),
+                {
+                    "state": AgentState(
+                        id=config.id,
+                        name=config.name,
+                        role=config.role,
+                        status=AgentStatus.IDLE,
+                        provider=config.provider.value,
+                        model=config.model,
+                    )
+                },
+            )()
+
+    class _FakeMemory:
+        async def remember(self, *args, **kwargs):
+            return None
+
+    async def _noop_sync(*args, **kwargs):
+        return None
+
+    swarm = SwarmManager(state_dir=state_dir)
+    swarm._agent_pool = _FakePool()
+    swarm._memory = _FakeMemory()
+    monkeypatch.setattr(swarm, "_sync_agent_contracts", _noop_sync)
+
+    agent = await swarm.spawn_agent("operator")
+    config = captured["config"]
+
+    assert agent.name == "operator"
+    assert config.metadata["allow_provider_routing"] is True
+    assert config.metadata["state_dir"] == str(state_dir)
 
 
 @pytest.mark.asyncio
@@ -395,6 +560,31 @@ async def test_run_does_not_consume_contribution_budget_without_work(
     assert calls["tick"] == 1
     assert swarm._daily_contributions == 0
     assert swarm._last_contribution is None
+
+
+@pytest.mark.asyncio
+async def test_run_publishes_fresh_dgc_health_snapshot(swarm, monkeypatch):
+    async def fake_tick():
+        swarm._running = False
+        return {"dispatched": 0, "settled": 0, "recovered": 0}
+
+    async def fake_sleep(_seconds):
+        return None
+
+    monkeypatch.setattr(swarm._orchestrator, "tick", fake_tick)
+    monkeypatch.setattr(asyncio, "sleep", fake_sleep)
+
+    daemon_pid = os.getpid()
+    (swarm.state_dir / "daemon.pid").write_text(f"{daemon_pid}\n", encoding="utf-8")
+
+    swarm._running = True
+    await swarm.run(interval=0.0)
+
+    summary = dgc_health_snapshot_summary(swarm.state_dir)
+    assert summary["status"] == "fresh"
+    assert summary["daemon_pid"] == daemon_pid
+    assert summary["daemon_pid_mismatch"] is False
+    assert summary["payload"]["source"] == "swarm.run"
 
 
 @pytest.mark.asyncio

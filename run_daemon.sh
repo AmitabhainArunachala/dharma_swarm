@@ -10,6 +10,15 @@
 set -e
 
 cd ~/dharma_swarm
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+RUNTIME_ENV_HELPER="${SCRIPT_DIR}/scripts/load_runtime_env.sh"
+
+export PATH="${HOME}/.npm-global/bin:/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin:${PATH:-}"
+
+if [ -f "$RUNTIME_ENV_HELPER" ]; then
+  # shellcheck disable=SC1090
+  source "$RUNTIME_ENV_HELPER"
+fi
 
 STATE_DIR="${HOME}/.dharma"
 LOG_DIR="${STATE_DIR}/logs"
@@ -58,6 +67,7 @@ echo $$ > "$PID_FILE"
 
 # Interval: 30s for interactive testing, omit --interval for full 6h daemon mode
 INTERVAL="${DHARMA_INTERVAL:-30}"
+export DHARMA_FAST_BOOT="${DHARMA_FAST_BOOT:-1}"
 
 # Enable verbose logging
 export DHARMA_LOG_LEVEL="${DHARMA_LOG_LEVEL:-INFO}"
@@ -71,10 +81,14 @@ logging.basicConfig(
 )
 
 from dharma_swarm.swarm import SwarmManager
+from dharma_swarm.startup_crew import spawn_cybernetics_crew
 
 async def main():
     swarm = SwarmManager(state_dir='$STATE_DIR')
     await swarm.init()
+    cyber_crew = await spawn_cybernetics_crew(swarm)
+    if cyber_crew:
+        print(f'Cybernetics crew asserted: {len(cyber_crew)} seats', flush=True)
     print(f'Crew ready. Thread: {swarm.current_thread}', flush=True)
     try:
         await swarm.run(interval=$INTERVAL)

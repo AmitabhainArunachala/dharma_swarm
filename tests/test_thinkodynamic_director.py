@@ -9,9 +9,11 @@ from unittest.mock import patch
 import pytest
 
 from dharma_swarm.engine.conversation_memory import ConversationMemoryStore
+from dharma_swarm.model_hierarchy import default_model
 from dharma_swarm.models import AgentRole, AgentState, AgentStatus, ProviderType, TaskStatus
 from dharma_swarm.thinkodynamic_director import (
     DirectorMindSpec,
+    DirectorOpportunity,
     ThinkodynamicDirector,
     WorkflowPlan,
     WorkflowTaskPlan,
@@ -118,6 +120,20 @@ def test_build_opportunities_biases_to_autonomy_director(
     assert "director" in primary.title.lower()
 
 
+def test_build_codex_command_uses_dangerous_bypass(
+    director: ThinkodynamicDirector,
+) -> None:
+    output_file = director.state_dir / "worker_runs" / "result.txt"
+    cmd = director._build_codex_command(output_file=output_file, model="gpt-5-codex")
+
+    assert cmd[:2] == ["codex", "exec"]
+    assert "--dangerously-bypass-approvals-and-sandbox" in cmd
+    assert "-m" in cmd
+    assert "gpt-5-codex" in cmd
+    assert "-o" in cmd
+    assert str(output_file) in cmd
+
+
 def test_sense_can_promote_world_service_signals_from_jk_artifacts(
     tmp_path: Path,
 ) -> None:
@@ -209,6 +225,35 @@ def test_plan_workflow_creates_dependent_execution_spine(
     assert workflow.tasks[3].depends_on_keys == ["highest-leverage-slice"]
 
 
+def test_plan_workflow_for_cybernetics_assigns_steward_agents(
+    director: ThinkodynamicDirector,
+) -> None:
+    opportunity = DirectorOpportunity(
+        opportunity_id="cybernetics-1",
+        theme="cybernetics",
+        title="Activate the Cybernetics Directive",
+        thesis="Turn the cybernetics layer into a living governance subsystem.",
+        why_now="The control plane is still partially off-path.",
+        score=99.0,
+        expected_duration_min=360,
+        evidence_paths=["/tmp/evidence.md"],
+        role_sequence=["cartographer", "architect", "general", "validator"],
+    )
+
+    workflow = director.plan_workflow(opportunity, cycle_id="12345")
+
+    assert workflow.theme == "cybernetics"
+    assert workflow.tasks[0].title == "Map the live cybernetics control plane"
+    assert "cyber-glm5" in workflow.tasks[0].preferred_agents
+    assert "cyber-kimi25" in workflow.tasks[0].preferred_agents
+    assert workflow.tasks[0].preferred_backends[0] == "provider-fallback"
+    assert workflow.tasks[0].provider_allowlist == [ProviderType.OLLAMA.value]
+    assert "cyber-opus" in workflow.tasks[1].preferred_agents
+    assert "cyber-codex" in workflow.tasks[2].preferred_agents
+    assert "cyber-opus" in workflow.tasks[3].preferred_agents
+    assert "cyber-codex" in workflow.tasks[3].preferred_agents
+
+
 def test_plan_workflow_attaches_primary_agent_preferences(
     director: ThinkodynamicDirector,
 ) -> None:
@@ -220,6 +265,45 @@ def test_plan_workflow_attaches_primary_agent_preferences(
     assert workflow.tasks[2].preferred_agents[0] == "codex-primus"
     assert workflow.tasks[2].preferred_backends[0] == "codex-cli"
     assert ProviderType.CODEX.value in workflow.tasks[2].provider_allowlist
+
+
+def test_director_support_minds_include_minimax_lane(
+    director: ThinkodynamicDirector,
+) -> None:
+    names = [mind.name for mind in director._support_minds]
+    assert "glm-researcher" in names
+    assert "kimi-cartographer" in names
+    assert "minimax-challenger" in names
+    nim_generalist = next(mind for mind in director._support_minds if mind.name == "nim-generalist")
+    assert nim_generalist.model == default_model(ProviderType.NVIDIA_NIM)
+
+
+def test_director_support_minds_resolve_nim_generalist_via_canonical_helper(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(
+        "dharma_swarm.thinkodynamic_director.canonical_default_model",
+        lambda provider: "nim-from-helper",
+    )
+    director = ThinkodynamicDirector(
+        repo_root=tmp_path / "repo",
+        state_dir=tmp_path / ".dharma",
+        scan_roots=(),
+        external_roots=(),
+    )
+    nim_generalist = next(mind for mind in director._support_minds if mind.name == "nim-generalist")
+    assert nim_generalist.model == "nim-from-helper"
+
+
+def test_director_council_routing_keeps_primary_minds_and_minimax_support(
+    director: ThinkodynamicDirector,
+) -> None:
+    routing = director._default_council_routing_strategy()
+
+    assert routing["meta"] == ["codex-primus", "opus-primus"]
+    assert "minimax-challenger" in routing["research"]
+    assert "minimax-challenger" in routing["validation"]
 
 
 def test_director_auto_concurrency_caps_to_active_limit(tmp_path: Path) -> None:

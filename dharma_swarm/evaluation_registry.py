@@ -8,6 +8,7 @@ import math
 from pathlib import Path
 from typing import Any
 
+from dharma_swarm.auto_grade.models import RewardSignal
 from dharma_swarm.artifact_store import RuntimeArtifactStore
 from dharma_swarm.engine.provenance import ProvenanceEntry, ProvenanceLogger
 from dharma_swarm.event_log import EventLog
@@ -426,6 +427,163 @@ class EvaluationRegistry:
                 "chain_valid": chain_valid,
                 "invariant_issues": invariant_issues,
                 "challenged_claims": challenged_claims,
+            },
+        )
+
+    async def record_research_grade(
+        self,
+        reward_payload: RewardSignal | dict[str, Any],
+        *,
+        run_id: str = "",
+        session_id: str = "",
+        task_id: str = "",
+        trace_id: str | None = None,
+        created_by: str = "evaluation.registry",
+        promotion_state: str = "shared",
+    ) -> EvaluationRegistrationResult:
+        await self.runtime_state.init_db()
+        await self.memory_lattice.init_db()
+
+        resolved_run = await self._resolve_run(run_id)
+        resolved_session_id = session_id or (resolved_run.session_id if resolved_run else "")
+        resolved_task_id = task_id or (resolved_run.task_id if resolved_run else "")
+        raw_payload = (
+            reward_payload.model_dump() if isinstance(reward_payload, RewardSignal) else dict(reward_payload)
+        )
+        reward = RewardSignal.model_validate(raw_payload)
+        resolved_trace_id = trace_id or self._resolve_trace_id(raw_payload, resolved_run)
+        if not resolved_session_id:
+            raise ValueError("session_id or run_id is required to record evaluation outputs canonically")
+        if not resolved_trace_id:
+            resolved_trace_id = f"research:{reward.report_id}"
+
+        stored = await self.artifact_store.create_text_artifact_async(
+            session_id=resolved_session_id,
+            artifact_type="evaluations",
+            artifact_kind="research_reward_signal",
+            content=self._render_job_payload(raw_payload),
+            created_by=created_by,
+            extension="json",
+            task_id=resolved_task_id,
+            run_id=run_id,
+            trace_id=resolved_trace_id,
+            promotion_state=promotion_state,
+            provenance={
+                "source": "auto_grade",
+                "report_id": reward.report_id,
+                "task_id": reward.task_id,
+            },
+            metadata={
+                "source": "auto_grade",
+                "report_id": reward.report_id,
+                "task_id": reward.task_id,
+                "final_score": reward.grade_card.final_score,
+                "promotion_state": reward.grade_card.promotion_state,
+                "gate_failures": list(reward.grade_card.gate_failures),
+                "scalar_reward": reward.scalar_reward,
+            },
+        )
+        artifact = stored.record
+
+        facts: list[MemoryFact] = []
+        facts.append(
+            await self.memory_lattice.record_fact(
+                self._research_grade_fact_text(reward),
+                fact_kind="research_grade",
+                truth_state="promoted" if reward.grade_card.promotion_state == "promotable" else "candidate",
+                confidence=max(reward.grade_card.final_score, 0.0),
+                session_id=resolved_session_id,
+                task_id=resolved_task_id,
+                source_artifact_id=artifact.artifact_id,
+                metadata={
+                    "report_id": reward.report_id,
+                    "task_id": reward.task_id,
+                    "final_score": reward.grade_card.final_score,
+                    "scalar_reward": reward.scalar_reward,
+                },
+                provenance={
+                    "artifact_id": artifact.artifact_id,
+                    "source": "auto_grade",
+                },
+            )
+        )
+        facts.append(
+            await self.memory_lattice.record_fact(
+                self._research_promotion_fact_text(reward),
+                fact_kind="research_promotion_decision",
+                truth_state="promoted" if reward.grade_card.promotion_state == "promotable" else "candidate",
+                confidence=1.0 if not reward.grade_card.gate_failures else 0.7,
+                session_id=resolved_session_id,
+                task_id=resolved_task_id,
+                source_artifact_id=artifact.artifact_id,
+                metadata={
+                    "report_id": reward.report_id,
+                    "task_id": reward.task_id,
+                    "promotion_state": reward.grade_card.promotion_state,
+                    "gate_failures": list(reward.grade_card.gate_failures),
+                },
+                provenance={
+                    "artifact_id": artifact.artifact_id,
+                    "source": "auto_grade",
+                },
+            )
+        )
+
+        self.provenance.append(
+            ProvenanceEntry(
+                event="research_grade_recorded",
+                artifact_id=artifact.artifact_id,
+                agent=created_by,
+                session_id=resolved_session_id,
+                inputs=[reward.report_id],
+                outputs=[artifact.artifact_id, *[fact.fact_id for fact in facts]],
+                confidence=1.0,
+                metadata={
+                    "report_id": reward.report_id,
+                    "task_id": reward.task_id,
+                    "run_id": run_id,
+                    "final_score": reward.grade_card.final_score,
+                    "promotion_state": reward.grade_card.promotion_state,
+                    "gate_failures": list(reward.grade_card.gate_failures),
+                },
+            )
+        )
+
+        receipt = self.event_log.append_envelope(
+            RuntimeEnvelope.create(
+                event_type=RuntimeEventType.ACTION_EVENT,
+                source="evaluation.registry",
+                agent_id=created_by,
+                session_id=resolved_session_id,
+                trace_id=resolved_trace_id,
+                payload={
+                    "action_name": "record_research_grade",
+                    "decision": "recorded",
+                    "confidence": 1.0,
+                    "report_id": reward.report_id,
+                    "artifact_id": artifact.artifact_id,
+                    "task_id": reward.task_id,
+                    "run_id": run_id,
+                    "final_score": reward.grade_card.final_score,
+                    "promotion_state": reward.grade_card.promotion_state,
+                },
+            ),
+            stream="research_evaluations",
+        )
+        return EvaluationRegistrationResult(
+            artifact=artifact,
+            manifest_path=stored.manifest_path,
+            facts=facts,
+            receipt=receipt,
+            summary={
+                "report_id": reward.report_id,
+                "task_id": reward.task_id,
+                "artifact_id": artifact.artifact_id,
+                "fact_ids": [fact.fact_id for fact in facts],
+                "receipt_event_id": str(receipt.get("event_id", "")),
+                "final_score": reward.grade_card.final_score,
+                "scalar_reward": reward.scalar_reward,
+                "promotion_state": reward.grade_card.promotion_state,
             },
         )
 
@@ -1092,3 +1250,16 @@ class EvaluationRegistry:
                 }
             )
         return findings
+
+    def _research_grade_fact_text(self, reward: RewardSignal) -> str:
+        return (
+            f"Research evaluation for report {reward.report_id} scored "
+            f"{reward.grade_card.final_score:.3f} with scalar_reward={reward.scalar_reward:.3f}."
+        )
+
+    def _research_promotion_fact_text(self, reward: RewardSignal) -> str:
+        failures = ",".join(reward.grade_card.gate_failures) or "none"
+        return (
+            f"Research promotion decision for report {reward.report_id}: "
+            f"state={reward.grade_card.promotion_state} gate_failures={failures}."
+        )

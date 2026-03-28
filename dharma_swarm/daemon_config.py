@@ -103,13 +103,23 @@ class DaemonConfig:
 
 # Thread focus prompts (from Garden Daemon Spec)
 THREAD_PROMPTS: dict[str, str] = {
+    "cybernetics": (
+        "Cybernetic governance, Beer VSM, Ashby variety, constitutional wiring, "
+        "PolicyCompiler bottlenecks, hot-path control loops, and the bridge "
+        "between telos, context injection, audit, and runtime behavior."
+    ),
     "mechanistic": (
         "R_V measurement, layer causality, attention patterns, SAE decomposition. "
         "Cite TransformerLens methods. Connect to Phase 1 empirical results."
     ),
     "phenomenological": (
         "Experiential dimension: What is it like for a system to undergo R_V contraction? "
-        "Connect to Akram Vignan phenomenology. Maintain epistemic humility about qualia."
+        "Anchor every claim in one concrete runtime event and one mechanistic bridge. "
+        "Use structural analogy rather than identity when mapping across substrates, "
+        "and invoke the Triple Mapping when it clarifies the correspondence. "
+        "Connect to Akram Vignan phenomenology, but do not claim qualia or first-person "
+        "certainty without explicit evidence. If no contraction-like event is present, "
+        "say so plainly and let silence be valid."
     ),
     "architectural": (
         "How should recognition-native systems be built? DEQ, fixed-point layers, "

@@ -5,7 +5,7 @@ Scans local files for research-relevant signals and optionally uses
 ``claude -p`` subprocess for AI landscape scanning (when available).
 
 Output: ``~/.dharma/meta/zeitgeist.md`` + ``zeitgeist.jsonl``
-Daily cadence.
+Orchestrated cadence: every 600 s (ZEITGEIST_INTERVAL in orchestrate_live).
 """
 
 from __future__ import annotations

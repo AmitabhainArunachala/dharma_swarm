@@ -54,3 +54,9 @@ exclude = ["hooks*", "scripts*", "tests*"]
 [tool.pytest.ini_options]
 asyncio_mode = "auto"
 testpaths = ["tests"]
+timeout = 300
+filterwarnings = [
+    "ignore:'asyncio.get_event_loop_policy' is deprecated and slated for removal in Python 3.16:DeprecationWarning",
+    "ignore:'asyncio.set_event_loop_policy' is deprecated and slated for removal in Python 3.16:DeprecationWarning",
+    "ignore:`torch.jit.script` is not supported in Python 3.14\\+ and may break\\. Please switch to `torch.compile` or `torch.export`\\.:DeprecationWarning",
+]

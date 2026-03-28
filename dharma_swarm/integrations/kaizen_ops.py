@@ -8,6 +8,8 @@ from typing import Any
 
 import httpx
 
+from dharma_swarm.api_keys import DGC_KAIZENOPS_API_KEY_ENV
+
 
 class KaizenOpsError(RuntimeError):
     """Raised when KaizenOps API requests fail."""
@@ -26,7 +28,7 @@ class KaizenOpsConfig:
         return cls(
             base_url=os.getenv("DGC_KAIZENOPS_URL", "http://127.0.0.1:8765"),
             timeout_sec=float(os.getenv("DGC_KAIZENOPS_TIMEOUT_SEC", "10")),
-            api_key=os.getenv("DGC_KAIZENOPS_API_KEY"),
+            api_key=os.getenv(DGC_KAIZENOPS_API_KEY_ENV),
         )
 
 

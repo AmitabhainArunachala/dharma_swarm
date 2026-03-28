@@ -21,6 +21,11 @@ from typing import Any
 
 import aiofiles
 
+from dharma_swarm.runtime_provider import (
+    PREFERRED_LOW_COST_WITH_ANTHROPIC_RUNTIME_PROVIDERS,
+    complete_via_preferred_runtime_providers,
+)
+
 _DREAM_FILE = Path.home() / ".dharma" / "subconscious" / "dream_associations.jsonl"
 _JOURNAL_DIR = Path.home() / ".dharma" / "subconscious" / "journal"
 
@@ -62,14 +67,6 @@ async def process_recent_dreams(
     max_dreams: int = 10,
 ) -> dict[str, Any]:
     """Read recent high-salience dreams and develop them in hypnagogic mode."""
-    from dharma_swarm.api_keys import has_any_llm, get_llm_key
-
-    openrouter_key = get_llm_key("openrouter")
-    anthropic_key = get_llm_key("anthropic")
-
-    if not has_any_llm():
-        return {"error": "No LLM API keys available"}
-
     # Load recent dreams
     dreams = await _load_recent_dreams(hours_back, min_salience, max_dreams)
     if not dreams:
@@ -88,58 +85,17 @@ Keep the hypnagogic voice — half-awake, generative, not yet engineering."""
     journal_text = ""
 
     try:
-        if openrouter_key:
-            import httpx
-
-            payload = {
-                "model": "anthropic/claude-3.5-sonnet",
-                "messages": [
-                    {"role": "system", "content": _HYPNAGOGIC_SYSTEM},
-                    {"role": "user", "content": user_prompt},
-                ],
-                "temperature": 0.75,
-                "max_tokens": 3000,
-            }
-            async with httpx.AsyncClient(timeout=180.0) as client:
-                resp = await client.post(
-                    "https://openrouter.ai/api/v1/chat/completions",
-                    json=payload,
-                    headers={
-                        "Authorization": f"Bearer {openrouter_key}",
-                        "HTTP-Referer": "https://github.com/dharma-swarm",
-                        "X-Title": "Dharma Swarm Hypnagogic",
-                    },
-                )
-                if resp.status_code != 200:
-                    return {
-                        "status": "error",
-                        "error": f"OpenRouter error {resp.status_code}: {resp.text[:200]}",
-                        "dreams_processed": len(dreams),
-                    }
-                data = resp.json()
-                choices = data.get("choices", [])
-                if not choices:
-                    return {
-                        "status": "error",
-                        "error": "OpenRouter returned empty choices",
-                        "dreams_processed": len(dreams),
-                    }
-                journal_text = choices[0].get("message", {}).get("content", "")
-        else:
-            from anthropic import AsyncAnthropic
-
-            ac = AsyncAnthropic(api_key=anthropic_key)
-            response = await ac.messages.create(
-                model="claude-sonnet-4-20250514",
-                max_tokens=3000,
-                temperature=0.75,
-                system=_HYPNAGOGIC_SYSTEM,
-                messages=[{"role": "user", "content": user_prompt}],
-            )
-            journal_text = next(
-                (b.text for b in response.content if b.type == "text"),  # type: ignore[union-attr]
-                "",
-            )
+        response, _provider_config = await complete_via_preferred_runtime_providers(
+            system=_HYPNAGOGIC_SYSTEM,
+            messages=[{"role": "user", "content": user_prompt}],
+            openrouter_model="anthropic/claude-3.5-sonnet",
+            anthropic_model="claude-sonnet-4-20250514",
+            max_tokens=3000,
+            temperature=0.75,
+            provider_order=PREFERRED_LOW_COST_WITH_ANTHROPIC_RUNTIME_PROVIDERS,
+            timeout_seconds=180.0,
+        )
+        journal_text = response.content
     except Exception as exc:
         return {
             "status": "error",

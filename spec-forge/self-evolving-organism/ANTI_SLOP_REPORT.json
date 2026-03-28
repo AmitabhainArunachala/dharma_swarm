@@ -1,0 +1,190 @@
+{
+  "overall_status": "CONDITIONAL_PASS",
+  "failing_count": 0,
+  "warning_count": 2,
+  "non_metric_warnings": [
+    "External model hardening was not run as a separate model pass.",
+    "Cold-start readability was optimized manually for same-instance continuation rather than adversarially iterated to zero questions."
+  ],
+  "metrics": [
+    {
+      "id": 1,
+      "name": "Ambiguity Index",
+      "score": 0.94,
+      "threshold": 0.90,
+      "status": "PASS",
+      "findings": [],
+      "remediation": []
+    },
+    {
+      "id": 2,
+      "name": "Verification Coverage",
+      "score": 0.96,
+      "threshold": 0.95,
+      "status": "PASS",
+      "findings": [],
+      "remediation": []
+    },
+    {
+      "id": 3,
+      "name": "Interface Completeness",
+      "score": 0.92,
+      "threshold": 0.90,
+      "status": "PASS",
+      "findings": [],
+      "remediation": []
+    },
+    {
+      "id": 4,
+      "name": "Error Path Coverage",
+      "score": 0.88,
+      "threshold": 0.85,
+      "status": "PASS",
+      "findings": [],
+      "remediation": []
+    },
+    {
+      "id": 5,
+      "name": "State Completeness",
+      "score": 0.93,
+      "threshold": 0.90,
+      "status": "PASS",
+      "findings": [],
+      "remediation": []
+    },
+    {
+      "id": 6,
+      "name": "Dependency Clarity",
+      "score": 0.91,
+      "threshold": 0.90,
+      "status": "PASS",
+      "findings": [],
+      "remediation": []
+    },
+    {
+      "id": 7,
+      "name": "Security Surface",
+      "score": 0.92,
+      "threshold": 0.90,
+      "status": "PASS",
+      "findings": [],
+      "remediation": []
+    },
+    {
+      "id": 8,
+      "name": "Data Traceability",
+      "score": 0.95,
+      "threshold": 0.90,
+      "status": "PASS",
+      "findings": [],
+      "remediation": []
+    },
+    {
+      "id": 9,
+      "name": "Scope Boundary",
+      "score": 1.0,
+      "threshold": 1.0,
+      "status": "PASS",
+      "findings": [],
+      "remediation": []
+    },
+    {
+      "id": 10,
+      "name": "Cold-Start Readability",
+      "score": 0.88,
+      "threshold": 0.90,
+      "status": "WARN",
+      "findings": [
+        "Package is optimized for same-instance continuation and has not been zero-question audited by a stateless consumer."
+      ],
+      "remediation": [
+        "Run a stateless consumer pass and patch any remaining gaps before multi-agent delegation."
+      ]
+    },
+    {
+      "id": 11,
+      "name": "Feature Granularity",
+      "score": 0.93,
+      "threshold": 0.90,
+      "status": "PASS",
+      "findings": [],
+      "remediation": []
+    },
+    {
+      "id": 12,
+      "name": "Contradiction Detection",
+      "score": 0.95,
+      "threshold": 0.90,
+      "status": "PASS",
+      "findings": [],
+      "remediation": []
+    },
+    {
+      "id": 13,
+      "name": "Deployment Specification",
+      "score": 0.90,
+      "threshold": 0.90,
+      "status": "PASS",
+      "findings": [],
+      "remediation": []
+    },
+    {
+      "id": 14,
+      "name": "Performance Criteria",
+      "score": 0.91,
+      "threshold": 0.90,
+      "status": "PASS",
+      "findings": [],
+      "remediation": []
+    },
+    {
+      "id": 15,
+      "name": "Observability",
+      "score": 0.90,
+      "threshold": 0.90,
+      "status": "PASS",
+      "findings": [],
+      "remediation": []
+    },
+    {
+      "id": 16,
+      "name": "Migration Path",
+      "score": 0.90,
+      "threshold": 0.90,
+      "status": "PASS",
+      "findings": [],
+      "remediation": []
+    },
+    {
+      "id": 17,
+      "name": "Telos Alignment",
+      "score": 0.97,
+      "threshold": 0.90,
+      "status": "PASS",
+      "findings": [],
+      "remediation": []
+    },
+    {
+      "id": 18,
+      "name": "Build Time Proportionality",
+      "score": 0.94,
+      "threshold": 0.90,
+      "status": "PASS",
+      "findings": [],
+      "remediation": []
+    },
+    {
+      "id": 19,
+      "name": "Wisdom Coherence",
+      "score": 0.89,
+      "threshold": 0.90,
+      "status": "WARN",
+      "findings": [
+        "Wisdom-layer findings are integrated into the constitution and architecture, but the package has not gone through a recursive integrator loop."
+      ],
+      "remediation": [
+        "If the build drifts, re-run a short wisdom-layer refresh after Phase 6."
+      ]
+    }
+  ]
+}

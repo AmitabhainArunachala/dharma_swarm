@@ -6,6 +6,8 @@ from collections.abc import AsyncIterator
 
 import pytest
 
+from dharma_swarm.model_hierarchy import DEFAULT_MODELS
+from dharma_swarm.models import ProviderType
 from dharma_swarm.tui.engine.adapters.base import CompletionRequest, ProviderConfig
 from dharma_swarm.tui.engine.adapters.openrouter import OpenRouterAdapter
 from dharma_swarm.tui.engine.events import ErrorEvent, SessionEnd, TextComplete, UsageReport
@@ -44,6 +46,13 @@ async def _collect_events(adapter: OpenRouterAdapter) -> list[object]:
     async for ev in adapter.stream(request, session_id="sid-1"):
         events.append(ev)
     return events
+
+
+def test_openrouter_adapter_defaults_to_canonical_runtime_model() -> None:
+    adapter = OpenRouterAdapter()
+    profile = adapter.get_profile()
+
+    assert profile.model_id == DEFAULT_MODELS[ProviderType.OPENROUTER]
 
 
 @pytest.mark.asyncio
@@ -88,6 +97,39 @@ async def test_openrouter_success_emits_text_and_usage(monkeypatch: pytest.Monke
     )
     assert any(
         isinstance(ev, UsageReport) and ev.total_cost_usd == 0.02 for ev in events
+    )
+    assert any(isinstance(ev, SessionEnd) and ev.success for ev in events)
+
+
+@pytest.mark.asyncio
+async def test_openrouter_success_emits_reasoning_when_content_missing(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    response = _FakeResponse(
+        200,
+        {
+            "choices": [{
+                "message": {
+                    "content": None,
+                    "reasoning": "hi from reasoning",
+                }
+            }],
+            "usage": {"prompt_tokens": 11, "completion_tokens": 7, "total_cost": 0.02},
+        },
+    )
+    monkeypatch.setattr(
+        "dharma_swarm.tui.engine.adapters.openrouter.httpx.AsyncClient",
+        lambda timeout: _FakeClient(response),
+    )
+    adapter = OpenRouterAdapter(
+        ProviderConfig(provider_id="openrouter", api_key="test-key")
+    )
+
+    events = await _collect_events(adapter)
+
+    assert any(
+        isinstance(ev, TextComplete) and ev.content == "hi from reasoning"
+        for ev in events
     )
     assert any(isinstance(ev, SessionEnd) and ev.success for ev in events)
 

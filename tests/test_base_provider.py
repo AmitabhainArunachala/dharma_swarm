@@ -13,12 +13,16 @@ from dharma_swarm.models import LLMResponse
 from dharma_swarm.providers import (
     AnthropicProvider,
     ClaudeCodeProvider,
+    FireworksProvider,
+    GroqProvider,
     LLMProvider,
     NVIDIANIMProvider,
     OllamaProvider,
     OpenAIProvider,
     OpenRouterFreeProvider,
     OpenRouterProvider,
+    SiliconFlowProvider,
+    TogetherProvider,
 )
 
 
@@ -34,12 +38,28 @@ class TestProviderCapabilities:
         assert OpenAIProvider.capabilities.provider_family == "openai"
 
     def test_openrouter_caps(self) -> None:
-        assert OpenRouterProvider.capabilities.supports_tools is False
+        assert OpenRouterProvider.capabilities.supports_tools is True
         assert OpenRouterProvider.capabilities.provider_family == "openrouter"
 
     def test_nvidia_caps(self) -> None:
         assert NVIDIANIMProvider.capabilities.can_close is True
         assert NVIDIANIMProvider.capabilities.provider_family == "nvidia"
+
+    def test_groq_caps(self) -> None:
+        assert GroqProvider.capabilities.supports_tools is True
+        assert GroqProvider.capabilities.provider_family == "groq"
+
+    def test_siliconflow_caps(self) -> None:
+        assert SiliconFlowProvider.capabilities.supports_tools is True
+        assert SiliconFlowProvider.capabilities.provider_family == "siliconflow"
+
+    def test_together_caps(self) -> None:
+        assert TogetherProvider.capabilities.supports_tools is True
+        assert TogetherProvider.capabilities.provider_family == "together"
+
+    def test_fireworks_caps(self) -> None:
+        assert FireworksProvider.capabilities.supports_tools is True
+        assert FireworksProvider.capabilities.provider_family == "fireworks"
 
     def test_ollama_caps(self) -> None:
         assert OllamaProvider.capabilities.requires_api_key is False
@@ -153,6 +173,7 @@ class TestInheritance:
 
     def test_all_providers_are_baseprovider(self) -> None:
         for cls in (AnthropicProvider, OpenAIProvider, OpenRouterProvider,
-                    NVIDIANIMProvider, OllamaProvider, ClaudeCodeProvider,
-                    OpenRouterFreeProvider):
+                    NVIDIANIMProvider, GroqProvider, SiliconFlowProvider,
+                    TogetherProvider, FireworksProvider,
+                    OllamaProvider, ClaudeCodeProvider, OpenRouterFreeProvider):
             assert issubclass(cls, BaseProvider), f"{cls.__name__} not a BaseProvider"

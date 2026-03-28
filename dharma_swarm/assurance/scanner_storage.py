@@ -144,11 +144,14 @@ def scan(
                                 proposed_fix="Guard the path or update it to the real base directory",
                             ))
 
-            if "MessageBus" in line and ("message_bus.db" in line or "messages.db" in line):
-                basename = "message_bus.db" if "message_bus.db" in line else "messages.db"
+            # Use regex to match actual filenames, not dict keys like "message_bus_db"
+            _mb_file_match = re.search(r'["\']message_bus\.db["\']|/message_bus\.db', line)
+            _msg_file_match = re.search(r'["\']messages\.db["\']|/messages\.db', line)
+            if "MessageBus" in line and (_mb_file_match or _msg_file_match):
+                basename = "message_bus.db" if _mb_file_match else "messages.db"
                 message_bus_locations.append((pyfile, line_no, basename, stripped))
-            elif ("message_bus.db" in line or "messages.db" in line) and "MessageBus" in content:
-                basename = "message_bus.db" if "message_bus.db" in line else "messages.db"
+            elif (_mb_file_match or _msg_file_match) and "MessageBus" in content:
+                basename = "message_bus.db" if _mb_file_match else "messages.db"
                 message_bus_locations.append((pyfile, line_no, basename, stripped))
 
     basenames = sorted({entry[2] for entry in message_bus_locations})

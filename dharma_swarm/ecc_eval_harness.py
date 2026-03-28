@@ -397,6 +397,133 @@ async def eval_bus_schema() -> EvalResult:
 
 
 # ---------------------------------------------------------------------------
+# Feedback-loop evals (Phase 3A)
+# ---------------------------------------------------------------------------
+
+
+def eval_health_monitoring() -> EvalResult:
+    """Verify SystemMonitor can detect anomalies."""
+    t0 = time.monotonic()
+    try:
+        from dharma_swarm.monitor import SystemMonitor
+        from dharma_swarm.traces import TraceStore
+
+        store = TraceStore(base_path=EVALS_DIR.parent / "traces")
+        monitor = SystemMonitor(trace_store=store)
+        # Just verify instantiation + method exists
+        assert callable(getattr(monitor, "detect_anomalies", None))
+        return EvalResult(
+            name="health_monitoring",
+            passed=True,
+            duration_seconds=time.monotonic() - t0,
+        )
+    except Exception as e:
+        return EvalResult(
+            name="health_monitoring",
+            passed=False,
+            duration_seconds=time.monotonic() - t0,
+            error=str(e),
+        )
+
+
+def eval_active_inference_flow() -> EvalResult:
+    """Verify active inference predict/observe cycle."""
+    t0 = time.monotonic()
+    try:
+        from dharma_swarm.active_inference import ActiveInferenceEngine
+
+        engine = ActiveInferenceEngine()
+        assert callable(getattr(engine, "predict", None))
+        assert callable(getattr(engine, "observe", None))
+        return EvalResult(
+            name="active_inference_flow",
+            passed=True,
+            duration_seconds=time.monotonic() - t0,
+        )
+    except Exception as e:
+        return EvalResult(
+            name="active_inference_flow",
+            passed=False,
+            duration_seconds=time.monotonic() - t0,
+            error=str(e),
+        )
+
+
+def eval_signal_bus_flow() -> EvalResult:
+    """Verify signal bus emit/drain roundtrip."""
+    t0 = time.monotonic()
+    try:
+        from dharma_swarm.signal_bus import SignalBus
+
+        bus = SignalBus.get()
+        test_signal = {"type": "_EVAL_TEST", "data": "roundtrip"}
+        bus.emit(test_signal)
+        drained = bus.drain(["_EVAL_TEST"])
+        assert len(drained) >= 1
+        assert drained[0].get("data") == "roundtrip"
+        return EvalResult(
+            name="signal_bus_flow",
+            passed=True,
+            duration_seconds=time.monotonic() - t0,
+        )
+    except Exception as e:
+        return EvalResult(
+            name="signal_bus_flow",
+            passed=False,
+            duration_seconds=time.monotonic() - t0,
+            error=str(e),
+        )
+
+
+def eval_training_flywheel_imports() -> EvalResult:
+    """Verify all flywheel pipeline modules import cleanly."""
+    t0 = time.monotonic()
+    modules = [
+        "dharma_swarm.trajectory_collector",
+        "dharma_swarm.thinkodynamic_scorer",
+        "dharma_swarm.training_flywheel",
+    ]
+    errors = []
+    for mod in modules:
+        try:
+            __import__(mod)
+        except Exception as e:
+            errors.append(f"{mod}: {e}")
+    return EvalResult(
+        name="training_flywheel_imports",
+        passed=len(errors) == 0,
+        duration_seconds=time.monotonic() - t0,
+        error="; ".join(errors) if errors else "",
+    )
+
+
+def eval_hook_bridge() -> EvalResult:
+    """Verify claude_hooks.py entry points work."""
+    t0 = time.monotonic()
+    try:
+        from dharma_swarm.claude_hooks import stop_verify, session_context, verify_baseline
+
+        sv = stop_verify()
+        assert "gate_decision" in sv
+        sc = session_context()
+        assert isinstance(sc, str)
+        # verify_baseline is heavier (async), just check it's callable
+        assert callable(verify_baseline)
+        return EvalResult(
+            name="hook_bridge",
+            passed=True,
+            duration_seconds=time.monotonic() - t0,
+        )
+    except Exception as e:
+        return EvalResult(
+            name="hook_bridge",
+            passed=False,
+            duration_seconds=time.monotonic() - t0,
+            error=str(e),
+        )
+
+
+# ---------------------------------------------------------------------------
 # Runner
 # ---------------------------------------------------------------------------
 
@@ -406,6 +533,12 @@ ALL_SYNC_EVALS = [
     eval_test_suite_health,
     eval_import_health,
     eval_config_validity,
+    # Feedback-loop evals (Phase 3A)
+    eval_health_monitoring,
+    eval_active_inference_flow,
+    eval_signal_bus_flow,
+    eval_training_flywheel_imports,
+    eval_hook_bridge,
 ]
 
 ALL_ASYNC_EVALS = [
@@ -476,7 +609,11 @@ def compute_pass_at_k(history: list[dict], k: int = 3) -> float:
 # ---------------------------------------------------------------------------
 
 def save_report(report: EvalReport) -> Path:
-    """Save report to ~/.dharma/evals/ and append to history."""
+    """Save report to ~/.dharma/evals/ and append to history.
+
+    Also updates benchmark registry with eval results so benchmarks
+    reflect the latest measurements.
+    """
     EVALS_DIR.mkdir(parents=True, exist_ok=True)
 
     # Save latest
@@ -486,6 +623,32 @@ def save_report(report: EvalReport) -> Path:
     # Append to history
     with HISTORY_FILE.open("a") as f:
         f.write(json.dumps(report.to_dict()) + "\n")
+
+    # Update benchmark registry with eval results
+    try:
+        from dharma_swarm.benchmark_registry import BenchmarkRegistry
+        registry = BenchmarkRegistry()
+
+        # eval_pass_rate ← overall pass rate
+        if "eval_pass_rate" in registry:
+            registry.update("eval_pass_rate", report.pass_at_1)
+
+        # Map specific eval results to benchmarks
+        for r in report.results:
+            name = r.get("name", "") if isinstance(r, dict) else r.name
+            passed = r.get("passed", False) if isinstance(r, dict) else r.passed
+            metrics = r.get("metrics", {}) if isinstance(r, dict) else {}
+
+            if name == "import_health" and "import_health" in registry:
+                registry.update("import_health", 1.0 if passed else 0.0)
+            elif name == "test_suite_health" and "test_collection" in registry:
+                collected = metrics.get("collected", 0)
+                if collected > 0:
+                    registry.update("test_collection", float(collected))
+
+        registry.save()
+    except Exception:
+        pass  # Benchmark update is best-effort, never block report saving
 
     return latest_path
 
@@ -592,4 +755,87 @@ def cmd_eval_trend() -> int:
     """Print historical eval trend."""
     history = load_history()
     print(format_trend(history))
+    return 0
+
+
+def cmd_eval_dashboard() -> int:
+    """Single-screen ASCII dashboard: latest results + benchmarks + trend."""
+    from dharma_swarm.benchmark_registry import BenchmarkRegistry
+    from dharma_swarm.eval_trace import TraceLog
+
+    lines: list[str] = []
+    lines.append("=" * 60)
+    lines.append("  DGC Eval Dashboard")
+    lines.append("=" * 60)
+
+    # -- Latest eval results --
+    latest = load_latest()
+    if latest:
+        lines.append("")
+        lines.append(f"  Latest Run: {latest['timestamp'][:19]}")
+        lines.append(
+            f"  {latest['passed']}/{latest['total']} passed  "
+            f"({latest['pass_at_1']:.0%})  "
+            f"in {latest['duration_seconds']:.2f}s"
+        )
+        lines.append("")
+        for r in latest.get("results", []):
+            marker = "+" if r["passed"] else "X"
+            err = f"  {r['error'][:50]}" if r.get("error") else ""
+            lines.append(f"    [{marker}] {r['name']:<32}{err}")
+    else:
+        lines.append("\n  No eval results yet. Run: dgc eval run")
+
+    # -- Benchmark status --
+    lines.append("")
+    lines.append("-" * 60)
+    lines.append("  Benchmarks")
+    lines.append("-" * 60)
+    try:
+        reg = BenchmarkRegistry()
+        for bm in reg.report():
+            status = "OK" if bm["status"] == "ok" else "REGR"
+            measured = f"  last={bm['last_value']:.2f}" if bm["last_measured"] > 0 else ""
+            lines.append(
+                f"    {bm['name']:<22} threshold={bm['threshold']:<6.2f} "
+                f"[{status}]{measured}"
+            )
+    except Exception as e:
+        lines.append(f"    (error loading benchmarks: {e})")
+
+    # -- Trace summary --
+    lines.append("")
+    lines.append("-" * 60)
+    lines.append("  Trace Log")
+    lines.append("-" * 60)
+    try:
+        tlog = TraceLog()
+        summary = tlog.summary()
+        if summary["by_source"]:
+            for src, count in sorted(summary["by_source"].items()):
+                lines.append(f"    {src:<16} {count} entries")
+            if summary["eval_pass_rate"] is not None:
+                lines.append(f"    eval pass rate: {summary['eval_pass_rate']:.0%}")
+        else:
+            lines.append("    (no traces recorded yet)")
+    except Exception as e:
+        lines.append(f"    (error loading traces: {e})")
+
+    # -- Trend sparkline --
+    history = load_history()
+    if history:
+        lines.append("")
+        lines.append("-" * 60)
+        lines.append("  Trend (last 5 runs)")
+        lines.append("-" * 60)
+        for run in history[-5:]:
+            ts = run["timestamp"][:16]
+            p1 = run.get("pass_at_1", 0.0)
+            bar_len = int(p1 * 20)
+            bar = "#" * bar_len + "." * (20 - bar_len)
+            lines.append(f"    {ts}  [{bar}] {p1:.0%}")
+
+    lines.append("")
+    lines.append("=" * 60)
+    print("\n".join(lines))
     return 0

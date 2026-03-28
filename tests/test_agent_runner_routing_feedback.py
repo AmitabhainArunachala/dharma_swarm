@@ -125,6 +125,75 @@ async def test_run_task_can_widen_provider_routing_from_task_metadata(fast_gate)
 
 
 @pytest.mark.asyncio
+async def test_run_task_resolves_model_catalog_selector_into_routing_metadata(
+    fast_gate,
+) -> None:
+    provider = _RoutedProvider(content="Open-pack response.")
+    runner = AgentRunner(
+        AgentConfig(
+            name="open-pack-agent",
+            role=AgentRole.RESEARCHER,
+            provider=ProviderType.ANTHROPIC,
+            model="claude-sonnet-4-20250514",
+            metadata={"model_catalog_selector": "top open models"},
+        ),
+        provider=provider,
+    )
+    await runner.start()
+
+    await runner.run_task(
+        Task(
+            id="task-route-pack",
+            title="Compare open-model options",
+            description="Load the top open models and compare them for this task.",
+        )
+    )
+
+    route_request, request, allowlist = provider.calls[0]
+    assert allowlist is not None
+    assert ProviderType.OPENROUTER in allowlist
+    assert ProviderType.OLLAMA in allowlist
+    assert ProviderType.ANTHROPIC not in allowlist
+    assert route_request.context["preferred_provider"] in {
+        provider_type.value for provider_type in allowlist
+    }
+    assert route_request.context["preserve_requested_model"] is False
+    assert request.model
+
+
+@pytest.mark.asyncio
+async def test_global_routed_execution_flag_does_not_override_pinned_agent_lane(
+    fast_gate,
+    monkeypatch,
+) -> None:
+    provider = _RoutedProvider(content="Pinned lane response.")
+    monkeypatch.setenv("DGC_AGENT_ROUTED_EXECUTION", "1")
+    runner = AgentRunner(
+        AgentConfig(
+            name="cyber-glm5",
+            role=AgentRole.RESEARCHER,
+            provider=ProviderType.OLLAMA,
+            model="glm-5:cloud",
+        ),
+        provider=provider,
+    )
+    await runner.start()
+
+    await runner.run_task(
+        Task(
+            id="task-route-flag",
+            title="CT-VSM live operator brief 20260327T144411Z",
+            description="Explain how the live round works and produce an operator brief.",
+        )
+    )
+
+    route_request, _, allowlist = provider.calls[0]
+    assert allowlist == [ProviderType.OLLAMA]
+    assert route_request.context["preferred_provider"] == "ollama"
+    assert route_request.context["preserve_requested_model"] is True
+
+
+@pytest.mark.asyncio
 async def test_run_task_records_failure_feedback_for_routed_provider(fast_gate) -> None:
     provider = _RoutedProvider(content="")
     runner = AgentRunner(

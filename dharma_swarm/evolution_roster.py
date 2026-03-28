@@ -25,6 +25,7 @@ from typing import Any
 
 import httpx
 
+from dharma_swarm.api_keys import PROVIDER_API_KEY_ENV_KEYS
 from dharma_swarm.models import ProviderType
 from dharma_swarm.ollama_config import (
     build_ollama_headers,
@@ -301,11 +302,18 @@ EVOLUTION_ROSTER: tuple[ModelSlot, ...] = (
 # ---------------------------------------------------------------------------
 
 _ENV_KEYS_FOR_PROVIDER: dict[ProviderType, str] = {
-    ProviderType.ANTHROPIC: "ANTHROPIC_API_KEY",
-    ProviderType.OPENAI: "OPENAI_API_KEY",
-    ProviderType.OPENROUTER: "OPENROUTER_API_KEY",
-    ProviderType.OPENROUTER_FREE: "OPENROUTER_API_KEY",  # same key
-    ProviderType.NVIDIA_NIM: "NVIDIA_NIM_API_KEY",
+    provider: PROVIDER_API_KEY_ENV_KEYS[provider.value]
+    for provider in (
+        ProviderType.ANTHROPIC,
+        ProviderType.OPENAI,
+        ProviderType.OPENROUTER,
+        ProviderType.OPENROUTER_FREE,
+        ProviderType.NVIDIA_NIM,
+        ProviderType.GROQ,
+        ProviderType.SILICONFLOW,
+        ProviderType.TOGETHER,
+        ProviderType.FIREWORKS,
+    )
 }
 
 

@@ -61,6 +61,7 @@ class SmartSeedSelector:
         Returns list of (seed_text, source_path, relevance_score).
         Falls back to random selection on any failure.
         """
+        results: list[tuple[str, str, float]] = []
         try:
             # Step 1: Build context query from hint + system state
             context = await self._extract_context_terms(hint=context_hint)
@@ -75,13 +76,29 @@ class SmartSeedSelector:
             if file_candidates:
                 selected = self._salience_weighted_sample(file_candidates, count)
                 # Step 5: Read file contents
-                return self._read_seeds(selected, max_chars)
+                results = self._read_seeds(selected, max_chars)
 
         except Exception as exc:
             logger.debug("Smart seed selection failed, falling back: %s", exc)
 
+        # Supplement with curated lodestones when smart selection yields too few
+        if len(results) <= 1:
+            try:
+                from dharma_swarm.thinkodynamic_director import read_random_seeds
+
+                extra = read_random_seeds(count=count, max_chars=max_chars)
+                existing_paths = {path for _, path, _ in results}
+                for text, path in extra:
+                    if path not in existing_paths and len(results) < count:
+                        results.append((text, path, 0.3))
+            except Exception as exc:
+                logger.debug("read_random_seeds supplement failed: %s", exc)
+
         # Fallback: random selection from hardcoded dirs
-        return self._fallback_random(count, max_chars)
+        if not results:
+            return self._fallback_random(count, max_chars)
+
+        return results
 
     # ── Context extraction ──────────────────────────────────────
 
@@ -172,7 +189,7 @@ class SmartSeedSelector:
         if context:
             for term in context.split()[:5]:
                 term_clean = term.strip().lower()
-                if len(term_clean) < 4:
+                if len(term_clean) < 7:
                     continue
                 # Search PSMV for files matching the term
                 for seed_dir in FALLBACK_SEED_DIRS:

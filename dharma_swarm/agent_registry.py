@@ -31,6 +31,7 @@ GINKO_DIR = Path(os.getenv("DHARMA_HOME", Path.home() / ".dharma")) / "ginko"
 # $/token pricing for cost computation.
 # Keys are full OpenRouter model identifiers.
 MODEL_PRICING: dict[str, float] = {
+    "xiaomi/mimo-v2-pro": 1.0e-6,  # Xiaomi MiMo-V2-Pro 1T MoE (42B active, 1M ctx) $1/M in $3/M out
     "moonshotai/kimi-k2.5": 0.45e-6,
     "deepseek/deepseek-chat-v3-0324": 0.26e-6,
     "nvidia/llama-3.1-nemotron-70b-instruct:free": 0.0,
@@ -222,6 +223,12 @@ class AgentRegistry:
     def _evolution_log_path(self, name: str) -> Path:
         return self._prompt_dir(name) / "evolution_log.jsonl"
 
+    def _runtime_fields_path(self, name: str) -> Path:
+        return self._agent_dir(name) / "runtime_fields.json"
+
+    def _frontier_tasks_path(self, name: str) -> Path:
+        return self._agent_dir(name) / "frontier_tasks.jsonl"
+
     # ── registration ───────────────────────────────────────────────────
 
     def register_agent(
@@ -230,6 +237,7 @@ class AgentRegistry:
         role: str,
         model: str,
         system_prompt: str,
+        runtime_fields: list[dict[str, Any]] | None = None,
     ) -> dict[str, Any]:
         """Create identity.json + prompt_variants/active.txt.
 
@@ -242,6 +250,8 @@ class AgentRegistry:
         if identity_path.exists():
             existing = _read_json(identity_path)
             if existing is not None:
+                if runtime_fields is not None:
+                    self.set_runtime_fields(name, runtime_fields)
                 logger.info("Agent '%s' already registered — returning existing.", name)
                 return existing
 
@@ -280,8 +290,38 @@ class AgentRegistry:
             "prompt_preview": system_prompt[:200],
         })
 
+        if runtime_fields is not None:
+            self.set_runtime_fields(name, runtime_fields)
+
         logger.info("Registered agent '%s' (role=%s, model=%s).", name, role, model)
         return data
+
+    def set_runtime_fields(self, name: str, fields: list[dict[str, Any]]) -> None:
+        """Persist the runtime field manifest for an agent."""
+        payload = {
+            "agent": name,
+            "updated_at": _jikoku(),
+            "fields": fields,
+        }
+        _write_json(self._runtime_fields_path(name), payload)
+
+    def get_runtime_fields(self, name: str) -> list[dict[str, Any]]:
+        """Load the runtime field manifest for an agent, if present."""
+        data = _read_json(self._runtime_fields_path(name))
+        if not data:
+            return []
+        fields = data.get("fields", [])
+        return fields if isinstance(fields, list) else []
+
+    def append_frontier_tasks(self, name: str, tasks: list[Any]) -> None:
+        """Persist frontier task proposals for an agent without a second task store."""
+        for task in tasks:
+            payload = task.model_dump() if hasattr(task, "model_dump") else dict(task)
+            _append_jsonl(self._frontier_tasks_path(name), payload)
+
+    def get_frontier_tasks(self, name: str) -> list[dict[str, Any]]:
+        """Load frontier task proposals persisted for an agent."""
+        return _read_jsonl(self._frontier_tasks_path(name))
 
     # ── loading ────────────────────────────────────────────────────────
 

@@ -18,6 +18,11 @@ from datetime import date, datetime, timezone
 from pathlib import Path
 from typing import Any
 
+from dharma_swarm.runtime_provider import (
+    PREFERRED_LOW_COST_WITH_ANTHROPIC_RUNTIME_PROVIDERS,
+    complete_via_preferred_runtime_providers,
+)
+
 # COLM 2026 deadlines
 _COLM_ABSTRACT_DATE = date(2026, 3, 26)
 _COLM_PAPER_DATE = date(2026, 3, 31)
@@ -411,7 +416,6 @@ def gather_system_state() -> dict[str, Any]:
 
     # Check API keys (existence only, not values)
     api_status = {}
-    from dharma_swarm.api_keys import PROVIDER_ENV_KEYS, provider_available
     for key_name in ("OPENROUTER_API_KEY", "ANTHROPIC_API_KEY", "OPENAI_API_KEY"):
         val = os.getenv(key_name, "")
         if val:
@@ -496,13 +500,6 @@ async def generate_evolved_prompt(
     Returns:
         The generated evolved prompt text.
     """
-    import httpx
-
-    from dharma_swarm.api_keys import get_llm_key
-    openrouter_key = get_llm_key("openrouter")
-    if not openrouter_key:
-        raise RuntimeError("No LLM API key configured (need OPENROUTER_API_KEY or similar)")
-
     # Auto-calculate COLM days if not provided
     if colm_days is None:
         colm_days, _ = _days_to_colm()
@@ -563,34 +560,19 @@ async def generate_evolved_prompt(
             extras.append(f"**Quality gap**:\n{quality_gap}")
         prompt_text += "\n\n## ADDITIONAL CONTEXT\n\n" + "\n\n".join(extras)
 
-    # Use Sonnet for meta-level prompt engineering (cheaper than Opus, fast)
-    async with httpx.AsyncClient(timeout=httpx.Timeout(llm_timeout_sec)) as client:
-        resp = await client.post(
-            "https://openrouter.ai/api/v1/chat/completions",
-            json={
-                "model": "anthropic/claude-3.5-sonnet",
-                "messages": [{"role": "user", "content": prompt_text}],
-                "temperature": 0.7,
-                "max_tokens": 4000,
-            },
-            headers={
-                "Authorization": f"Bearer {openrouter_key}",
-                "HTTP-Referer": "https://github.com/dharma-swarm",
-                "X-Title": "Dharma Swarm Master Prompt Engineer",
-            },
-        )
-
-        if resp.status_code != 200:
-            raise RuntimeError(f"OpenRouter error {resp.status_code}: {resp.text[:200]}")
-
-        data = resp.json()
-        choices = data.get("choices", [])
-        if not choices:
-            raise RuntimeError("OpenRouter returned empty choices")
-        evolved_prompt = choices[0].get("message", {}).get("content", "")
+    response, _provider_config = await complete_via_preferred_runtime_providers(
+        messages=[{"role": "user", "content": prompt_text}],
+        openrouter_model="anthropic/claude-3.5-sonnet",
+        anthropic_model="claude-sonnet-4-20250514",
+        max_tokens=4000,
+        temperature=0.7,
+        provider_order=PREFERRED_LOW_COST_WITH_ANTHROPIC_RUNTIME_PROVIDERS,
+        timeout_seconds=llm_timeout_sec,
+    )
+    evolved_prompt = response.content
 
     if not evolved_prompt.strip():
-        raise RuntimeError("OpenRouter returned empty prompt content")
+        raise RuntimeError("Runtime provider returned empty prompt content")
 
     return evolved_prompt
 

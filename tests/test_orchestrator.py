@@ -212,6 +212,43 @@ async def test_route_next_prefers_reviewer_for_uncertain_coordination_task():
 
 
 @pytest.mark.asyncio
+async def test_route_next_prefers_director_named_agent_over_role_match():
+    board = MockTaskBoard()
+    board.tasks = [
+        Task(
+            id="t-cyber",
+            title="Wire cybernetics lever",
+            metadata={
+                "director_preferred_agents": ["cyber-codex", "cyber-opus"],
+                "coordination_preferred_roles": ["architect"],
+            },
+        )
+    ]
+    pool = MockAgentPool(
+        [
+            AgentState(
+                id="a-opus-legacy",
+                name="opus-primus",
+                role=AgentRole.ARCHITECT,
+                status=AgentStatus.IDLE,
+            ),
+            AgentState(
+                id="a-cyber-codex",
+                name="cyber-codex",
+                role=AgentRole.SURGEON,
+                status=AgentStatus.IDLE,
+            ),
+        ]
+    )
+    orch = Orchestrator(task_board=board, agent_pool=pool)
+
+    dispatches = await orch.route_next()
+
+    assert len(dispatches) == 1
+    assert dispatches[0].agent_id == "a-cyber-codex"
+
+
+@pytest.mark.asyncio
 async def test_fan_in(agents):
     pool = MockAgentPool(agents)
     pool.set_result("a1", "result from agent 1")
@@ -569,6 +606,51 @@ async def test_orchestrator_writes_task_and_progress_ledgers(tmp_path):
     assert "task_started" in progress_events
     assert "task_completed" in progress_events
     assert any(topic == "orchestrator.lifecycle" for topic, _ in bus.published)
+
+
+@pytest.mark.asyncio
+async def test_orchestrator_fail_closes_when_honors_checkpoint_missing(tmp_path):
+    board = MockTaskBoard()
+    board.tasks = [
+        Task(
+            id="t-honors-missing",
+            title="Defended analysis",
+            description="safe",
+            metadata={
+                "max_retries": 0,
+                "completion_contract": {
+                    "mode": "honors",
+                    "minimum_file_references": 1,
+                },
+            },
+        )
+    ]
+    pool = MockAgentPool(
+        [AgentState(id="a1", name="agent-1", role=AgentRole.GENERAL, status=AgentStatus.IDLE)]
+    )
+    pool.set_runner("a1", DummyRunner(result="Looks polished but carried no checkpoint packet."))
+
+    orch = Orchestrator(
+        task_board=board,
+        agent_pool=pool,
+        ledger_dir=tmp_path,
+        session_id="sess_honors_missing",
+    )
+
+    await orch.route_next()
+    for _ in range(50):
+        if not orch._running_tasks:
+            break
+        await orch._collect_completed()
+        await asyncio.sleep(0.01)
+    await orch._collect_completed()
+
+    assert any(
+        task_id == "t-honors-missing"
+        and fields.get("status") == TaskStatus.FAILED
+        and "honors checkpoint" in str(fields.get("result", "")).lower()
+        for task_id, fields in board.updates
+    )
 
 
 @pytest.mark.asyncio

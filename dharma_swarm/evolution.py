@@ -11,9 +11,12 @@ from __future__ import annotations
 
 import asyncio
 from collections import defaultdict
+from dataclasses import dataclass
 import hashlib
+import inspect
 import logging
 import re
+import shlex
 import shutil
 from tempfile import TemporaryDirectory
 import time
@@ -29,6 +32,7 @@ from dharma_swarm.archive import (
     EvolutionArchive,
     FitnessScore,
     normalize_fitness_weights,
+    research_reward_to_fitness,
 )
 from dharma_swarm.convergence import ConvergenceConfig, ConvergenceDetector
 from dharma_swarm.diff_applier import DiffApplier
@@ -46,6 +50,8 @@ from dharma_swarm.fitness_predictor import FitnessPredictor, ProposalFeatures
 from dharma_swarm.jikoku_instrumentation import jikoku_auto_span
 from dharma_swarm.landscape import FitnessLandscapeMapper, LandscapeProbe
 from dharma_swarm.models import GateDecision, GateResult, SandboxResult, _new_id, _utc_now
+from dharma_swarm.pending_proposals import PENDING_PROPOSALS_FILE
+from dharma_swarm.quality_gates import QualityGateResult, run_quality_gate
 from dharma_swarm.router_retrospective import (
     DriftGuardDecision,
     DriftGuardThresholds,
@@ -165,6 +171,16 @@ class EvolutionPlan(BaseModel):
     created_at: str = Field(default_factory=lambda: _utc_now().isoformat())
 
 
+@dataclass
+class RuntimeFieldEvolutionResult:
+    """Outcome of a runtime-field Darwin trial."""
+
+    proposal: Proposal
+    archive_entry_id: str
+    trial_result: Any
+    reward_signal: Any | None = None
+
+
 # ---------------------------------------------------------------------------
 # Darwin Engine
 # ---------------------------------------------------------------------------
@@ -211,6 +227,10 @@ class DarwinEngine:
         meta_auto_apply: bool = True,
         experiment_log_path: Path | None = None,
         router_drift_thresholds: DriftGuardThresholds | None = None,
+        quality_gate_threshold: float = 60.0,
+        quality_gate_enabled: bool = False,
+        quality_gate_use_llm: bool = False,
+        quality_gate_provider: Any = None,
     ) -> None:
         self.archive = EvolutionArchive(path=archive_path)
         self.traces = TraceStore(base_path=traces_path)
@@ -238,6 +258,14 @@ class DarwinEngine:
         self.execution_profile_registry = ExecutionProfileRegistry.from_configs(
             probe_targets
         )
+        # Quality gates: post-fitness evaluation filter (must be before MetaEvolutionEngine
+        # which calls get_meta_parameter_state() which references these)
+        self._quality_gate_threshold = max(0.0, min(100.0, float(quality_gate_threshold)))
+        self._quality_gate_enabled = bool(quality_gate_enabled)
+        self._quality_gate_use_llm = bool(quality_gate_use_llm)
+        self._quality_gate_provider = quality_gate_provider
+        self.last_quality_gate_result: QualityGateResult | None = None
+
         self._meta_evolution_interval = max(0, int(meta_evolution_interval))
         self.last_meta_evolution_result: Any | None = None
         self.last_coordination_summary: dict[str, Any] = {}
@@ -257,6 +285,10 @@ class DarwinEngine:
         self._adaptive_strategy = "explore"
         self._max_cycle_tokens = max(0, int(max_cycle_tokens))
         self._session_tokens_used = 0
+        # Mutation budget: max mutations per day (prevents runaway self-modification)
+        self._daily_mutation_budget = 5
+        self._mutations_today = 0
+        self._budget_reset_date = ""
         self.last_landscape_probe: LandscapeProbe | None = None
         self.last_experiment_memory: ExperimentMemorySnapshot | None = None
         self.landscape_mapper = FitnessLandscapeMapper(self)
@@ -392,6 +424,8 @@ class DarwinEngine:
             "exploration_coeff": self.ucb_selector.state.exploration_coeff,
             "circuit_breaker_limit": self._circuit_breaker_limit,
             "map_elites_n_bins": self._map_elites_n_bins,
+            "quality_gate_threshold": self._quality_gate_threshold,
+            "quality_gate_enabled": self._quality_gate_enabled,
         }
 
     def apply_meta_parameters(self, meta_params: Any) -> dict[str, Any]:
@@ -450,6 +484,154 @@ class DarwinEngine:
             return str(source_file.resolve().relative_to(Path.cwd().resolve()))
         except ValueError:
             return source_file.name
+
+    @staticmethod
+    def _workspace_roots(workspace: Path | None = None) -> list[Path]:
+        """Return candidate roots for resolving component and test paths."""
+        roots: list[Path] = []
+        if workspace is not None:
+            roots.append(Path(workspace).resolve())
+        cwd = Path.cwd().resolve()
+        if cwd not in roots:
+            roots.append(cwd)
+        return roots
+
+    @classmethod
+    def _candidate_component_paths(
+        cls,
+        component: str,
+        *,
+        workspace: Path | None = None,
+    ) -> list[Path]:
+        """Enumerate plausible on-disk locations for a component path."""
+        component_path = Path(component)
+        if component_path.is_absolute():
+            return [component_path]
+
+        candidates: list[Path] = []
+        seen: set[Path] = set()
+        for root in cls._workspace_roots(workspace):
+            options = [root / component_path]
+            if len(component_path.parts) == 1:
+                options.append(root / "dharma_swarm" / component_path.name)
+            for option in options:
+                resolved = option.resolve()
+                if resolved in seen:
+                    continue
+                seen.add(resolved)
+                candidates.append(resolved)
+        return candidates
+
+    @classmethod
+    def _resolve_component_source_path(
+        cls,
+        component: str,
+        *,
+        workspace: Path | None = None,
+    ) -> Path | None:
+        """Resolve a component to an existing source file when possible."""
+        for candidate in cls._candidate_component_paths(component, workspace=workspace):
+            if candidate.is_file():
+                return candidate
+        return None
+
+    @classmethod
+    def _infer_component_test_command(
+        cls,
+        component: str,
+        *,
+        workspace: Path | None = None,
+    ) -> str | None:
+        """Infer a targeted pytest command for a component when convention matches."""
+        component_path = Path(component)
+        stem = component_path.stem.strip()
+        if not stem:
+            return None
+
+        for root in cls._workspace_roots(workspace):
+            candidates: list[Path] = [root / "tests" / f"test_{stem}.py"]
+            if component_path.parent != Path("."):
+                candidates.append(root / component_path.parent / f"test_{stem}.py")
+            for candidate in candidates:
+                if not candidate.is_file():
+                    continue
+                try:
+                    command_target = candidate.resolve().relative_to(root)
+                except ValueError:
+                    command_target = candidate.resolve()
+                return (
+                    "python3 -m pytest "
+                    f"{shlex.quote(command_target.as_posix())} -q --tb=short"
+                )
+        return None
+
+    @staticmethod
+    def _read_component_code(source_file: Path | None) -> str | None:
+        """Read Python source for elegance scoring when a file is available."""
+        if source_file is None or not source_file.is_file():
+            return None
+        try:
+            return source_file.read_text(encoding="utf-8")
+        except OSError:
+            return None
+
+    def _resolve_cycle_execution_target(
+        self,
+        component: str,
+    ) -> tuple[ResolvedExecutionProfile, Path | None]:
+        """Resolve the best runtime-validation target for ``run_cycle``."""
+        resolved = self.execution_profile_registry.resolve(component)
+        target = ResolvedExecutionProfile(
+            component=component,
+            profile_name=(
+                resolved.profile_name if resolved is not None else "unvalidated"
+            ),
+            workspace=resolved.workspace if resolved is not None else None,
+            test_command=resolved.test_command if resolved is not None else None,
+            timeout=resolved.timeout if resolved is not None else None,
+            matched_pattern=resolved.matched_pattern if resolved is not None else None,
+            priority=resolved.priority if resolved is not None else 0,
+            risk_level=resolved.risk_level if resolved is not None else "medium",
+            expected_metrics=(
+                list(resolved.expected_metrics) if resolved is not None else []
+            ),
+            rollback_policy=(
+                resolved.rollback_policy if resolved is not None else "discard"
+            ),
+            evidence_tier=(
+                resolved.evidence_tier
+                if resolved is not None
+                else EvidenceTier.UNVALIDATED
+            ),
+        )
+
+        if target.test_command is None:
+            inferred = self._infer_component_test_command(
+                component,
+                workspace=target.workspace,
+            )
+            if inferred is not None:
+                target.test_command = inferred
+                target.timeout = target.timeout or 60.0
+                target.expected_metrics = list(target.expected_metrics or ["pass_rate"])
+                if target.evidence_tier == EvidenceTier.UNVALIDATED:
+                    target.evidence_tier = EvidenceTier.COMPONENT
+                if target.profile_name == "unvalidated":
+                    target.profile_name = "component_inferred"
+                # Ensure workspace is set so sandbox runs in the right dir
+                if target.workspace is None:
+                    for root in self._workspace_roots():
+                        if (root / "tests").is_dir():
+                            target.workspace = root
+                            break
+        elif target.timeout is None:
+            target.timeout = 60.0
+
+        source_file = self._resolve_component_source_path(
+            component,
+            workspace=target.workspace,
+        )
+        return target, source_file
 
     def get_contextual_mutation_rate(
         self,
@@ -1023,6 +1205,24 @@ class DarwinEngine:
         self._initialized = True
         logger.info("DarwinEngine initialized")
 
+    async def flush_trace_tasks(self) -> None:
+        """Wait for pending background trace writes to finish."""
+        if not self._trace_tasks:
+            return
+
+        pending = tuple(self._trace_tasks)
+        results = await asyncio.gather(*pending, return_exceptions=True)
+        self._trace_tasks.difference_update(pending)
+
+        for result in results:
+            if isinstance(result, Exception):
+                logger.warning("Background trace logging failed during flush", exc_info=result)
+
+    async def close(self) -> None:
+        """Flush background tasks owned by the Darwin engine."""
+        await self.flush_trace_tasks()
+        self._initialized = False
+
     # -- proposal creation ---------------------------------------------------
 
     async def propose(
@@ -1411,6 +1611,43 @@ class DarwinEngine:
             )
             return proposal
 
+    # -- quality gate --------------------------------------------------------
+
+    async def _run_quality_gate(self, proposal: Proposal) -> QualityGateResult:
+        """Run quality gate on an evaluated proposal.
+
+        Uses the proposal description, diff, and any code artifact to
+        determine whether the proposal meets minimum quality standards.
+        Falls back to structural analysis if no LLM provider is available.
+
+        Args:
+            proposal: The evaluated proposal to gate.
+
+        Returns:
+            QualityGateResult with pass/fail, score, and feedback.
+        """
+        code = None
+        if proposal.diff and proposal.diff.strip():
+            # Extract added lines from diff as "code" for code quality gate
+            added_lines = []
+            for line in proposal.diff.splitlines():
+                if line.startswith("+") and not line.startswith("+++"):
+                    added_lines.append(line[1:])
+            if added_lines:
+                code = "\n".join(added_lines)
+
+        return await run_quality_gate(
+            proposal_description=proposal.description,
+            proposal_diff=proposal.diff,
+            proposal_component=proposal.component,
+            proposal_change_type=proposal.change_type,
+            code=code,
+            threshold=self._quality_gate_threshold,
+            provider=self._quality_gate_provider,
+            use_llm=self._quality_gate_use_llm,
+            cache_enabled=True,
+        )
+
     # -- archiving -----------------------------------------------------------
 
     async def archive_result(self, proposal: Proposal) -> str:
@@ -1578,6 +1815,114 @@ class DarwinEngine:
         )
         return entry_id
 
+    async def run_runtime_field_trial(
+        self,
+        *,
+        component: str,
+        registry: Any,
+        mutations: list[Any],
+        evaluate: Callable[[], Any],
+        description: str,
+        parent_id: str | None = None,
+        spec_ref: str | None = None,
+        requirement_refs: list[str] | None = None,
+        metadata: dict[str, Any] | None = None,
+    ) -> RuntimeFieldEvolutionResult:
+        """Run one reward-scored runtime-field trial through the archive path."""
+
+        from dharma_swarm.optimizer_bridge import (
+            apply_runtime_field_mutations,
+            render_runtime_field_trial_diff,
+            rollback_runtime_field_trial,
+        )
+
+        proposal = Proposal(
+            component=component,
+            change_type="runtime_field_trial",
+            description=description,
+            parent_id=parent_id,
+            spec_ref=spec_ref,
+            requirement_refs=list(requirement_refs or []),
+            diff=render_runtime_field_trial_diff(mutations),
+            metadata=dict(metadata or {}),
+        )
+        trial_result = apply_runtime_field_mutations(registry, mutations)
+        reward_signal: Any | None = None
+
+        try:
+            outcome = evaluate()
+            if inspect.isawaitable(outcome):
+                outcome = await outcome
+            reward_signal = outcome
+            proposal.actual_fitness = research_reward_to_fitness(reward_signal)
+            proposal.gate_decision = GateDecision.ALLOW.value
+
+            reward_payload = (
+                reward_signal.model_dump()
+                if hasattr(reward_signal, "model_dump")
+                else dict(reward_signal)
+            )
+            grade_card = dict(reward_payload.get("grade_card") or {})
+            proposal.promotion_state = derive_promotion_state(
+                evidence_tier=proposal.evidence_tier,
+                pass_rate=1.0,
+                rolled_back=True,
+            ).value
+            proposal.test_results["runtime_field_trial"] = {
+                "mutated_fields": list(trial_result.applied_fields),
+                "before": dict(trial_result.before),
+                "after": dict(trial_result.after),
+                "reward_signal": reward_payload,
+                "reward_promotion_state": str(grade_card.get("promotion_state") or ""),
+            }
+        except Exception as exc:
+            error = str(exc) or exc.__class__.__name__
+            trial_result.error = error
+            proposal.actual_fitness = FitnessScore(safety=0.0)
+            proposal.gate_decision = GateDecision.BLOCK.value
+            proposal.gate_reason = error
+            proposal.promotion_state = PromotionState.CANDIDATE.value
+            proposal.test_results["runtime_field_trial"] = {
+                "mutated_fields": list(trial_result.applied_fields),
+                "before": dict(trial_result.before),
+                "after": dict(trial_result.after),
+                "error": error,
+            }
+        finally:
+            rollback_runtime_field_trial(registry, trial_result)
+            proposal.test_results.setdefault("runtime_field_trial", {})
+            proposal.test_results["runtime_field_trial"]["rolled_back"] = (
+                trial_result.rolled_back
+            )
+
+        archive_entry_id = await self.archive_result(proposal)
+        return RuntimeFieldEvolutionResult(
+            proposal=proposal,
+            archive_entry_id=archive_entry_id,
+            trial_result=trial_result,
+            reward_signal=reward_signal,
+        )
+
+    def propose_curriculum_tasks(
+        self,
+        *,
+        report: Any,
+        reward_signal: Any,
+        curriculum_engine: Any | None = None,
+    ) -> list[Any]:
+        """Explicitly derive frontier tasks from a poor or uncertain research result."""
+
+        if curriculum_engine is None:
+            from dharma_swarm.curriculum_engine import CurriculumEngine
+
+            curriculum_engine = CurriculumEngine()
+        return list(
+            curriculum_engine.derive_frontier_tasks(
+                report=report,
+                reward_signal=reward_signal,
+            )
+        )
+
     # -- full cycle ----------------------------------------------------------
 
     async def run_cycle(self, proposals: list[Proposal]) -> CycleResult:
@@ -1586,12 +1931,31 @@ class DarwinEngine:
         For each proposal: gate-check, and if it passes, evaluate and
         archive. Tracks aggregate statistics.
 
+        Respects the daily mutation budget (default 5/day). When exhausted,
+        the cycle evaluates existing population only — no new mutations.
+
         Args:
             proposals: List of proposals to process.
 
         Returns:
             A ``CycleResult`` summarising the cycle.
         """
+        # Check and reset daily mutation budget
+        from datetime import date
+        today = date.today().isoformat()
+        if self._budget_reset_date != today:
+            self._mutations_today = 0
+            self._budget_reset_date = today
+
+        if self._mutations_today >= self._daily_mutation_budget:
+            logger.warning(
+                "Daily mutation budget exhausted (%d/%d). "
+                "Skipping mutations, eval-only mode.",
+                self._mutations_today,
+                self._daily_mutation_budget,
+            )
+            proposals = []  # Empty proposals = eval-only
+
         start = time.monotonic()
         plan = await self.plan_cycle(proposals)
         result = CycleResult(
@@ -1605,20 +1969,17 @@ class DarwinEngine:
 
         # Stage execution context for all proposals
         ordered_proposals: list[Proposal] = []
+        proposal_targets: dict[str, tuple[ResolvedExecutionProfile, Path | None]] = {}
         for proposal_id in plan.ordered_proposal_ids:
             proposal = proposal_by_id[proposal_id]
+            target, source_file = self._resolve_cycle_execution_target(proposal.component)
             self._stage_execution_context(
                 proposal,
-                self.resolve_execution_target(
-                    proposal.component,
-                    fallback_evidence_tier=EvidenceTier.UNVALIDATED,
-                    fallback_profile_name="unvalidated",
-                    fallback_expected_metrics=[],
-                    fallback_rollback_policy="discard",
-                ),
+                target,
                 cycle_id=result.cycle_id,
             )
             ordered_proposals.append(proposal)
+            proposal_targets[proposal.id] = (target, source_file)
 
         # Phase 4: parallel gate-check all proposals
         await asyncio.gather(
@@ -1635,14 +1996,69 @@ class DarwinEngine:
                 continue
 
             result.proposals_gated += 1
+            target, source_file = proposal_targets[proposal.id]
+            code = self._read_component_code(source_file)
+            test_results: dict[str, Any] | None = None
+
+            if target.test_command is not None:
+                if proposal.diff.strip():
+                    proposal, test_results = await self.apply_diff_and_test(
+                        proposal,
+                        test_command=target.test_command,
+                        timeout=target.timeout or 60.0,
+                        workspace=target.workspace,
+                    )
+                    code = self._read_component_code(
+                        self._resolve_component_source_path(
+                            proposal.component,
+                            workspace=target.workspace,
+                        )
+                    )
+                    if test_results.get("rolled_back"):
+                        logger.warning(
+                            "Proposal %s diff rolled back after test failure",
+                            proposal.id,
+                        )
+                else:
+                    proposal, sr = await self.apply_in_sandbox(
+                        proposal,
+                        test_command=target.test_command,
+                        timeout=target.timeout or 60.0,
+                        workspace=target.workspace,
+                    )
+                    test_results = self._parse_sandbox_result(sr)
 
             # Evaluate
-            await self.evaluate(proposal)
+            await self.evaluate(proposal, test_results=test_results, code=code)
             result.proposals_tested += 1
+
+            # Quality gate: reject low-quality proposals before archiving
+            if self._quality_gate_enabled:
+                qg_result = await self._run_quality_gate(proposal)
+                self.last_quality_gate_result = qg_result
+                if not qg_result.passed:
+                    proposal.status = EvolutionStatus.REJECTED
+                    proposal.gate_reason = (
+                        f"quality_gate: {qg_result.reason} "
+                        f"(score={qg_result.score.overall:.1f}, "
+                        f"threshold={qg_result.threshold:.1f})"
+                    )
+                    logger.info(
+                        "Proposal %s rejected by quality gate: %s",
+                        proposal.id,
+                        qg_result.reason,
+                    )
+                    await self._trip_circuit_breaker_if_needed(
+                        proposal=proposal,
+                        failure_streaks=failure_streaks,
+                        cycle=result,
+                    )
+                    continue
 
             # Archive
             entry_id = await self.archive_result(proposal)
             result.proposals_archived += 1
+            self._mutations_today += 1
             archived_entry = await self.archive.get_entry(entry_id)
             if archived_entry is not None:
                 new_entries.append(archived_entry)
@@ -1932,6 +2348,7 @@ class DarwinEngine:
             # Archive
             entry_id = await self.archive_result(proposal)
             result.proposals_archived += 1
+            self._mutations_today += 1
             archived_entry = await self.archive.get_entry(entry_id)
             if archived_entry is not None:
                 new_entries.append(archived_entry)
@@ -2223,7 +2640,7 @@ class DarwinEngine:
         provider: Any,
         source_file: Path,
         context: str = "",
-        model: str = "meta-llama/llama-3.3-70b-instruct",
+        model: str = "",
     ) -> Proposal | None:
         """Use an LLM to generate an evolution proposal from a source file.
 
@@ -2240,6 +2657,10 @@ class DarwinEngine:
             A Proposal ready for gate_check(), or None if the LLM says no-op.
         """
         from dharma_swarm.models import LLMRequest
+        if not model:
+            from dharma_swarm.model_hierarchy import default_model as _dm
+            from dharma_swarm.models import ProviderType as _PT
+            model = _dm(_PT.OPENROUTER)
 
         if not source_file.exists():
             logger.warning("Source file not found: %s", source_file)
@@ -2387,11 +2808,43 @@ class DarwinEngine:
         )
         return proposal
 
+    # -- pending proposals (from consolidation / skill bridge) ----------------
+
+    _PENDING_PROPOSALS_PATH = PENDING_PROPOSALS_FILE
+
+    def load_pending_proposals(self) -> list[Proposal]:
+        """Load and clear pending proposals written by consolidation or skill bridge.
+
+        Returns a list of Proposal objects.  The file is truncated after reading
+        so proposals are consumed exactly once.
+        """
+        path = self._PENDING_PROPOSALS_PATH
+        if not path.exists():
+            return []
+        proposals: list[Proposal] = []
+        try:
+            import json as _pp_json
+            lines = path.read_text().splitlines()
+            for line in lines:
+                line = line.strip()
+                if not line:
+                    continue
+                try:
+                    data = _pp_json.loads(line)
+                    proposals.append(Proposal(**data))
+                except Exception as exc:
+                    logger.warning("Skipping malformed pending proposal: %s", exc)
+            # Truncate after successful read
+            path.write_text("")
+        except Exception as exc:
+            logger.warning("Failed to load pending proposals: %s", exc)
+        return proposals
+
     async def auto_evolve(
         self,
         provider: Any,
         source_files: list[Path],
-        model: str = "meta-llama/llama-3.3-70b-instruct",
+        model: str = "",
         test_command: str = "python3 -m pytest tests/ -q --tb=short -x --timeout=10",
         timeout: float = 60.0,
         context: str = "",
@@ -2428,6 +2881,11 @@ class DarwinEngine:
             A CycleResult summarizing the autonomous evolution cycle.
         """
         _emit = on_progress or (lambda _e, _d: None)
+
+        if not model:
+            from dharma_swarm.model_hierarchy import default_model as _dm
+            from dharma_swarm.models import ProviderType as _PT
+            model = _dm(_PT.OPENROUTER)
 
         await self.refresh_experiment_memory()
         _emit("cycle_start", {
@@ -2615,7 +3073,7 @@ class DarwinEngine:
         self,
         think_provider: Any,
         source_dir: Path | None = None,
-        model: str = "meta-llama/llama-3.3-70b-instruct",
+        model: str = "",
         interval: float = 1800.0,
         fitness_threshold: float = 0.6,
         max_cycles: int | None = None,
@@ -2644,6 +3102,11 @@ class DarwinEngine:
             shadow: If True, do not apply diffs or commit.
             on_progress: Optional callback ``(event_name, data)`` for real-time UX.
         """
+        if not model:
+            from dharma_swarm.model_hierarchy import default_model as _dm
+            from dharma_swarm.models import ProviderType as _PT
+            model = _dm(_PT.OPENROUTER)
+
         src = source_dir or (Path.home() / "dharma_swarm" / "dharma_swarm")
         cycle_count = 0
         context_parts: list[str] = []

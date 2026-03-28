@@ -147,6 +147,7 @@ _INDEXES = [
     "CREATE INDEX IF NOT EXISTS idx_turn_task_time ON conversation_turns(task_id, created_at)",
     "CREATE INDEX IF NOT EXISTS idx_shard_task_state ON idea_shards(task_id, state, created_at)",
     "CREATE INDEX IF NOT EXISTS idx_shard_session_state ON idea_shards(session_id, state, created_at)",
+    "CREATE INDEX IF NOT EXISTS idx_shard_state_created ON idea_shards(state, created_at DESC)",
     "CREATE INDEX IF NOT EXISTS idx_uptake_task_time ON idea_uptake(task_id, recorded_at)",
 ]
 

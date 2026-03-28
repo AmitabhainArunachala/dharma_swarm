@@ -172,6 +172,16 @@ CREATE TABLE IF NOT EXISTS external_outcomes (
     created_at TEXT NOT NULL
 )"""
 
+_OVERNIGHT_METRICS_DDL = """
+CREATE TABLE IF NOT EXISTS overnight_metrics (
+    metric_id TEXT PRIMARY KEY,
+    date TEXT NOT NULL,
+    metric_name TEXT NOT NULL,
+    value REAL NOT NULL DEFAULT 0.0,
+    context_json TEXT NOT NULL DEFAULT '{}',
+    created_at TEXT NOT NULL
+)"""
+
 _INDEXES = [
     "CREATE INDEX IF NOT EXISTS idx_agent_identity_status_updated ON agent_identity(status, updated_at)",
     "CREATE INDEX IF NOT EXISTS idx_reward_agent_created ON agent_reward_ledger(agent_id, created_at)",
@@ -185,6 +195,7 @@ _INDEXES = [
     "CREATE INDEX IF NOT EXISTS idx_intervention_task_created ON intervention_outcomes(task_id, created_at)",
     "CREATE INDEX IF NOT EXISTS idx_economic_kind_created ON economic_events(event_kind, created_at)",
     "CREATE INDEX IF NOT EXISTS idx_external_kind_created ON external_outcomes(outcome_kind, created_at)",
+    "CREATE INDEX IF NOT EXISTS idx_overnight_date_metric ON overnight_metrics(date, metric_name)",
 ]
 
 
@@ -267,6 +278,7 @@ async def ensure_telemetry_schema_async(db: aiosqlite.Connection) -> None:
         _INTERVENTION_OUTCOMES_DDL,
         _ECONOMIC_EVENTS_DDL,
         _EXTERNAL_OUTCOMES_DDL,
+        _OVERNIGHT_METRICS_DDL,
     ):
         await db.execute(ddl)
     for idx in _INDEXES:
@@ -593,15 +605,23 @@ def _row_to_external_outcome(row: sqlite3.Row | aiosqlite.Row) -> ExternalOutcom
 class TelemetryPlaneStore:
     """SQLite-backed telemetry store for company-state records."""
 
+    _BUSY_TIMEOUT_MS = 30000
+
     def __init__(self, db_path: Path | None = None) -> None:
         self.db_path = db_path or DEFAULT_TELEMETRY_DB
         self._initialized = False
+
+    def _open(self) -> aiosqlite.Connection:
+        """Open connection with busy_timeout to prevent 'database is locked'."""
+        return aiosqlite.connect(self.db_path, timeout=self._BUSY_TIMEOUT_MS / 1000)
 
     async def init_db(self) -> None:
         if self._initialized:
             return
         self.db_path.parent.mkdir(parents=True, exist_ok=True)
-        async with aiosqlite.connect(self.db_path) as db:
+        async with self._open() as db:
+            await db.execute("PRAGMA journal_mode=WAL")
+            await db.execute("PRAGMA busy_timeout=30000")
             await ensure_telemetry_schema_async(db)
         self._initialized = True
 
@@ -610,7 +630,7 @@ class TelemetryPlaneStore:
         record: AgentIdentityRecord,
     ) -> AgentIdentityRecord:
         await self.init_db()
-        async with aiosqlite.connect(self.db_path) as db:
+        async with self._open() as db:
             await db.execute(
                 "INSERT INTO agent_identity (agent_id, codename, serial, avatar_id,"
                 " department, squad_id, specialization, level, xp, status,"
@@ -654,7 +674,7 @@ class TelemetryPlaneStore:
 
     async def get_agent_identity(self, agent_id: str) -> AgentIdentityRecord | None:
         await self.init_db()
-        async with aiosqlite.connect(self.db_path) as db:
+        async with self._open() as db:
             db.row_factory = aiosqlite.Row
             cursor = await db.execute(
                 "SELECT agent_id, codename, serial, avatar_id, department, squad_id,"
@@ -683,7 +703,7 @@ class TelemetryPlaneStore:
             params.append(status)
         query += " ORDER BY updated_at DESC LIMIT ?"
         params.append(limit)
-        async with aiosqlite.connect(self.db_path) as db:
+        async with self._open() as db:
             db.row_factory = aiosqlite.Row
             rows = await (await db.execute(query, params)).fetchall()
         return [_row_to_agent_identity(row) for row in rows]
@@ -693,7 +713,7 @@ class TelemetryPlaneStore:
         entry: AgentRewardLedgerEntry,
     ) -> AgentRewardLedgerEntry:
         await self.init_db()
-        async with aiosqlite.connect(self.db_path) as db:
+        async with self._open() as db:
             await db.execute(
                 "INSERT INTO agent_reward_ledger (entry_id, agent_id, session_id,"
                 " task_id, run_id, reward_type, amount, unit, reason, metadata_json,"
@@ -737,7 +757,7 @@ class TelemetryPlaneStore:
             params.append(session_id)
         query += " ORDER BY created_at DESC LIMIT ?"
         params.append(limit)
-        async with aiosqlite.connect(self.db_path) as db:
+        async with self._open() as db:
             db.row_factory = aiosqlite.Row
             rows = await (await db.execute(query, params)).fetchall()
         return [_row_to_reward(row) for row in rows]
@@ -747,7 +767,7 @@ class TelemetryPlaneStore:
         record: AgentReputationRecord,
     ) -> AgentReputationRecord:
         await self.init_db()
-        async with aiosqlite.connect(self.db_path) as db:
+        async with self._open() as db:
             await db.execute(
                 "INSERT INTO agent_reputation (agent_id, reputation, trust_band,"
                 " last_reason, evidence_json, updated_at) VALUES (?,?,?,?,?,?)"
@@ -774,7 +794,7 @@ class TelemetryPlaneStore:
 
     async def get_agent_reputation(self, agent_id: str) -> AgentReputationRecord | None:
         await self.init_db()
-        async with aiosqlite.connect(self.db_path) as db:
+        async with self._open() as db:
             db.row_factory = aiosqlite.Row
             row = await (
                 await db.execute(
@@ -791,7 +811,7 @@ class TelemetryPlaneStore:
         record: TeamRosterRecord,
     ) -> TeamRosterRecord:
         await self.init_db()
-        async with aiosqlite.connect(self.db_path) as db:
+        async with self._open() as db:
             await db.execute(
                 "INSERT INTO team_roster (roster_id, team_id, agent_id, role, active,"
                 " metadata_json, created_at, updated_at) VALUES (?,?,?,?,?,?,?,?)"
@@ -840,7 +860,7 @@ class TelemetryPlaneStore:
             query += " AND active = 1"
         query += " ORDER BY updated_at DESC LIMIT ?"
         params.append(limit)
-        async with aiosqlite.connect(self.db_path) as db:
+        async with self._open() as db:
             db.row_factory = aiosqlite.Row
             rows = await (await db.execute(query, params)).fetchall()
         return [_row_to_team_roster(row) for row in rows]
@@ -850,7 +870,7 @@ class TelemetryPlaneStore:
         record: WorkflowScoreRecord,
     ) -> WorkflowScoreRecord:
         await self.init_db()
-        async with aiosqlite.connect(self.db_path) as db:
+        async with self._open() as db:
             await db.execute(
                 "INSERT INTO workflow_scores (score_id, workflow_id, session_id,"
                 " task_id, run_id, score_name, score_value, weighting,"
@@ -895,7 +915,7 @@ class TelemetryPlaneStore:
             params.append(score_name)
         query += " ORDER BY recorded_at DESC LIMIT ?"
         params.append(limit)
-        async with aiosqlite.connect(self.db_path) as db:
+        async with self._open() as db:
             db.row_factory = aiosqlite.Row
             rows = await (await db.execute(query, params)).fetchall()
         return [_row_to_workflow_score(row) for row in rows]
@@ -905,7 +925,7 @@ class TelemetryPlaneStore:
         record: RoutingDecisionRecord,
     ) -> RoutingDecisionRecord:
         await self.init_db()
-        async with aiosqlite.connect(self.db_path) as db:
+        async with self._open() as db:
             await db.execute(
                 "INSERT INTO routing_decisions (decision_id, session_id, task_id,"
                 " run_id, action_name, route_path, selected_provider,"
@@ -953,7 +973,7 @@ class TelemetryPlaneStore:
             params.append(run_id)
         query += " ORDER BY created_at DESC LIMIT ?"
         params.append(limit)
-        async with aiosqlite.connect(self.db_path) as db:
+        async with self._open() as db:
             db.row_factory = aiosqlite.Row
             rows = await (await db.execute(query, params)).fetchall()
         return [_row_to_routing_decision(row) for row in rows]
@@ -963,7 +983,7 @@ class TelemetryPlaneStore:
         record: PolicyDecisionRecord,
     ) -> PolicyDecisionRecord:
         await self.init_db()
-        async with aiosqlite.connect(self.db_path) as db:
+        async with self._open() as db:
             await db.execute(
                 "INSERT INTO policy_decisions (decision_id, session_id, task_id,"
                 " run_id, policy_name, decision, status_before, status_after,"
@@ -1011,7 +1031,7 @@ class TelemetryPlaneStore:
             params.append(policy_name)
         query += " ORDER BY created_at DESC LIMIT ?"
         params.append(limit)
-        async with aiosqlite.connect(self.db_path) as db:
+        async with self._open() as db:
             db.row_factory = aiosqlite.Row
             rows = await (await db.execute(query, params)).fetchall()
         return [_row_to_policy_decision(row) for row in rows]
@@ -1021,7 +1041,7 @@ class TelemetryPlaneStore:
         record: InterventionOutcomeRecord,
     ) -> InterventionOutcomeRecord:
         await self.init_db()
-        async with aiosqlite.connect(self.db_path) as db:
+        async with self._open() as db:
             await db.execute(
                 "INSERT INTO intervention_outcomes (intervention_id, session_id,"
                 " task_id, run_id, operator_id, intervention_type, outcome_status,"
@@ -1066,7 +1086,7 @@ class TelemetryPlaneStore:
             params.append(operator_id)
         query += " ORDER BY created_at DESC LIMIT ?"
         params.append(limit)
-        async with aiosqlite.connect(self.db_path) as db:
+        async with self._open() as db:
             db.row_factory = aiosqlite.Row
             rows = await (await db.execute(query, params)).fetchall()
         return [_row_to_intervention(row) for row in rows]
@@ -1076,7 +1096,7 @@ class TelemetryPlaneStore:
         record: EconomicEventRecord,
     ) -> EconomicEventRecord:
         await self.init_db()
-        async with aiosqlite.connect(self.db_path) as db:
+        async with self._open() as db:
             await db.execute(
                 "INSERT INTO economic_events (event_id, session_id, task_id, run_id,"
                 " event_kind, amount, currency, counterparty, summary, metadata_json,"
@@ -1120,7 +1140,7 @@ class TelemetryPlaneStore:
             params.append(session_id)
         query += " ORDER BY created_at DESC LIMIT ?"
         params.append(limit)
-        async with aiosqlite.connect(self.db_path) as db:
+        async with self._open() as db:
             db.row_factory = aiosqlite.Row
             rows = await (await db.execute(query, params)).fetchall()
         return [_row_to_economic_event(row) for row in rows]
@@ -1130,7 +1150,7 @@ class TelemetryPlaneStore:
         record: ExternalOutcomeRecord,
     ) -> ExternalOutcomeRecord:
         await self.init_db()
-        async with aiosqlite.connect(self.db_path) as db:
+        async with self._open() as db:
             await db.execute(
                 "INSERT INTO external_outcomes (outcome_id, session_id, task_id,"
                 " run_id, outcome_kind, subject_id, value, unit, confidence, status,"
@@ -1176,7 +1196,7 @@ class TelemetryPlaneStore:
             params.append(session_id)
         query += " ORDER BY created_at DESC LIMIT ?"
         params.append(limit)
-        async with aiosqlite.connect(self.db_path) as db:
+        async with self._open() as db:
             db.row_factory = aiosqlite.Row
             rows = await (await db.execute(query, params)).fetchall()
         return [_row_to_external_outcome(row) for row in rows]

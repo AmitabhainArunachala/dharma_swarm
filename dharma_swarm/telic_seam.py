@@ -64,6 +64,7 @@ class TelicSeam:
         self._lineage = lineage or LineageGraph()
         self._proposal_map: dict[str, str] = {}  # task_id -> proposal obj_id
         self._duplicate_suppressions: dict[str, int] = {
+            "execution_leases": 0,
             "outcomes": 0,
             "value_events": 0,
             "contributions": 0,
@@ -181,6 +182,53 @@ class TelicSeam:
 
         except Exception as exc:
             logger.debug("TelicSeam.record_gate_decision failed: %s", exc)
+            return None
+
+    def record_execution_lease(
+        self,
+        proposal_id: str | None,
+        claim: dict[str, Any] | None,
+    ) -> str | None:
+        """Record the active execution lease for a proposal."""
+        if proposal_id is None or not isinstance(claim, dict):
+            return None
+
+        claim_id = str(claim.get("claim_id") or "")
+        if not claim_id:
+            return None
+
+        try:
+            existing = self._existing_execution_lease_for_claim(claim_id)
+            if existing is not None:
+                self._duplicate_suppressions["execution_leases"] += 1
+                self._ensure_execution_lease_linkage(proposal_id, existing)
+                self._flush_registry()
+                return existing.id
+
+            obj, errors = self._registry.create_object(
+                "ExecutionLease",
+                properties={
+                    "proposal_id": proposal_id,
+                    "claim_id": claim_id,
+                    "agent_id": str(claim.get("agent_id") or ""),
+                    "claimed_at": str(claim.get("claimed_at") or ""),
+                    "claim_timeout_seconds": float(claim.get("claim_timeout_seconds") or 0.0),
+                    "claim_expires_at_epoch": float(claim.get("claim_expires_at_epoch") or 0.0),
+                    "dispatch_timeout_seconds": float(claim.get("dispatch_timeout_seconds") or 0.0),
+                    "dispatch_attempt": int(claim.get("dispatch_attempt") or 0),
+                },
+                created_by="orchestrator",
+            )
+            if obj is None:
+                logger.debug("ExecutionLease creation failed: %s", errors)
+                return None
+
+            self._ensure_execution_lease_linkage(proposal_id, obj)
+            self._flush_registry()
+            return obj.id
+
+        except Exception as exc:
+            logger.debug("TelicSeam.record_execution_lease failed: %s", exc)
             return None
 
     def record_outcome(
@@ -446,6 +494,7 @@ class TelicSeam:
         return {
             "proposals": by_type.get("ActionProposal", 0),
             "gate_decisions": by_type.get("GateDecisionRecord", 0),
+            "execution_leases": by_type.get("ExecutionLease", 0),
             "outcomes": by_type.get("Outcome", 0),
             "value_events": by_type.get("ValueEvent", 0),
             "contributions": by_type.get("Contribution", 0),
@@ -588,6 +637,46 @@ class TelicSeam:
 
         matches.sort(key=lambda obj: (obj.created_at, obj.id))
         return matches[0]
+
+    def _existing_execution_lease_for_claim(self, claim_id: str) -> Any:
+        """Return the canonical ExecutionLease for a claim if one already exists."""
+        if not claim_id:
+            return None
+
+        matches = [
+            obj
+            for obj in self._registry.get_objects_by_type("ExecutionLease")
+            if obj.properties.get("claim_id") == claim_id
+        ]
+        if not matches:
+            return None
+
+        matches.sort(key=lambda obj: (obj.created_at, obj.id))
+        return matches[0]
+
+    def _ensure_execution_lease_linkage(self, proposal_id: str | None, lease: Any) -> None:
+        """Repair proposal linkage/status when reusing an existing ExecutionLease."""
+        if not proposal_id:
+            return
+
+        links = self._registry.get_links(
+            source_id=proposal_id,
+            target_id=lease.id,
+            link_name="has_execution_lease",
+        )
+        if not links:
+            self._registry.create_link(
+                "has_execution_lease",
+                source_id=proposal_id,
+                target_id=lease.id,
+                created_by="telic_seam",
+            )
+
+        self._registry.update_object(
+            proposal_id,
+            {"status": "executing"},
+            updated_by="telic_seam",
+        )
 
     def _ensure_outcome_linkage(self, proposal_id: str | None, outcome: Any) -> None:
         """Repair proposal linkage/status when reusing an existing canonical Outcome."""

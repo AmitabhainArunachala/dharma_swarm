@@ -31,6 +31,37 @@ def test_record_turn_harvests_multiple_idea_shards(tmp_path) -> None:
     assert {shard.shard_kind for shard in latent} & {"proposal", "question"}
 
 
+def test_record_turn_persists_tiny_router_transition_metadata(tmp_path) -> None:
+    db_path = tmp_path / "memory_plane.db"
+    store = ConversationMemoryStore(db_path)
+    store.record_turn(
+        session_id="sess-transition",
+        task_id="task-transition",
+        role="user",
+        content="Set a reminder for Friday",
+        turn_index=1,
+    )
+
+    turn_id = store.record_turn(
+        session_id="sess-transition",
+        task_id="task-transition",
+        role="user",
+        content="Actually next Monday",
+        turn_index=2,
+    )
+
+    turn = store.get_turn(turn_id)
+    assert turn is not None
+    assert turn.metadata["relation_to_previous"] == "correction"
+    assert turn.metadata["actionability"] == "act"
+    assert turn.metadata["retention"] == "useful"
+    assert turn.metadata["ingress_urgency_label"] in {"medium", "high"}
+    assert turn.metadata["tiny_router_source"] in {
+        "heuristic-shadow",
+        "hf-tgupj-tiny-router-shadow",
+    }
+
+
 def test_record_uptake_marks_implemented_and_orphaned(tmp_path) -> None:
     db_path = tmp_path / "memory_plane.db"
     store = ConversationMemoryStore(db_path)

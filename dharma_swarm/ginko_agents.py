@@ -1,6 +1,6 @@
 """Ginko Agent Fleet — persistent AI agents for Dharmic Quant analysis.
 
-6 frontier AI agents analyze markets via OpenRouter:
+6 frontier AI agents analyze markets via the preferred runtime stack:
   - KIMI: macro oracle (moonshotai/kimi-k2.5)
   - DEEPSEEK: quant architect (deepseek/deepseek-chat-v3-0324)
   - NEMOTRON: intelligence synthesizer (nvidia/llama-3.1-nemotron-70b-instruct:free)
@@ -19,6 +19,7 @@ migrated on first load.
 from __future__ import annotations
 
 import asyncio
+import httpx
 import json
 import logging
 import os
@@ -28,13 +29,16 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
-import httpx
+from dharma_swarm.models import LLMRequest, ProviderType
+from dharma_swarm.runtime_provider import (
+    create_runtime_provider,
+    preferred_runtime_provider_configs,
+)
 
 logger = logging.getLogger(__name__)
 
 GINKO_DIR = Path(os.getenv("DHARMA_HOME", Path.home() / ".dharma")) / "ginko"
 AGENTS_DIR = GINKO_DIR / "agents"
-
 OPENROUTER_URL = "https://openrouter.ai/api/v1/chat/completions"
 
 # Maximum task entries kept in the in-memory history (full log on disk is unlimited)
@@ -60,7 +64,7 @@ class GinkoAgent:
     Attributes:
         name: Lowercase identifier (e.g. "kimi", "sentinel").
         role: Functional role in the fleet (e.g. "macro_oracle").
-        model: OpenRouter model identifier.
+        model: Runtime-model identifier.
         system_prompt: System-level instruction for the LLM.
         status: Current lifecycle state ("idle", "busy", "error", "retired").
         fitness: Composite performance score in [0.0, 1.0].
@@ -529,7 +533,7 @@ async def _call_openrouter(
     """Call OpenRouter chat completions API with automatic fallback.
 
     On 429 (rate limit) or 400 (invalid model), retries with fallback
-    models from _MODEL_FALLBACKS before giving up.
+    models from ``_MODEL_FALLBACKS`` before giving up.
 
     Args:
         model: OpenRouter model identifier (e.g. "moonshotai/kimi-k2.5").
@@ -583,7 +587,6 @@ async def _call_openrouter(
         latency_ms = (time.monotonic() - t0) * 1000.0
 
         if resp.status_code in (429, 400):
-            # Try fallback models
             fallbacks = _MODEL_FALLBACKS.get(model, [])
             for fb_model in fallbacks:
                 logger.info("Falling back from %s to %s", model, fb_model)
@@ -591,8 +594,10 @@ async def _call_openrouter(
                 try:
                     async with httpx.AsyncClient() as fb_client:
                         fb_resp = await fb_client.post(
-                            OPENROUTER_URL, json=payload,
-                            headers=headers, timeout=timeout_s,
+                            OPENROUTER_URL,
+                            json=payload,
+                            headers=headers,
+                            timeout=timeout_s,
                         )
                     if fb_resp.status_code == 200:
                         fb_data = fb_resp.json()
@@ -616,7 +621,9 @@ async def _call_openrouter(
             error_body = resp.text[:500]
             logger.warning(
                 "OpenRouter %s returned HTTP %d (all fallbacks exhausted): %s",
-                model, resp.status_code, error_body,
+                model,
+                resp.status_code,
+                error_body,
             )
             return {
                 "content": f"HTTP {resp.status_code}: {error_body}",
@@ -755,7 +762,7 @@ async def agent_task(
 ) -> dict[str, Any]:
     """Execute a task using a specific fleet agent.
 
-    Dispatches the task to the agent's model via OpenRouter with its
+    Dispatches the task to the agent's model via the preferred runtime stack with its
     system prompt, records timing and token usage, updates the agent's
     persistent state, and logs the result.
 

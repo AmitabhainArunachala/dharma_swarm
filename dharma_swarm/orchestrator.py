@@ -78,36 +78,42 @@ class Orchestrator:
         message_bus: Any = None,
         ledger: SessionLedger | None = None,
         ledger_dir: Path | None = None,
+        runtime_db_path: Path | None = None,
+        shared_dir: Path | None = None,
+        stigmergy_dir: Path | None = None,
         session_id: str | None = None,
         event_memory: Any = None,
         yoga: YogaScheduler | None = None,
-        state_dir: Path | str | None = None,
-        ontology_path: Path | str | None = None,
     ) -> None:
         from dharma_swarm.config import DEFAULT_CONFIG
         _cfg = DEFAULT_CONFIG.orchestrator
+        resolved_ledger_dir = Path(ledger_dir) if ledger_dir is not None else None
+        resolved_runtime_db_path = runtime_db_path
+        if (
+            resolved_runtime_db_path is None
+            and ledger is None
+            and resolved_ledger_dir is not None
+        ):
+            if resolved_ledger_dir.name == "ledgers":
+                resolved_runtime_db_path = (
+                    resolved_ledger_dir.parent / "state" / "runtime.db"
+                )
+            else:
+                resolved_runtime_db_path = resolved_ledger_dir / "runtime.db"
 
         self._board = task_board
         self._pool = agent_pool
         self._bus = message_bus
         self._event_memory = event_memory
         self._yoga = yoga
-        if state_dir is not None:
-            self._state_dir = Path(state_dir).expanduser()
-        elif ledger_dir is not None:
-            self._state_dir = Path(ledger_dir).expanduser()
-        else:
-            self._state_dir = None
-        if ontology_path is not None:
-            self._ontology_path = Path(ontology_path).expanduser()
-        elif self._state_dir is not None:
-            self._ontology_path = self._state_dir / "ontology.db"
-        else:
-            self._ontology_path = None
         self._ledger = ledger or SessionLedger(
-            base_dir=ledger_dir,
+            base_dir=resolved_ledger_dir,
             session_id=session_id,
+            runtime_db_path=resolved_runtime_db_path,
         )
+        self._telic_seam = self._init_telic_seam()
+        self._shared_dir = shared_dir or self._derive_runtime_artifact_dir("shared")
+        self._stigmergy_dir = stigmergy_dir or self._derive_runtime_artifact_dir("stigmergy")
         self._running = False
         self._active_dispatches: dict[str, TaskDispatch] = {}
         # Track running asyncio tasks for actual LLM execution
@@ -126,49 +132,43 @@ class Orchestrator:
         self._last_coordination_result: CoordinationResult | None = None
         self._last_coordination_summary: dict[str, Any] = self._empty_coordination_summary()
         self._last_coordination_signature = ""
+        self._last_coordination_refresh_at: float = 0.0  # monotonic timestamp
+        self._coordination_refresh_interval_s: float = 120.0  # skip if refreshed within this window
 
-    def _shared_dir(self) -> Path | None:
-        state_dir = getattr(self, "_state_dir", None)
-        if state_dir is None:
-            return None
-        return state_dir / "shared"
+    def _runtime_root(self) -> Path:
+        base_dir = self._ledger.base_dir
+        if base_dir.name == "ledgers":
+            return base_dir.parent
+        return base_dir
 
-    def _algedonic_log_path(self) -> Path | None:
-        state_dir = getattr(self, "_state_dir", None)
-        if state_dir is None:
-            return None
-        return state_dir / "algedonic_signals.jsonl"
-
-    def _get_telic_seam(self):
-        if not hasattr(self, "_ontology_path"):
-            from dharma_swarm import telic_seam as telic_seam_module
-            from dharma_swarm.ontology import OntologyRegistry
+    def _init_telic_seam(self) -> Any | None:
+        """Prefer a state-local ontology seam over the global singleton."""
+        try:
+            from dharma_swarm.ontology_runtime import get_shared_registry
             from dharma_swarm.telic_seam import TelicSeam
 
-            seam = telic_seam_module._SEAM
-            if seam is not None:
-                return seam
-
-            seam = getattr(self, "_legacy_telic_seam", None)
-            if seam is None:
-                seam = TelicSeam(registry=OntologyRegistry.create_dharma_registry())
-                self._legacy_telic_seam = seam
-            return seam
-
-        if self._ontology_path is None:
+            ontology_db = self._runtime_root() / "ontology.db"
+            registry = get_shared_registry(path=ontology_db)
+            return TelicSeam(registry=registry, registry_path=ontology_db)
+        except Exception:
+            logger.debug("Failed to initialize local telic seam", exc_info=True)
             return None
-        from dharma_swarm.telic_seam import get_seam
 
-        return get_seam(self._ontology_path)
+    def _derive_runtime_artifact_dir(self, leaf: str) -> Path:
+        """Resolve state-local artifact directories from the ledger root when possible."""
+        return self._runtime_root() / leaf
 
     async def dispatch(
         self,
         task: Task,
-        topology: TopologyType = TopologyType.FAN_OUT,
+        topology: TopologyType | Any = TopologyType.FAN_OUT,
     ) -> list[TaskDispatch]:
         """Assign task to available agents based on topology."""
         if self._pool is None:
             return []
+
+        if self._is_topology_genome(topology):
+            return await self._dispatch_topology_genome(task, topology)
 
         idle: list[AgentState] = await self._pool.get_idle_agents()
         if not idle:
@@ -189,6 +189,54 @@ class Orchestrator:
         )
         await self._assign_dispatch(td)
         return [td]
+
+    @staticmethod
+    def _is_topology_genome(topology: Any) -> bool:
+        return all(
+            hasattr(topology, attr)
+            for attr in ("nodes", "entrypoints", "validate_structure")
+        )
+
+    async def _dispatch_topology_genome(
+        self,
+        task: Task,
+        genome: Any,
+    ) -> list[TaskDispatch]:
+        if self._pool is None:
+            return []
+
+        genome.validate_structure()
+        idle: list[AgentState] = await self._pool.get_idle_agents()
+        if not idle:
+            return []
+
+        available = list(idle)
+        dispatches: list[TaskDispatch] = []
+        entrypoints = list(genome.entrypoints)
+        topology_type = TopologyType.FAN_OUT if len(entrypoints) > 1 else TopologyType.PIPELINE
+
+        for node_id in entrypoints or [genome.nodes[0].node_id]:
+            agent = self._select_idle_agent(task, available)
+            if agent is None:
+                break
+            td = TaskDispatch(
+                task_id=task.id,
+                agent_id=agent.id,
+                topology=topology_type,
+                timeout_seconds=self._resolve_timeout_seconds(
+                    task,
+                    self._default_timeout_seconds,
+                ),
+                metadata={
+                    "topology_genome_id": genome.genome_id,
+                    "topology_node_id": node_id,
+                    "topology_entrypoints": list(entrypoints),
+                    "topology_edge_ids": list(genome.incoming_edge_ids(node_id)),
+                },
+            )
+            await self._assign_dispatch(td)
+            dispatches.append(td)
+        return dispatches
 
     async def fan_out(
         self, task: Task, agents: list[AgentState]
@@ -225,11 +273,14 @@ class Orchestrator:
 
     async def route_next(self) -> list[TaskDispatch]:
         """Match ready tasks to idle agents, one-to-one. Returns dispatches."""
+        import time as _tt; _rn0 = _tt.monotonic()
         if self._board is None or self._pool is None:
             return []
 
         ready = await self._board.get_ready_tasks()
+        logger.info("route_next: ready=%d (%.1fs)", len(ready), _tt.monotonic() - _rn0)
         idle = await self._pool.get_idle_agents()
+        logger.info("route_next: idle=%d (%.1fs)", len(idle), _tt.monotonic() - _rn0)
         if not ready or not idle:
             return []
 
@@ -269,16 +320,9 @@ class Orchestrator:
                     self._default_timeout_seconds,
                 ),
             )
+            _ad_t0 = _tt.monotonic()
             await self._assign_dispatch(td)
-
-            # Sprint 3: Create economic mission for tracking
-            try:
-                mission = await self._create_mission_for_dispatch(task, agent.id)
-                if mission is not None:
-                    td.metadata = td.metadata or {}
-                    td.metadata["mission_id"] = mission.id
-            except Exception:
-                logger.debug("Economic mission tracking failed", exc_info=True)
+            logger.info("route_next: assign_dispatch took %.1fs (total %.1fs)", _tt.monotonic() - _ad_t0, _tt.monotonic() - _rn0)
 
             # Record dispatch in YogaNode usage tracker
             if self._yoga is not None:
@@ -294,27 +338,34 @@ class Orchestrator:
 
     async def tick(self) -> dict[str, int]:
         """One orchestration cycle: collect completed, then route pending."""
+        import time as _tt
+        _t0 = _tt.monotonic()
         settled, recovered = await self._collect_completed()
-
-        # Check for hibernated jobs that are ready to resume
-        hibernation_resumed = 0
-        try:
-            hibernation_resumed = await self._resume_hibernated_jobs()
-        except Exception as exc:
-            logger.debug("Hibernation resume check failed (non-critical): %s", exc)
-
+        logger.info("orchestrator.tick: collect=%.1fs", _tt.monotonic() - _t0)
         dispatches = await self.route_next()
+        logger.info("orchestrator.tick: dispatched=%d route=%.1fs", len(dispatches), _tt.monotonic() - _t0)
         coordination = self._empty_coordination_summary()
-        try:
-            coordination = await self._refresh_coordination_state()
-        except Exception as exc:
-            logger.debug("Coordination refresh failed (non-critical): %s", exc)
+        _since_last_refresh = _tt.monotonic() - self._last_coordination_refresh_at
+        if _since_last_refresh >= self._coordination_refresh_interval_s:
+            logger.info("orchestrator.tick: entering coordination refresh (%.0fs since last)", _since_last_refresh)
+            try:
+                coordination = await asyncio.wait_for(
+                    self._refresh_coordination_state(), timeout=30.0
+                )
+                self._last_coordination_refresh_at = _tt.monotonic()
+            except asyncio.TimeoutError:
+                logger.warning("Coordination refresh timed out after 30s — skipping")
+            except Exception as exc:
+                logger.warning("Coordination refresh failed: %s", exc)
+            logger.info("orchestrator.tick: coordination done")
+        else:
+            coordination = dict(self._last_coordination_summary)
+            logger.info("orchestrator.tick: coordination cached (%.0fs ago)", _since_last_refresh)
 
         summary = {
             "settled": settled,
             "recovered": recovered,
             "dispatched": len(dispatches),
-            "hibernation_resumed": hibernation_resumed,
             "coordination_global_truths": int(coordination.get("global_truths", 0) or 0),
             "coordination_disagreements": int(
                 coordination.get("productive_disagreements", 0) or 0
@@ -377,196 +428,6 @@ class Orchestrator:
     def stop(self) -> None:
         """Signal the run loop to exit after the current tick."""
         self._running = False
-
-    # ── Hibernation integration ──────────────────────────────────────
-
-    def set_hibernation_manager(self, manager: Any) -> None:
-        """Attach a HibernationManager for resume-on-tick integration."""
-        self._hibernation_manager = manager
-
-    # ── Sprint 3: Economic Spine integration ─────────────────────────
-
-    def set_economic_spine(self, spine: Any) -> None:
-        """Attach an EconomicSpine for mission lifecycle tracking."""
-        self._economic_spine = spine
-
-    def _estimate_task_tokens(self, task: Task) -> int:
-        """Estimate token cost for a task based on description length."""
-        text = "\n".join(
-            part for part in (task.title, task.description) if part
-        ).strip()
-        if not text:
-            return 1000
-        # Rough estimate: ~1.3 tokens per word, minimum 500
-        return max(int(len(text.split()) * 1.3), 500)
-
-    async def _create_mission_for_dispatch(
-        self, task: Task, agent_id: str
-    ) -> Any:
-        """Create and advance a mission record through early lifecycle."""
-        spine = getattr(self, "_economic_spine", None)
-        if spine is None:
-            return None
-
-        try:
-            from dharma_swarm.economic_spine import MissionState
-
-            estimated = self._estimate_task_tokens(task)
-
-            # Check budget
-            budget = spine.get_or_create_budget(agent_id)
-            if budget.tokens_remaining < estimated:
-                logger.warning(
-                    "Agent %s insufficient budget (%d < %d) for task %s",
-                    agent_id,
-                    budget.tokens_remaining,
-                    estimated,
-                    task.id,
-                )
-                # Continue anyway — don't block dispatch, just log
-
-            mission = spine.create_mission(
-                agent_id, task.title or task.description or "", estimated
-            )
-            spine.transition_mission(mission.id, MissionState.QUOTED)
-            spine.transition_mission(mission.id, MissionState.ACCEPTED)
-            spine.transition_mission(mission.id, MissionState.EXECUTING)
-            return mission
-        except Exception as exc:
-            logger.debug("Mission creation failed (non-fatal): %s", exc)
-            return None
-
-    async def _complete_mission(
-        self, mission: Any, tokens_used: int = 0
-    ) -> None:
-        """Advance a mission to DELIVERED after task completion."""
-        spine = getattr(self, "_economic_spine", None)
-        if spine is None or mission is None:
-            return
-
-        try:
-            from dharma_swarm.economic_spine import MissionState
-
-            spine.transition_mission(
-                mission.id,
-                MissionState.DELIVERED,
-                tokens_actual=tokens_used or mission.tokens_quoted,
-            )
-            # Track spending
-            actual = tokens_used or mission.tokens_quoted
-            spine.spend_tokens(mission.agent_id, actual, mission.id)
-        except Exception as exc:
-            logger.debug("Mission completion failed (non-fatal): %s", exc)
-
-    async def _resume_hibernated_jobs(self) -> int:
-        """Re-queue READY_TO_RESUME jobs for agent dispatch.
-
-        Called at the start of each tick, before ``route_next()``.
-        For each ready job, creates a new task on the board with the
-        job's context snapshot so the agent can resume seamlessly.
-        Returns the number of jobs resumed.
-        """
-        mgr = getattr(self, "_hibernation_manager", None)
-        if mgr is None:
-            return 0
-
-        ready_jobs = await mgr.get_ready_jobs()
-        if not ready_jobs:
-            return 0
-
-        resumed = 0
-        for job in ready_jobs:
-            try:
-                from dharma_swarm.hibernation import JobState
-
-                # Transition from READY_TO_RESUME → RUNNING
-                await mgr.transition(job.job_id, JobState.RUNNING)
-
-                # Re-queue as a task on the board if we have one
-                if self._board is not None:
-                    from dharma_swarm.models import Task, TaskStatus, TaskPriority
-
-                    task = Task(
-                        title=f"Resume hibernated job {job.job_id}",
-                        description=job.metadata.get(
-                            "original_description",
-                            f"Resumed from hibernation (agent={job.agent_id})",
-                        ),
-                        status=TaskStatus.PENDING,
-                        priority=TaskPriority.HIGH,
-                        metadata={
-                            "hibernation_job_id": job.job_id,
-                            "context_snapshot": job.context_snapshot,
-                            "resumed_from_hibernation": True,
-                        },
-                    )
-                    add_task = getattr(self._board, "add_task", None)
-                    if add_task is not None:
-                        result = add_task(task)
-                        if asyncio.iscoroutine(result):
-                            await result
-
-                resumed += 1
-                logger.info(
-                    "Resumed hibernated job %s (agent=%s)",
-                    job.job_id,
-                    job.agent_id,
-                )
-            except Exception as exc:
-                logger.debug(
-                    "Failed to resume job %s: %s", job.job_id, exc,
-                )
-        return resumed
-
-    # ── Sprint 2 Integration: auto-consolidate knowledge ────────────
-
-    def _get_sleep_time_agent(self) -> Any:
-        """Get the SleepTimeAgent instance from the organism or swarm."""
-        organism = getattr(self, "_organism", None)
-        if organism is not None:
-            sta = getattr(organism, "sleep_time_agent", None)
-            if sta is not None:
-                return sta
-        return getattr(self, "_sleep_time_agent", None)
-
-    def _build_consolidation_context(self, task: Any, td: Any, result: Any) -> str:
-        """Build a text context for SleepTimeAgent from task execution data."""
-        parts = [
-            f"Task: {getattr(task, 'title', '')}",
-            f"Description: {str(getattr(task, 'description', ''))[:500]}",
-            f"Agent: {td.agent_id}",
-            f"Status: {getattr(td, 'status', 'completed')}",
-        ]
-        if hasattr(result, "content") and result.content:
-            parts.append(f"Result: {str(result.content)[:2000]}")
-        elif isinstance(result, str):
-            parts.append(f"Result: {result[:2000]}")
-        return "\n".join(parts)
-
-    async def _safe_consolidate(
-        self, sleep_agent: Any, context: str, outcome: dict
-    ) -> None:
-        """Consolidate knowledge without blocking or crashing the orchestrator."""
-        try:
-            knowledge_store = getattr(self, "_knowledge_store", None)
-            result = await sleep_agent.consolidate_knowledge(
-                context, outcome, knowledge_store=knowledge_store,
-            )
-            logger.info(
-                "Knowledge consolidated: %d propositions, %d prescriptions",
-                result.get("propositions", 0),
-                result.get("prescriptions", 0),
-            )
-        except Exception:
-            logger.debug("Knowledge consolidation failed (non-fatal)", exc_info=True)
-
-    def set_organism(self, organism: Any) -> None:
-        """Attach an organism for SleepTimeAgent access."""
-        self._organism = organism
-
-    def set_knowledge_store(self, store: Any) -> None:
-        """Attach a KnowledgeStore for consolidation pass-through."""
-        self._knowledge_store = store
 
     async def graceful_stop(self, timeout: float = 30.0) -> dict[str, int]:
         """Cancel all in-flight tasks, gather with timeout, then stop.
@@ -641,6 +502,20 @@ class Orchestrator:
         self._ledger.progress_event(event, **payload)
 
     async def _emit_lifecycle_event(
+        self,
+        event: str,
+        *,
+        task_id: str,
+        agent_id: str,
+        extra: dict[str, Any] | None = None,
+    ) -> None:
+        """Fire-and-forget lifecycle event — non-blocking to avoid stalling dispatch."""
+        asyncio.create_task(
+            self._emit_lifecycle_event_impl(event, task_id=task_id, agent_id=agent_id, extra=extra),
+            name=f"lifecycle-{event}-{task_id[:8]}",
+        )
+
+    async def _emit_lifecycle_event_impl(
         self,
         event: str,
         *,
@@ -959,6 +834,13 @@ class Orchestrator:
             return ["reviewer", "researcher", "general"]
         return []
 
+    def _task_preferred_agent_names(self, task: Task | None) -> list[str]:
+        meta = self._task_meta(task)
+        raw = meta.get("director_preferred_agents")
+        if raw is None:
+            raw = meta.get("preferred_agents")
+        return self._dedupe_strings(self._coerce_string_list(raw))
+
     _EXPLORATION_RATE = 0.1  # 10% random exploration
 
     def _select_idle_agent(
@@ -969,7 +851,23 @@ class Orchestrator:
         if not idle_agents:
             return None
 
+        preferred_names = self._task_preferred_agent_names(task)
         preferred_roles = self._task_preferred_roles(task)
+
+        # Prefer exact agent-name routing when the task already knows its seats.
+        name_matched: list[AgentState] = []
+        if preferred_names:
+            seen: set[str] = set()
+            for preferred_name in preferred_names:
+                wanted = preferred_name.strip()
+                if not wanted:
+                    continue
+                for agent in idle_agents:
+                    if agent.name != wanted or agent.id in seen:
+                        continue
+                    name_matched.append(agent)
+                    seen.add(agent.id)
+                    break
 
         # Collect ALL role-matched candidates (not just first match)
         role_matched: list[AgentState] = []
@@ -978,8 +876,14 @@ class Orchestrator:
             if any(role_value == p for p in preferred_roles):
                 role_matched.append(agent)
 
-        # Pick from role-matched subset if any, else all candidates
-        candidates = role_matched if role_matched else list(idle_agents)
+        # Pick from name-matched subset first, then role-matched subset, else all candidates.
+        candidates = name_matched or role_matched or list(idle_agents)
+
+        # Active inference EFE-based selection (Friston P10)
+        best = self._efe_biased_pick(candidates, task)
+        if best is not None:
+            idle_agents.remove(best)
+            return best
 
         # Fitness-biased selection (feature-flagged, best-effort)
         best = self._fitness_biased_pick(candidates, task)
@@ -988,11 +892,54 @@ class Orchestrator:
             return best
 
         # FIFO fallback (original behavior)
+        if name_matched:
+            pick = name_matched[0]
+            idle_agents.remove(pick)
+            return pick
         if role_matched:
             pick = role_matched[0]
             idle_agents.remove(pick)
             return pick
         return idle_agents.pop(0)
+
+    def _efe_biased_pick(
+        self,
+        candidates: list[AgentState],
+        task: Task | None,
+    ) -> AgentState | None:
+        """Expected Free Energy routing — Friston P10 embodiment.
+
+        Routes tasks to agents that minimize expected surprise (Risk + Ambiguity).
+        Feature-flagged via ENABLE_EFE_ROUTING env var.
+        """
+        if len(candidates) <= 1:
+            return candidates[0] if candidates else None
+
+        import os
+        if os.getenv("ENABLE_EFE_ROUTING", "").lower() not in ("1", "true", "yes"):
+            return None  # Falls through to fitness-biased or FIFO
+
+        try:
+            from dharma_swarm.active_inference import get_engine
+            engine = get_engine()
+            task_meta = task.metadata if task and isinstance(task.metadata, dict) else {}
+            task_type = str(task_meta.get("task_type", "general") or "general")
+
+            scored: list[tuple[float, AgentState]] = []
+            for agent in candidates:
+                efe = engine.expected_free_energy(agent.id, task_type)
+                scored.append((efe, agent))
+
+            # Sort ascending: lower EFE = better match
+            scored.sort(key=lambda x: x[0])
+            logger.debug(
+                "EFE routing: %s",
+                [(round(s, 3), a.id) for s, a in scored[:3]],
+            )
+            return scored[0][1]
+        except Exception:
+            logger.debug("EFE routing failed", exc_info=True)
+            return None
 
     def _fitness_biased_pick(
         self,
@@ -1010,7 +957,7 @@ class Orchestrator:
 
         try:
             import random
-            seam = self._get_telic_seam()
+            seam = self._telic_seam
             if seam is None:
                 return None
 
@@ -1115,7 +1062,7 @@ class Orchestrator:
         list_tasks = getattr(self._board, "list_tasks", None)
         if list_tasks:
             try:
-                result = list_tasks(limit=500)
+                result = list_tasks(limit=200)
             except TypeError:
                 result = list_tasks()
             if inspect.isawaitable(result):
@@ -1124,11 +1071,8 @@ class Orchestrator:
                 return [task for task in result if isinstance(task, Task)]
         task_items = getattr(self._board, "tasks", None)
         if isinstance(task_items, list):
-            return [
-                task.model_copy(deep=True)
-                for task in task_items
-                if isinstance(task, Task)
-            ]
+            # Read-only for coordination analysis — skip expensive deep copy
+            return [task for task in task_items if isinstance(task, Task)][:200]
         return []
 
     async def _list_coordination_messages(self, *, limit: int = 200) -> list[Message]:
@@ -1487,9 +1431,14 @@ class Orchestrator:
         return merged
 
     async def _refresh_coordination_state(self) -> dict[str, Any]:
+        import time as _t; _cs_t0 = _t.monotonic()
+        logger.info("_refresh_coordination: entering")
         agents = await self._list_coordination_agents()
+        logger.info("_refresh_coordination: agents=%.1fs (n=%d)", _t.monotonic() - _cs_t0, len(agents))
         tasks = await self._list_coordination_tasks()
-        messages = await self._list_coordination_messages(limit=500)
+        logger.info("_refresh_coordination: tasks=%.1fs", _t.monotonic() - _cs_t0)
+        messages = await self._list_coordination_messages(limit=200)
+        logger.info("_refresh_coordination: messages=%.1fs (n=%d)", _t.monotonic() - _cs_t0, len(messages))
         agent_ids = {agent.id for agent in agents}
 
         relevant_messages = [
@@ -1514,7 +1463,9 @@ class Orchestrator:
             if discovery is not None:
                 protocol.publish(discovery.agent_id, [discovery])
 
+        logger.info("_refresh_coordination: sheaf_compute=%.1fs", _t.monotonic() - _cs_t0)
         result = protocol.coordinate()
+        logger.info("_refresh_coordination: coordinate_done=%.1fs", _t.monotonic() - _cs_t0)
         self._last_coordination_result = result.model_copy(deep=True)
         summary = {
             "observed_at": datetime.now(timezone.utc).isoformat(),
@@ -1565,6 +1516,7 @@ class Orchestrator:
                 )
             self._last_coordination_signature = signature
         self._last_coordination_summary = dict(summary)
+        logger.info("_refresh_coordination: total=%.1fs", _t.monotonic() - _cs_t0)
         return dict(summary)
 
     async def get_coordination_summary(self, *, refresh: bool = True) -> dict[str, Any]:
@@ -1722,37 +1674,38 @@ class Orchestrator:
                 "timestamp": datetime.now(timezone.utc).isoformat(),
             })
             # Also persist to algedonic log (S5 bypass)
-            _alg_path = self._algedonic_log_path()
-            if _alg_path is not None:
-                _alg_path.parent.mkdir(parents=True, exist_ok=True)
-                with _alg_path.open("a", encoding="utf-8") as _af:
-                    _af.write(json.dumps({
-                        "kind": "task_retries_exhausted",
-                        "severity": "warning",
-                        "value": retry_count,
-                        "action": f"dead-letter: {task_title}",
-                        "timestamp": time.time(),
-                    }) + "\n")
-                logger.warning(
-                    "ALGEDONIC: task %s exhausted %d retries — dead-lettered",
-                    td.task_id, max_retries,
-                )
+            _alg_path = Path.home() / ".dharma" / "algedonic_signals.jsonl"
+            _alg_path.parent.mkdir(parents=True, exist_ok=True)
+            with _alg_path.open("a", encoding="utf-8") as _af:
+                _af.write(json.dumps({
+                    "kind": "task_retries_exhausted",
+                    "severity": "warning",
+                    "value": retry_count,
+                    "action": f"dead-letter: {task_title}",
+                    "timestamp": time.time(),
+                }) + "\n")
+            logger.warning(
+                "ALGEDONIC: task %s exhausted %d retries — dead-lettered",
+                td.task_id, max_retries,
+            )
         except Exception:
             logger.debug("Algedonic signal emission failed", exc_info=True)
 
     async def _assign_dispatch(self, td: TaskDispatch) -> None:
         """Record dispatch, update board + pool, kick off execution, notify via bus."""
+        import time as _adt; _ad0 = _adt.monotonic()
         td.metadata["dispatch_started_monotonic"] = time.monotonic()
         task_for_gate = await self._safe_get_task(td.task_id)
+        logger.info("_assign_dispatch(%s): get_task=%.2fs", td.task_id[:8], _adt.monotonic() - _ad0)
 
         # ── Telic Seam: record ActionProposal in ontology ──
         proposal_id: str | None = None
         if task_for_gate is not None:
             try:
-                seam = self._get_telic_seam()
-                if seam is not None:
-                    proposal_id = seam.record_dispatch(
-                        task_for_gate, td.agent_id,
+                if self._telic_seam is not None:
+                    proposal_id = self._telic_seam.record_dispatch(
+                        task_for_gate,
+                        td.agent_id,
                         topology=td.topology.value if td.topology else "dispatch",
                     )
                     td.metadata["telic_proposal_id"] = proposal_id or ""
@@ -1765,6 +1718,7 @@ class Orchestrator:
             else f"dispatch task {td.task_id} -> {td.agent_id}"
         )
         content_ref = task_for_gate.description if task_for_gate else ""
+        _gate_t0 = _adt.monotonic()
         gate = check_with_reflective_reroute(
             action=action_ref,
             content=content_ref,
@@ -1777,14 +1731,18 @@ class Orchestrator:
             max_reroutes=1,
             requirement_refs=[f"task:{td.task_id}", f"agent:{td.agent_id}"],
         )
+        logger.info("_assign_dispatch(%s): gate=%.2fs total=%.2fs", td.task_id[:8], _adt.monotonic() - _gate_t0, _adt.monotonic() - _ad0)
+
+        # Yield after sync gate check so other coroutines can progress
+        await asyncio.sleep(0)
 
         # ── Telic Seam: record GateDecision in ontology ──
         if proposal_id is not None:
             try:
-                seam = self._get_telic_seam()
-                if seam is not None:
-                    seam.record_gate_decision(
-                        proposal_id, gate.result,
+                if self._telic_seam is not None:
+                    self._telic_seam.record_gate_decision(
+                        proposal_id,
+                        gate.result,
                         witness_reroutes=gate.attempts,
                     )
             except Exception:
@@ -1831,16 +1789,30 @@ class Orchestrator:
         claim_meta = self._attach_latent_gold(task_for_gate, claim_meta)
         if task_for_gate is not None:
             task_for_gate.metadata = dict(claim_meta)
+        if proposal_id is not None:
+            try:
+                if self._telic_seam is not None:
+                    self._telic_seam.record_execution_lease(
+                        proposal_id,
+                        claim_meta.get("active_claim"),
+                    )
+            except Exception:
+                logger.debug("Telic seam execution lease recording failed", exc_info=True)
 
+        _pe_t0 = _adt.monotonic()
         if self._pool is not None:
             await self._pool.assign(td.agent_id, td.task_id)
+        logger.info("_assign_dispatch(%s): pool_assign=%.2fs", td.task_id[:8], _adt.monotonic() - _pe_t0)
+        _pe_t1 = _adt.monotonic()
         await self._safe_update_task(
             td.task_id,
             status=TaskStatus.ASSIGNED,
             assigned_to=td.agent_id,
             metadata=claim_meta,
         )
+        logger.info("_assign_dispatch(%s): update_task=%.2fs", td.task_id[:8], _adt.monotonic() - _pe_t1)
         self._active_dispatches[td.task_id] = td
+        _pe_t2 = _adt.monotonic()
         if self._bus is not None:
             await self._bus.send(Message(
                 from_agent="orchestrator",
@@ -1848,6 +1820,7 @@ class Orchestrator:
                 subject=f"Task assigned: {td.task_id}",
                 body=f"You have been assigned task {td.task_id}.",
             ))
+        logger.info("_assign_dispatch(%s): bus_send=%.2fs", td.task_id[:8], _adt.monotonic() - _pe_t2)
         self._record_task_event(
             "dispatch_assigned",
             task_id=td.task_id,
@@ -1883,13 +1856,16 @@ class Orchestrator:
                     ],
                 },
             )
+        _pe_t3 = _adt.monotonic()
         await self._emit_lifecycle_event(
             "dispatch_assigned",
             task_id=td.task_id,
             agent_id=td.agent_id,
             extra={"topology": td.topology.value},
         )
+        logger.info("_assign_dispatch(%s): lifecycle_event=%.2fs", td.task_id[:8], _adt.monotonic() - _pe_t3)
 
+        logger.info("_assign_dispatch(%s): pre_execute=%.2fs", td.task_id[:8], _adt.monotonic() - _ad0)
         # Actually execute the task via the agent runner
         pool_get = getattr(self._pool, "get", None)
         runner = await pool_get(td.agent_id) if pool_get else None
@@ -1922,6 +1898,7 @@ class Orchestrator:
                 name=f"exec-{td.task_id[:8]}",
             )
             self._running_tasks[td.task_id] = bg
+            logger.info("_assign_dispatch(%s): bg_task_created total=%.2fs", td.task_id[:8], _adt.monotonic() - _ad0)
         else:
             reason = (
                 f"Dispatch accepted but worker unavailable "
@@ -1943,6 +1920,9 @@ class Orchestrator:
 
     async def _execute_task(self, runner: Any, task: Task, td: TaskDispatch) -> None:
         """Run agent.run_task() in background, update board on completion/failure."""
+        # Yield immediately so the dispatching coroutine can finish its loop
+        # before this background task starts its synchronous pre-LLM work
+        await asyncio.sleep(0)
         run_started = float(td.metadata.get("run_started_monotonic", time.monotonic()))
         timeout_seconds = max(
             0.01,
@@ -1953,11 +1933,56 @@ class Orchestrator:
                 runner.run_task(task),
                 timeout=timeout_seconds,
             )
+            try:
+                from dharma_swarm.mission_contract import (
+                    honors_checkpoint_passed,
+                    load_completion_contract,
+                    load_honors_checkpoint,
+                )
+
+                completion_contract = load_completion_contract(task.metadata)
+                honors_checkpoint = load_honors_checkpoint(task.metadata)
+                if completion_contract is not None and not honors_checkpoint_passed(task.metadata):
+                    error = (
+                        "Honors checkpoint missing or failed: task returned a result "
+                        "without a passing judge pack"
+                    )
+                    if self._pool is not None:
+                        await self._pool.release(td.agent_id)
+                    self._active_dispatches.pop(td.task_id, None)
+                    await self._handle_task_failure(
+                        td=td,
+                        task=task,
+                        error=error,
+                        source="honors_checkpoint",
+                    )
+                    return
+            except Exception as exc:
+                logger.exception("Task %s honors checkpoint validation failed: %s", td.task_id, exc)
+                if self._pool is not None:
+                    await self._pool.release(td.agent_id)
+                self._active_dispatches.pop(td.task_id, None)
+                await self._handle_task_failure(
+                    td=td,
+                    task=task,
+                    error=f"Honors checkpoint validation failed: {exc}",
+                    source="honors_checkpoint",
+                )
+                return
             success_meta = self._task_meta(task)
             success_meta.pop("active_claim", None)
             success_meta.pop("retry_not_before_epoch", None)
             success_meta["last_completed_at"] = datetime.now(timezone.utc).isoformat()
             success_meta["last_result_chars"] = len(result or "")
+            try:
+                from dharma_swarm.mission_contract import load_honors_checkpoint
+
+                honors_checkpoint = load_honors_checkpoint(success_meta)
+                if honors_checkpoint is not None:
+                    success_meta["honors_checkpoint_score"] = honors_checkpoint.judge_pack.final_score
+                    success_meta["honors_checkpoint_accepted"] = honors_checkpoint.judge_pack.accepted
+            except Exception:
+                logger.debug("Honors checkpoint summary extraction failed", exc_info=True)
             await self._safe_update_task(
                 td.task_id,
                 status=TaskStatus.COMPLETED,
@@ -2003,23 +2028,6 @@ class Orchestrator:
                 result=result,
             )
 
-            # --- Sprint 2 Integration: Auto-consolidate knowledge ---
-            try:
-                sleep_agent = self._get_sleep_time_agent()
-                if sleep_agent is not None and hasattr(sleep_agent, "consolidate_knowledge"):
-                    task_context = self._build_consolidation_context(task, td, result)
-                    task_outcome = {
-                        "success": True,
-                        "agent_id": td.agent_id,
-                        "task_title": getattr(task, "title", ""),
-                        "tokens_used": getattr(result, "tokens_used", 0),
-                    }
-                    asyncio.create_task(
-                        self._safe_consolidate(sleep_agent, task_context, task_outcome)
-                    )
-            except Exception:
-                logger.debug("Knowledge consolidation trigger failed", exc_info=True)
-
         except asyncio.TimeoutError:
             error = f"Task execution timed out after {timeout_seconds:.1f}s"
             logger.warning("Task %s timeout on agent %s", td.task_id, td.agent_id)
@@ -2060,12 +2068,9 @@ class Orchestrator:
         This is the critical persistence step that makes agent output
         visible to future sessions. Without it, the colony has no memory.
         """
-        from pathlib import Path
         from datetime import datetime, timezone
 
-        shared_dir = self._shared_dir()
-        if shared_dir is None:
-            return
+        shared_dir = self._shared_dir
         shared_dir.mkdir(parents=True, exist_ok=True)
 
         # Write shared notes (append, not overwrite)
@@ -2129,7 +2134,7 @@ class Orchestrator:
         try:
             from dharma_swarm.stigmergy import StigmergyStore, StigmergicMark
 
-            store = StigmergyStore()
+            store = StigmergyStore(self._stigmergy_dir)
             # Extract first meaningful line as observation
             lines = [l.strip() for l in result.split("\n") if l.strip()]
             observation = lines[0][:200] if lines else f"Completed: {task.title}"

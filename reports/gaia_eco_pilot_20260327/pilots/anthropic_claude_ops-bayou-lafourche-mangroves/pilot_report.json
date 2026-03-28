@@ -1,0 +1,180 @@
+{
+  "effectiveness": {
+    "avg_user_satisfaction": 4.5,
+    "checks_passed": 5,
+    "latest_community_participants": 25,
+    "latest_survival_rate_pct": 87.0,
+    "net_carbon_position_tons": -254.20000000000005,
+    "status": "on_track",
+    "verified_offset_tons": 258.40000000000003
+  },
+  "feedback": [
+    {
+      "actor_id": "bayou-community-steward-01",
+      "confidence": 0.91,
+      "requested_follow_up": "Keep the shoreline survival trend visible in the next review.",
+      "role": "community_steward",
+      "satisfaction": 4.7,
+      "summary": "The pilot report makes the verification state understandable for field stewards and funders."
+    },
+    {
+      "actor_id": "bayou-science-review-01",
+      "confidence": 0.88,
+      "requested_follow_up": "Add a note on seasonal storm exposure in the 90-day checkpoint.",
+      "role": "scientific_reviewer",
+      "satisfaction": 4.3,
+      "summary": "Evidence paths are auditable and the monitoring snapshots preserve uncertainty instead of flattening it."
+    }
+  ],
+  "feedback_summary": {
+    "average_confidence": 0.9,
+    "average_satisfaction": 4.5,
+    "response_count": 2,
+    "top_follow_up": "Keep the shoreline survival trend visible in the next review."
+  },
+  "fitness": {
+    "correctness": 0.875,
+    "dharmic_alignment": 1.0,
+    "economic_value": 0.0,
+    "efficiency": 0.0,
+    "elegance": 0.8,
+    "performance": 0.0,
+    "safety": 1.0,
+    "utilization": 0.0,
+    "weighted_score": 0.93875
+  },
+  "ledger_path": "/Users/dhyana/dharma_swarm/reports/gaia_eco_pilot_20260327/pilots/anthropic_claude_ops-bayou-lafourche-mangroves/ledger.jsonl",
+  "ledger_summary": {
+    "chain_valid": true,
+    "compute_units": 1,
+    "conservation_violations": 1,
+    "entries": 8,
+    "funding_units": 1,
+    "labor_units": 1,
+    "morphisms": 0,
+    "net_carbon_position": -254.20000000000005,
+    "offset_units": 1,
+    "total_compute_co2e": 4.199999999999999,
+    "total_funding_usd": 31499.999999999996,
+    "total_labor_hours": 192.0,
+    "total_verified_offset": 258.40000000000003,
+    "verification_units": 4,
+    "violations": [
+      {
+        "description": "Claimed 304.00 tons > verified 258.40 tons",
+        "evidence": {
+          "total_claimed": 304.0,
+          "total_verified": 258.40000000000003
+        },
+        "law": "no_creation_ex_nihilo",
+        "severity": 0.14999999999999988
+      }
+    ],
+    "worker_count": 1
+  },
+  "model_id": "anthropic_claude_ops",
+  "monitoring": {
+    "snapshot_count": 3,
+    "snapshots": [
+      {
+        "community_participants": 16,
+        "day": 0,
+        "label": "baseline",
+        "notes": "Initial stewardship plan loaded with baseline habitat and labor commitments.",
+        "soil_carbon_index": 0.41,
+        "steward_hours": 105.6,
+        "survival_rate_pct": 76.0,
+        "vegetation_cover_pct": 25.5
+      },
+      {
+        "community_participants": 21,
+        "day": 45,
+        "label": "day_45_review",
+        "notes": "Early monitoring shows field engagement increasing while verification channels remain active.",
+        "soil_carbon_index": 0.54,
+        "steward_hours": 153.1,
+        "survival_rate_pct": 82.0,
+        "vegetation_cover_pct": 35.0
+      },
+      {
+        "community_participants": 25,
+        "day": 90,
+        "label": "day_90_review",
+        "notes": "Pilot remains on track with rising cover, stronger soil signal, and sustained community participation.",
+        "soil_carbon_index": 0.67,
+        "steward_hours": 200.6,
+        "survival_rate_pct": 87.0,
+        "vegetation_cover_pct": 40.5
+      }
+    ]
+  },
+  "project": {
+    "carbon_potential_tons_yr": 3800.0,
+    "community_partner": "Bayou Reciprocity Cooperative",
+    "country": "USA",
+    "description": "Community-led mangrove restoration that combines satellite monitoring, field audits, and local stewardship to strengthen coastal resilience and worker livelihoods.",
+    "funding_gap_usd": 640000.0,
+    "hectares": 420.0,
+    "labor_needed": 48,
+    "name": "Bayou Lafourche Mangrove Reciprocity Pilot",
+    "project_id": "bayou-lafourche-mangroves",
+    "project_type": "mangrove_restoration",
+    "region": "Louisiana Gulf Coast",
+    "verification_channels": [
+      "satellite",
+      "iot_sensor",
+      "human_auditor",
+      "community"
+    ],
+    "verification_status": "verified"
+  },
+  "recommendation": {
+    "community_bonus": 1.15,
+    "match_score": 1768.48,
+    "project": {
+      "carbon_potential_tons_yr": 3800.0,
+      "community_partner": "Bayou Reciprocity Cooperative",
+      "country": "USA",
+      "description": "Community-led mangrove restoration that combines satellite monitoring, field audits, and local stewardship to strengthen coastal resilience and worker livelihoods.",
+      "funding_gap_usd": 640000.0,
+      "hectares": 420.0,
+      "labor_needed": 48,
+      "name": "Bayou Lafourche Mangrove Reciprocity Pilot",
+      "project_id": "bayou-lafourche-mangroves",
+      "project_type": "mangrove_restoration",
+      "region": "Louisiana Gulf Coast",
+      "verification_channels": [
+        "satellite",
+        "iot_sensor",
+        "human_auditor",
+        "community"
+      ],
+      "verification_status": "verified"
+    },
+    "strategy": {
+      "approved": true,
+      "principles": [
+        "anekanta",
+        "ahimsa",
+        "satya",
+        "jagat_kalyan"
+      ],
+      "rationale": "Project clears harm, verification, and community reciprocity checks.",
+      "warnings": []
+    },
+    "verification_bonus": 1.0,
+    "welfare_tons": 6118.0
+  },
+  "verification": {
+    "agreeing_oracles": [
+      "satellite",
+      "iot_sensor",
+      "human_auditor",
+      "community"
+    ],
+    "agreement_count": 4,
+    "dissenting_oracles": [],
+    "final_confidence": 0.8500000000000001,
+    "session_id": "c668b01871a6"
+  }
+}

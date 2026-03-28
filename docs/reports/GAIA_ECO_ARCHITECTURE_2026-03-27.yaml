@@ -1,0 +1,180 @@
+generated: 2026-03-27
+artifact: GAIA_ECO_ARCHITECTURE
+status: conceptual
+objective: >
+  Define the smallest credible GAIA-ECO architecture that translates Aptavani-informed
+  principles into auditable ecological restoration coordination on top of the current
+  dharma_swarm GAIA runtime.
+
+current_state:
+  strengths:
+    - append-only GAIA ledger for compute, funding, labor, offset, and verification
+    - 3-of-5 oracle verification across satellite, iot_sensor, human_auditor, community, and statistical_model
+    - conservation checks and Goodhart-drift detection
+    - operator-facing recommendation and pilot staging surface
+  gaps:
+    - no Aptavani principle registry or policy compiler
+    - no standards-aligned initiative registry
+    - no geospatial observation plane
+    - no biodiversity schema integration
+    - no public challenge and remediation workflow
+    - no governance role model for science, community, ethics, and audit
+
+principles:
+  - id: ahimsa
+    inference_level: direct
+    basis:
+      - https://www.dadabhagwan.org/path-to-happiness/spiritual-science/non-violence-and-spiritual-awareness/
+    requirement: >
+      Block or downgrade projects with unresolved ecological harm, coercion, biodiversity loss,
+      invasive species risk, or community harm.
+  - id: anekanta
+    inference_level: inferred_from_non_insistence_and_open_viewpoints
+    basis:
+      - https://download.dadabhagwan.org/books/English/PDF/aptavani-01.pdf
+      - local_code_symbol: dharma_swarm/gaia_platform.py::GAIA_PRINCIPLES
+    requirement: >
+      Preserve disagreement, require multiple evidence channels, and provide a public challenge path.
+  - id: vyavasthit
+    inference_level: direct
+    basis:
+      - http://dadabhagwan.org/akram-vignan.html
+      - https://www.dadabhagwan.org/path-to-happiness/self-help/how-to-stop-worrying/who-is-the-doer/
+    requirement: >
+      Recommendations must cite conditions, baselines, and causal drivers rather than heroic narratives.
+  - id: jagat_kalyan
+    inference_level: direct_plus_local_mission_binding
+    basis:
+      - https://www.dadabhagwan.org/path-to-happiness/spiritual-science/the-essence-of-all-religion/salvation-of-the-world/
+      - /Users/dhyana/.dharma/shared/thinkodynamic_director_vision_2026-03-27T08-52-05Z.md
+    requirement: >
+      Optimize for ecological recovery and human well-being together, with explicit local benefit-sharing.
+  - id: practical_applied_science
+    inference_level: direct
+    basis:
+      - http://dadabhagwan.org/akram-vignan.html
+    requirement: >
+      Every principle must compile into a rule, check, or measurable reporting obligation.
+
+architecture:
+  layers:
+    - name: knowledge_policy
+      capabilities:
+        - Aptavani source registry
+        - interpretation registry
+        - policy compiler
+        - gate definitions
+      outputs:
+        - machine-readable principle catalog
+        - checkable policy rules
+    - name: initiative_observation
+      capabilities:
+        - restoration initiative registry
+        - site and baseline capture
+        - monitoring plan capture
+        - observation ingestion
+      interfaces:
+        - FERM-style initiative structure
+        - OGC SensorThings
+        - STAC
+        - Darwin Core
+    - name: evidence_verification
+      capabilities:
+        - claim graph
+        - evidence object store
+        - 3-of-5 oracle verification
+        - challenge and remediation tracking
+        - consent and grievance records
+      reuse:
+        - dharma_swarm/gaia_ledger.py
+        - dharma_swarm/gaia_verification.py
+        - dharma_swarm/gaia_fitness.py
+    - name: reasoning_recommendation
+      capabilities:
+        - evidence-bound assessment
+        - gate evaluation
+        - pilot design suggestion
+        - monitoring suggestion
+      constraints:
+        - advisory_only
+        - cite_sources_in_outputs
+        - separate_fact_from_inference
+    - name: coordination_reporting
+      capabilities:
+        - operator console
+        - project integrity cards
+        - adaptive management review
+        - exportable pilot reports
+    - name: commons_governance
+      capabilities:
+        - scientific_mrv_council
+        - community_worker_council
+        - ethics_alignment_council
+        - audit_challenge_desk
+
+mvp:
+  title: Aptavani policy compiler over a FERM-aligned initiative registry
+  deliverables:
+    - principle registry with provenance and interpretation status
+    - initiative schema with planning, implementation, and monitoring sections
+    - gate engine that emits pass, review, or block with evidence references
+    - public project card with integrity class, evidence path, and challenge status
+  avoid_for_now:
+    - full marketplace flows
+    - broad predictive modeling
+    - complex live sensor integrations
+    - production web suite redesign
+
+technical_requirements:
+  storage:
+    - append-only ledger
+    - relational store with geospatial support
+    - object storage for evidence bundles
+  api:
+    - typed Python API surface
+    - source-cited assessment responses
+    - export endpoints for public claim cards and pilot reports
+  governance:
+    - role-based access control
+    - challenge lifecycle
+    - consent status tracking
+    - immutable reversal visibility
+  interoperability:
+    - FERM-compatible field mapping
+    - STAC asset references
+    - SensorThings observation ingestion
+    - Darwin Core-compatible biodiversity records
+
+success_criteria:
+  - current GAIA kernel remains the trust anchor
+  - every public claim has methodology, evidence path, and challenge path
+  - direct source claims and design inferences are clearly separated
+  - ecological and livelihood integrity are co-measured
+  - the first pilot can be staged without inventing a parallel stack
+
+sources:
+  internal:
+    - /Users/dhyana/.dharma/shared/thinkodynamic_director_vision_2026-03-27T08-52-05Z.md
+    - /Users/dhyana/.dharma/shared/director_council_dialogue.md
+    - dharma_swarm/gaia_platform.py
+    - dharma_swarm/gaia_ledger.py
+    - dharma_swarm/gaia_verification.py
+    - dharma_swarm/gaia_fitness.py
+    - gaia_ui.md
+    - docs/dse/GAIA_FACILITATOR_GUIDE.md
+    - docs/dse/GAIA_TRAINING_WORKBOOK.md
+    - docs/reports/JAGAT_KALYAN_RECIPROCITY_COMMONS_2026-03-11.md
+    - docs/reports/PLANETARY_RECIPROCITY_COMMONS_GOVERNANCE_CHARTER_2026-03-11.md
+    - /Users/dhyana/Persistent-Semantic-Memory-Vault/01-Transmission-Vectors/aptavani-derived/claude-first-reading-aptavani.md
+  external:
+    - http://dadabhagwan.org/akram-vignan.html
+    - https://www.dadabhagwan.org/path-to-happiness/spiritual-science/non-violence-and-spiritual-awareness/
+    - https://www.dadabhagwan.org/path-to-happiness/self-help/how-to-stop-worrying/who-is-the-doer/
+    - https://www.dadabhagwan.org/path-to-happiness/spiritual-science/the-essence-of-all-religion/salvation-of-the-world/
+    - https://download.dadabhagwan.org/books/English/PDF/aptavani-01.pdf
+    - https://openknowledge.fao.org/server/api/core/bitstreams/b234f058-9f77-4481-b870-a7fa2e7ad5f8/content
+    - https://openknowledge.fao.org/server/api/core/bitstreams/90ed5439-59f7-4e7c-8a46-17059065aadb/content
+    - https://ferm.fao.org/docs/ferm_user_guide_draft.pdf
+    - https://ogcapi.ogc.org/sensorthings/overview.html
+    - https://stacspec.org/en/about/
+    - https://dwc.tdwg.org/terms/

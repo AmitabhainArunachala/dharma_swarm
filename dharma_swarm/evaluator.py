@@ -11,6 +11,9 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
+from dharma_swarm.auto_grade.engine import AutoGradeEngine
+from dharma_swarm.auto_grade.models import RewardSignal
+from dharma_swarm.auto_research.models import ResearchReport, SourceDocument
 from dharma_swarm.epistemic_telemetry import analyze_output
 from dharma_swarm.metrics import MetricsAnalyzer
 from dharma_swarm.models import ProviderType, Task
@@ -477,3 +480,18 @@ class OutputEvaluator:
                 handle.write(json.dumps(evaluation.to_record(), sort_keys=True) + "\n")
 
         await asyncio.to_thread(_write_sync)
+
+
+class ResearchEvaluator:
+    """Thin integration wrapper that routes research reports through AutoGrade."""
+
+    def __init__(self, grader: AutoGradeEngine | None = None) -> None:
+        self.grader = grader or AutoGradeEngine()
+
+    def evaluate(
+        self,
+        report: ResearchReport,
+        sources: list[SourceDocument],
+        **kwargs: Any,
+    ) -> RewardSignal:
+        return self.grader.grade(report, sources, **kwargs)

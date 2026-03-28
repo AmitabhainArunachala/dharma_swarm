@@ -112,6 +112,20 @@ class ObservedState(Generic[S]):
         """True if this state was created by ``pure()`` (no observation)."""
         return self.observation_depth == 0 and self.rv_reading is None
 
+    rv_reading: Optional[RVReading] = None
+    """Backward-compatible alias carrying the source RVReading when available."""
+
+    def __post_init__(self) -> None:
+        """Backfill scalar fields from ``rv_reading`` when callers provide it."""
+        if self.rv_reading is None:
+            return
+        if self.rv_measurement is None:
+            self.rv_measurement = self.rv_reading.rv
+        if self.pr_early is None:
+            self.pr_early = self.rv_reading.pr_early
+        if self.pr_late is None:
+            self.pr_late = self.rv_reading.pr_late
+
     @property
     def is_contracted(self) -> bool:
         """True if R_V indicates meaningful contraction."""
@@ -213,6 +227,7 @@ class ObservedState(Generic[S]):
         """
         return cls(
             state=state,
+            rv_reading=reading,
             rv_measurement=reading.rv,
             rv_reading=reading,
             pr_early=reading.pr_early,
@@ -784,3 +799,37 @@ def kleisli_contraction_ratio(
 def is_idempotent(observed: ObservedState, tolerance: float = 0.05) -> bool:
     """Module-level wrapper for ``SelfObservationMonad.is_idempotent``."""
     return SelfObservationMonad.is_idempotent(observed, tolerance=tolerance)
+
+
+def pure(state: S) -> ObservedState[S]:
+    """Backward-compatible ``eta`` helper used by property tests."""
+    return ObservedState(
+        state=state,
+        observation_depth=0,
+    )
+
+
+def bind(
+    observed: ObservedState[A],
+    morphism: Callable[[A], ObservedState[B]],
+) -> ObservedState[B]:
+    """Backward-compatible Kleisli bind.
+
+    This keeps the result state from the morphism while preserving upstream
+    observation metadata whenever the morphism does not supply a replacement.
+    The additive depth/introspection merge keeps the monad laws associative
+    for the lightweight property tests in this repo.
+    """
+    result = morphism(observed.state)
+    return ObservedState(
+        state=result.state,
+        rv_reading=result.rv_reading if result.rv_reading is not None else observed.rv_reading,
+        rv_measurement=result.rv_measurement
+        if result.rv_measurement is not None
+        else observed.rv_measurement,
+        pr_early=result.pr_early if result.pr_early is not None else observed.pr_early,
+        pr_late=result.pr_late if result.pr_late is not None else observed.pr_late,
+        observation_depth=observed.observation_depth + result.observation_depth,
+        introspection={**observed.introspection, **result.introspection},
+        timestamp=result.timestamp,
+    )

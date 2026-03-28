@@ -70,7 +70,7 @@ class MetaEvolutionEngine:
         darwin_engine: DarwinEngine,
         meta_archive_path: Path | None = None,
         n_object_cycles_per_meta: int = 10,
-        poor_meta_fitness_threshold: float = 0.5,
+        poor_meta_fitness_threshold: float = 0.7,
         auto_apply: bool = True,
         max_weight_shift: float = 0.08,
         max_mutation_delta: float = 0.05,

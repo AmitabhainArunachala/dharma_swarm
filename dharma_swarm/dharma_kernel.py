@@ -15,7 +15,7 @@ import hashlib
 import json
 from enum import Enum
 from pathlib import Path
-from typing import Literal
+from typing import Any, Literal
 
 import aiofiles
 from pydantic import BaseModel, Field
@@ -78,12 +78,18 @@ class MetaPrinciple(str, Enum):
 
 
 class PrincipleSpec(BaseModel):
-    """Specification for a single dharmic principle."""
+    """Specification for a single dharmic principle.
+
+    The optional ``structured_predicate`` field enables Tier 1 deterministic
+    evaluation in PolicyCompiler.  When present, the predicate is evaluated
+    against action_metadata instead of falling through to semantic similarity.
+    """
 
     name: str
     description: str
     formal_constraint: str
     severity: Literal["critical", "high", "medium"]
+    structured_predicate: dict[str, Any] | None = None
 
 
 class DharmaKernel(BaseModel):
@@ -102,6 +108,11 @@ class DharmaKernel(BaseModel):
                 description="System observing itself must maintain separation between observer and observed",
                 formal_constraint="observer_id != observed_id in all self-referential operations",
                 severity="critical",
+                structured_predicate={
+                    "field": "observer_equals_observed",
+                    "op": "eq",
+                    "value": True,
+                },
             ),
             MetaPrinciple.EPISTEMIC_HUMILITY.value: PrincipleSpec(
                 name="Epistemic Humility",
@@ -120,6 +131,11 @@ class DharmaKernel(BaseModel):
                 description="Higher layers constrain lower for safety gates; lower layers inform higher for emergence. Upward signals are proposals, not overrides.",
                 formal_constraint="proposer_layer >= target_layer for constraint operations; lower layers may propose but not override safety",
                 severity="critical",
+                structured_predicate={
+                    "field": "upward_override_attempted",
+                    "op": "eq",
+                    "value": True,
+                },
             ),
             MetaPrinciple.POWER_MINIMIZATION.value: PrincipleSpec(
                 name="Power Minimization",
@@ -138,18 +154,33 @@ class DharmaKernel(BaseModel):
                 description="Significant decisions require evaluation from multiple perspectives",
                 formal_constraint="evaluator_count >= 2 for significance_level > threshold",
                 severity="high",
+                structured_predicate={
+                    "field": "evaluator_count",
+                    "op": "lt",
+                    "value": 2,
+                },
             ),
             MetaPrinciple.NON_VIOLENCE_IN_COMPUTATION.value: PrincipleSpec(
                 name="Non-Violence in Computation",
                 description="No destructive operations without explicit consent and justification",
                 formal_constraint="destructive_op implies (consent_given and justification_provided)",
                 severity="critical",
+                structured_predicate={
+                    "field": "destructive_without_consent",
+                    "op": "eq",
+                    "value": True,
+                },
             ),
             MetaPrinciple.HUMAN_OVERSIGHT_PRESERVATION.value: PrincipleSpec(
                 name="Human Oversight Preservation",
                 description="Human oversight channels must remain open and functional",
                 formal_constraint="oversight_channel.is_active() == True at all times",
                 severity="critical",
+                structured_predicate={
+                    "field": "oversight_active",
+                    "op": "eq",
+                    "value": False,
+                },
             ),
             MetaPrinciple.PROVENANCE_INTEGRITY.value: PrincipleSpec(
                 name="Provenance Integrity",

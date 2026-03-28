@@ -22,7 +22,6 @@ import asyncio
 import json
 import logging
 import os
-import subprocess
 import sys
 import time
 from datetime import datetime, timezone
@@ -41,6 +40,11 @@ from dharma_swarm.stigmergy import StigmergicMark, StigmergyStore
 from dharma_swarm.subconscious import SubconsciousStream
 from dharma_swarm.thread_manager import ThreadManager
 from dharma_swarm.telos_gates import check_with_reflective_reroute
+from dharma_swarm.claude_cli import (
+    resolve_claude_binary,
+    run_claude_headless as _run_claude_headless_impl,
+)
+from dharma_swarm.runtime_artifacts import append_pulse_log, freshest_pulse_log_path
 
 logger = logging.getLogger(__name__)
 
@@ -109,56 +113,28 @@ Active thread: {thread}
 
 
 def _resolve_claude_binary() -> str:
-    """Find the claude CLI binary, checking known locations beyond PATH."""
-    import shutil
-    found = shutil.which("claude")
-    if found:
-        return found
-    for candidate in [
-        Path.home() / ".npm-global" / "bin" / "claude",
-        Path("/usr/local/bin/claude"),
-        Path("/opt/homebrew/bin/claude"),
-    ]:
-        if candidate.exists():
-            return str(candidate)
-    return "claude"  # fallback — will raise FileNotFoundError
-
-
-_MODEL_ALIASES: dict[str, str] = {
-    "flash": "haiku",       # Gemini Flash → Claude Haiku (fast/cheap)
-    "gemini": "haiku",
-    "gpt4": "sonnet",
-    "gpt-4": "sonnet",
-}
+    """Compatibility wrapper for shared Claude CLI resolution."""
+    return resolve_claude_binary()
 
 
 def run_claude_headless(
     prompt: str,
     timeout: int = 600,
     model: str | None = None,
+    *,
+    bare: bool = True,
+    permission_mode: str | None = "bypassPermissions",
+    tools: str | None = "default",
 ) -> str:
     """Run Claude Code in headless mode — the REAL agent."""
-    try:
-        claude_bin = _resolve_claude_binary()
-        command = [claude_bin, "-p", prompt, "--output-format", "text"]
-        if model:
-            resolved = _MODEL_ALIASES.get(model.lower(), model)
-            command.extend(["--model", resolved])
-
-        result = subprocess.run(
-            command,
-            capture_output=True, text=True, timeout=timeout,
-            env={**os.environ, "CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC": "1"},
-        )
-        if result.returncode == 0:
-            return result.stdout[:5000]
-        return f"Error (rc={result.returncode}): {result.stderr[:500]}"
-    except subprocess.TimeoutExpired:
-        return "TIMEOUT: Claude Code exceeded limit"
-    except FileNotFoundError:
-        return "ERROR: claude CLI not found in PATH"
-    except Exception as e:
-        return f"ERROR: {e}"
+    return _run_claude_headless_impl(
+        prompt,
+        timeout=timeout,
+        model=model,
+        bare=bare,
+        permission_mode=permission_mode,
+        tools=tools,
+    )
 
 
 def _load_living_state() -> dict[str, Any]:
@@ -433,10 +409,13 @@ def pulse(config: DaemonConfig | None = None) -> str:
         )
 
     # Log to pulse log
-    log_path = STATE_DIR / "pulse.log"
-    with open(log_path, "a") as f:
-        f.write(f"\n--- PULSE @ {datetime.now(timezone.utc).isoformat()} [{thread}] ---\n")
-        f.write(f"{result[:500]}\n")
+    append_pulse_log(
+        STATE_DIR,
+        (
+            f"\n--- PULSE @ {datetime.now(timezone.utc).isoformat()} [{thread}] ---\n"
+            f"{result[:500]}\n"
+        ),
+    )
 
     # Rotate thread for next pulse
     tm.rotate()
@@ -481,69 +460,88 @@ def _check_and_run_cron_jobs(cfg: DaemonConfig | None = None) -> None:
             continue
         if not job.get("enabled", False):
             continue
-        if job.get("trigger") != "cron":
-            continue
 
         job_id = str(job.get("id", "")).strip()
         if not job_id:
             continue
-        schedule = job.get("schedule", {})
-        if not isinstance(schedule, dict):
-            continue
+        trigger = str(job.get("trigger", "")).strip()
+        last_run_key: str | None = None
+        schedule_label = ""
 
-        try:
-            hour = int(schedule.get("hour"))
-            minute = int(schedule.get("minute", 0))
-        except (TypeError, ValueError):
-            continue
-
-        if hour is None:
-            continue
-
-        # Check if this hour/minute matches
-        if now.hour == hour and now.minute == minute:
-            # Check if already run this exact minute slot.
+        if trigger == "cron":
+            schedule = job.get("schedule", {})
+            if not isinstance(schedule, dict):
+                continue
+            try:
+                hour = int(schedule.get("hour"))
+                minute = int(schedule.get("minute", 0))
+            except (TypeError, ValueError):
+                continue
+            if now.hour != hour or now.minute != minute:
+                continue
             last_run_key = f"{job_id}:{slot_key}"
             if last_run_key in last_runs:
                 continue
-
-            name = str(job.get("name", job_id))
-            prompt = str(job.get("prompt", "")).strip()
-            if not prompt:
-                print(f"[cron] Skipping {job_id}: empty prompt")
-                continue
-
-            model = str(job.get("model", "")).strip() or None
-            print(f"[cron] Running: {name} (hour={hour}, minute={minute})")
-
-            gate = check_with_reflective_reroute(
-                action=f"cron:{job_id}",
-                content=prompt[:2000],
-                tool_name="pulse_cron",
-                think_phase="before_complete",
-                reflection=(
-                    f"Cron job {job_id} scheduled at {hour:02d}:{minute:02d}. "
-                    "Validate safety and bounded execution."
-                ),
-                max_reroutes=1,
-                requirement_refs=[f"cron:{job_id}"],
-            )
-            if gate.result.decision.value == "block":
-                print(f"[cron] Blocked {job_id}: {gate.result.reason}")
-                continue
-
+            schedule_label = f"hour={hour}, minute={minute}"
+        elif trigger == "interval":
             try:
-                result = run_claude_headless(
-                    prompt=prompt,
-                    model=model,
-                )
-                print(f"[cron] {job_id}: {result[:150].replace(chr(10), ' ')}")
+                interval_seconds = int(job.get("interval_seconds"))
+            except (TypeError, ValueError):
+                continue
+            if interval_seconds <= 0:
+                continue
+            last_run_key = f"{job_id}:interval"
+            raw_last_run = last_runs.get(last_run_key)
+            last_run_dt: datetime | None = None
+            if isinstance(raw_last_run, str):
+                try:
+                    last_run_dt = datetime.fromisoformat(raw_last_run)
+                except ValueError:
+                    last_run_dt = None
+            if last_run_dt is not None:
+                elapsed = (now - last_run_dt).total_seconds()
+                if elapsed < interval_seconds:
+                    continue
+            schedule_label = f"every {interval_seconds}s"
+        else:
+            continue
 
-                # Mark as run
-                last_runs[last_run_key] = now.isoformat()
-                did_run = True
-            except Exception as e:
-                print(f"[cron] Error running {job_id}: {e}")
+        name = str(job.get("name", job_id))
+        prompt = str(job.get("prompt", "")).strip()
+        if not prompt:
+            print(f"[cron] Skipping {job_id}: empty prompt")
+            continue
+
+        model = str(job.get("model", "")).strip() or None
+        print(f"[cron] Running: {name} ({schedule_label})")
+
+        gate = check_with_reflective_reroute(
+            action=f"cron:{job_id}",
+            content=prompt[:2000],
+            tool_name="pulse_cron",
+            think_phase="before_complete",
+            reflection=(
+                f"Cron job {job_id} scheduled as {schedule_label}. "
+                "Validate safety and bounded execution."
+            ),
+            max_reroutes=1,
+            requirement_refs=[f"cron:{job_id}"],
+        )
+        if gate.result.decision.value == "block":
+            print(f"[cron] Blocked {job_id}: {gate.result.reason}")
+            continue
+
+        try:
+            result = run_claude_headless(
+                prompt=prompt,
+                model=model,
+            )
+            print(f"[cron] {job_id}: {result[:150].replace(chr(10), ' ')}")
+
+            last_runs[last_run_key] = now.isoformat()
+            did_run = True
+        except Exception as e:
+            print(f"[cron] Error running {job_id}: {e}")
 
     if did_run:
         try:
@@ -597,7 +595,7 @@ def daemon_loop(config: DaemonConfig | None = None):
 
 def show_status():
     """Show pulse status from dharma_swarm state."""
-    log_path = STATE_DIR / "pulse.log"
+    log_path = freshest_pulse_log_path(STATE_DIR) or (STATE_DIR / "pulse.log")
     if not log_path.exists():
         print("No pulse log yet.")
         return

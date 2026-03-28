@@ -1,4 +1,9 @@
-"""Canonical lifecycle representation scanner."""
+"""Canonical lifecycle representation scanner.
+
+Audits the lifecycle that is explicitly modeled in the current core runtime.
+Downstream effects like routing bias and projection refresh are not enforced
+until they exist as first-class lifecycle records.
+"""
 
 from __future__ import annotations
 
@@ -6,16 +11,14 @@ from pathlib import Path
 
 from dharma_swarm.assurance.report_schema import Finding, ScanReport, Severity
 
-CANONICAL_STEPS = {
-    "ActionProposal": Severity.LOW,
-    "GateDecision": Severity.LOW,
-    "ExecutionLease": Severity.HIGH,
-    "ActionExecution": Severity.MEDIUM,
-    "Outcome": Severity.LOW,
-    "ValueEvent": Severity.LOW,
-    "Contribution": Severity.LOW,
-    "RoutingBias": Severity.MEDIUM,
-    "ProjectionRefresh": Severity.MEDIUM,
+REQUIRED_STEPS: dict[str, tuple[Severity, tuple[str, ...]]] = {
+    "ActionProposal": (Severity.LOW, ("ActionProposal",)),
+    "GateDecision": (Severity.LOW, ("GateDecision", "GateDecisionRecord")),
+    "ExecutionLease": (Severity.HIGH, ("ExecutionLease",)),
+    "ActionExecution": (Severity.MEDIUM, ("ActionExecution",)),
+    "Outcome": (Severity.LOW, ("Outcome",)),
+    "ValueEvent": (Severity.LOW, ("ValueEvent",)),
+    "Contribution": (Severity.LOW, ("Contribution",)),
 }
 
 
@@ -41,8 +44,8 @@ def scan(
             corpus_parts.append(rel_path.read_text(encoding="utf-8", errors="replace"))
     corpus = "\n".join(corpus_parts)
 
-    for step, severity in CANONICAL_STEPS.items():
-        if step in corpus:
+    for step, (severity, aliases) in REQUIRED_STEPS.items():
+        if any(alias in corpus for alias in aliases):
             continue
         fid += 1
         findings.append(Finding(

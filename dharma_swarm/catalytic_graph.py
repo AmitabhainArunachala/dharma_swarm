@@ -341,27 +341,78 @@ class CatalyticGraph:
     def load(self) -> bool:
         """Load graph from disk, replacing in-memory state.
 
+        Tries the primary persist path first.  Falls back to the
+        mycelium-populated ``cc_catalytic_graph.json`` in the same
+        parent directory (written by the mycelium daemon with richer
+        data from cross-session analysis).
+
         Returns:
-            ``True`` if the file was found and parsed, ``False``
+            ``True`` if a file was found and parsed, ``False``
             otherwise.
         """
-        if not self._persist_path.exists():
-            return False
-        try:
-            data = json.loads(self._persist_path.read_text())
-            self._nodes = data.get("nodes", {})
-            self._edges = [
-                CatalyticEdge(**e) for e in data.get("edges", [])
-            ]
-            self._adj = defaultdict(list)
-            self._rev = defaultdict(list)
-            for e in self._edges:
-                self._adj[e.source].append(e.target)
-                self._rev[e.target].append(e.source)
-            return True
-        except Exception as exc:
-            logger.warning("Failed to load catalytic graph: %s", exc)
-            return False
+        # Prefer the richer mycelium graph when available, fall back to primary
+        mycelium_path = self._persist_path.parent / "cc_catalytic_graph.json"
+        candidates = []
+        if mycelium_path != self._persist_path and mycelium_path.exists():
+            candidates.append(mycelium_path)
+        candidates.append(self._persist_path)
+
+        for path in candidates:
+            if not path.exists():
+                continue
+            try:
+                data = json.loads(path.read_text())
+                self._nodes = data.get("nodes", {})
+                self._edges = [
+                    CatalyticEdge(**e) for e in data.get("edges", [])
+                ]
+                self._adj = defaultdict(list)
+                self._rev = defaultdict(list)
+                for e in self._edges:
+                    self._adj[e.source].append(e.target)
+                    self._rev[e.target].append(e.source)
+                logger.debug(
+                    "Catalytic graph loaded from %s: %d nodes, %d edges",
+                    path, len(self._nodes), len(self._edges),
+                )
+                # Persist to primary path if loaded from fallback
+                if path != self._persist_path and self._nodes:
+                    try:
+                        self.save()
+                    except Exception:
+                        pass
+                return True
+            except Exception as exc:
+                logger.warning("Failed to load catalytic graph from %s: %s", path, exc)
+        return False
+
+    # ------------------------------------------------------------------
+    # ------------------------------------------------------------------
+    # Matrix representation
+    # ------------------------------------------------------------------
+
+    def adjacency_matrix(self) -> tuple[Any, list[str]]:
+        """Return the weighted adjacency matrix and node ordering.
+
+        Returns:
+            (matrix, node_list) where matrix[i][j] is the total edge
+            strength from node_list[i] to node_list[j].
+            Returns empty if no nodes exist.
+        """
+        import numpy as np
+
+        nodes = sorted(self._nodes.keys())
+        n = len(nodes)
+        if n == 0:
+            return np.zeros((0, 0)), []
+
+        idx = {name: i for i, name in enumerate(nodes)}
+        mat = np.zeros((n, n))
+        for edge in self._edges:
+            i, j = idx.get(edge.source), idx.get(edge.target)
+            if i is not None and j is not None:
+                mat[i, j] += edge.strength
+        return mat, nodes
 
     # ------------------------------------------------------------------
     # Properties & summaries

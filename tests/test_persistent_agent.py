@@ -20,7 +20,7 @@ class TestProviderString:
         assert _provider_string(ProviderType.CLAUDE_CODE) == "anthropic"
 
     def test_codex(self):
-        assert _provider_string(ProviderType.CODEX) == "anthropic"
+        assert _provider_string(ProviderType.CODEX) == "codex"
 
     def test_openrouter(self):
         assert _provider_string(ProviderType.OPENROUTER) == "openrouter"

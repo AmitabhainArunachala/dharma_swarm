@@ -94,12 +94,22 @@ class SubconsciousStream:
                 resonance_type = "unknown"
 
             description = (
-                f"{mark_a.observation} <-> {mark_b.observation}"
+                f"{mark_a.observation[:100]} <-> {mark_b.observation[:100]}"
             )
 
+            # Cap file_path to basename to prevent recursive bloat:
+            # dream marks use source file_paths which may themselves be
+            # concatenated dream paths from previous cycles.
+            def _cap_path(p: str, limit: int = 200) -> str:
+                if len(p) <= limit:
+                    return p
+                # Take last segment (after last <->)
+                parts = p.rsplit("<->", 1)
+                return parts[-1][:limit]
+
             assoc = SubconsciousAssociation(
-                source_a=mark_a.file_path,
-                source_b=mark_b.file_path,
+                source_a=_cap_path(mark_a.file_path),
+                source_b=_cap_path(mark_b.file_path),
                 resonance_type=resonance_type,
                 description=description,
                 strength=strength,
@@ -115,7 +125,7 @@ class SubconsciousStream:
         for assoc in associations:
             dream_mark = StigmergicMark(
                 agent="subconscious",
-                file_path=f"{assoc.source_a}<->{assoc.source_b}",
+                file_path=f"{assoc.source_a[:100]}<->{assoc.source_b[:100]}",
                 action="dream",
                 observation=assoc.description[:200],
                 salience=assoc.strength,

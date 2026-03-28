@@ -107,6 +107,29 @@ class WorkflowResult(BaseModel):
     resumed_from: str = ""
 
 
+class AutoResearchWorkflowOutcome(BaseModel):
+    """Result bundle for an AutoResearch workflow execution."""
+
+    workflow: WorkflowResult
+    report: Any
+    reward_signal: Any
+    trace_ids: list[str] = Field(default_factory=list)
+    lineage_edge_id: str = ""
+
+    model_config = {"arbitrary_types_allowed": True}
+
+
+class TopologyWorkflowOutcome(BaseModel):
+    """Result bundle for a topology-genome workflow execution."""
+
+    workflow: WorkflowResult
+    outputs: dict[str, Any] = Field(default_factory=dict)
+    trace_ids: list[str] = Field(default_factory=list)
+    lineage_edge_ids: list[str] = Field(default_factory=list)
+
+    model_config = {"arbitrary_types_allowed": True}
+
+
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 # WORKFLOW DEFINITION
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
@@ -478,3 +501,182 @@ def compile_workflow(name: str) -> CompiledWorkflow:
 def list_workflows() -> list[str]:
     """List all registered workflow names."""
     return sorted(_REGISTRY.keys())
+
+
+async def execute_auto_research_workflow(
+    *,
+    brief: Any,
+    research_engine: Any,
+    grade_engine: Any,
+    agent_name: str,
+    trace_store: Any | None = None,
+    lineage_graph: Any | None = None,
+    checkpoint_dir: Path | None = None,
+    grade_kwargs: dict[str, Any] | None = None,
+    runtime_field_names: list[str] | None = None,
+) -> AutoResearchWorkflowOutcome:
+    """Execute AutoResearch + AutoGrade inside the canonical workflow runtime."""
+    from dharma_swarm.traces import auto_research_trace_entry
+
+    workflow_def = WorkflowDefinition("auto_research")
+    grade_kwargs = dict(grade_kwargs or {})
+
+    plan_ref = workflow_def.step(
+        "plan",
+        lambda _inputs, _ctx: research_engine.plan(brief),
+    )
+    sources_ref = workflow_def.step(
+        "sources",
+        lambda inputs, _ctx: research_engine.reader.normalize_all(
+            list(research_engine.search_backend.search(brief, inputs["plan"]))
+        ),
+        inputs=[plan_ref],
+        deterministic=False,
+    )
+    claims_ref = workflow_def.step(
+        "claim_graph",
+        lambda inputs, _ctx: research_engine.claim_graph.build(brief, inputs["sources"]),
+        inputs=[sources_ref],
+    )
+    report_ref = workflow_def.step(
+        "report",
+        lambda inputs, _ctx: research_engine.reporter.create_report(
+            brief=brief,
+            queries=inputs["plan"],
+            sources=inputs["sources"],
+            claims=inputs["claim_graph"],
+        ),
+        inputs=[plan_ref, sources_ref, claims_ref],
+    )
+    grade_ref = workflow_def.step(
+        "grade",
+        lambda inputs, _ctx: grade_engine.grade(
+            inputs["report"],
+            inputs["sources"],
+            **grade_kwargs,
+        ),
+        inputs=[report_ref, sources_ref],
+        deterministic=False,
+    )
+
+    compiled = workflow_def.compile()
+    trace_ids: list[str] = []
+
+    async def _on_step_complete(step: WorkflowStep) -> None:
+        if trace_store is None or step.status != StepStatus.COMPLETED:
+            return
+        trace_id = await trace_store.log_entry(
+            auto_research_trace_entry(
+                agent=agent_name,
+                task_id=brief.task_id,
+                workflow_name=compiled.name,
+                step_name=step.name,
+                output=step.output,
+                runtime_fields=runtime_field_names,
+            )
+        )
+        trace_ids.append(trace_id)
+
+    workflow_result = await compiled.execute(
+        context={"task_id": brief.task_id},
+        checkpoint_dir=checkpoint_dir,
+        on_step_complete=_on_step_complete,
+    )
+    step_map = {step.name: step.output for step in workflow_result.steps if step.status == StepStatus.COMPLETED}
+    report = step_map.get(report_ref.name)
+    reward_signal = step_map.get(grade_ref.name)
+
+    lineage_edge_id = ""
+    if lineage_graph is not None and report is not None and reward_signal is not None:
+        lineage_edge_id = lineage_graph.record_research_run(
+            task_id=brief.task_id,
+            report_id=report.report_id,
+            source_ids=list(report.source_ids),
+            agent=agent_name,
+            metadata={
+                "trace_ids": list(trace_ids),
+                "runtime_fields": list(runtime_field_names or []),
+                "final_score": reward_signal.grade_card.final_score,
+            },
+        )
+
+    return AutoResearchWorkflowOutcome(
+        workflow=workflow_result,
+        report=report,
+        reward_signal=reward_signal,
+        trace_ids=trace_ids,
+        lineage_edge_id=lineage_edge_id,
+    )
+
+
+async def execute_topology_genome_workflow(
+    *,
+    genome: Any,
+    node_functions: dict[str, Callable[..., Any]],
+    agent_name: str,
+    trace_store: Any | None = None,
+    lineage_graph: Any | None = None,
+    checkpoint_dir: Path | None = None,
+    context: dict[str, Any] | None = None,
+) -> TopologyWorkflowOutcome:
+    """Execute a topology genome through the canonical workflow runtime."""
+    from dharma_swarm.traces import topology_trace_entry
+
+    compiled = genome.compile(node_functions)
+    trace_ids: list[str] = []
+    lineage_edge_ids: list[str] = []
+
+    async def _on_step_complete(step: WorkflowStep) -> None:
+        if step.status != StepStatus.COMPLETED:
+            return
+        if trace_store is not None:
+            trace_ids.append(
+                await trace_store.log_entry(
+                    topology_trace_entry(
+                        agent=agent_name,
+                        workflow_name=compiled.name,
+                        genome_id=genome.genome_id,
+                        step=step,
+                        output=step.output,
+                    )
+                )
+            )
+        if lineage_graph is not None:
+            node_id = str(step.checkpoint.get("topology_node_id") or step.step_id)
+            inputs = (
+                [f"topology_output:{dep}" for dep in step.inputs]
+                if step.inputs
+                else [f"topology_entry:{node_id}"]
+            )
+            lineage_edge_ids.append(
+                lineage_graph.record_transformation(
+                    task_id=f"topology:{compiled.workflow_id}:{node_id}",
+                    inputs=inputs,
+                    outputs=[f"topology_output:{node_id}"],
+                    agent=agent_name,
+                    operation="topology_genome_workflow",
+                    pipeline_id=compiled.workflow_id,
+                    metadata={
+                        "topology_genome_id": genome.genome_id,
+                        "topology_node_id": node_id,
+                        "topology_edge_ids": list(step.checkpoint.get("topology_edge_ids", [])),
+                    },
+                )
+            )
+
+    workflow_result = await compiled.execute(
+        context=dict(context or {"topology_genome_id": genome.genome_id}),
+        checkpoint_dir=checkpoint_dir,
+        on_step_complete=_on_step_complete,
+    )
+    outputs = {
+        step.step_id: step.output
+        for step in workflow_result.steps
+        if step.status == StepStatus.COMPLETED
+    }
+    return TopologyWorkflowOutcome(
+        workflow=workflow_result,
+        outputs=outputs,
+        trace_ids=trace_ids,
+        lineage_edge_ids=lineage_edge_ids,
+    )

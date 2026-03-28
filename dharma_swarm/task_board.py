@@ -16,7 +16,7 @@ from dharma_swarm.models import Task, TaskPriority, TaskStatus, _new_id, _utc_no
 from dharma_swarm.telos_gates import check_with_reflective_reroute
 
 _TRANSITIONS: dict[TaskStatus, set[TaskStatus]] = {
-    TaskStatus.PENDING: {TaskStatus.ASSIGNED, TaskStatus.CANCELLED},
+    TaskStatus.PENDING: {TaskStatus.ASSIGNED, TaskStatus.CANCELLED, TaskStatus.FAILED},
     TaskStatus.ASSIGNED: {TaskStatus.RUNNING, TaskStatus.CANCELLED, TaskStatus.PENDING},
     TaskStatus.RUNNING: {TaskStatus.COMPLETED, TaskStatus.FAILED, TaskStatus.CANCELLED},
     TaskStatus.COMPLETED: set(),
@@ -59,14 +59,20 @@ class TaskBoardError(Exception):
 class TaskBoard:
     """Async task board backed by SQLite."""
 
+    _BUSY_TIMEOUT_S = 30  # seconds — must survive contention with daemon + SwarmLens
+
     def __init__(self, db_path: Path) -> None:
         self._db_path = db_path
 
+    def _open(self) -> aiosqlite.Connection:
+        """Open connection with busy_timeout to prevent 'database is locked'."""
+        return aiosqlite.connect(self._db_path, timeout=self._BUSY_TIMEOUT_S)
+
     async def init_db(self) -> None:
         """Create tasks and task_dependencies tables.  Enables WAL for concurrency."""
-        async with aiosqlite.connect(self._db_path) as db:
+        async with self._open() as db:
             await db.execute("PRAGMA journal_mode=WAL")
-            await db.execute("PRAGMA busy_timeout=5000")
+            await db.execute("PRAGMA busy_timeout=30000")
             await db.execute("PRAGMA synchronous=NORMAL")
             await db.execute(_CREATE_TASKS)
             await db.execute(_CREATE_DEPS)
@@ -112,7 +118,7 @@ class TaskBoard:
 
     async def _set_status(self, task_id: str, new: TaskStatus, **fields: Any) -> Task:
         """Validate and apply a status transition with optional field updates."""
-        async with aiosqlite.connect(self._db_path) as db:
+        async with self._open() as db:
             cur = await db.execute("SELECT status FROM tasks WHERE id = ?", (task_id,))
             row = await cur.fetchone()
             if row is None:
@@ -184,7 +190,7 @@ class TaskBoard:
         now = _utc_now()
         dep_ids: list[str] = depends_on or []
         meta = dict(metadata or {})
-        async with aiosqlite.connect(self._db_path) as db:
+        async with self._open() as db:
             await db.execute(
                 "INSERT INTO tasks VALUES (?,?,?,?,?,?,?,?,?,?,?)",
                 (task_id, title, description, TaskStatus.PENDING.value,
@@ -225,7 +231,7 @@ class TaskBoard:
         now = _utc_now()
         created_tasks: list[Task] = []
 
-        async with aiosqlite.connect(self._db_path) as db:
+        async with self._open() as db:
             # Single transaction for all tasks
             for spec in tasks:
                 task_id = _new_id()
@@ -263,7 +269,7 @@ class TaskBoard:
 
     async def get(self, task_id: str) -> Task | None:
         """Retrieve a single task by ID, or None if missing."""
-        async with aiosqlite.connect(self._db_path) as db:
+        async with self._open() as db:
             cur = await db.execute("SELECT * FROM tasks WHERE id = ?", (task_id,))
             row = await cur.fetchone()
             if row is None:
@@ -288,7 +294,7 @@ class TaskBoard:
             params.append(assigned_to)
         where = f"WHERE {' AND '.join(clauses)}" if clauses else ""
         params.append(limit)
-        async with aiosqlite.connect(self._db_path) as db:
+        async with self._open() as db:
             cur = await db.execute(
                 f"SELECT * FROM tasks {where} ORDER BY created_at DESC LIMIT ?",
                 params,
@@ -333,7 +339,7 @@ class TaskBoard:
                 )
         elif fields:
             # Raw column update (no status change)
-            async with aiosqlite.connect(self._db_path) as db:
+            async with self._open() as db:
                 sets = []
                 params: list[Any] = []
                 for col, val in fields.items():
@@ -483,7 +489,7 @@ class TaskBoard:
 
     async def add_dependency(self, task_id: str, depends_on_id: str) -> None:
         """Add a dependency edge: task_id depends on depends_on_id."""
-        async with aiosqlite.connect(self._db_path) as db:
+        async with self._open() as db:
             await db.execute(
                 "INSERT OR IGNORE INTO task_dependencies VALUES (?,?)",
                 (task_id, depends_on_id),
@@ -492,12 +498,12 @@ class TaskBoard:
 
     async def get_dependencies(self, task_id: str) -> list[str]:
         """Return task IDs that task_id depends on."""
-        async with aiosqlite.connect(self._db_path) as db:
+        async with self._open() as db:
             return await self._fetch_deps(db, task_id)
 
     async def get_ready_tasks(self) -> list[Task]:
         """Return PENDING tasks whose dependencies are all COMPLETED."""
-        async with aiosqlite.connect(self._db_path) as db:
+        async with self._open() as db:
             cur = await db.execute(
                 _READY_QUERY, (TaskStatus.PENDING.value, TaskStatus.COMPLETED.value),
             )
@@ -507,7 +513,7 @@ class TaskBoard:
 
     async def stats(self) -> dict[str, int]:
         """Return task counts grouped by status."""
-        async with aiosqlite.connect(self._db_path) as db:
+        async with self._open() as db:
             cur = await db.execute("SELECT status, COUNT(*) FROM tasks GROUP BY status")
             counts = {s.value: 0 for s in TaskStatus}
             for status_val, count in await cur.fetchall():

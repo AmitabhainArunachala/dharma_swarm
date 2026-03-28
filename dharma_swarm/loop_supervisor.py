@@ -36,6 +36,9 @@ class LoopHealth:
     tick_count: int = 0
     error_count: int = 0
     last_errors: list[str] = field(default_factory=list)  # last 5 errors
+    last_progress_score: float | None = None
+    best_progress_score: float | None = None
+    stagnant_cycles: int = 0
 
     @property
     def stale_seconds(self) -> float:
@@ -54,6 +57,50 @@ class LoopHealth:
         d["stale_seconds"] = round(self.stale_seconds, 1)
         d["is_stalled"] = self.is_stalled
         return d
+
+
+@dataclass
+class StateChangeTracker:
+    """Tracks observable state changes within a cycle.
+
+    Used by the state-change gate to prevent token burn on dead cycles
+    (cycles that produce zero observable mutations).
+    """
+
+    files_written: list[str] = field(default_factory=list)
+    tests_changed: int = 0
+    metrics_updated: int = 0
+
+    @property
+    def total_changes(self) -> int:
+        return len(self.files_written) + self.tests_changed + self.metrics_updated
+
+    @property
+    def is_dead_cycle(self) -> bool:
+        return self.total_changes == 0
+
+    def record_file_write(self, path: str) -> None:
+        self.files_written.append(path)
+
+    def record_test_change(self, delta: int = 1) -> None:
+        self.tests_changed += delta
+
+    def record_metric_update(self, count: int = 1) -> None:
+        self.metrics_updated += count
+
+    def reset(self) -> None:
+        self.files_written.clear()
+        self.tests_changed = 0
+        self.metrics_updated = 0
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "files_written": list(self.files_written),
+            "tests_changed": self.tests_changed,
+            "metrics_updated": self.metrics_updated,
+            "total_changes": self.total_changes,
+            "is_dead_cycle": self.is_dead_cycle,
+        }
 
 
 @dataclass
@@ -137,6 +184,8 @@ class LoopSupervisor:
         self._error_windows: dict[str, _ErrorWindow] = {}
         self._alerts: list[SupervisorAlert] = []
         self._last_eval_pass_rate: float | None = None
+        self._state_tracker = StateChangeTracker()
+        self._consecutive_dead_cycles: dict[str, int] = {}
 
     def register_loop(self, name: str, expected_interval: float) -> None:
         """Register a loop to be monitored."""
@@ -162,6 +211,109 @@ class LoopSupervisor:
         health.error_count += 1
         health.last_errors = (health.last_errors + [error[:200]])[-5:]
         self._error_windows[loop_name].add(error)
+
+    def record_progress(
+        self,
+        loop_name: str,
+        score: float,
+        *,
+        improved: bool | None = None,
+        epsilon: float = 1e-6,
+    ) -> None:
+        """Record whether a loop produced meaningful progress."""
+        if loop_name not in self._loops:
+            return
+        health = self._loops[loop_name]
+        previous_best = health.best_progress_score
+        if improved is None:
+            improved = previous_best is None or score > (previous_best + epsilon)
+        health.last_progress_score = score
+        if previous_best is None or score > previous_best:
+            health.best_progress_score = score
+        if improved:
+            health.stagnant_cycles = 0
+        else:
+            health.stagnant_cycles += 1
+
+    @property
+    def state_tracker(self) -> StateChangeTracker:
+        """Access the state change tracker for the current cycle."""
+        return self._state_tracker
+
+    def reset_cycle(self) -> None:
+        """Reset state tracker for a new cycle."""
+        self._state_tracker.reset()
+
+    def check_state_change(self, loop_name: str) -> SupervisorAlert | None:
+        """Check if the current cycle produced any state changes.
+
+        Returns an alert if the cycle is dead (no changes).
+        Escalates on consecutive dead cycles.
+        """
+        if not self._state_tracker.is_dead_cycle:
+            self._consecutive_dead_cycles[loop_name] = 0
+            return None
+
+        # Dead cycle detected
+        count = self._consecutive_dead_cycles.get(loop_name, 0) + 1
+        self._consecutive_dead_cycles[loop_name] = count
+
+        if count >= 5:
+            severity = "critical"
+            intervention = "ALERT_DHYANA"
+        elif count >= 3:
+            severity = "critical"
+            intervention = "REDUCE_SCOPE"
+        elif count >= 2:
+            severity = "warning"
+            intervention = "PAUSE_LOOP"
+        else:
+            severity = "warning"
+            intervention = "LOG_WARNING"
+
+        alert = SupervisorAlert(
+            alert_type="DEAD_CYCLE",
+            loop_name=loop_name,
+            severity=severity,
+            message=f"Cycle produced 0 state changes ({count} consecutive dead cycles)",
+            intervention=intervention,
+            timestamp=datetime.now(timezone.utc).isoformat(),
+        )
+        logger.warning(
+            "DEAD_CYCLE [%s]: %s (intervention=%s)",
+            loop_name,
+            alert.message,
+            intervention,
+        )
+        return alert
+
+    def check_progress(self, loop_name: str, threshold: int = 3) -> SupervisorAlert | None:
+        """Alert when a loop keeps moving without improving."""
+        health = self._loops.get(loop_name)
+        if health is None or health.last_progress_score is None:
+            return None
+        if health.stagnant_cycles < threshold:
+            return None
+        severity = "critical" if health.stagnant_cycles >= (threshold + 2) else "warning"
+        intervention = "REDUCE_SCOPE" if severity == "critical" else "PAUSE_LOOP"
+        alert = SupervisorAlert(
+            alert_type="NO_PROGRESS",
+            loop_name=loop_name,
+            severity=severity,
+            message=(
+                f"Loop '{loop_name}' produced no progress improvement for "
+                f"{health.stagnant_cycles} consecutive cycles"
+            ),
+            intervention=intervention,
+            timestamp=datetime.now(timezone.utc).isoformat(),
+        )
+        logger.warning(
+            "NO_PROGRESS [%s]: %s (intervention=%s)",
+            loop_name,
+            alert.message,
+            intervention,
+        )
+        return alert
 
     def tick(self) -> list[SupervisorAlert]:
         """Run all checks, return any new alerts.
@@ -198,6 +350,10 @@ class LoopSupervisor:
                     timestamp=datetime.now(timezone.utc).isoformat(),
                 )
                 alerts.append(alert)
+
+            progress_alert = self.check_progress(name)
+            if progress_alert:
+                alerts.append(progress_alert)
 
         # Check eval degradation
         eval_alert = self._check_eval_degradation()
@@ -236,7 +392,6 @@ class LoopSupervisor:
 
     def _write_alert_file(self, alerts: list[SupervisorAlert]) -> None:
         """Write alerts to shared alert file for human/agent consumption."""
-        ALERT_FILE.parent.mkdir(parents=True, exist_ok=True)
         lines = [
             f"# Loop Supervisor Alert — {datetime.now(timezone.utc).strftime('%Y-%m-%d %H:%M:%S UTC')}",
             "",
@@ -248,8 +403,17 @@ class LoopSupervisor:
             lines.append(f"- Intervention: {a.intervention}")
             lines.append("")
 
-        ALERT_FILE.write_text("\n".join(lines))
-        logger.warning("Loop supervisor: %d alerts written to %s", len(alerts), ALERT_FILE)
+        try:
+            ALERT_FILE.parent.mkdir(parents=True, exist_ok=True)
+            ALERT_FILE.write_text("\n".join(lines))
+            logger.warning("Loop supervisor: %d alerts written to %s", len(alerts), ALERT_FILE)
+        except Exception:
+            logger.warning(
+                "Loop supervisor: failed to write %d alerts to %s",
+                len(alerts),
+                ALERT_FILE,
+                exc_info=True,
+            )
 
     def status(self) -> dict[str, Any]:
         """Return full supervisor status."""

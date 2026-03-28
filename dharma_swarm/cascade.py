@@ -449,12 +449,15 @@ async def feedback_ascent(result: LoopResult) -> None:
         if recent and recent[0].observation == obs:
             logger.debug("Cascade mark deduplicated for domain %s", result.domain)
         else:
+            # Eigenform marks get high salience so Shakti/subconscious can perceive them
+            salience = 0.85 if result.eigenform_reached else (0.7 if result.converged else 0.5)
             mark = StigmergicMark(
                 agent="cascade_engine",
                 file_path=f"cascade_domain_{result.domain}",
                 action="write",
                 observation=obs,
-                salience=0.7 if result.eigenform_reached else 0.5,
+                salience=salience,
+                channel="governance",
             )
             await store.leave_mark(mark)
     except Exception as e:

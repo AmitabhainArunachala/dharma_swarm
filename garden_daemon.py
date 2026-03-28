@@ -18,11 +18,16 @@ import sys
 from datetime import datetime
 from pathlib import Path
 
+from dharma_swarm.claude_cli import (
+    build_claude_headless_command,
+    build_claude_headless_env,
+    unattended_claude_auth_error,
+)
+
 logger = logging.getLogger(__name__)
 
 # ── Paths ──────────────────────────────────────────────────────────
 HOME = Path.home()
-CLAUDE_BIN = str(HOME / ".npm-global" / "bin" / "claude")
 GARDEN_DIR = HOME / ".dharma" / "garden"
 SEEDS_DIR = HOME / ".dharma" / "seeds"
 SUBCONSCIOUS_DIR = HOME / ".dharma" / "subconscious"
@@ -125,6 +130,20 @@ Write a brief status to ~/.dharma/garden/research_status.md with:
 Keep it under 50 lines. Factual, no fluff.""".format(today=datetime.now().strftime("%Y-%m-%d")),
     },
 
+    "citation-verify": {
+        "name": "citation-verification",
+        "model": "haiku",
+        "timeout": 120,
+        "cwd": str(HOME),
+        "prompt": """Run citation verification for dharma_swarm.
+
+1. Load citations from ~/.dharma/citations/citations.jsonl (or seed file)
+2. For each citation with a verification_test, check if the target code location still exists
+3. Report: total citations, verified count, failed count, stale count
+4. Write summary to ~/.dharma/citations/verification_report.md
+""",
+    },
+
     "ecosystem-pulse": {
         "name": "ecosystem-pulse",
         "model": "haiku",
@@ -147,7 +166,7 @@ Format: [OK] or [WARN] or [MISS] prefix per item.""",
 # ── Cycle Definitions ─────────────────────────────────────────────
 # Order matters: earlier skills feed later ones
 
-FULL_CYCLE = ["ecosystem-pulse", "archaeology", "hum", "research-status"]
+FULL_CYCLE = ["ecosystem-pulse", "archaeology", "citation-verify", "hum", "research-status"]
 QUICK_CYCLE = ["ecosystem-pulse", "research-status"]
 
 
@@ -171,20 +190,34 @@ async def run_skill(skill_key: str) -> dict:
     proc = None
 
     try:
-        args = [CLAUDE_BIN, "-p", prompt, "--output-format", "text",
-                "--permission-mode", "bypassPermissions"]
-        if model:
-            args.extend(["--model", model])
+        env = build_claude_headless_env(os.environ)
+        auth_error = unattended_claude_auth_error(bare=True, env=env)
+        if auth_error:
+            result = {
+                "skill": name,
+                "key": skill_key,
+                "status": "auth-error",
+                "elapsed": round((datetime.now() - start).total_seconds(), 1),
+                "output_len": len(auth_error),
+                "output_preview": auth_error[:800],
+                "timestamp": datetime.now().isoformat(),
+            }
+            print(f"  [AUTH] {auth_error}")
+            return result
 
-        # Build env: MUST unset CLAUDECODE to allow nesting
-        env = {**os.environ, "CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC": "1"}
-        env.pop("CLAUDECODE", None)
-        env.pop("CLAUDE_CODE_ENTRYPOINT", None)
+        args = build_claude_headless_command(
+            prompt,
+            model=model,
+            permission_mode="bypassPermissions",
+            bare=True,
+            tools="default",
+        )
 
         proc = await asyncio.create_subprocess_exec(
             *args,
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.PIPE,
+            stdin=asyncio.subprocess.DEVNULL,
             cwd=cwd,
             env=env,
         )

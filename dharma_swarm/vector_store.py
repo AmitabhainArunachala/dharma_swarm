@@ -67,6 +67,74 @@ class Embedder(Protocol):
         ...
 
 
+class SentenceTransformerEmbedder:
+    """Neural embedder using sentence-transformers for real semantic similarity.
+
+    Drop-in replacement for TFIDFEmbedder via the Embedder protocol.
+    Loads model lazily on first embed() call to avoid slow startup.
+    Model and state are cached at state_path for fast restarts.
+
+    Default model: all-MiniLM-L6-v2 (384-dim, 22M params, fast on CPU).
+    For better quality at ~2x cost: all-mpnet-base-v2 (768-dim).
+    """
+
+    def __init__(
+        self,
+        model_name: str = "all-MiniLM-L6-v2",
+        dim: int = 384,
+        state_path: Path | None = None,
+    ) -> None:
+        self._model_name = model_name
+        self._dim = dim
+        self._state_path = state_path  # unused but matches protocol shape
+        self._model: Any = None
+
+    @property
+    def dim(self) -> int:
+        return self._dim
+
+    def _ensure_model(self) -> None:
+        if self._model is not None:
+            return
+        try:
+            from sentence_transformers import SentenceTransformer
+            self._model = SentenceTransformer(self._model_name)
+            actual_dim = self._model.get_sentence_embedding_dimension()
+            if actual_dim and actual_dim != self._dim:
+                logger.info(
+                    "SentenceTransformerEmbedder: model dim=%d, configured dim=%d — using model dim",
+                    actual_dim, self._dim,
+                )
+                self._dim = actual_dim
+        except ImportError:
+            logger.warning("sentence-transformers not installed, falling back to zero vectors")
+        except Exception as exc:
+            logger.warning("SentenceTransformerEmbedder model load failed: %s", exc)
+
+    def embed(self, texts: list[str]) -> list[list[float]]:
+        """Embed texts using the sentence-transformer model."""
+        if not texts:
+            return []
+        self._ensure_model()
+        if self._model is None:
+            return [[0.0] * self._dim for _ in texts]
+        try:
+            embeddings = self._model.encode(
+                texts,
+                show_progress_bar=False,
+                normalize_embeddings=True,
+                batch_size=64,
+            )
+            return [list(map(float, vec)) for vec in embeddings]
+        except Exception as exc:
+            logger.debug("SentenceTransformerEmbedder.embed failed: %s", exc)
+            return [[0.0] * self._dim for _ in texts]
+
+    def fit_add(self, texts: list[str]) -> None:
+        """No-op for pre-trained model — vocabulary is fixed."""
+        pass
+
+
 class TFIDFEmbedder:
     """Lightweight embedder using scikit-learn TF-IDF + TruncatedSVD.
 
@@ -207,16 +275,17 @@ class TFIDFEmbedder:
         if self._state_path is None:
             return
         try:
+            import json as _json
             state = {
-                "vectorizer": self._vectorizer,
-                "svd": self._svd,
-                "corpus": self._corpus[-2000:],  # Save last 2000 for space
+                # vectorizer/svd are sklearn objects — not JSON-serializable
+                # persist only the corpus and metadata; refit on next load
+                "corpus": self._corpus[-2000:],
                 "corpus_hash": self._corpus_hash,
                 "dim": self._dim,
-                "fitted": self._fitted,
+                "fitted": False,
             }
-            with open(self._state_path, "wb") as fh:
-                pickle.dump(state, fh, protocol=4)
+            with open(self._state_path, "w", encoding="utf-8") as fh:
+                _json.dump(state, fh)
         except Exception as exc:
             logger.debug("TFIDFEmbedder._save_state failed: %s", exc)
 
@@ -225,13 +294,15 @@ class TFIDFEmbedder:
         if self._state_path is None or not Path(self._state_path).exists():
             return
         try:
-            with open(self._state_path, "rb") as fh:
-                state = pickle.load(fh)
-            self._vectorizer = state.get("vectorizer")
-            self._svd = state.get("svd")
+            import json as _json
+            with open(self._state_path, "r", encoding="utf-8") as fh:
+                state = _json.load(fh)
+            # vectorizer and svd cannot be serialized to JSON — rebuild on next fit
+            self._vectorizer = None
+            self._svd = None
             self._corpus = state.get("corpus", [])
             self._corpus_hash = state.get("corpus_hash", "")
-            self._fitted = state.get("fitted", False)
+            self._fitted = False  # must refit since models aren't persisted
         except Exception as exc:
             logger.debug("TFIDFEmbedder._load_state failed: %s", exc)
 

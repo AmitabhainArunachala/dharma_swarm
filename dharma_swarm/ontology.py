@@ -1304,6 +1304,46 @@ _GATE_DECISION_TYPE = ObjectType(
     icon="⊘",
 )
 
+_EXECUTION_LEASE = ObjectType(
+    name="ExecutionLease",
+    description="The orchestrator's active claim lease for executing an ActionProposal",
+    properties={
+        "proposal_id": PropertyDef(name="proposal_id", property_type=PropertyType.STRING,
+                                    required=True, immutable=True),
+        "claim_id": PropertyDef(name="claim_id", property_type=PropertyType.STRING,
+                                 required=True, immutable=True),
+        "agent_id": PropertyDef(name="agent_id", property_type=PropertyType.STRING,
+                                 required=True),
+        "claimed_at": PropertyDef(name="claimed_at", property_type=PropertyType.STRING,
+                                   required=True),
+        "claim_timeout_seconds": PropertyDef(
+            name="claim_timeout_seconds",
+            property_type=PropertyType.FLOAT,
+            required=True,
+        ),
+        "claim_expires_at_epoch": PropertyDef(
+            name="claim_expires_at_epoch",
+            property_type=PropertyType.FLOAT,
+        ),
+        "dispatch_timeout_seconds": PropertyDef(
+            name="dispatch_timeout_seconds",
+            property_type=PropertyType.FLOAT,
+        ),
+        "dispatch_attempt": PropertyDef(
+            name="dispatch_attempt",
+            property_type=PropertyType.INTEGER,
+        ),
+    },
+    actions=[
+        ActionDef(name="Record", object_type="ExecutionLease",
+                  description="Record the active execution lease for a proposal"),
+    ],
+    security=SecurityPolicy(audit_all=True),
+    telos_alignment=0.95,
+    shakti_energy=ShaktiEnergy.MAHASARASWATI,
+    icon="⌛",
+)
+
 _OUTCOME = ObjectType(
     name="Outcome",
     description="What happened after an ActionProposal was executed",
@@ -1450,6 +1490,10 @@ _METABOLIC_LINKS: list[LinkDef] = [
             target_type="GateDecisionRecord", cardinality=LinkCardinality.ONE_TO_ONE,
             inverse_name="decides_proposal",
             description="Gate evaluation result for this proposal"),
+    LinkDef(name="has_execution_lease", source_type="ActionProposal",
+            target_type="ExecutionLease", cardinality=LinkCardinality.ONE_TO_ONE,
+            inverse_name="lease_of_proposal",
+            description="Active execution lease for this proposal"),
     LinkDef(name="has_outcome", source_type="ActionProposal",
             target_type="Outcome", cardinality=LinkCardinality.ONE_TO_ONE,
             inverse_name="outcome_of_proposal",
@@ -1485,7 +1529,7 @@ _METABOLIC_LINKS: list[LinkDef] = [
 _DOMAIN_TYPES: list[ObjectType] = [
     _RESEARCH_THREAD, _EXPERIMENT, _PAPER, _AGENT_IDENTITY, _CUSTODIAN_ROLE,
     _KNOWLEDGE_ARTIFACT, _TYPED_TASK, _EVOLUTION_ENTRY, _WITNESS_LOG,
-    _ACTION_PROPOSAL, _GATE_DECISION_TYPE, _OUTCOME, _VALUE_EVENT,
+    _ACTION_PROPOSAL, _GATE_DECISION_TYPE, _EXECUTION_LEASE, _OUTCOME, _VALUE_EVENT,
     _CONTRIBUTION, _VENTURE_CELL,
 ]
 

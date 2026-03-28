@@ -19,6 +19,8 @@ from fastapi.responses import HTMLResponse, JSONResponse
 from fastapi.middleware.cors import CORSMiddleware
 from starlette.middleware.base import BaseHTTPMiddleware
 
+from dharma_swarm.api_keys import DASHBOARD_API_KEY_ENV
+
 logger = logging.getLogger("swarmlens")
 
 # ---------------------------------------------------------------------------
@@ -30,7 +32,7 @@ def _get_api_key() -> str | None:
 
     Called per-request so the app can pick up rotated keys without restart.
     """
-    return os.environ.get("DASHBOARD_API_KEY")
+    return os.environ.get(DASHBOARD_API_KEY_ENV)
 
 
 # Routes that never require authentication (method, path).
@@ -104,8 +106,8 @@ app.add_middleware(CORSMiddleware, allow_origins=_SWARMLENS_ORIGINS, allow_metho
 def _warn_if_no_api_key():
     if _get_api_key() is None:
         logger.warning(
-            "DASHBOARD_API_KEY not set -- ALL routes are open (dev mode). "
-            "Set DASHBOARD_API_KEY in environment to enable Bearer auth."
+            f"{DASHBOARD_API_KEY_ENV} not set -- ALL routes are open (dev mode). "
+            f"Set {DASHBOARD_API_KEY_ENV} in environment to enable Bearer auth."
         )
     else:
         logger.info("Bearer token auth enabled for /api/* and dashboard routes.")

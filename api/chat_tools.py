@@ -690,7 +690,7 @@ async def exec_stigmergy_query(args: dict) -> str:
             return f"Stigmergy density: {stig.density()} marks"
 
         elif action == "recent":
-            marks = stig.recent(limit=limit) if hasattr(stig, "recent") else []
+            marks = await stig.read_marks(limit=limit) if hasattr(stig, "read_marks") else []
             if not marks:
                 # Fallback: read the JSONL file directly
                 marks_file = Path.home() / ".dharma" / "stigmergy" / "marks.jsonl"
@@ -707,13 +707,14 @@ async def exec_stigmergy_query(args: dict) -> str:
 
         elif action == "hot_paths":
             if hasattr(stig, "hot_paths"):
-                paths = stig.hot_paths(limit=limit)
+                paths = await stig.hot_paths()
+                paths = paths[:limit]
                 return json.dumps(paths, indent=2, default=str)
             return "hot_paths not available on this StigmergyStore version"
 
         elif action == "high_salience":
             if hasattr(stig, "high_salience"):
-                marks = stig.high_salience(limit=limit)
+                marks = await stig.high_salience(limit=limit)
                 return json.dumps([vars(m) if hasattr(m, "__dict__") else str(m) for m in marks], indent=2, default=str)
             return "high_salience not available on this StigmergyStore version"
 

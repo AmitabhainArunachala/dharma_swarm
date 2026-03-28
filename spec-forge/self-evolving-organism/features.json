@@ -1,0 +1,1333 @@
+[
+  {
+    "id": "SEO-P5-001",
+    "phase": "phase_5_optimizer_bridge",
+    "component": "optimizer_bridge",
+    "category": "test",
+    "description": "Write failing contract tests for the optimizer bridge surface.",
+    "steps": [
+      "Create tests/test_optimizer_bridge.py with import and contract expectations.",
+      "Cover optimizer bridge entrypoints and mutation trial payload shape.",
+      "Assert no live optimizer dependency is required for import."
+    ],
+    "verification": "pytest tests/test_optimizer_bridge.py -q fails because the bridge modules do not exist yet.",
+    "dependencies": [],
+    "estimated_minutes": 12,
+    "priority": "P0",
+    "status": "not_started"
+  },
+  {
+    "id": "SEO-P5-002",
+    "phase": "phase_5_optimizer_bridge",
+    "component": "optimizer_bridge",
+    "category": "verification",
+    "description": "Run the optimizer bridge contract tests red and capture the expected failure mode.",
+    "steps": [
+      "Run the focused optimizer bridge test file.",
+      "Confirm failure is due to missing bridge modules or symbols.",
+      "Do not implement code until the red state is observed."
+    ],
+    "verification": "Pytest output shows missing optimizer bridge modules or missing symbols.",
+    "dependencies": ["SEO-P5-001"],
+    "estimated_minutes": 6,
+    "priority": "P0",
+    "status": "not_started"
+  },
+  {
+    "id": "SEO-P5-003",
+    "phase": "phase_5_optimizer_bridge",
+    "component": "optimizer_bridge",
+    "category": "implementation",
+    "description": "Create minimal optimizer bridge scaffolding.",
+    "steps": [
+      "Add dharma_swarm/optimizer_bridge.py.",
+      "Add dharma_swarm/optimizers/__init__.py.",
+      "Export the narrow public types required by the tests."
+    ],
+    "verification": "Focused optimizer bridge contract tests import successfully.",
+    "dependencies": ["SEO-P5-002"],
+    "estimated_minutes": 12,
+    "priority": "P0",
+    "status": "not_started"
+  },
+  {
+    "id": "SEO-P5-004",
+    "phase": "phase_5_optimizer_bridge",
+    "component": "optimizer_bridge",
+    "category": "verification",
+    "description": "Verify the core optimizer bridge scaffold tests green.",
+    "steps": [
+      "Run pytest tests/test_optimizer_bridge.py -q.",
+      "Confirm only the implemented contract expectations pass.",
+      "Keep the bridge surface minimal."
+    ],
+    "verification": "Focused optimizer bridge scaffold tests pass.",
+    "dependencies": ["SEO-P5-003"],
+    "estimated_minutes": 6,
+    "priority": "P0",
+    "status": "not_started"
+  },
+  {
+    "id": "SEO-P5-005",
+    "phase": "phase_5_optimizer_bridge",
+    "component": "runtime_field_projection",
+    "category": "test",
+    "description": "Write failing tests for runtime-field manifest to optimizer candidate projection.",
+    "steps": [
+      "Assert runtime field manifests are converted to stable candidate objects.",
+      "Cover numeric, categorical, and prompt-like fields.",
+      "Assert candidate metadata preserves field names and rollback context."
+    ],
+    "verification": "Projection tests fail because candidate conversion logic is missing.",
+    "dependencies": ["SEO-P5-004"],
+    "estimated_minutes": 12,
+    "priority": "P0",
+    "status": "not_started"
+  },
+  {
+    "id": "SEO-P5-006",
+    "phase": "phase_5_optimizer_bridge",
+    "component": "runtime_field_projection",
+    "category": "verification",
+    "description": "Run projection tests red for runtime-field candidate conversion.",
+    "steps": [
+      "Execute the focused projection tests.",
+      "Confirm failure is due to missing conversion behavior rather than bad assertions.",
+      "Record the candidate fields that need support first."
+    ],
+    "verification": "Pytest shows missing projection implementation.",
+    "dependencies": ["SEO-P5-005"],
+    "estimated_minutes": 5,
+    "priority": "P0",
+    "status": "not_started"
+  },
+  {
+    "id": "SEO-P5-007",
+    "phase": "phase_5_optimizer_bridge",
+    "component": "runtime_field_projection",
+    "category": "implementation",
+    "description": "Implement runtime-field manifest to optimizer candidate projection.",
+    "steps": [
+      "Convert manifest rows into candidate objects with value type metadata.",
+      "Preserve field name, path, and current value.",
+      "Avoid mutating runtime fields during projection."
+    ],
+    "verification": "Projection tests pass for supported field types.",
+    "dependencies": ["SEO-P5-006"],
+    "estimated_minutes": 15,
+    "priority": "P0",
+    "status": "not_started"
+  },
+  {
+    "id": "SEO-P5-008",
+    "phase": "phase_5_optimizer_bridge",
+    "component": "runtime_field_projection",
+    "category": "verification",
+    "description": "Verify runtime-field candidate projection tests green.",
+    "steps": [
+      "Run the projection-focused test subset.",
+      "Ensure candidate projection remains pure and deterministic.",
+      "Leave unsupported field types guarded, not silently coerced."
+    ],
+    "verification": "Projection-focused pytest subset passes.",
+    "dependencies": ["SEO-P5-007"],
+    "estimated_minutes": 5,
+    "priority": "P0",
+    "status": "not_started"
+  },
+  {
+    "id": "SEO-P5-009",
+    "phase": "phase_5_optimizer_bridge",
+    "component": "mutation_apply_reset",
+    "category": "test",
+    "description": "Write failing tests for applying and rolling back runtime-field mutations.",
+    "steps": [
+      "Cover mutation application through RuntimeFieldRegistry.",
+      "Cover rollback through reset semantics.",
+      "Assert failed trials restore original values."
+    ],
+    "verification": "Mutation apply/reset tests fail because helpers do not exist yet.",
+    "dependencies": ["SEO-P5-008"],
+    "estimated_minutes": 12,
+    "priority": "P0",
+    "status": "not_started"
+  },
+  {
+    "id": "SEO-P5-010",
+    "phase": "phase_5_optimizer_bridge",
+    "component": "mutation_apply_reset",
+    "category": "verification",
+    "description": "Run mutation apply/reset tests red.",
+    "steps": [
+      "Execute the mutation helper test subset.",
+      "Confirm the red state points to missing helper logic.",
+      "Keep rollback semantics explicit."
+    ],
+    "verification": "Pytest shows missing mutation helper implementation.",
+    "dependencies": ["SEO-P5-009"],
+    "estimated_minutes": 5,
+    "priority": "P0",
+    "status": "not_started"
+  },
+  {
+    "id": "SEO-P5-011",
+    "phase": "phase_5_optimizer_bridge",
+    "component": "mutation_apply_reset",
+    "category": "implementation",
+    "description": "Implement runtime-field mutation apply and rollback helpers.",
+    "steps": [
+      "Apply candidate mutations through RuntimeFieldRegistry setters.",
+      "Use snapshots or reset semantics for rollback.",
+      "Return structured trial results instead of ad hoc booleans."
+    ],
+    "verification": "Mutation helper tests pass for apply and rollback paths.",
+    "dependencies": ["SEO-P5-010"],
+    "estimated_minutes": 15,
+    "priority": "P0",
+    "status": "not_started"
+  },
+  {
+    "id": "SEO-P5-012",
+    "phase": "phase_5_optimizer_bridge",
+    "component": "mutation_apply_reset",
+    "category": "verification",
+    "description": "Verify mutation helper tests green.",
+    "steps": [
+      "Run the focused mutation helper suite.",
+      "Confirm mutated values revert after failed or rolled-back trials.",
+      "Check that no code-file edit path was introduced."
+    ],
+    "verification": "Mutation helper suite passes.",
+    "dependencies": ["SEO-P5-011"],
+    "estimated_minutes": 5,
+    "priority": "P0",
+    "status": "not_started"
+  },
+  {
+    "id": "SEO-P5-013",
+    "phase": "phase_5_optimizer_bridge",
+    "component": "optional_optimizer_adapters",
+    "category": "test",
+    "description": "Write failing tests for guarded nevergrad and textual-gradient adapters.",
+    "steps": [
+      "Assert import guard behavior when optional dependencies are absent.",
+      "Assert prompt-only boundaries for textual-gradient support.",
+      "Assert bridge modules do not fail import in minimal environments."
+    ],
+    "verification": "Optional dependency adapter tests fail because the guarded modules do not exist yet.",
+    "dependencies": ["SEO-P5-012"],
+    "estimated_minutes": 12,
+    "priority": "P1",
+    "status": "not_started"
+  },
+  {
+    "id": "SEO-P5-014",
+    "phase": "phase_5_optimizer_bridge",
+    "component": "optional_optimizer_adapters",
+    "category": "implementation",
+    "description": "Implement guarded adapters for nevergrad and textual-gradient optimizers.",
+    "steps": [
+      "Add nevergrad bridge module with optional import guard.",
+      "Add textual-gradient bridge module with prompt-only constraints.",
+      "Return structured availability information when dependencies are missing."
+    ],
+    "verification": "Optional adapter tests pass without installing extra packages.",
+    "dependencies": ["SEO-P5-013"],
+    "estimated_minutes": 15,
+    "priority": "P1",
+    "status": "not_started"
+  },
+  {
+    "id": "SEO-P5-015",
+    "phase": "phase_5_optimizer_bridge",
+    "component": "darwin_integration",
+    "category": "test",
+    "description": "Write failing Darwin integration tests for reward-driven runtime-field optimization.",
+    "steps": [
+      "Create tests/test_evolution_runtime_fields.py.",
+      "Assert Darwin can run a runtime-field trial and score it from RewardSignal.",
+      "Assert failed trials archive cleanly and can roll back."
+    ],
+    "verification": "Evolution runtime-field tests fail because Darwin lacks the new bridge path.",
+    "dependencies": ["SEO-P5-014"],
+    "estimated_minutes": 12,
+    "priority": "P0",
+    "status": "not_started"
+  },
+  {
+    "id": "SEO-P5-016",
+    "phase": "phase_5_optimizer_bridge",
+    "component": "darwin_integration",
+    "category": "implementation",
+    "description": "Implement the narrow Phase 5 Darwin hooks for reward-driven runtime-field trials.",
+    "steps": [
+      "Extend evolution.py with a minimal bridge entrypoint.",
+      "Convert RewardSignal into archive-compatible fitness using existing helpers.",
+      "Keep evidence tier and promotion state compatible with the archive."
+    ],
+    "verification": "tests/test_evolution_runtime_fields.py passes.",
+    "dependencies": ["SEO-P5-015"],
+    "estimated_minutes": 18,
+    "priority": "P0",
+    "status": "not_started"
+  },
+  {
+    "id": "SEO-P5-017",
+    "phase": "phase_5_optimizer_bridge",
+    "component": "optimizer_bridge",
+    "category": "verification",
+    "description": "Verify the focused Phase 5 suite green.",
+    "steps": [
+      "Run tests/test_optimizer_bridge.py -q.",
+      "Run tests/test_evolution_runtime_fields.py -q.",
+      "Confirm no failing assertions remain in the bridge path."
+    ],
+    "verification": "Phase 5 focused suites pass.",
+    "dependencies": ["SEO-P5-016"],
+    "estimated_minutes": 8,
+    "priority": "P0",
+    "status": "not_started"
+  },
+  {
+    "id": "SEO-P5-018",
+    "phase": "phase_5_optimizer_bridge",
+    "component": "optimizer_bridge",
+    "category": "verification",
+    "description": "Run adjacent seam verification after Phase 5.",
+    "steps": [
+      "Run archive, runtime_fields, evaluation_registry, and agent_runner seam tests.",
+      "Confirm the optimizer path did not bypass canonical reward or rollback behavior.",
+      "Update the handoff notes if seams changed materially."
+    ],
+    "verification": "Adjacent seam regression subset passes after Phase 5 changes.",
+    "dependencies": ["SEO-P5-017"],
+    "estimated_minutes": 10,
+    "priority": "P0",
+    "status": "not_started"
+  },
+
+  {
+    "id": "SEO-P6-001",
+    "phase": "phase_6_topology_genome",
+    "component": "topology_genome",
+    "category": "test",
+    "description": "Write failing topology genome contract tests.",
+    "steps": [
+      "Create tests/test_topology_genome.py.",
+      "Cover TopologyNode, TopologyEdge, and TopologyGenome contracts.",
+      "Assert required fields and minimal validation expectations."
+    ],
+    "verification": "Topology genome contract tests fail because the module does not exist yet.",
+    "dependencies": ["SEO-P5-018"],
+    "estimated_minutes": 12,
+    "priority": "P0",
+    "status": "not_started"
+  },
+  {
+    "id": "SEO-P6-002",
+    "phase": "phase_6_topology_genome",
+    "component": "topology_genome",
+    "category": "verification",
+    "description": "Run topology genome contract tests red.",
+    "steps": [
+      "Execute tests/test_topology_genome.py -q.",
+      "Confirm the failure is missing contracts rather than invalid tests.",
+      "Lock the red state before implementation."
+    ],
+    "verification": "Pytest shows missing topology genome module or symbols.",
+    "dependencies": ["SEO-P6-001"],
+    "estimated_minutes": 5,
+    "priority": "P0",
+    "status": "not_started"
+  },
+  {
+    "id": "SEO-P6-003",
+    "phase": "phase_6_topology_genome",
+    "component": "topology_genome",
+    "category": "implementation",
+    "description": "Create topology genome contract models.",
+    "steps": [
+      "Add dharma_swarm/topology_genome.py.",
+      "Implement TopologyNode, TopologyEdge, and TopologyGenome.",
+      "Keep the initial surface small and serializable."
+    ],
+    "verification": "Contract-level topology tests import and pass.",
+    "dependencies": ["SEO-P6-002"],
+    "estimated_minutes": 15,
+    "priority": "P0",
+    "status": "not_started"
+  },
+  {
+    "id": "SEO-P6-004",
+    "phase": "phase_6_topology_genome",
+    "component": "topology_genome",
+    "category": "verification",
+    "description": "Verify the topology genome contracts green.",
+    "steps": [
+      "Run the contract-focused topology tests.",
+      "Confirm JSON round-trip behavior is stable.",
+      "Do not add execution logic yet."
+    ],
+    "verification": "Contract-focused topology tests pass.",
+    "dependencies": ["SEO-P6-003"],
+    "estimated_minutes": 5,
+    "priority": "P0",
+    "status": "not_started"
+  },
+  {
+    "id": "SEO-P6-005",
+    "phase": "phase_6_topology_genome",
+    "component": "topology_validation",
+    "category": "test",
+    "description": "Write failing validation tests for node uniqueness, edge endpoints, and entrypoints.",
+    "steps": [
+      "Cover duplicate node IDs.",
+      "Cover edges that reference missing nodes.",
+      "Cover entrypoints that do not exist."
+    ],
+    "verification": "Validation tests fail because the checks are not implemented yet.",
+    "dependencies": ["SEO-P6-004"],
+    "estimated_minutes": 12,
+    "priority": "P0",
+    "status": "not_started"
+  },
+  {
+    "id": "SEO-P6-006",
+    "phase": "phase_6_topology_genome",
+    "component": "topology_validation",
+    "category": "verification",
+    "description": "Run topology validation tests red.",
+    "steps": [
+      "Execute the validation subset.",
+      "Confirm the failure mode is missing validation behavior.",
+      "Keep validation independent from workflow compilation at first."
+    ],
+    "verification": "Pytest shows missing validation rules.",
+    "dependencies": ["SEO-P6-005"],
+    "estimated_minutes": 5,
+    "priority": "P0",
+    "status": "not_started"
+  },
+  {
+    "id": "SEO-P6-007",
+    "phase": "phase_6_topology_genome",
+    "component": "topology_validation",
+    "category": "implementation",
+    "description": "Implement topology validation rules.",
+    "steps": [
+      "Validate unique node IDs.",
+      "Validate edge endpoints and entrypoints.",
+      "Reject invalid genomes early with clear errors."
+    ],
+    "verification": "Topology validation tests pass.",
+    "dependencies": ["SEO-P6-006"],
+    "estimated_minutes": 15,
+    "priority": "P0",
+    "status": "not_started"
+  },
+  {
+    "id": "SEO-P6-008",
+    "phase": "phase_6_topology_genome",
+    "component": "topology_validation",
+    "category": "verification",
+    "description": "Verify topology validation tests green.",
+    "steps": [
+      "Run the validation-focused topology suite.",
+      "Confirm failure messages remain precise.",
+      "Do not overfit to one topology shape."
+    ],
+    "verification": "Validation-focused topology suite passes.",
+    "dependencies": ["SEO-P6-007"],
+    "estimated_minutes": 5,
+    "priority": "P0",
+    "status": "not_started"
+  },
+  {
+    "id": "SEO-P6-009",
+    "phase": "phase_6_topology_genome",
+    "component": "workflow_compiler",
+    "category": "test",
+    "description": "Write failing workflow compilation tests for topology genomes.",
+    "steps": [
+      "Create tests/test_topology_execution.py.",
+      "Assert genomes compile into workflow-compatible steps.",
+      "Assert entrypoint order and dependency structure are preserved."
+    ],
+    "verification": "Topology execution tests fail because compile support does not exist yet.",
+    "dependencies": ["SEO-P6-008"],
+    "estimated_minutes": 12,
+    "priority": "P0",
+    "status": "not_started"
+  },
+  {
+    "id": "SEO-P6-010",
+    "phase": "phase_6_topology_genome",
+    "component": "workflow_compiler",
+    "category": "verification",
+    "description": "Run topology workflow compilation tests red.",
+    "steps": [
+      "Execute the topology execution test file.",
+      "Confirm the red state is missing compiler behavior.",
+      "Keep compile logic separate from orchestrator acceptance at first."
+    ],
+    "verification": "Pytest shows missing genome compilation behavior.",
+    "dependencies": ["SEO-P6-009"],
+    "estimated_minutes": 5,
+    "priority": "P0",
+    "status": "not_started"
+  },
+  {
+    "id": "SEO-P6-011",
+    "phase": "phase_6_topology_genome",
+    "component": "workflow_compiler",
+    "category": "implementation",
+    "description": "Implement genome-to-workflow compilation.",
+    "steps": [
+      "Compile validated genomes into WorkflowDefinition-compatible steps.",
+      "Map node runtime_fields into step or agent metadata.",
+      "Preserve a simple and auditable execution graph."
+    ],
+    "verification": "Topology execution tests pass for compilation and dependency ordering.",
+    "dependencies": ["SEO-P6-010"],
+    "estimated_minutes": 18,
+    "priority": "P0",
+    "status": "not_started"
+  },
+  {
+    "id": "SEO-P6-012",
+    "phase": "phase_6_topology_genome",
+    "component": "workflow_compiler",
+    "category": "verification",
+    "description": "Verify topology workflow compilation tests green.",
+    "steps": [
+      "Run the focused topology execution suite.",
+      "Check compile output is readable and deterministic.",
+      "Keep the compiler bounded to the canonical workflow runtime."
+    ],
+    "verification": "Topology execution suite passes for compilation behavior.",
+    "dependencies": ["SEO-P6-011"],
+    "estimated_minutes": 5,
+    "priority": "P0",
+    "status": "not_started"
+  },
+  {
+    "id": "SEO-P6-013",
+    "phase": "phase_6_topology_genome",
+    "component": "provenance_metadata",
+    "category": "test",
+    "description": "Write failing provenance tests for node_id and edge_id projection into traces and lineage.",
+    "steps": [
+      "Assert node and edge identifiers survive execution.",
+      "Assert lineage artifacts can be traced back to genome structure.",
+      "Assert trace metadata names the compiled topology step."
+    ],
+    "verification": "Provenance metadata tests fail because node and edge IDs are not projected yet.",
+    "dependencies": ["SEO-P6-012"],
+    "estimated_minutes": 12,
+    "priority": "P1",
+    "status": "not_started"
+  },
+  {
+    "id": "SEO-P6-014",
+    "phase": "phase_6_topology_genome",
+    "component": "provenance_metadata",
+    "category": "verification",
+    "description": "Run topology provenance tests red.",
+    "steps": [
+      "Execute the provenance subset.",
+      "Confirm failure is missing metadata projection.",
+      "Keep provenance logic additive."
+    ],
+    "verification": "Pytest shows missing node_id or edge_id projection behavior.",
+    "dependencies": ["SEO-P6-013"],
+    "estimated_minutes": 5,
+    "priority": "P1",
+    "status": "not_started"
+  },
+  {
+    "id": "SEO-P6-015",
+    "phase": "phase_6_topology_genome",
+    "component": "provenance_metadata",
+    "category": "implementation",
+    "description": "Implement topology provenance metadata projection.",
+    "steps": [
+      "Add node_id and edge_id metadata to traces where appropriate.",
+      "Add genome metadata to lineage edges or workflow outputs.",
+      "Keep causal-credit compatibility intact."
+    ],
+    "verification": "Topology provenance tests pass.",
+    "dependencies": ["SEO-P6-014"],
+    "estimated_minutes": 15,
+    "priority": "P1",
+    "status": "not_started"
+  },
+  {
+    "id": "SEO-P6-016",
+    "phase": "phase_6_topology_genome",
+    "component": "orchestrator_integration",
+    "category": "test",
+    "description": "Write failing orchestrator tests for accepting topology genomes without breaking enum topology dispatch.",
+    "steps": [
+      "Add orchestrator acceptance tests for a genome input path.",
+      "Assert existing TopologyType dispatch still works.",
+      "Assert genome-based dispatch resolves through the canonical orchestrator."
+    ],
+    "verification": "Genome acceptance tests fail because orchestrator does not support the new path yet.",
+    "dependencies": ["SEO-P6-015"],
+    "estimated_minutes": 12,
+    "priority": "P0",
+    "status": "not_started"
+  },
+  {
+    "id": "SEO-P6-017",
+    "phase": "phase_6_topology_genome",
+    "component": "orchestrator_integration",
+    "category": "implementation",
+    "description": "Implement orchestrator support for topology genomes while preserving enum topology behavior.",
+    "steps": [
+      "Add a narrow genome-aware path in orchestrator.py.",
+      "Reuse the compiled workflow runtime rather than a second dispatcher.",
+      "Verify the enum path remains unchanged."
+    ],
+    "verification": "Topology execution and orchestrator genome acceptance tests pass.",
+    "dependencies": ["SEO-P6-016"],
+    "estimated_minutes": 18,
+    "priority": "P0",
+    "status": "not_started"
+  },
+  {
+    "id": "SEO-P6-018",
+    "phase": "phase_6_topology_genome",
+    "component": "topology_genome",
+    "category": "verification",
+    "description": "Run focused and adjacent seam verification after Phase 6.",
+    "steps": [
+      "Run topology-focused tests.",
+      "Run workflow, traces, lineage, and orchestrator regression subsets.",
+      "Confirm topology remains easier to reason about than the workflows it encodes."
+    ],
+    "verification": "Focused topology suites and adjacent seam regressions pass.",
+    "dependencies": ["SEO-P6-017"],
+    "estimated_minutes": 10,
+    "priority": "P0",
+    "status": "not_started"
+  },
+
+  {
+    "id": "SEO-P7-001",
+    "phase": "phase_7_curriculum_engine",
+    "component": "curriculum_engine",
+    "category": "test",
+    "description": "Write failing FrontierTask contract tests.",
+    "steps": [
+      "Create tests/test_curriculum_engine.py with FrontierTask model checks.",
+      "Assert source, verifier_type, and difficulty fields exist.",
+      "Assert provenance metadata fields are preserved."
+    ],
+    "verification": "Curriculum tests fail because curriculum_engine.py does not exist yet.",
+    "dependencies": ["SEO-P6-018"],
+    "estimated_minutes": 12,
+    "priority": "P0",
+    "status": "not_started"
+  },
+  {
+    "id": "SEO-P7-002",
+    "phase": "phase_7_curriculum_engine",
+    "component": "curriculum_engine",
+    "category": "verification",
+    "description": "Run FrontierTask contract tests red.",
+    "steps": [
+      "Execute tests/test_curriculum_engine.py -q.",
+      "Confirm the red state is missing curriculum contracts.",
+      "Do not implement heuristics before contracts exist."
+    ],
+    "verification": "Pytest shows missing curriculum module or contract symbols.",
+    "dependencies": ["SEO-P7-001"],
+    "estimated_minutes": 5,
+    "priority": "P0",
+    "status": "not_started"
+  },
+  {
+    "id": "SEO-P7-003",
+    "phase": "phase_7_curriculum_engine",
+    "component": "curriculum_engine",
+    "category": "implementation",
+    "description": "Create curriculum_engine.py and the FrontierTask contract.",
+    "steps": [
+      "Add dharma_swarm/curriculum_engine.py.",
+      "Implement FrontierTask and minimal engine shell.",
+      "Keep the engine focused on proposal generation, not execution."
+    ],
+    "verification": "Curriculum contract tests pass.",
+    "dependencies": ["SEO-P7-002"],
+    "estimated_minutes": 15,
+    "priority": "P0",
+    "status": "not_started"
+  },
+  {
+    "id": "SEO-P7-004",
+    "phase": "phase_7_curriculum_engine",
+    "component": "curriculum_engine",
+    "category": "verification",
+    "description": "Verify the FrontierTask contract tests green.",
+    "steps": [
+      "Run the contract subset.",
+      "Confirm serialization and metadata behavior are stable.",
+      "Avoid over-designing execution semantics."
+    ],
+    "verification": "FrontierTask contract subset passes.",
+    "dependencies": ["SEO-P7-003"],
+    "estimated_minutes": 5,
+    "priority": "P0",
+    "status": "not_started"
+  },
+  {
+    "id": "SEO-P7-005",
+    "phase": "phase_7_curriculum_engine",
+    "component": "curriculum_derivation",
+    "category": "test",
+    "description": "Write failing derivation tests for failures, contradictions, uncertainty, and stale capabilities.",
+    "steps": [
+      "Cover hard gate failures producing frontier tasks.",
+      "Cover contradiction-derived tasks.",
+      "Cover low-freshness and low-confidence derived tasks."
+    ],
+    "verification": "Curriculum derivation tests fail because the heuristics are missing.",
+    "dependencies": ["SEO-P7-004"],
+    "estimated_minutes": 12,
+    "priority": "P0",
+    "status": "not_started"
+  },
+  {
+    "id": "SEO-P7-006",
+    "phase": "phase_7_curriculum_engine",
+    "component": "curriculum_derivation",
+    "category": "verification",
+    "description": "Run curriculum derivation tests red.",
+    "steps": [
+      "Execute the derivation subset.",
+      "Confirm red state is missing heuristic behavior.",
+      "Keep derivation inputs tied to existing runtime artifacts."
+    ],
+    "verification": "Pytest shows missing curriculum derivation behavior.",
+    "dependencies": ["SEO-P7-005"],
+    "estimated_minutes": 5,
+    "priority": "P0",
+    "status": "not_started"
+  },
+  {
+    "id": "SEO-P7-007",
+    "phase": "phase_7_curriculum_engine",
+    "component": "curriculum_derivation",
+    "category": "implementation",
+    "description": "Implement curriculum derivation heuristics.",
+    "steps": [
+      "Derive tasks from RewardSignal gate failures and weak final scores.",
+      "Derive tasks from unresolved contradictions and stale reports.",
+      "Compute verifier_type and difficulty heuristics."
+    ],
+    "verification": "Curriculum derivation tests pass.",
+    "dependencies": ["SEO-P7-006"],
+    "estimated_minutes": 18,
+    "priority": "P0",
+    "status": "not_started"
+  },
+  {
+    "id": "SEO-P7-008",
+    "phase": "phase_7_curriculum_engine",
+    "component": "curriculum_derivation",
+    "category": "verification",
+    "description": "Verify curriculum derivation tests green.",
+    "steps": [
+      "Run the focused derivation suite.",
+      "Confirm generated tasks preserve source provenance metadata.",
+      "Do not create shadow task IDs without seed linkage."
+    ],
+    "verification": "Curriculum derivation suite passes.",
+    "dependencies": ["SEO-P7-007"],
+    "estimated_minutes": 5,
+    "priority": "P0",
+    "status": "not_started"
+  },
+  {
+    "id": "SEO-P7-009",
+    "phase": "phase_7_curriculum_engine",
+    "component": "evolution_hook",
+    "category": "test",
+    "description": "Write failing evolution.py tests for curriculum generation hooks.",
+    "steps": [
+      "Assert poor reward outcomes can emit FrontierTask proposals.",
+      "Assert the hook does not bypass archive or registry semantics.",
+      "Assert the evolution path remains optional and explicit."
+    ],
+    "verification": "Evolution hook tests fail because the curriculum hook is missing.",
+    "dependencies": ["SEO-P7-008"],
+    "estimated_minutes": 12,
+    "priority": "P0",
+    "status": "not_started"
+  },
+  {
+    "id": "SEO-P7-010",
+    "phase": "phase_7_curriculum_engine",
+    "component": "evolution_hook",
+    "category": "verification",
+    "description": "Run evolution curriculum-hook tests red.",
+    "steps": [
+      "Execute the evolution integration subset.",
+      "Confirm red state is missing hook behavior rather than wrong assertions.",
+      "Keep the hook narrow."
+    ],
+    "verification": "Pytest shows missing curriculum hook behavior in evolution.py.",
+    "dependencies": ["SEO-P7-009"],
+    "estimated_minutes": 5,
+    "priority": "P0",
+    "status": "not_started"
+  },
+  {
+    "id": "SEO-P7-011",
+    "phase": "phase_7_curriculum_engine",
+    "component": "evolution_hook",
+    "category": "implementation",
+    "description": "Implement the narrow curriculum hook inside evolution.py.",
+    "steps": [
+      "Project poor or failed research outcomes into FrontierTask proposals.",
+      "Keep the hook behind an explicit path or method.",
+      "Do not create a second orchestration loop."
+    ],
+    "verification": "Evolution curriculum-hook tests pass.",
+    "dependencies": ["SEO-P7-010"],
+    "estimated_minutes": 15,
+    "priority": "P0",
+    "status": "not_started"
+  },
+  {
+    "id": "SEO-P7-012",
+    "phase": "phase_7_curriculum_engine",
+    "component": "registry_persistence",
+    "category": "test",
+    "description": "Write failing agent registry persistence tests for frontier task artifacts.",
+    "steps": [
+      "Assert frontier tasks can be persisted canonically.",
+      "Assert loading does not require a second task store.",
+      "Assert provenance metadata survives the round-trip."
+    ],
+    "verification": "Registry persistence tests fail because frontier persistence is missing.",
+    "dependencies": ["SEO-P7-011"],
+    "estimated_minutes": 12,
+    "priority": "P1",
+    "status": "not_started"
+  },
+  {
+    "id": "SEO-P7-013",
+    "phase": "phase_7_curriculum_engine",
+    "component": "registry_persistence",
+    "category": "implementation",
+    "description": "Implement frontier task persistence in agent_registry.py and verify the focused suite green.",
+    "steps": [
+      "Add a narrow JSON or JSONL persistence surface for frontier tasks.",
+      "Keep it consistent with existing agent registry patterns.",
+      "Run the focused curriculum suite after implementation."
+    ],
+    "verification": "Curriculum-focused tests, including registry persistence, pass.",
+    "dependencies": ["SEO-P7-012"],
+    "estimated_minutes": 18,
+    "priority": "P1",
+    "status": "not_started"
+  },
+  {
+    "id": "SEO-P7-014",
+    "phase": "phase_7_curriculum_engine",
+    "component": "curriculum_engine",
+    "category": "verification",
+    "description": "Run adjacent seam verification after Phase 7.",
+    "steps": [
+      "Run curriculum-focused tests.",
+      "Run evolution, evaluation, archive, and agent_registry regression subsets.",
+      "Confirm curriculum did not create a shadow runtime."
+    ],
+    "verification": "Focused and adjacent seam regression subsets pass after Phase 7.",
+    "dependencies": ["SEO-P7-013"],
+    "estimated_minutes": 10,
+    "priority": "P0",
+    "status": "not_started"
+  },
+
+  {
+    "id": "SEO-P8-001",
+    "phase": "phase_8_export_install",
+    "component": "agent_install",
+    "category": "test",
+    "description": "Write failing installer contract tests.",
+    "steps": [
+      "Create tests/test_agent_install.py.",
+      "Assert install planning and execution are separate concerns.",
+      "Assert render functions remain side-effect free."
+    ],
+    "verification": "Installer contract tests fail because agent_install.py does not exist yet.",
+    "dependencies": ["SEO-P7-014"],
+    "estimated_minutes": 12,
+    "priority": "P0",
+    "status": "not_started"
+  },
+  {
+    "id": "SEO-P8-002",
+    "phase": "phase_8_export_install",
+    "component": "agent_install",
+    "category": "verification",
+    "description": "Run installer contract tests red.",
+    "steps": [
+      "Execute tests/test_agent_install.py -q.",
+      "Confirm failure is missing installer behavior.",
+      "Do not modify render logic before the red state is captured."
+    ],
+    "verification": "Pytest shows missing installer module or symbols.",
+    "dependencies": ["SEO-P8-001"],
+    "estimated_minutes": 5,
+    "priority": "P0",
+    "status": "not_started"
+  },
+  {
+    "id": "SEO-P8-003",
+    "phase": "phase_8_export_install",
+    "component": "agent_install",
+    "category": "implementation",
+    "description": "Create agent_install.py and the installer target abstractions.",
+    "steps": [
+      "Add dharma_swarm/agent_install.py.",
+      "Define installer planning and execution abstractions.",
+      "Keep install side effects explicit."
+    ],
+    "verification": "Installer contract tests pass for the base abstractions.",
+    "dependencies": ["SEO-P8-002"],
+    "estimated_minutes": 15,
+    "priority": "P0",
+    "status": "not_started"
+  },
+  {
+    "id": "SEO-P8-004",
+    "phase": "phase_8_export_install",
+    "component": "agent_install",
+    "category": "verification",
+    "description": "Verify the base installer contracts green.",
+    "steps": [
+      "Run the contract subset.",
+      "Confirm install planning is separate from execution.",
+      "Keep renderers untouched."
+    ],
+    "verification": "Installer contract subset passes.",
+    "dependencies": ["SEO-P8-003"],
+    "estimated_minutes": 5,
+    "priority": "P0",
+    "status": "not_started"
+  },
+  {
+    "id": "SEO-P8-005",
+    "phase": "phase_8_export_install",
+    "component": "install_planning",
+    "category": "test",
+    "description": "Write failing dry-run install planning tests for supported targets.",
+    "steps": [
+      "Cover Claude Code planning.",
+      "Cover Copilot, OpenCode, Cursor, and Qwen planning.",
+      "Assert planned paths derive from explicit target rules."
+    ],
+    "verification": "Dry-run planning tests fail because target planners are missing.",
+    "dependencies": ["SEO-P8-004"],
+    "estimated_minutes": 12,
+    "priority": "P0",
+    "status": "not_started"
+  },
+  {
+    "id": "SEO-P8-006",
+    "phase": "phase_8_export_install",
+    "component": "install_planning",
+    "category": "verification",
+    "description": "Run dry-run install planning tests red.",
+    "steps": [
+      "Execute the planning subset.",
+      "Confirm failure is missing planner behavior rather than wrong assertions.",
+      "Keep destination logic explicit and deterministic."
+    ],
+    "verification": "Pytest shows missing planning behavior for install targets.",
+    "dependencies": ["SEO-P8-005"],
+    "estimated_minutes": 5,
+    "priority": "P0",
+    "status": "not_started"
+  },
+  {
+    "id": "SEO-P8-007",
+    "phase": "phase_8_export_install",
+    "component": "install_planning",
+    "category": "implementation",
+    "description": "Implement dry-run planners for the supported install targets.",
+    "steps": [
+      "Map rendered artifacts to install destinations for each target.",
+      "Support Claude Code, Copilot, OpenCode, Cursor, and Qwen.",
+      "Return structured install plans without performing side effects."
+    ],
+    "verification": "Dry-run planning tests pass.",
+    "dependencies": ["SEO-P8-006"],
+    "estimated_minutes": 18,
+    "priority": "P0",
+    "status": "not_started"
+  },
+  {
+    "id": "SEO-P8-008",
+    "phase": "phase_8_export_install",
+    "component": "install_planning",
+    "category": "verification",
+    "description": "Verify install planning tests green.",
+    "steps": [
+      "Run the dry-run planning subset.",
+      "Confirm path planning remains deterministic and side-effect free.",
+      "Do not add install execution yet."
+    ],
+    "verification": "Dry-run install planning suite passes.",
+    "dependencies": ["SEO-P8-007"],
+    "estimated_minutes": 5,
+    "priority": "P0",
+    "status": "not_started"
+  },
+  {
+    "id": "SEO-P8-009",
+    "phase": "phase_8_export_install",
+    "component": "install_execution",
+    "category": "test",
+    "description": "Write failing install execution and checksum tests.",
+    "steps": [
+      "Assert explicit install writes only through install execution paths.",
+      "Assert checksum or changed-file detection works.",
+      "Assert install manifests capture written files."
+    ],
+    "verification": "Install execution tests fail because execution helpers are missing.",
+    "dependencies": ["SEO-P8-008"],
+    "estimated_minutes": 12,
+    "priority": "P1",
+    "status": "not_started"
+  },
+  {
+    "id": "SEO-P8-010",
+    "phase": "phase_8_export_install",
+    "component": "install_execution",
+    "category": "verification",
+    "description": "Run install execution tests red.",
+    "steps": [
+      "Execute the install execution subset.",
+      "Confirm failure is missing write-path logic.",
+      "Ensure render-only tests still pass."
+    ],
+    "verification": "Pytest shows missing install execution behavior.",
+    "dependencies": ["SEO-P8-009"],
+    "estimated_minutes": 5,
+    "priority": "P1",
+    "status": "not_started"
+  },
+  {
+    "id": "SEO-P8-011",
+    "phase": "phase_8_export_install",
+    "component": "install_execution",
+    "category": "implementation",
+    "description": "Implement explicit install execution and install manifest output.",
+    "steps": [
+      "Write artifacts only from install execution helpers.",
+      "Emit an install manifest summarizing writes and checksums.",
+      "Support overwrite detection without mutating render behavior."
+    ],
+    "verification": "Install execution and manifest tests pass.",
+    "dependencies": ["SEO-P8-010"],
+    "estimated_minutes": 18,
+    "priority": "P1",
+    "status": "not_started"
+  },
+  {
+    "id": "SEO-P8-012",
+    "phase": "phase_8_export_install",
+    "component": "export_purity",
+    "category": "test",
+    "description": "Expand render-side purity regression tests in tests/test_agent_export.py.",
+    "steps": [
+      "Assert render_agent and render_all remain pure.",
+      "Assert installer logic is not imported by render paths.",
+      "Assert target expansion does not change existing artifact semantics."
+    ],
+    "verification": "New export purity assertions fail before the implementation is updated.",
+    "dependencies": ["SEO-P8-011"],
+    "estimated_minutes": 12,
+    "priority": "P0",
+    "status": "not_started"
+  },
+  {
+    "id": "SEO-P8-013",
+    "phase": "phase_8_export_install",
+    "component": "export_purity",
+    "category": "verification",
+    "description": "Verify the focused Phase 8 suite green.",
+    "steps": [
+      "Run tests/test_agent_install.py -q.",
+      "Run tests/test_agent_export.py -q.",
+      "Confirm render/install separation remains explicit."
+    ],
+    "verification": "Focused Phase 8 suites pass.",
+    "dependencies": ["SEO-P8-012"],
+    "estimated_minutes": 8,
+    "priority": "P0",
+    "status": "not_started"
+  },
+  {
+    "id": "SEO-P8-014",
+    "phase": "phase_8_export_install",
+    "component": "export_install",
+    "category": "verification",
+    "description": "Run adjacent seam verification after Phase 8.",
+    "steps": [
+      "Run export/install-focused tests.",
+      "Run any affected archive, workflow, and agent seam tests.",
+      "Confirm no filesystem side effects leaked into render helpers."
+    ],
+    "verification": "Focused and adjacent seam regression subsets pass after Phase 8.",
+    "dependencies": ["SEO-P8-013"],
+    "estimated_minutes": 10,
+    "priority": "P0",
+    "status": "not_started"
+  },
+
+  {
+    "id": "SEO-P9-001",
+    "phase": "phase_9_offline_training_lane",
+    "component": "offline_training_bridge",
+    "category": "test",
+    "description": "Write failing offline training bridge contract tests.",
+    "steps": [
+      "Create tests/test_offline_training_bridge.py.",
+      "Assert the bridge exports trajectories, grades, and rewards.",
+      "Assert no training execution entrypoint exists."
+    ],
+    "verification": "Offline bridge tests fail because offline_training_bridge.py does not exist yet.",
+    "dependencies": ["SEO-P8-014"],
+    "estimated_minutes": 12,
+    "priority": "P0",
+    "status": "not_started"
+  },
+  {
+    "id": "SEO-P9-002",
+    "phase": "phase_9_offline_training_lane",
+    "component": "offline_training_bridge",
+    "category": "verification",
+    "description": "Run offline training bridge contract tests red.",
+    "steps": [
+      "Execute tests/test_offline_training_bridge.py -q.",
+      "Confirm failure is missing export-only bridge behavior.",
+      "Do not add training hooks to make tests pass."
+    ],
+    "verification": "Pytest shows missing offline export bridge behavior.",
+    "dependencies": ["SEO-P9-001"],
+    "estimated_minutes": 5,
+    "priority": "P0",
+    "status": "not_started"
+  },
+  {
+    "id": "SEO-P9-003",
+    "phase": "phase_9_offline_training_lane",
+    "component": "offline_training_bridge",
+    "category": "implementation",
+    "description": "Create offline_training_bridge.py as an export-only bridge.",
+    "steps": [
+      "Add the bridge module and manifest models.",
+      "Support exported trajectories, grades, and rewards.",
+      "Exclude any live training execution behavior."
+    ],
+    "verification": "Offline bridge contract tests pass.",
+    "dependencies": ["SEO-P9-002"],
+    "estimated_minutes": 15,
+    "priority": "P0",
+    "status": "not_started"
+  },
+  {
+    "id": "SEO-P9-004",
+    "phase": "phase_9_offline_training_lane",
+    "component": "offline_training_bridge",
+    "category": "implementation",
+    "description": "Implement export bundle manifest and artifact export path.",
+    "steps": [
+      "Write bundle-manifest generation logic.",
+      "Emit referenced artifact paths or bundle members.",
+      "Keep the bridge deterministic and export-only."
+    ],
+    "verification": "Offline bridge tests pass for manifest and export behavior.",
+    "dependencies": ["SEO-P9-003"],
+    "estimated_minutes": 18,
+    "priority": "P0",
+    "status": "not_started"
+  },
+  {
+    "id": "SEO-P9-005",
+    "phase": "phase_9_offline_training_lane",
+    "component": "offline_training_bridge",
+    "category": "documentation",
+    "description": "Create the offline training lane design note and verify the focused Phase 9 suite green.",
+    "steps": [
+      "Write docs/plans/2026-03-26-offline-training-lane.md.",
+      "Describe export formats and explicit non-goals.",
+      "Run the focused offline bridge suite."
+    ],
+    "verification": "Offline bridge suite passes and the offline lane doc exists.",
+    "dependencies": ["SEO-P9-004"],
+    "estimated_minutes": 12,
+    "priority": "P1",
+    "status": "not_started"
+  },
+  {
+    "id": "SEO-P9-006",
+    "phase": "phase_9_offline_training_lane",
+    "component": "offline_training_bridge",
+    "category": "verification",
+    "description": "Verify no live-training execution path exists after Phase 9.",
+    "steps": [
+      "Run the focused offline bridge tests.",
+      "Search for training execution entrypoints in the live runtime path.",
+      "Confirm Phase 9 remains export-only."
+    ],
+    "verification": "Focused Phase 9 tests pass and no live-training path is introduced.",
+    "dependencies": ["SEO-P9-005"],
+    "estimated_minutes": 8,
+    "priority": "P0",
+    "status": "not_started"
+  },
+
+  {
+    "id": "SEO-X-001",
+    "phase": "cross_cutting",
+    "component": "research_fixtures",
+    "category": "implementation",
+    "description": "Create tests/fixtures/research and seed a high-quality supported report fixture.",
+    "steps": [
+      "Create the fixtures directory.",
+      "Add a good-report fixture with strong citations and metadata.",
+      "Keep fixture contents stable and deterministic."
+    ],
+    "verification": "Fixture path exists and can be loaded by tests.",
+    "dependencies": [],
+    "estimated_minutes": 10,
+    "priority": "P1",
+    "status": "not_started"
+  },
+  {
+    "id": "SEO-X-002",
+    "phase": "cross_cutting",
+    "component": "research_fixtures",
+    "category": "implementation",
+    "description": "Add hallucinated and contradiction-heavy research fixtures.",
+    "steps": [
+      "Add a weak or fabricated-citation report fixture.",
+      "Add a contradiction-heavy report fixture.",
+      "Preserve explicit expected failure characteristics."
+    ],
+    "verification": "Fixture files exist and represent distinct failure modes.",
+    "dependencies": ["SEO-X-001"],
+    "estimated_minutes": 10,
+    "priority": "P1",
+    "status": "not_started"
+  },
+  {
+    "id": "SEO-X-003",
+    "phase": "cross_cutting",
+    "component": "research_fixtures",
+    "category": "implementation",
+    "description": "Add a stale recency-sensitive research fixture.",
+    "steps": [
+      "Create a stale report fixture with low freshness metadata.",
+      "Mark the brief as recency-sensitive.",
+      "Keep expected failure reasons explicit."
+    ],
+    "verification": "Stale-report fixture exists and encodes recency failure conditions.",
+    "dependencies": ["SEO-X-002"],
+    "estimated_minutes": 8,
+    "priority": "P1",
+    "status": "not_started"
+  },
+  {
+    "id": "SEO-X-004",
+    "phase": "cross_cutting",
+    "component": "golden_tests",
+    "category": "test",
+    "description": "Write failing golden tests for fixture-backed grading behavior.",
+    "steps": [
+      "Load the research fixtures into grading tests.",
+      "Assert strong reports score high and weak reports fail hard gates.",
+      "Assert stale reports fail freshness when recency is required."
+    ],
+    "verification": "Golden tests fail before fixture-backed grading behavior is implemented or wired.",
+    "dependencies": ["SEO-X-003"],
+    "estimated_minutes": 12,
+    "priority": "P1",
+    "status": "not_started"
+  },
+  {
+    "id": "SEO-X-005",
+    "phase": "cross_cutting",
+    "component": "golden_tests",
+    "category": "implementation",
+    "description": "Expand fixture-backed golden grading coverage.",
+    "steps": [
+      "Wire the fixtures into test_auto_grade_engine.py or new golden suites.",
+      "Keep expected scores or states stable.",
+      "Verify deterministic outcomes."
+    ],
+    "verification": "Fixture-backed golden grading tests pass.",
+    "dependencies": ["SEO-X-004"],
+    "estimated_minutes": 15,
+    "priority": "P1",
+    "status": "not_started"
+  },
+  {
+    "id": "SEO-X-006",
+    "phase": "cross_cutting",
+    "component": "adversarial_tests",
+    "category": "test",
+    "description": "Write failing adversarial tests for fabricated citation URLs, unsupported quantitative claims, and duplicate low-value sources.",
+    "steps": [
+      "Assert fabricated citation URLs are rejected.",
+      "Assert unsupported quantitative claims trigger gate failures.",
+      "Assert duplicate low-value sourcing lowers diversity or quality."
+    ],
+    "verification": "Adversarial tests fail before the grading path is hardened for those cases.",
+    "dependencies": ["SEO-X-005"],
+    "estimated_minutes": 12,
+    "priority": "P1",
+    "status": "not_started"
+  },
+  {
+    "id": "SEO-X-007",
+    "phase": "cross_cutting",
+    "component": "adversarial_tests",
+    "category": "implementation",
+    "description": "Expand adversarial grading checks and verify the focused suite green.",
+    "steps": [
+      "Tighten grader checks only as needed to satisfy the new tests.",
+      "Preserve the canonical Section 7 evaluation function.",
+      "Run the focused grading suite."
+    ],
+    "verification": "Focused grading and adversarial suites pass.",
+    "dependencies": ["SEO-X-006"],
+    "estimated_minutes": 15,
+    "priority": "P1",
+    "status": "not_started"
+  },
+  {
+    "id": "SEO-X-008",
+    "phase": "cross_cutting",
+    "component": "verification",
+    "category": "verification",
+    "description": "Run the full remaining-phase verification set and update CURRENT_STATE.md if behavior changed materially.",
+    "steps": [
+      "Run all newly added phase and hardening suites.",
+      "Record pass counts and any warnings.",
+      "Update the handoff current-state file if the verification baseline changes."
+    ],
+    "verification": "Remaining-phase verification passes and CURRENT_STATE.md reflects reality.",
+    "dependencies": ["SEO-P9-006", "SEO-X-007"],
+    "estimated_minutes": 15,
+    "priority": "P0",
+    "status": "not_started"
+  }
+]

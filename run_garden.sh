@@ -10,8 +10,11 @@ set -euo pipefail
 
 cd "$(dirname "$0")"
 
-# Source API keys from shell config
-if [ -f "$HOME/.zshrc" ]; then
+# Source runtime env (launchd-safe).
+if [ -f "$PWD/scripts/load_runtime_env.sh" ]; then
+    # shellcheck disable=SC1091
+    source "$PWD/scripts/load_runtime_env.sh"
+elif [ -f "$HOME/.zshrc" ]; then
     eval "$(grep -E '^export (ANTHROPIC_API_KEY|OPENROUTER_API_KEY)=' "$HOME/.zshrc" 2>/dev/null || true)"
 fi
 

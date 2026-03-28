@@ -810,3 +810,136 @@ def test_read_agent_notes_falls_back_when_stale(tmp_path):
         result = read_agent_notes()
         assert "distilled" not in result
         assert "Raw note content" in result
+
+
+# === L6: Consolidation -- Dreams & Corrections ===
+
+
+def test_read_consolidation_context_no_state(tmp_path):
+    """Empty state dir produces empty string."""
+    from dharma_swarm.context import read_consolidation_context
+
+    result = read_consolidation_context(state_dir=tmp_path)
+    assert result == ""
+
+
+def test_read_consolidation_context_with_dreams(tmp_path):
+    """Recent dream associations appear in consolidation context."""
+    import json
+    from dharma_swarm.context import read_consolidation_context
+
+    sub_dir = tmp_path / "subconscious"
+    sub_dir.mkdir()
+    dreams = [
+        {
+            "resonance_type": "structural_isomorphism",
+            "salience": 0.87,
+            "description": "Induction and maintenance are different acts",
+            "invented_vocabulary": "maintenance-recoil",
+        },
+        {
+            "resonance_type": "cross_domain_bridge",
+            "salience": 0.82,
+            "description": "L5 causes contraction, L27 reads the shadow",
+            "invented_vocabulary": "induction-shadow",
+        },
+        {
+            "resonance_type": "synesthetic_mapping",
+            "salience": 0.79,
+            "description": "Dense architectures breathe deeply",
+            "invented_vocabulary": "geometric-respiration",
+        },
+    ]
+    dream_file = sub_dir / "dream_associations.jsonl"
+    dream_file.write_text("\n".join(json.dumps(d) for d in dreams))
+
+    result = read_consolidation_context(state_dir=tmp_path, max_dreams=3)
+    assert "Dreams & Corrections" in result
+    assert "structural_isomorphism" in result
+    assert "maintenance-recoil" in result
+    assert "induction-shadow" in result
+    assert "0.87" in result
+
+
+def test_read_consolidation_context_with_report(tmp_path):
+    """Consolidation report stats appear in context."""
+    import json
+    import time
+    from dharma_swarm.context import read_consolidation_context
+
+    reports_dir = tmp_path / "consolidation" / "reports"
+    reports_dir.mkdir(parents=True)
+    report = {
+        "losses_found": 3,
+        "corrections_applied": 2,
+        "division_proposals": 1,
+        "advocate_summary": "Agents need tighter gate checks",
+    }
+    report_file = reports_dir / "consolidation_2026-03-22_120000.json"
+    report_file.write_text(json.dumps(report))
+
+    result = read_consolidation_context(state_dir=tmp_path)
+    assert "Losses: 3" in result
+    assert "Corrections: 2" in result
+    assert "Advocate: Agents need tighter gate checks" in result
+
+
+def test_read_consolidation_context_max_dreams_limit(tmp_path):
+    """Only the most recent N dreams are included."""
+    import json
+    from dharma_swarm.context import read_consolidation_context
+
+    sub_dir = tmp_path / "subconscious"
+    sub_dir.mkdir()
+    dreams = [
+        {"resonance_type": f"type_{i}", "salience": 0.5 + i * 0.1, "description": f"Dream {i}"}
+        for i in range(10)
+    ]
+    dream_file = sub_dir / "dream_associations.jsonl"
+    dream_file.write_text("\n".join(json.dumps(d) for d in dreams))
+
+    result = read_consolidation_context(state_dir=tmp_path, max_dreams=3)
+    # Should contain the last 3 dreams (7, 8, 9) but not the first ones
+    assert "Dream 9" in result
+    assert "Dream 8" in result
+    assert "Dream 7" in result
+    assert "Dream 0" not in result
+    assert "Dream 3" not in result
+
+
+def test_consolidation_context_appears_in_build_agent_context(tmp_path, monkeypatch):
+    """Dreams flow through to the full agent context assembly."""
+    import json
+    from dharma_swarm.context import read_consolidation_context
+
+    sub_dir = tmp_path / "subconscious"
+    sub_dir.mkdir()
+    dreams = [
+        {
+            "resonance_type": "recursive_echo",
+            "salience": 0.88,
+            "description": "The knowing is at L5 not L27",
+            "invented_vocabulary": "depth-echelon",
+        },
+    ]
+    (sub_dir / "dream_associations.jsonl").write_text(
+        "\n".join(json.dumps(d) for d in dreams)
+    )
+
+    # Stub expensive layers to keep test fast
+    monkeypatch.setattr("dharma_swarm.context.read_research", lambda **_: "")
+    monkeypatch.setattr("dharma_swarm.context.read_engineering", lambda: "# Engineering Layer")
+    monkeypatch.setattr("dharma_swarm.context.read_ops", lambda _state_dir=None: "# Operations Layer")
+    monkeypatch.setattr(
+        "dharma_swarm.context.read_agent_notes",
+        lambda **_: "# Agent notes",
+    )
+
+    result = build_agent_context(
+        role="surgeon",
+        thread="mechanistic",
+        state_dir=tmp_path,
+    )
+    assert "Dreams & Corrections" in result
+    assert "depth-echelon" in result
+    assert "recursive_echo" in result

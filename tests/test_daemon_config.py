@@ -69,6 +69,14 @@ def test_thread_prompts_complete():
         assert len(THREAD_PROMPTS[thread]) > 20
 
 
+def test_phenomenological_prompt_enforces_bridge_discipline():
+    prompt = THREAD_PROMPTS["phenomenological"]
+    assert "concrete runtime event" in prompt
+    assert "structural analogy" in prompt
+    assert "Triple Mapping" in prompt
+    assert "do not claim qualia" in prompt
+
+
 def test_role_briefings_complete():
     for role in ["cartographer", "archeologist", "surgeon", "architect", "validator"]:
         assert role in ROLE_BRIEFINGS

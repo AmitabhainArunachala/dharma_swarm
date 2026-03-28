@@ -333,3 +333,39 @@ async def test_meta_cycle_reports_coordination_pressure(engine_paths, tmp_path, 
     assert result.coordination_summary["fitness_trend"] == -0.05
     assert result.coordination_summary["observation_count"] == 4
     assert result.coordination_summary["approaching_fixed_point"] is True
+
+
+@pytest.mark.asyncio
+async def test_default_threshold_evolves_on_flat_fitness(engine_paths, tmp_path, monkeypatch):
+    """With default threshold 0.7, flat fitness at 0.48 should trigger evolution.
+
+    This is a regression test for the stagnation bug where 310 meta-cycles
+    produced identical fitness because the threshold (0.5) was too low —
+    meta_fitness 0.594 was considered "adequate" despite object fitness 0.48.
+    """
+    engine = DarwinEngine(**engine_paths)
+    await engine.init()
+    meta = MetaEvolutionEngine(
+        engine,
+        meta_archive_path=tmp_path / "meta_archive_stall.jsonl",
+        n_object_cycles_per_meta=2,
+        # Use default threshold (0.7) — no explicit override
+        seed=42,
+    )
+    initial = meta.meta_params.model_copy(deep=True)
+
+    # Simulate the exact stagnation scenario: flat fitness at 0.48
+    async def fake_flat_cycle(proposals):
+        del proposals
+        return CycleResult(best_fitness=0.4798)
+
+    monkeypatch.setattr(engine, "run_cycle", fake_flat_cycle)
+    result = await meta.run_meta_cycle([])
+
+    # meta_fitness for [0.4798, 0.4798] ≈ 0.594 which is < 0.7
+    assert result.meta_fitness < 0.7
+    assert result.evolved_parameters is True, (
+        f"Expected evolution at meta_fitness={result.meta_fitness:.3f} "
+        f"(threshold=0.7), but parameters were NOT evolved"
+    )
+    assert meta.meta_params != initial

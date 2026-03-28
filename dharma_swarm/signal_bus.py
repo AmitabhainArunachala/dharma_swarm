@@ -20,6 +20,25 @@ from collections import deque
 from typing import Any
 
 
+# ---------------------------------------------------------------------------
+# Canonical signal type constants — use these instead of bare strings.
+# ---------------------------------------------------------------------------
+SIGNAL_AGENT_FITNESS = "AGENT_FITNESS"
+SIGNAL_WORKER_FITNESS = "WORKER_FITNESS"
+SIGNAL_ANOMALY_DETECTED = "ANOMALY_DETECTED"
+SIGNAL_CASCADE_EIGENFORM_DISTANCE = "CASCADE_EIGENFORM_DISTANCE"
+SIGNAL_RECOGNITION_UPDATED = "RECOGNITION_UPDATED"
+
+# Replication lifecycle signals
+SIGNAL_AGENT_REPLICATED = "AGENT_REPLICATED"
+SIGNAL_AGENT_APOPTOSIS = "AGENT_APOPTOSIS"
+SIGNAL_REPLICATION_PROPOSAL = "REPLICATION_PROPOSAL"
+
+# Transcendence signals (Zhang et al. NeurIPS 2024)
+SIGNAL_DIVERSITY_HEALTH = "DIVERSITY_HEALTH"
+SIGNAL_TRANSCENDENCE_MARGIN = "TRANSCENDENCE_MARGIN"
+
+
 class SignalBus:
     """Simple in-process event bus for inter-loop signaling.
 

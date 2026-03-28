@@ -121,12 +121,33 @@ class StigmergyStore:
         Derives a channel from the agent name when the mark uses the
         default channel (``general``), giving dashboard, cascade, and
         test agents proper channel separation.
+
+        Applies salience boosting so the living layers (Shakti, subconscious)
+        have meaningful signal to perceive:
+        - Governance/witness channel marks: +0.1
+        - Marks with connections: +0.05 per connection (cap +0.2)
         """
+        updates: dict[str, object] = {}
+
+        # Channel derivation
         if mark.channel == "general" and mark.agent:
             derived = _derive_channel(mark.agent)
             if derived != "general":
-                # Pydantic frozen? Use model_copy for immutable marks.
-                mark = mark.model_copy(update={"channel": derived})
+                updates["channel"] = derived
+
+        # Salience boosting — feed the living layers
+        boosted = mark.salience
+        effective_channel = updates.get("channel", mark.channel)
+        if effective_channel in ("governance", "witness"):
+            boosted += 0.1
+        if mark.connections:
+            boosted += min(len(mark.connections) * 0.05, 0.2)
+        if boosted != mark.salience:
+            updates["salience"] = min(boosted, 1.0)
+
+        if updates:
+            mark = mark.model_copy(update=updates)
+
         self.base_path.mkdir(parents=True, exist_ok=True)
         line = mark.model_dump_json() + "\n"
         async with self._write_lock:
@@ -187,7 +208,9 @@ class StigmergyStore:
                 or m.salience >= CROSS_CHANNEL_SALIENCE_THRESHOLD
             ]
         marks.sort(key=lambda m: m.timestamp, reverse=True)
-        return marks[:limit]
+        result = marks[:limit]
+        await self._record_access(result)
+        return result
 
     async def hot_paths(
         self,
@@ -219,7 +242,9 @@ class StigmergyStore:
         marks = await self._load_marks()
         filtered = [m for m in marks if m.salience >= threshold]
         filtered.sort(key=lambda m: m.salience, reverse=True)
-        return filtered[:limit]
+        result = filtered[:limit]
+        await self._record_access(result)
+        return result
 
     async def connections_for(self, file_path: str) -> list[str]:
         """Collect unique connections from all marks referencing *file_path*."""
@@ -255,7 +280,38 @@ class StigmergyStore:
             return await self.high_salience(limit=limit)
         relevant = [m for m in marks if any(kw in (m.observation + " " + m.file_path).lower() for kw in keywords_lower)]
         relevant.sort(key=lambda m: m.salience, reverse=True)
-        return relevant[:limit]
+        result = relevant[:limit]
+        await self._record_access(result)
+        return result
+
+    async def _record_access(self, marks: list[StigmergicMark]) -> None:
+        """Persist access-count increments for read marks."""
+        if not marks:
+            return
+
+        mark_ids = {mark.id for mark in marks if getattr(mark, "id", "")}
+        if not mark_ids:
+            return
+
+        async with self._write_lock:
+            persisted = await self._load_marks()
+            touched = False
+            for mark in persisted:
+                if mark.id in mark_ids:
+                    mark.access_count += 1
+                    touched = True
+            if not touched:
+                return
+
+            self.base_path.mkdir(parents=True, exist_ok=True)
+            tmp = self._marks_file.with_suffix(".tmp")
+            async with aiofiles.open(tmp, "w") as f:
+                for mark in persisted:
+                    await f.write(mark.model_dump_json() + "\n")
+            tmp.replace(self._marks_file)
+
+        for mark in marks:
+            mark.access_count += 1
 
     # -- maintenance ---------------------------------------------------------
 

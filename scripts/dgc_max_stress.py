@@ -27,6 +27,7 @@ from typing import Any
 
 sys.path.insert(0, str(Path.home() / "dharma_swarm"))
 
+from dharma_swarm.codex_cli import dgc_codex_exec_prefix
 from dharma_swarm.models import (
     AgentRole,
     LLMRequest,
@@ -486,7 +487,7 @@ async def run_external_research(timeout_sec: int) -> dict[str, Any]:
             ("claude", ["claude", "-p", prompt, "--output-format", "text", "--model", "opus"])
         )
     if which("codex"):
-        jobs.append(("codex", ["codex", "exec", prompt]))
+        jobs.append(("codex", [*dgc_codex_exec_prefix(), prompt]))
 
     async def one(label: str, cmd: list[str]) -> tuple[str, dict[str, Any]]:
         return label, await run_async_cmd(cmd, timeout=timeout_sec)

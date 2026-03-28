@@ -11,6 +11,7 @@ import pytest
 from dharma_swarm.loop_supervisor import (
     LoopHealth,
     LoopSupervisor,
+    StateChangeTracker,
     SupervisorAlert,
     _ErrorWindow,
     _escalation_level,
@@ -158,6 +159,25 @@ class TestLoopSupervisor:
         content = alert_file.read_text()
         assert "LOOP_STALL" in content
 
+    def test_alert_write_failure_does_not_abort_tick(self, tmp_path, monkeypatch):
+        alert_file = tmp_path / "alert.md"
+        monkeypatch.setattr("dharma_swarm.loop_supervisor.ALERT_FILE", alert_file)
+        original_write_text = Path.write_text
+
+        def _raise_for_alert(self, data, *args, **kwargs):
+            if self == alert_file:
+                raise PermissionError("no write access")
+            return original_write_text(self, data, *args, **kwargs)
+
+        monkeypatch.setattr(Path, "write_text", _raise_for_alert)
+
+        sup = LoopSupervisor()
+        sup.register_loop("swarm", expected_interval=1.0)
+        sup._loops["swarm"].last_tick = time.monotonic() - 100.0
+
+        alerts = sup.tick()
+        assert [a.alert_type for a in alerts] == ["LOOP_STALL"]
+
     def test_status_shape(self):
         sup = LoopSupervisor()
         sup.register_loop("a", 60.0)
@@ -193,6 +213,28 @@ class TestLoopSupervisor:
         assert alert is not None
         assert alert.alert_type == "EVAL_REGRESSION"
 
+    def test_progress_stagnation_alert(self):
+        sup = LoopSupervisor()
+        sup.register_loop("overnight", expected_interval=60.0)
+        sup.record_tick("overnight")
+
+        sup.record_progress("overnight", 0.5, improved=True)
+        for _ in range(3):
+            sup.record_progress("overnight", 0.5, improved=False)
+
+        alerts = sup.tick()
+        progress_alerts = [a for a in alerts if a.alert_type == "NO_PROGRESS"]
+        assert len(progress_alerts) == 1
+        assert progress_alerts[0].loop_name == "overnight"
+
+    def test_progress_resets_stagnation(self):
+        sup = LoopSupervisor()
+        sup.register_loop("overnight", expected_interval=60.0)
+        sup.record_progress("overnight", 0.2, improved=True)
+        sup.record_progress("overnight", 0.2, improved=False)
+        sup.record_progress("overnight", 0.3, improved=True)
+        assert sup._loops["overnight"].stagnant_cycles == 0
+
 
 class TestCLI:
     def test_no_state(self, monkeypatch):
@@ -200,3 +242,110 @@ class TestCLI:
                             Path("/nonexistent"))
         rc = cmd_loop_status()
         assert rc == 0
+
+
+# ---------------------------------------------------------------------------
+# State Change Gate Tests
+# ---------------------------------------------------------------------------
+
+
+class TestStateChangeTracker:
+    def test_empty_tracker_is_dead(self):
+        tracker = StateChangeTracker()
+        assert tracker.is_dead_cycle
+        assert tracker.total_changes == 0
+
+    def test_file_write_not_dead(self):
+        tracker = StateChangeTracker()
+        tracker.record_file_write("/tmp/test.py")
+        assert not tracker.is_dead_cycle
+        assert tracker.total_changes == 1
+
+    def test_test_change_not_dead(self):
+        tracker = StateChangeTracker()
+        tracker.record_test_change(3)
+        assert not tracker.is_dead_cycle
+        assert tracker.total_changes == 3
+
+    def test_metric_update_not_dead(self):
+        tracker = StateChangeTracker()
+        tracker.record_metric_update(2)
+        assert not tracker.is_dead_cycle
+
+    def test_reset_clears_all(self):
+        tracker = StateChangeTracker()
+        tracker.record_file_write("/tmp/a.py")
+        tracker.record_test_change(1)
+        tracker.record_metric_update(1)
+        tracker.reset()
+        assert tracker.is_dead_cycle
+        assert tracker.total_changes == 0
+
+    def test_to_dict(self):
+        tracker = StateChangeTracker()
+        tracker.record_file_write("/tmp/a.py")
+        d = tracker.to_dict()
+        assert d["total_changes"] == 1
+        assert d["is_dead_cycle"] is False
+        assert "/tmp/a.py" in d["files_written"]
+
+
+class TestStateChangeGate:
+    def test_no_alert_when_changes_exist(self):
+        sup = LoopSupervisor()
+        sup.register_loop("test_loop", expected_interval=60.0)
+        sup.state_tracker.record_file_write("/tmp/test.py")
+        alert = sup.check_state_change("test_loop")
+        assert alert is None
+
+    def test_alert_on_dead_cycle(self):
+        sup = LoopSupervisor()
+        sup.register_loop("test_loop", expected_interval=60.0)
+        # No state changes recorded
+        alert = sup.check_state_change("test_loop")
+        assert alert is not None
+        assert alert.alert_type == "DEAD_CYCLE"
+        assert alert.intervention == "LOG_WARNING"
+
+    def test_escalation_on_consecutive_dead_cycles(self):
+        sup = LoopSupervisor()
+        sup.register_loop("test_loop", expected_interval=60.0)
+
+        # First dead cycle -> LOG_WARNING
+        alert1 = sup.check_state_change("test_loop")
+        assert alert1.intervention == "LOG_WARNING"
+        sup.reset_cycle()
+
+        # Second -> PAUSE_LOOP
+        alert2 = sup.check_state_change("test_loop")
+        assert alert2.intervention == "PAUSE_LOOP"
+        sup.reset_cycle()
+
+        # Third -> REDUCE_SCOPE
+        alert3 = sup.check_state_change("test_loop")
+        assert alert3.intervention == "REDUCE_SCOPE"
+
+    def test_consecutive_count_resets_on_success(self):
+        sup = LoopSupervisor()
+        sup.register_loop("test_loop", expected_interval=60.0)
+
+        # Two dead cycles
+        sup.check_state_change("test_loop")
+        sup.reset_cycle()
+        sup.check_state_change("test_loop")
+        sup.reset_cycle()
+
+        # Successful cycle resets count
+        sup.state_tracker.record_file_write("/tmp/x.py")
+        sup.check_state_change("test_loop")
+        sup.reset_cycle()
+
+        # Next dead cycle starts from 1 again
+        alert = sup.check_state_change("test_loop")
+        assert alert.intervention == "LOG_WARNING"
+
+    def test_reset_cycle_clears_tracker(self):
+        sup = LoopSupervisor()
+        sup.state_tracker.record_file_write("/tmp/a.py")
+        sup.reset_cycle()
+        assert sup.state_tracker.is_dead_cycle

@@ -9,6 +9,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Sequence
 
+from dharma_swarm.codex_cli import dgc_codex_exec_prefix
 
 ROOT = Path.home() / "dharma_swarm"
 STATE = Path.home() / ".dharma"
@@ -383,20 +384,20 @@ def build_codex_exec_command(
     output_file: Path,
     model: str = "",
 ) -> list[str]:
-    cmd = [
-        "codex",
-        "exec",
-        "--full-auto",
-        "-C",
-        str(repo_root),
-        "--add-dir",
-        str(state_dir),
-        "-o",
-        str(output_file),
-        "-",
-    ]
+    cmd = dgc_codex_exec_prefix()
     if model.strip():
-        cmd[2:2] = ["-m", model.strip()]
+        cmd.extend(["-m", model.strip()])
+    cmd.extend(
+        [
+            "-C",
+            str(repo_root),
+            "--add-dir",
+            str(state_dir),
+            "-o",
+            str(output_file),
+            "-",
+        ]
+    )
     return cmd
 
 

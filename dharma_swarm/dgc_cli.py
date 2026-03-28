@@ -23,6 +23,7 @@ Usage:
   dgc stress [--profile max]    Run end-to-end max-capacity stress harness
   dgc full-power-probe          Run operator-facing full-power verification
   dgc provider-smoke            Probe Ollama and NVIDIA NIM completion lanes
+  dgc provider-matrix           Run the live provider/model matrix harness
   dgc swarm --status            Show orchestrator state
   dgc swarm live [N]            Persistent tmux swarm (N agents)
   dgc swarm overnight start [H] [--aggressive]
@@ -264,6 +265,277 @@ def _tail(path: Path, lines: int = 60) -> str:
         return ""
 
 
+def _parse_iso_datetime(raw: str | None) -> datetime | None:
+    if not raw:
+        return None
+    text = raw.strip()
+    if not text:
+        return None
+    try:
+        parsed = datetime.fromisoformat(text.replace("Z", "+00:00"))
+    except ValueError:
+        return None
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=timezone.utc)
+    return parsed.astimezone(timezone.utc)
+
+
+def _format_age(seconds: float) -> str:
+    total = max(0, int(seconds))
+    days, rem = divmod(total, 86400)
+    hours, rem = divmod(rem, 3600)
+    minutes, secs = divmod(rem, 60)
+    if days:
+        return f"{days}d {hours}h"
+    if hours:
+        return f"{hours}h {minutes}m"
+    if minutes:
+        return f"{minutes}m {secs}s"
+    return f"{secs}s"
+
+
+def _runtime_pid_status() -> tuple[int | None, str]:
+    pid_file = DHARMA_STATE / "daemon.pid"
+    if not pid_file.exists():
+        return (None, "missing")
+    try:
+        pid = int(pid_file.read_text(encoding="utf-8").strip())
+    except Exception:
+        return (None, "invalid")
+    if _pid_alive(pid):
+        return (pid, "alive")
+    return (pid, "stale")
+
+
+def _list_daemon_like_processes() -> list[tuple[int, str]]:
+    """Best-effort process scan for live daemon/orchestrator launchers."""
+    try:
+        proc = subprocess.run(
+            ["ps", "-axo", "pid=,command="],
+            capture_output=True,
+            text=True,
+            timeout=1.0,
+            check=False,
+        )
+    except Exception:
+        return []
+
+    if proc.returncode != 0:
+        return []
+
+    current_pid = os.getpid()
+    matches: list[tuple[int, str]] = []
+    needles = ("dharma_swarm.orchestrate_live", "orchestrate_live.py", "run_daemon.sh")
+    skip_markers = ("dgc doctor", "ps -axo", "rg ", "pytest")
+
+    for raw in proc.stdout.splitlines():
+        line = raw.strip()
+        if not line:
+            continue
+        parts = line.split(maxsplit=1)
+        if len(parts) != 2:
+            continue
+        try:
+            pid = int(parts[0])
+        except ValueError:
+            continue
+        command = parts[1]
+        if pid == current_pid:
+            continue
+        if not any(needle in command for needle in needles):
+            continue
+        if any(marker in command for marker in skip_markers):
+            continue
+        matches.append((pid, command))
+
+    return matches
+
+
+def _first_daemon_like_process() -> tuple[int, str] | None:
+    matches = _list_daemon_like_processes()
+    if not matches:
+        return None
+    return matches[0]
+
+
+def _pulse_sort_key(last_seen: str | None, source: Path) -> float:
+    parsed = _parse_iso_datetime(last_seen)
+    if parsed is not None:
+        return parsed.timestamp()
+    try:
+        return source.stat().st_mtime
+    except Exception:
+        return 0.0
+
+
+def _pulse_summary_from_log(path: Path) -> tuple[int, str | None, Path] | None:
+    if not path.exists():
+        return None
+    try:
+        count = 0
+        last_seen: str | None = None
+        for raw_line in path.read_text(errors="ignore").splitlines():
+            line = raw_line.strip()
+            if line.startswith("--- PULSE @"):
+                count += 1
+                marker = line[len("--- PULSE @"):].strip()
+                timestamp = marker.split(" [", 1)[0].strip()
+                if timestamp:
+                    last_seen = timestamp
+                continue
+            marker = "pulse_"
+            if marker not in line:
+                continue
+            start = line.rfind(marker)
+            end = line.find(".md", start)
+            if start == -1 or end == -1:
+                continue
+            count += 1
+            raw_stamp = line[start + len(marker):end]
+            try:
+                timestamp = datetime.strptime(raw_stamp, "%Y%m%d_%H%M%S").replace(tzinfo=timezone.utc)
+                last_seen = timestamp.isoformat()
+            except ValueError:
+                last_seen = datetime.fromtimestamp(path.stat().st_mtime, timezone.utc).isoformat()
+        if last_seen:
+            return (count, last_seen, path)
+        return (1, datetime.fromtimestamp(path.stat().st_mtime, timezone.utc).isoformat(), path)
+    except Exception:
+        return None
+
+
+def _canonical_pulse_summary() -> tuple[int, str | None, Path | None]:
+    candidates = [
+        summary
+        for summary in (
+            _pulse_summary_from_log(DHARMA_STATE / "pulse.log"),
+            _pulse_summary_from_log(DHARMA_STATE / "logs" / "pulse.log"),
+        )
+        if summary is not None
+    ]
+
+    cron_dir = DHARMA_STATE / "cron"
+    pulse_artifacts = sorted(cron_dir.glob("pulse_*.md"))
+    if pulse_artifacts:
+        latest = pulse_artifacts[-1].stem.removeprefix("pulse_")
+        try:
+            timestamp = datetime.strptime(latest, "%Y%m%d_%H%M%S").replace(tzinfo=timezone.utc)
+            candidates.append((len(pulse_artifacts), timestamp.isoformat(), pulse_artifacts[-1]))
+        except ValueError:
+            candidates.append(
+                (
+                    len(pulse_artifacts),
+                    datetime.fromtimestamp(pulse_artifacts[-1].stat().st_mtime, timezone.utc).isoformat(),
+                    pulse_artifacts[-1],
+                )
+            )
+
+    if candidates:
+        count, last_seen, source = max(candidates, key=lambda item: _pulse_sort_key(item[1], item[2]))
+        return (count, last_seen, source)
+
+    return (0, None, None)
+
+
+def _witness_sort_key(path: Path, *, prefix: str, fmt: str) -> float:
+    stem = path.stem
+    raw_stamp = stem.removeprefix(prefix) if prefix else stem
+    try:
+        return datetime.strptime(raw_stamp, fmt).replace(tzinfo=timezone.utc).timestamp()
+    except ValueError:
+        try:
+            return path.stat().st_mtime
+        except Exception:
+            return 0.0
+
+
+def _latest_witness_count(directory: Path, *, pattern: str, prefix: str, fmt: str) -> int | None:
+    if not directory.exists():
+        return None
+
+    candidates = sorted(
+        directory.glob(pattern),
+        key=lambda path: _witness_sort_key(path, prefix=prefix, fmt=fmt),
+        reverse=True,
+    )
+    for witness_file in candidates:
+        try:
+            with witness_file.open(encoding="utf-8") as handle:
+                return sum(1 for line in handle if line.strip())
+        except Exception:
+            continue
+    return None
+
+
+def _canonical_gate_count() -> int:
+    canonical_count = _latest_witness_count(
+        DHARMA_STATE / "witness",
+        pattern="witness_*.jsonl",
+        prefix="witness_",
+        fmt="%Y%m%d",
+    )
+    if canonical_count is not None:
+        return canonical_count
+
+    legacy_count = _latest_witness_count(
+        DGC_CORE / "memory" / "witness",
+        pattern="*.jsonl",
+        prefix="",
+        fmt="%Y-%m-%d",
+    )
+    if legacy_count is not None:
+        return legacy_count
+
+    return 0
+
+
+def _control_plane_snapshot() -> str | None:
+    details: list[str] = []
+
+    _, _, pulse_source = _canonical_pulse_summary()
+    if pulse_source is not None:
+        details.append(f"pulse_source={pulse_source}")
+
+    live_pid, live_pid_state = _runtime_pid_status()
+    if live_pid is not None:
+        details.append(f"runtime_pid={live_pid}")
+    elif live_pid_state != "missing":
+        details.append(f"runtime_pid={live_pid_state}")
+
+    snapshot_path = DHARMA_STATE / "stigmergy" / "dgc_health.json"
+    if snapshot_path.exists():
+        try:
+            payload = json.loads(snapshot_path.read_text())
+        except Exception:
+            details.append("dgc_health=unreadable")
+        else:
+            timestamp = str(payload.get("timestamp", "")).strip()
+            freshness = "unknown"
+            parsed_timestamp = _parse_iso_datetime(timestamp)
+            if parsed_timestamp is not None:
+                age_seconds = (
+                    datetime.now(timezone.utc) - parsed_timestamp
+                ).total_seconds()
+                freshness = "fresh" if age_seconds <= 3600 else "stale"
+                details.append(f"snapshot_age={_format_age(age_seconds)}")
+            elif timestamp:
+                freshness = "unknown"
+            daemon_pid = payload.get("daemon_pid")
+            details.append(f"dgc_health={freshness}")
+            if daemon_pid is not None:
+                details.append(f"daemon_pid={daemon_pid}")
+                try:
+                    snapshot_pid = int(daemon_pid)
+                except (TypeError, ValueError):
+                    snapshot_pid = None
+                if snapshot_pid is not None and live_pid is not None and snapshot_pid != live_pid:
+                    details.append("daemon_pid_mismatch")
+
+    if not details:
+        return None
+    return " | ".join(details)
+
+
 def _accelerator_mode() -> str:
     configured = any(
         os.getenv(key, "").strip()
@@ -308,22 +580,19 @@ def cmd_status() -> None:
         print(f"Memory: unavailable ({exc})")
 
     # Daemon state
-    state_file = DGC_CORE / "daemon" / "state.json"
-    if state_file.exists():
-        state = json.loads(state_file.read_text())
-        print(f"Pulse: {state.get('pulse_count', 0)} total, last: {state.get('last_pulse', 'never')}")
+    pulse_count, last_pulse, pulse_source = _canonical_pulse_summary()
+    if last_pulse:
+        source_note = f" via {pulse_source}" if pulse_source is not None else ""
+        print(f"Pulse: {pulse_count} logged{source_note}, last: {last_pulse}")
     else:
         print("Pulse: not yet run")
 
     # Gate witness log
-    today = datetime.now(timezone.utc).strftime("%Y-%m-%d")
-    gate_log = DGC_CORE / "memory" / "witness" / f"{today}.jsonl"
-    if gate_log.exists():
-        with open(gate_log) as f:
-            count = sum(1 for _ in f)
-        print(f"Gates today: {count} checks")
-    else:
-        print("Gates today: 0 checks")
+    print(f"Gates today: {_canonical_gate_count()} checks")
+
+    snapshot = _control_plane_snapshot()
+    if snapshot:
+        print(f"Control plane snapshot: {snapshot}")
 
     # AGNI sync
     agni = HOME / "agni-workspace"
@@ -1276,22 +1545,135 @@ def cmd_pulse() -> None:
     print(response)
 
 
+def cmd_organism_pulse(task: str | None = None, dry_run: bool = False) -> None:
+    """Run one canonical organism pulse (9 stages)."""
+    import asyncio
+
+    async def _run():
+        from dharma_swarm.organism_pulse import run_pulse
+
+        result = await run_pulse(
+            task=None if dry_run else task,
+            persist=True,
+        )
+        print(f"Pulse {result.pulse_id}")
+        print(f"  Duration: {result.duration_ms:.0f}ms")
+        print(f"  Health:   {result.overall_health}")
+        print(f"  Gate:     {result.gate_decision}")
+        print(f"  Agents:   {result.agent_count}")
+        if result.invariants:
+            inv = result.invariants
+            print(f"  Invariants:")
+            print(f"    Criticality:  {inv.criticality:.4f} ({inv.criticality_status})")
+            print(f"    Closure:      {inv.closure_ratio:.4f} ({inv.closure_status})")
+            print(f"    Info Retain:   {inv.info_retention:.6f} ({inv.info_retention_status})")
+            print(f"    Diversity:    {inv.diversity_equilibrium:.4f} ({inv.diversity_status})")
+            print(f"    Overall:      {inv.overall}")
+        if result.transcendence_metrics:
+            tm = result.transcendence_metrics
+            print(f"  Transcendence:")
+            print(f"    Margin:    {tm.transcendence_margin:.4f}")
+            print(f"    Diversity: {tm.behavioral_div:.4f}")
+            print(f"    Families:  {tm.n_model_families}")
+        if result.prediction:
+            print(f"  Self-Prediction:")
+            print(f"    Predicted: {result.prediction.predicted_duration_ms:.0f}ms")
+            if result.prediction.duration_error is not None:
+                print(f"    Error:     {result.prediction.duration_error:.0f}ms")
+            if result.prediction.surprise:
+                print(f"    SURPRISE detected!")
+        print(f"  Stages: {result.stage_timings}")
+
+    asyncio.run(_run())
+
+
+def cmd_invariants() -> None:
+    """Show the 4 computable system invariants."""
+    from dharma_swarm.invariants import snapshot
+    import numpy as np
+
+    # Try to get real data from catalytic graph
+    try:
+        from dharma_swarm.catalytic_graph import CatalyticGraph
+        graph = CatalyticGraph()
+        # Load from seed if available
+        try:
+            from dharma_swarm.catalytic_graph import seed_ecosystem
+            seed_ecosystem(graph)
+        except ImportError:
+            pass
+        mat, nodes = graph.adjacency_matrix()
+        total_nodes = graph.node_count
+        ac_sets = graph.detect_autocatalytic_sets()
+        ac_count = sum(len(s) for s in ac_sets)
+    except Exception:
+        mat = np.zeros((0, 0))
+        total_nodes = 0
+        ac_count = 0
+
+    snap = snapshot(
+        adjacency_matrix=mat,
+        total_nodes=total_nodes,
+        autocatalytic_node_count=ac_count,
+    )
+
+    print("=== System Invariants ===")
+    print(f"  Criticality (λ_max):   {snap.criticality:.4f}  [{snap.criticality_status}]")
+    print(f"  Closure ratio:          {snap.closure_ratio:.4f}  [{snap.closure_status}]")
+    print(f"  Info retention:         {snap.info_retention:.6f}  [{snap.info_retention_status}]")
+    print(f"  Diversity equilibrium:  {snap.diversity_equilibrium:.4f}  [{snap.diversity_status}]")
+    print(f"  Overall:                {snap.overall}")
+    print(f"  Timestamp:              {snap.timestamp}")
+
+
+def cmd_transcendence() -> None:
+    """Show transcendence metrics (ensemble vs individual)."""
+    try:
+        from dharma_swarm.ginko_brier import ensemble_brier_report
+        report = ensemble_brier_report()
+        print("=== Transcendence Report ===")
+        print(f"  Status: {report['status']}")
+        if report.get("ensemble_brier") is not None:
+            print(f"  Ensemble Brier:       {report['ensemble_brier']}")
+            print(f"  Best Individual:      {report.get('best_individual_brier', 'N/A')}")
+            print(f"  Mean Individual:      {report.get('mean_individual_brier', 'N/A')}")
+            print(f"  Transcendence Margin: {report.get('transcendence_margin', 'N/A')}")
+            print(f"  Aggregation Lift:     {report.get('aggregation_lift', 'N/A')}")
+            print(f"  Transcended:          {report.get('transcended', 'N/A')}")
+        if report.get("individual_briers"):
+            print(f"\n  Individual Brier Scores:")
+            for src, score in sorted(report["individual_briers"].items()):
+                print(f"    {src}: {score}")
+    except Exception as e:
+        print(f"Transcendence report unavailable: {e}")
+
+
 def cmd_orchestrate_live(background: bool = False) -> None:
     """Run all DGC systems concurrently (live orchestrator)."""
     import asyncio
 
-    pid_file = DHARMA_STATE / "orchestrator.pid"
-    if pid_file.exists():
+    pid_file = DHARMA_STATE / "daemon.pid"
+    legacy_pid_file = DHARMA_STATE / "orchestrator.pid"
+    for candidate in (pid_file, legacy_pid_file):
+        if not candidate.exists():
+            continue
         try:
-            pid = int(pid_file.read_text().strip())
+            pid = int(candidate.read_text().strip())
             os.kill(pid, 0)
             print(f"Orchestrator already running (PID {pid})")
             return
         except (ValueError, OSError):
-            pid_file.unlink(missing_ok=True)
+            candidate.unlink(missing_ok=True)
+
+    live_process = _first_daemon_like_process()
+    if live_process is not None:
+        pid, _command = live_process
+        print(f"Orchestrator already running (PID {pid})")
+        return
 
     if background:
         import subprocess as sp
+        legacy_pid_file.unlink(missing_ok=True)
         proc = sp.Popen(
             [sys.executable, "-m", "dharma_swarm.orchestrate_live", "--background"],
             stdout=sp.DEVNULL,
@@ -1315,6 +1697,12 @@ def cmd_up(background: bool = False) -> None:
             return
         except (ValueError, OSError):
             pid_file.unlink(missing_ok=True)
+
+    live_process = _first_daemon_like_process()
+    if live_process is not None:
+        pid, _command = live_process
+        print(f"Daemon already running (PID {pid})")
+        return
 
     repo_root = Path(__file__).resolve().parent.parent
     daemon_script = repo_root / "run_daemon.sh"
@@ -1359,7 +1747,6 @@ def cmd_down() -> None:
 def cmd_daemon_status() -> None:
     """Show daemon state."""
     pid_file = DHARMA_STATE / "daemon.pid"
-    pulse_log = DHARMA_STATE / "pulse.log"
     if pid_file.exists():
         try:
             pid = int(pid_file.read_text().strip())
@@ -1369,11 +1756,10 @@ def cmd_daemon_status() -> None:
             print("  status: stale PID file")
     else:
         print("  status: not running")
-    if pulse_log.exists():
-        # Show last 5 lines of pulse log
-        lines = pulse_log.read_text().strip().split("\n")
-        print(f"  pulse_log: {len(lines)} entries")
-        for line in lines[-5:]:
+    pulse_count, last_pulse, pulse_source = _canonical_pulse_summary()
+    if last_pulse and pulse_source is not None:
+        print(f"  pulse_log: {pulse_count} logged via {pulse_source}, last: {last_pulse}")
+        for line in _tail(pulse_source, lines=5).splitlines():
             print(f"    {line[:120]}")
     else:
         print("  pulse_log: no entries")
@@ -3890,6 +4276,9 @@ def cmd_provider_smoke(
     *,
     ollama_model: str | None = None,
     nim_model: str | None = None,
+    qwen_provider: str | None = None,
+    qwen_task: str | None = None,
+    telemetry_db: str | None = None,
     as_json: bool = False,
 ) -> int:
     """Run best-effort smoke tests for local and external provider lanes."""
@@ -3898,12 +4287,17 @@ def cmd_provider_smoke(
     payload = run_provider_smoke(
         ollama_model=ollama_model,
         nim_model=nim_model,
+        qwen_provider=qwen_provider,
+        qwen_task=qwen_task,
+        telemetry_db_path=telemetry_db,
     )
     if as_json:
         print(json.dumps(payload, indent=2, sort_keys=True))
         return 0
 
     for label, block in payload.items():
+        if label.startswith("_"):
+            continue
         print(
             f"[{label}] status={block.get('status')} "
             f"model={block.get('model') or block.get('configured_model')}"
@@ -3924,12 +4318,88 @@ def cmd_provider_smoke(
                 f"{item.get('model')}:{item.get('status')}" for item in verified[:6]
             )
             print(f"  verified={summary}")
+        if label == "qwen_dashboard":
+            if block.get("resolved_provider"):
+                print(f"  resolved_provider={block['resolved_provider']}")
+            if block.get("tool_names"):
+                print(f"  tool_names={', '.join(block['tool_names'])}")
+            if block.get("required_env_key") and block.get("status") == "missing_config":
+                print(f"  required_env_key={block['required_env_key']}")
         if block.get("configured_base_url"):
             print(f"  base_url={block['configured_base_url']}")
         if block.get("response_preview"):
             print(f"  preview={block['response_preview']}")
         if block.get("error"):
             print(f"  error={block['error']}")
+    telemetry = payload.get("_telemetry")
+    if isinstance(telemetry, dict):
+        print(
+            f"[telemetry] status={telemetry.get('status')} "
+            f"outcomes={telemetry.get('outcome_count', 0)} "
+            f"session_id={telemetry.get('session_id')}"
+        )
+        if telemetry.get("db_path"):
+            print(f"  db_path={telemetry['db_path']}")
+        for item in (telemetry.get("errors") or [])[:5]:
+            print(f"  error={item}")
+    return 0
+
+
+def cmd_provider_matrix(
+    *,
+    profile: str,
+    corpus: str,
+    max_targets: int | None,
+    max_prompts: int | None,
+    timeout_seconds: float,
+    concurrency: int,
+    budget_units: int | None,
+    artifact_dir: str | None,
+    include_unavailable: bool,
+    write_artifacts: bool,
+    as_json: bool = False,
+) -> int:
+    """Run the live provider/model matrix harness."""
+    from dharma_swarm.provider_matrix import run_provider_matrix
+
+    payload = run_provider_matrix(
+        profile=profile,
+        corpus=corpus,
+        max_targets=max_targets,
+        max_prompts=max_prompts,
+        timeout_seconds=timeout_seconds,
+        concurrency=concurrency,
+        budget_units=budget_units,
+        artifact_dir=artifact_dir,
+        include_unavailable=include_unavailable,
+        write_artifacts=write_artifacts,
+        working_dir=str(DHARMA_SWARM),
+    )
+    if as_json:
+        print(json.dumps(payload, indent=2, sort_keys=True))
+        return 0
+
+    counts = payload.get("counts", {})
+    budget = payload.get("budget", {})
+    print(
+        f"[provider-matrix] profile={payload.get('profile')} corpus={payload.get('corpus')} "
+        f"attempted={counts.get('attempted', 0)} ok={counts.get('ok', 0)} "
+        f"schema_valid={counts.get('schema_valid', 0)} "
+        f"budget={budget.get('units_consumed')}/{budget.get('budget_units')}"
+    )
+    for row in payload.get("leaderboard", [])[:10]:
+        print(
+            f"  {row.get('provider')} / {row.get('model')} "
+            f"[{row.get('lane_role')}, {row.get('tier')}] "
+            f"score={row.get('avg_score')} ok={row.get('ok_count')}/{row.get('attempts')} "
+            f"latency={row.get('avg_elapsed_sec')}s"
+        )
+    artifacts = payload.get("artifacts", {})
+    if artifacts:
+        print(
+            f"[artifacts] json={artifacts.get('json_path')} "
+            f"md={artifacts.get('markdown_path')}"
+        )
     return 0
 
 
@@ -4249,6 +4719,16 @@ def cmd_free_fleet(
             print(f"\n  Tier {tier_num}:")
             for m in models:
                 print(f"    {m}")
+
+
+def cmd_model_catalog(
+    selector: str | None = None,
+    as_json: bool = False,
+) -> None:
+    """Show the canonical model catalog or a specific named pack."""
+    from dharma_swarm.model_catalog import model_catalog_summary
+
+    print(model_catalog_summary(selector=selector, as_json=as_json))
 
 
 def cmd_custodians(
@@ -4679,6 +5159,20 @@ def _build_parser() -> argparse.ArgumentParser:
     # -- pulse --
     sub.add_parser("pulse", help="Run one heartbeat pulse")
 
+    # -- organism-pulse (the canonical 9-stage heartbeat) --
+    p_org_pulse = sub.add_parser(
+        "organism-pulse",
+        help="Run one canonical organism pulse (sense→constrain→execute→evaluate→adapt)",
+    )
+    p_org_pulse.add_argument("--task", type=str, default=None, help="Task to execute")
+    p_org_pulse.add_argument("--dry-run", action="store_true", help="Health-only, no execution")
+
+    # -- invariants --
+    sub.add_parser("invariants", help="Show the 4 computable system invariants")
+
+    # -- transcendence --
+    sub.add_parser("transcendence", help="Show transcendence metrics (ensemble vs individual)")
+
     # -- orchestrate-live --
     p_orch_live = sub.add_parser(
         "orchestrate-live",
@@ -4740,6 +5234,36 @@ def _build_parser() -> argparse.ArgumentParser:
     p_provider.add_argument("--json", action="store_true", help="Emit machine-readable JSON")
     p_provider.add_argument("--ollama-model", default=None, help="Override Ollama model")
     p_provider.add_argument("--nim-model", default=None, help="Override NVIDIA NIM model")
+    p_provider.add_argument(
+        "--qwen-provider",
+        default=None,
+        help="Force a Qwen3.5 Surgical Coder dashboard smoke against a specific provider",
+    )
+    p_provider.add_argument(
+        "--qwen-task",
+        default=None,
+        help="Override the read-only Qwen dashboard smoke task",
+    )
+    p_provider.add_argument(
+        "--telemetry-db",
+        default=None,
+        help="Persist probe outcomes into the canonical telemetry DB at this path",
+    )
+    p_matrix = sub.add_parser(
+        "provider-matrix",
+        help="Run the live provider/model matrix harness",
+    )
+    p_matrix.add_argument("--profile", choices=["quick", "live25"], default="live25")
+    p_matrix.add_argument("--corpus", choices=["deployment", "workspace"], default="deployment")
+    p_matrix.add_argument("--max-targets", type=int, default=None)
+    p_matrix.add_argument("--max-prompts", type=int, default=None)
+    p_matrix.add_argument("--timeout-seconds", type=float, default=45.0)
+    p_matrix.add_argument("--concurrency", type=int, default=4)
+    p_matrix.add_argument("--budget-units", type=int, default=40)
+    p_matrix.add_argument("--artifact-dir", default=None)
+    p_matrix.add_argument("--include-unavailable", action="store_true")
+    p_matrix.add_argument("--no-artifacts", action="store_true")
+    p_matrix.add_argument("--json", action="store_true", help="Emit machine-readable JSON")
 
     # -- context --
     p_ctx = sub.add_parser("context", help="Load context for a domain")
@@ -4766,6 +5290,9 @@ def _build_parser() -> argparse.ArgumentParser:
 
     # -- health-check (v0.2.0 monitor) --
     sub.add_parser("health-check", help="Monitor-based system health check")
+
+    # -- verify-baseline (claude_hooks bridge) --
+    sub.add_parser("verify-baseline", help="Full baseline verification (gates + health)")
 
     # -- doctor --
     p_doc = sub.add_parser("doctor", help="Deep runtime diagnostics and fix guidance")
@@ -4817,7 +5344,7 @@ def _build_parser() -> argparse.ArgumentParser:
     p_spawn = sub.add_parser("spawn", help="Spawn a new agent")
     p_spawn.add_argument("--name", required=True)
     p_spawn.add_argument("--role", default="general")
-    p_spawn.add_argument("--model", default="anthropic/claude-sonnet-4")
+    p_spawn.add_argument("--model", default="anthropic/claude-opus-4-6")
 
     # -- agent (autonomous agents with tool use) --
     p_agent = sub.add_parser("agent", help="Autonomous agents with multi-step reasoning and tool use")
@@ -4870,7 +5397,7 @@ def _build_parser() -> argparse.ArgumentParser:
 
     p_eauto = evolve_sub.add_parser("auto", help="LLM-powered autonomous evolution")
     p_eauto.add_argument("--files", nargs="*", help="Source files to evolve (default: core modules)")
-    p_eauto.add_argument("--model", default="meta-llama/llama-3.3-70b-instruct")
+    p_eauto.add_argument("--model", default="")
     p_eauto.add_argument("--context", default="", help="Focus area or context for the LLM")
     p_eauto.add_argument("--single-model", action="store_true", help="Use only --model instead of full roster")
     p_eauto.add_argument("--shadow", action="store_true", help="Dry-run: generate proposals but don't apply diffs")
@@ -4879,7 +5406,7 @@ def _build_parser() -> argparse.ArgumentParser:
     p_edaemon = evolve_sub.add_parser("daemon", help="Run continuous autonomous evolution")
     p_edaemon.add_argument("--interval", type=float, default=1800.0, help="Seconds between cycles (default: 30min)")
     p_edaemon.add_argument("--threshold", type=float, default=0.6, help="Min fitness to auto-commit")
-    p_edaemon.add_argument("--model", default="meta-llama/llama-3.3-70b-instruct")
+    p_edaemon.add_argument("--model", default="")
     p_edaemon.add_argument("--cycles", type=int, default=None, help="Max cycles (default: infinite)")
     p_edaemon.add_argument("--single-model", action="store_true", help="Use only --model instead of full roster")
     p_edaemon.add_argument("--shadow", action="store_true", help="Dry-run: generate proposals but don't apply diffs")
@@ -5115,6 +5642,7 @@ def _build_parser() -> argparse.ArgumentParser:
     eval_sub.add_parser("run", help="Run all evals and print scorecard")
     eval_sub.add_parser("report", help="Print latest eval report")
     eval_sub.add_parser("trend", help="Show historical pass rates")
+    eval_sub.add_parser("dashboard", help="Single-screen eval dashboard")
 
     # -- self-improve --
     p_si = sub.add_parser("self-improve", help="Self-improvement cycle — strange loop")
@@ -5177,6 +5705,14 @@ def _build_parser() -> argparse.ArgumentParser:
     # -- execute-compose (v0.4.2) --
     p_exec_comp = sub.add_parser("execute-compose", help="Compose and execute a task DAG end-to-end")
     p_exec_comp.add_argument("exec_comp_desc", nargs="+", help="Task description")
+
+    # -- overnight (autonomous overnight loop) --
+    p_overnight = sub.add_parser("overnight", help="Run overnight autonomous loop")
+    p_overnight.add_argument("--hours", type=float, default=8.0, help="Duration in hours")
+    p_overnight.add_argument("--dry-run", action="store_true", help="Simulate without real execution")
+    p_overnight.add_argument("--autonomy", type=int, default=1, help="Autonomy level (0-3)")
+    p_overnight.add_argument("--max-tokens", type=int, default=500_000, help="Token budget")
+    p_overnight.add_argument("--cycle-timeout", type=float, default=900.0, help="Seconds per cycle")
 
     # -- handoff (v0.4.1) --
     p_ho = sub.add_parser("handoff", help="Create a structured agent handoff (v0.4.1)")
@@ -5438,6 +5974,9 @@ def _build_parser() -> argparse.ArgumentParser:
     p_ff.add_argument("--tier", type=int, default=None, help="Filter to tier 1, 2, or 3")
     p_ff.add_argument("--json", dest="json", action="store_true", default=False, help="Output as JSON")
     p_ff.add_argument("--set-env", dest="set_env", action="store_true", default=False, help="Print shell export command")
+    p_mc = sub.add_parser("model-catalog", help="Show canonical model packs and routing selectors")
+    p_mc.add_argument("selector", nargs="?", default=None, help="Pack selector, e.g. 'top open models' or 'tier one models'")
+    p_mc.add_argument("--json", dest="json", action="store_true", default=False, help="Output as JSON")
 
     # -- custodians (Phase 17: Autonomous Code Maintenance Fleet) --
     p_cust = sub.add_parser("custodians", help="Autonomous code maintenance fleet")
@@ -5606,6 +6145,17 @@ def main() -> None:
             cmd_pulse()
         case "orchestrate-live":
             cmd_orchestrate_live(background=args.background)
+        case "overnight":
+            import asyncio as _aio
+            from dharma_swarm.overnight_director import run_overnight as _run_overnight
+            _result = _aio.run(_run_overnight(
+                hours=args.hours,
+                dry_run=args.dry_run,
+                autonomy_level=args.autonomy,
+                max_tokens=args.max_tokens,
+                cycle_timeout=args.cycle_timeout,
+            ))
+            print(json.dumps(_result, indent=2))
         case "swarm":
             cmd_swarm(args.swarm_args)
         case "stress":
@@ -5637,6 +6187,25 @@ def main() -> None:
             rc = cmd_provider_smoke(
                 ollama_model=args.ollama_model,
                 nim_model=args.nim_model,
+                qwen_provider=args.qwen_provider,
+                qwen_task=args.qwen_task,
+                telemetry_db=args.telemetry_db,
+                as_json=args.json,
+            )
+            if rc != 0:
+                raise SystemExit(rc)
+        case "provider-matrix":
+            rc = cmd_provider_matrix(
+                profile=args.profile,
+                corpus=args.corpus,
+                max_targets=args.max_targets,
+                max_prompts=args.max_prompts,
+                timeout_seconds=args.timeout_seconds,
+                concurrency=args.concurrency,
+                budget_units=args.budget_units,
+                artifact_dir=args.artifact_dir,
+                include_unavailable=args.include_unavailable,
+                write_artifacts=not args.no_artifacts,
                 as_json=args.json,
             )
             if rc != 0:
@@ -5651,6 +6220,12 @@ def main() -> None:
             cmd_develop(args.what, " ".join(args.evidence))
         case "gates":
             cmd_gates(" ".join(args.action))
+        case "organism-pulse":
+            cmd_organism_pulse(task=args.task, dry_run=args.dry_run)
+        case "invariants":
+            cmd_invariants()
+        case "transcendence":
+            cmd_transcendence()
         case "health":
             cmd_health()
         case "cascade":
@@ -5668,6 +6243,17 @@ def main() -> None:
             cmd_loops()
         case "health-check":
             cmd_health_check()
+        case "verify-baseline":
+            from dharma_swarm.claude_hooks import verify_baseline
+            import json as _json
+            result = verify_baseline()
+            print(_json.dumps(result, indent=2))
+            gates = result.get("gates", {})
+            health = result.get("health", {})
+            status = health.get("status", "unknown") if isinstance(health, dict) else "unknown"
+            print(f"\nGates: {gates.get('passed', '?')}/{gates.get('total', '?')} | Health: {status}")
+            if gates.get("decision") == "BLOCK":
+                raise SystemExit(1)
         case "doctor":
             rc = cmd_doctor(
                 doctor_cmd=args.doctor_action,
@@ -5900,6 +6486,7 @@ def main() -> None:
         case "eval":
             from dharma_swarm.ecc_eval_harness import (
                 cmd_eval_run, cmd_eval_report, cmd_eval_trend,
+                cmd_eval_dashboard,
             )
             match args.eval_cmd:
                 case "run":
@@ -5913,6 +6500,10 @@ def main() -> None:
                         raise SystemExit(rc)
                 case "trend":
                     rc = cmd_eval_trend()
+                    if rc != 0:
+                        raise SystemExit(rc)
+                case "dashboard":
+                    rc = cmd_eval_dashboard()
                     if rc != 0:
                         raise SystemExit(rc)
                 case _:
@@ -6281,6 +6872,8 @@ def main() -> None:
             cmd_gateway(config_path=args.config)
         case "free-fleet":
             cmd_free_fleet(tier=args.tier, as_json=args.json, set_env=args.set_env)
+        case "model-catalog":
+            cmd_model_catalog(selector=args.selector, as_json=args.json)
         case "custodians":
             cmd_custodians(
                 custodians_cmd=args.custodians_cmd,

@@ -43,7 +43,30 @@ async def engine(engine_paths):
     """Create and initialize a DarwinEngine with tmp paths."""
     eng = DarwinEngine(**engine_paths)
     await eng.init()
-    return eng
+    try:
+        yield eng
+    finally:
+        await eng.close()
+
+
+@pytest.fixture(autouse=True)
+async def cleanup_initialized_engines(monkeypatch):
+    """Close any DarwinEngine initialized directly inside a test."""
+    initialized: list[DarwinEngine] = []
+    original_init = DarwinEngine.init
+
+    async def tracked_init(self, *args, **kwargs):
+        result = await original_init(self, *args, **kwargs)
+        initialized.append(self)
+        return result
+
+    monkeypatch.setattr(DarwinEngine, "init", tracked_init)
+
+    try:
+        yield
+    finally:
+        for eng in reversed(initialized):
+            await eng.close()
 
 
 _THINK_NOTES_SAFE = (
@@ -525,11 +548,23 @@ async def test_gate_check_review_proposal(engine):
 async def test_gate_check_logs_trace(engine):
     p = _safe_proposal()
     await engine.gate_check(p)
-    # Drain fire-and-forget trace tasks before checking
-    if engine._trace_tasks:
-        await asyncio.gather(*engine._trace_tasks)
+    await engine.flush_trace_tasks()
     recent = await engine.traces.get_recent(limit=5)
     assert len(recent) >= 1
+    actions = [t.action for t in recent]
+    assert "gate_check" in actions
+
+
+async def test_close_drains_background_trace_tasks(engine):
+    p = _safe_proposal()
+    await engine.gate_check(p)
+
+    assert engine._trace_tasks
+
+    await engine.close()
+
+    assert not engine._trace_tasks
+    recent = await engine.traces.get_recent(limit=5)
     actions = [t.action for t in recent]
     assert "gate_check" in actions
 
@@ -802,9 +837,7 @@ async def test_archive_result_logs_trace(engine):
     await engine.evaluate(p, test_results={"pass_rate": 0.7})
     await engine.archive_result(p)
 
-    # Drain fire-and-forget trace tasks
-    if engine._trace_tasks:
-        await asyncio.gather(*engine._trace_tasks)
+    await engine.flush_trace_tasks()
     recent = await engine.traces.get_recent(limit=10)
     actions = [t.action for t in recent]
     assert "archive_result" in actions
@@ -885,6 +918,74 @@ async def test_run_cycle_tracks_best_fitness(engine):
     # Both get pass_rate=0.0 by default, but best_fitness should be > 0
     # because other dimensions (efficiency, safety, dharmic_alignment) contribute
     assert result.best_fitness >= 0.0
+
+
+async def test_run_cycle_uses_inferred_component_pytest_for_real_fitness(
+    engine_paths,
+    tmp_path,
+    monkeypatch,
+):
+    workspace_root = tmp_path / "workspace"
+    workspace_root.mkdir()
+    (workspace_root / "alpha.py").write_text(
+        "def alpha():\n    return 1\n",
+        encoding="utf-8",
+    )
+    tests_root = workspace_root / "tests"
+    tests_root.mkdir()
+    (tests_root / "test_alpha.py").write_text(
+        "def test_alpha():\n    assert True\n",
+        encoding="utf-8",
+    )
+
+    eng = DarwinEngine(**engine_paths)
+    await eng.init()
+    eng.register_probe_target("alpha.py", workspace=workspace_root, timeout=7.0)
+
+    calls: list[tuple[str, float, str | None]] = []
+
+    async def fake_apply_in_sandbox(
+        proposal,
+        test_command="python3 -m pytest tests/ -q --tb=short",
+        timeout=60.0,
+        workspace=None,
+    ):
+        calls.append(
+            (
+                test_command,
+                float(timeout),
+                str(workspace) if workspace is not None else None,
+            )
+        )
+        proposal.status = EvolutionStatus.TESTING
+        return proposal, SandboxResult(
+            exit_code=0,
+            stdout="1 passed in 0.01s",
+            stderr="",
+        )
+
+    monkeypatch.setattr(eng, "apply_in_sandbox", fake_apply_in_sandbox)
+    monkeypatch.setattr(
+        "dharma_swarm.evolution.evaluate_elegance",
+        lambda code: types.SimpleNamespace(overall=0.91 if "def alpha" in code else 0.5),
+    )
+
+    result = await eng.run_cycle(
+        [_safe_proposal(component="alpha.py", description="runtime evidence", diff="")]
+    )
+    latest = await eng.archive.get_latest(n=1)
+
+    assert result.proposals_tested == 1
+    assert calls == [
+        (
+            "python3 -m pytest tests/test_alpha.py -q --tb=short",
+            7.0,
+            str(workspace_root.resolve()),
+        )
+    ]
+    assert latest[0].fitness.correctness == pytest.approx(1.0)
+    assert latest[0].fitness.elegance == pytest.approx(0.91)
+    assert latest[0].promotion_state == "component_pass"
 
 
 async def test_run_cycle_updates_convergence_state(engine_paths):

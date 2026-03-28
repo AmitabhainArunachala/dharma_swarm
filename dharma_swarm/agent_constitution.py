@@ -25,11 +25,17 @@ Grounded in:
 
 from __future__ import annotations
 
+import dataclasses
+import json
+import logging
 from dataclasses import dataclass, field
 from enum import Enum
+from pathlib import Path
 from typing import Any
 
 from dharma_swarm.models import AgentRole, ProviderType
+
+logger = logging.getLogger(__name__)
 
 
 # ---------------------------------------------------------------------------
@@ -249,8 +255,11 @@ _ROSTER_BY_ROLE: dict[AgentRole, AgentSpec] = {spec.role: spec for spec in CONST
 
 
 def get_agent_spec(name: str) -> AgentSpec | None:
-    """Look up a constitutional agent by name."""
-    return _ROSTER_BY_NAME.get(name)
+    """Look up an agent by name (static roster first, then dynamic)."""
+    spec = _ROSTER_BY_NAME.get(name)
+    if spec is None and _dynamic_roster is not None:
+        spec = _dynamic_roster.get(name)
+    return spec
 
 
 def get_agent_by_role(role: AgentRole) -> AgentSpec | None:
@@ -259,8 +268,14 @@ def get_agent_by_role(role: AgentRole) -> AgentSpec | None:
 
 
 def get_stable_agent_names() -> list[str]:
-    """Return names of all stable agents in the constitutional roster."""
-    return [spec.name for spec in CONSTITUTIONAL_ROSTER]
+    """Return names of all agents (static + dynamic)."""
+    names = [spec.name for spec in CONSTITUTIONAL_ROSTER]
+    if _dynamic_roster is not None:
+        names.extend(
+            name for name in _dynamic_roster._dynamic
+            if name not in _ROSTER_BY_NAME
+        )
+    return names
 
 
 def get_expected_roster_size() -> int:
@@ -274,16 +289,91 @@ def get_agents_by_layer(layer: ConstitutionalLayer) -> list[AgentSpec]:
 
 
 def can_spawn_worker(parent_name: str, worker_type: str) -> bool:
-    """Check if a stable agent is authorized to spawn a given worker type."""
-    spec = _ROSTER_BY_NAME.get(parent_name)
+    """Check if an agent is authorized to spawn a given worker type."""
+    spec = get_agent_spec(parent_name)  # checks static + dynamic
     if spec is None:
         return False
     return worker_type in spec.spawn_authority
 
 
 def get_max_workers(parent_name: str) -> int:
-    """Return the max concurrent worker count for a stable agent."""
-    spec = _ROSTER_BY_NAME.get(parent_name)
+    """Return the max concurrent worker count for an agent."""
+    spec = get_agent_spec(parent_name)  # checks static + dynamic
+    if spec is None:
+        return 0
+    return spec.max_concurrent_workers
+
+
+def _coerce_state_dir(state_dir: Path | str | None) -> Path | None:
+    if state_dir is None:
+        return None
+    return Path(state_dir)
+
+
+def get_runtime_roster(*, state_dir: Path | str | None = None) -> "DynamicRoster":
+    """Return a roster view resolved from the provided runtime state directory."""
+    return DynamicRoster(state_dir=_coerce_state_dir(state_dir))
+
+
+def get_runtime_agent_spec(
+    name: str,
+    *,
+    state_dir: Path | str | None = None,
+) -> AgentSpec | None:
+    """Look up an agent by name from the runtime roster."""
+    return get_runtime_roster(state_dir=state_dir).get(name)
+
+
+def get_runtime_agent_by_role(
+    role: AgentRole,
+    *,
+    state_dir: Path | str | None = None,
+) -> AgentSpec | None:
+    """Look up the first runtime agent matching the requested role."""
+    for spec in get_runtime_roster(state_dir=state_dir).get_all():
+        if spec.role == role:
+            return spec
+    return None
+
+
+def get_runtime_agent_names(*, state_dir: Path | str | None = None) -> list[str]:
+    """Return names of all runtime agents, including dynamic additions."""
+    return [spec.name for spec in get_runtime_roster(state_dir=state_dir).get_all()]
+
+
+def get_runtime_agents_by_layer(
+    layer: ConstitutionalLayer,
+    *,
+    state_dir: Path | str | None = None,
+) -> list[AgentSpec]:
+    """Return runtime agents in the given constitutional layer."""
+    return [
+        spec
+        for spec in get_runtime_roster(state_dir=state_dir).get_all()
+        if spec.layer == layer
+    ]
+
+
+def runtime_can_spawn_worker(
+    parent_name: str,
+    worker_type: str,
+    *,
+    state_dir: Path | str | None = None,
+) -> bool:
+    """Check worker authority against the runtime roster."""
+    spec = get_runtime_agent_spec(parent_name, state_dir=state_dir)
+    if spec is None:
+        return False
+    return worker_type in spec.spawn_authority
+
+
+def get_runtime_max_workers(
+    parent_name: str,
+    *,
+    state_dir: Path | str | None = None,
+) -> int:
+    """Return the max worker count for any runtime agent."""
+    spec = get_runtime_agent_spec(parent_name, state_dir=state_dir)
     if spec is None:
         return 0
     return spec.max_concurrent_workers
@@ -291,3 +381,160 @@ def get_max_workers(parent_name: str) -> int:
 
 # Maximum stable agents (ceiling from Four Shaktis x 2 aspects)
 MAX_STABLE_AGENTS = 8
+
+
+# ---------------------------------------------------------------------------
+# Dynamic Roster singleton — set at orchestrator startup
+# ---------------------------------------------------------------------------
+
+_dynamic_roster: "DynamicRoster | None" = None
+
+
+def set_dynamic_roster(roster: "DynamicRoster") -> None:
+    """Register the DynamicRoster so all lookup helpers see dynamic agents."""
+    global _dynamic_roster
+    _dynamic_roster = roster
+
+
+def bootstrap_dynamic_roster(
+    *,
+    state_dir: Path | str | None = None,
+) -> "DynamicRoster":
+    """Load and register the runtime dynamic roster for helper-based lookups."""
+    roster = DynamicRoster(state_dir=_coerce_state_dir(state_dir))
+    set_dynamic_roster(roster)
+    return roster
+
+
+# ---------------------------------------------------------------------------
+# Dynamic Roster — overlay for runtime-added agents
+# ---------------------------------------------------------------------------
+
+
+class DynamicRoster:
+    """Extends the frozen CONSTITUTIONAL_ROSTER with runtime-added agents.
+
+    The static CONSTITUTIONAL_ROSTER is IMMUTABLE (the 6 founding agents).
+    Dynamic additions come from the replication protocol.
+    Total population is bounded by MAX_STABLE_AGENTS.
+    Persists dynamic roster to disk for restart durability.
+
+    Design:
+        - Static agents take precedence over dynamic in all lookups.
+        - Dynamic agents cannot shadow a static agent name.
+        - Serialization uses dataclasses.asdict / AgentSpec(**data) round-trip.
+        - ProviderType and AgentRole enums are stored as their string values
+          and reconstructed on load.
+    """
+
+    def __init__(self, state_dir: Path | None = None) -> None:
+        self._static: dict[str, AgentSpec] = {s.name: s for s in CONSTITUTIONAL_ROSTER}
+        self._dynamic: dict[str, AgentSpec] = {}
+        self._state_dir = state_dir or Path.home() / ".dharma"
+        self._roster_path = self._state_dir / "replication" / "dynamic_roster.json"
+        self._load()
+
+    # -- persistence --------------------------------------------------------
+
+    def _load(self) -> None:
+        """Load persisted dynamic agents from disk."""
+        if not self._roster_path.exists():
+            return
+        try:
+            data = json.loads(self._roster_path.read_text(encoding="utf-8"))
+            for entry in data:
+                spec = self._deserialize_spec(entry)
+                self._dynamic[spec.name] = spec
+        except Exception:
+            logger.warning(
+                "Failed to load dynamic roster from %s", self._roster_path, exc_info=True,
+            )
+
+    def _persist(self) -> None:
+        """Write dynamic roster to disk atomically."""
+        self._roster_path.parent.mkdir(parents=True, exist_ok=True)
+        data = [self._serialize_spec(spec) for spec in self._dynamic.values()]
+        tmp = self._roster_path.with_suffix(".tmp")
+        tmp.write_text(json.dumps(data, indent=2, default=str), encoding="utf-8")
+        tmp.replace(self._roster_path)
+
+    @staticmethod
+    def _serialize_spec(spec: AgentSpec) -> dict[str, Any]:
+        """Convert a frozen AgentSpec to a JSON-safe dict."""
+        d = dataclasses.asdict(spec)
+        # Enum values are stored as their string representation
+        d["role"] = spec.role.value
+        d["layer"] = spec.layer.value
+        d["default_provider"] = spec.default_provider.value
+        return d
+
+    @staticmethod
+    def _deserialize_spec(data: dict[str, Any]) -> AgentSpec:
+        """Reconstruct an AgentSpec from a dict, resolving enum strings."""
+        data = dict(data)  # shallow copy to avoid mutating caller's dict
+        data["role"] = AgentRole(data["role"])
+        data["layer"] = ConstitutionalLayer(data["layer"])
+        data["default_provider"] = ProviderType(data["default_provider"])
+        return AgentSpec(**data)
+
+    # -- public API ---------------------------------------------------------
+
+    def get_all(self) -> list[AgentSpec]:
+        """All agents: static founding + dynamic replicated."""
+        return list(self._static.values()) + list(self._dynamic.values())
+
+    def get(self, name: str) -> AgentSpec | None:
+        """Lookup by name. Static takes precedence."""
+        return self._static.get(name) or self._dynamic.get(name)
+
+    def add(self, spec: AgentSpec) -> None:
+        """Add a replicated agent. Validates population cap.
+
+        Raises:
+            ValueError: If population is at cap, name shadows a static agent,
+                or a dynamic agent with the same name already exists.
+        """
+        total = len(self._static) + len(self._dynamic)
+        if total >= MAX_STABLE_AGENTS:
+            raise ValueError(f"Population at cap ({MAX_STABLE_AGENTS}). Cull first.")
+        if spec.name in self._static:
+            raise ValueError(f"Cannot shadow static agent '{spec.name}'")
+        if spec.name in self._dynamic:
+            raise ValueError(f"Dynamic agent '{spec.name}' already exists")
+        self._dynamic[spec.name] = spec
+        self._persist()
+
+    def remove(self, name: str) -> AgentSpec:
+        """Remove a dynamic agent. Cannot remove static agents.
+
+        Returns:
+            The removed AgentSpec.
+
+        Raises:
+            ValueError: If name is a static agent or not found.
+        """
+        if name in self._static:
+            raise ValueError(f"Cannot remove static agent '{name}'")
+        if name not in self._dynamic:
+            raise ValueError(f"Dynamic agent '{name}' not found")
+        spec = self._dynamic.pop(name)
+        self._persist()
+        return spec
+
+    def is_static(self, name: str) -> bool:
+        """True if name belongs to the immutable constitutional roster."""
+        return name in self._static
+
+    def is_dynamic(self, name: str) -> bool:
+        """True if name belongs to the runtime-added roster."""
+        return name in self._dynamic
+
+    @property
+    def population(self) -> int:
+        """Total agent count (static + dynamic)."""
+        return len(self._static) + len(self._dynamic)
+
+    @property
+    def dynamic_count(self) -> int:
+        """Number of runtime-added agents."""
+        return len(self._dynamic)

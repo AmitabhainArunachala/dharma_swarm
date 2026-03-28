@@ -5,15 +5,20 @@ from unittest.mock import AsyncMock, patch
 
 import pytest
 
+from dharma_swarm.model_hierarchy import default_model
 from dharma_swarm.models import LLMRequest, LLMResponse, ProviderType
 from dharma_swarm.providers import (
     AnthropicProvider,
     ClaudeCodeProvider,
     CodexProvider,
+    FireworksProvider,
+    GroqProvider,
     ModelRouter,
     NVIDIANIMProvider,
     OpenAIProvider,
     OpenRouterFreeProvider,
+    SiliconFlowProvider,
+    TogetherProvider,
     create_default_router,
 )
 
@@ -75,10 +80,34 @@ def test_create_default_router():
     router = create_default_router()
     assert router.get_provider(ProviderType.ANTHROPIC) is not None
     assert router.get_provider(ProviderType.OPENAI) is not None
+    assert router.get_provider(ProviderType.GROQ) is not None
+    assert router.get_provider(ProviderType.SILICONFLOW) is not None
+    assert router.get_provider(ProviderType.TOGETHER) is not None
+    assert router.get_provider(ProviderType.FIREWORKS) is not None
     assert router.get_provider(ProviderType.NVIDIA_NIM) is not None
     assert router.get_provider(ProviderType.CLAUDE_CODE) is not None
     assert router.get_provider(ProviderType.CODEX) is not None
     assert router.get_provider(ProviderType.OPENROUTER_FREE) is not None
+
+
+def test_groq_provider_init():
+    p = GroqProvider(api_key="test-key")
+    assert p._api_key == "test-key"
+
+
+def test_siliconflow_provider_init():
+    p = SiliconFlowProvider(api_key="test-key")
+    assert p._api_key == "test-key"
+
+
+def test_together_provider_init():
+    p = TogetherProvider(api_key="test-key")
+    assert p._api_key == "test-key"
+
+
+def test_fireworks_provider_init():
+    p = FireworksProvider(api_key="test-key")
+    assert p._api_key == "test-key"
 
 
 def test_nvidia_nim_provider_no_key():
@@ -86,6 +115,20 @@ def test_nvidia_nim_provider_no_key():
     p._api_key = None
     with pytest.raises(RuntimeError, match="NVIDIA_NIM_API_KEY"):
         p._headers_or_raise()
+
+
+def test_nvidia_nim_provider_uses_canonical_default_model():
+    p = NVIDIANIMProvider(api_key="test-key")
+    assert p._default_model == default_model(ProviderType.NVIDIA_NIM)
+
+
+def test_nvidia_nim_provider_resolves_default_via_canonical_helper(monkeypatch):
+    monkeypatch.setattr(
+        "dharma_swarm.providers.canonical_default_model",
+        lambda provider: "nim-from-helper",
+    )
+    p = NVIDIANIMProvider(api_key="test-key")
+    assert p._default_model == "nim-from-helper"
 
 
 # --- ClaudeCodeProvider tests ---
@@ -239,7 +282,10 @@ def test_codex_provider_init():
 def test_codex_provider_cli_args():
     p = CodexProvider()
     args = p._build_cli_args("test prompt")
-    assert args[:2] == ["codex", "exec"]
+    # The resolved command may be an absolute path (e.g. /usr/local/bin/codex)
+    assert args[0].endswith("codex")
+    assert args[1] == "exec"
+    assert "--dangerously-bypass-approvals-and-sandbox" in args
     assert "test prompt" in args
 
 

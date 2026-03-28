@@ -230,6 +230,29 @@ class LineageGraph:
         )
         return self.record(edge)
 
+    def record_research_run(
+        self,
+        *,
+        task_id: str,
+        report_id: str,
+        source_ids: list[str],
+        agent: str = "",
+        metadata: dict[str, Any] | None = None,
+    ) -> str:
+        """Record the canonical lineage projection for one research run."""
+        inputs = [f"brief:{task_id}", *[f"source:{source_id}" for source_id in source_ids]]
+        outputs = [f"report:{report_id}", f"grade:{report_id}"]
+        return self.record(
+            LineageEdge(
+                task_id=task_id,
+                input_artifacts=inputs,
+                output_artifacts=outputs,
+                agent=agent,
+                operation="auto_research_workflow",
+                metadata=metadata or {},
+            )
+        )
+
     # ── Querying ──────────────────────────────────────────────────────
 
     def _row_to_edge(self, row: tuple) -> LineageEdge:

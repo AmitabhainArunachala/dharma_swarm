@@ -56,8 +56,31 @@ def scan(
     backend_wraps = "class ApiResponse" in backend_text
     typed_start, typed_end = _function_window(frontend_lines, "async function _fetchWrapped<T>(")
     typed_wrapper_text = "\n".join(frontend_lines[typed_start - 1:typed_end]) if typed_start else ""
-    typed_wrapper_line = typed_start - 1 + _find_line(typed_wrapper_text.splitlines(), "const data: T = await res.json();") if typed_start else 0
-    typed_wrapper_uses_envelope = '"data" in json' in typed_wrapper_text and "return json.data as T;" in typed_wrapper_text
+    typed_wrapper_lines = typed_wrapper_text.splitlines()
+    typed_wrapper_line = 0
+    if typed_start:
+        for needle in (
+            "const data: T = await res.json();",
+            "data: json as T,",
+            "data: json as T",
+        ):
+            rel_line = _find_line(typed_wrapper_lines, needle)
+            if rel_line:
+                typed_wrapper_line = typed_start - 1 + rel_line
+                break
+    checks_data_envelope = '"data" in json' in typed_wrapper_text or "'data' in json" in typed_wrapper_text
+    checks_status_envelope = (
+        '"status" in json' in typed_wrapper_text or "'status' in json" in typed_wrapper_text
+    )
+    typed_wrapper_uses_envelope = (
+        checks_data_envelope
+        and checks_status_envelope
+        and (
+            "return json.data as T;" in typed_wrapper_text
+            or "data: json.data as T," in typed_wrapper_text
+            or "data: json.data as T" in typed_wrapper_text
+        )
+    )
     legacy_unwrap_line = _find_line(frontend_lines, "return json.data as T;")
 
     if backend_wraps and typed_wrapper_line and legacy_unwrap_line and not typed_wrapper_uses_envelope:

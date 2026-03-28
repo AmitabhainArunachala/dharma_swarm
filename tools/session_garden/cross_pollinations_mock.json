@@ -1,0 +1,82 @@
+[
+  {
+    "id": "xp_001",
+    "source_session": "session_001",
+    "target_session": "session_014",
+    "shared_concepts": ["self-replication", "telos-gates"],
+    "insight": "Discerning autonomy principles constrain replication: Viveka function evaluates each replication proposal against telos gates before genome inheritance proceeds. Gate-governed replication as evolutionary filter.",
+    "timestamp": "2026-03-23T12:00:00Z"
+  },
+  {
+    "id": "xp_002",
+    "source_session": "session_001",
+    "target_session": "session_013",
+    "shared_concepts": ["telos-gates", "population-control"],
+    "insight": "Gate 11 (apoptosis) as population control mechanism: KernelGuard axioms enforce that replication proposals failing telos gate evaluation trigger apoptosis rather than silent rejection. Death is a feature, not a bug.",
+    "timestamp": "2026-03-22T16:00:00Z"
+  },
+  {
+    "id": "xp_003",
+    "source_session": "session_003",
+    "target_session": "session_005",
+    "shared_concepts": ["cascade", "agent-fitness"],
+    "insight": "Strange Loop cascade drives DarwinEngine selection: L7 fitness signals from cascade domain scoring feed directly into evolution tournament. Agents that improve cascade throughput get replicated; those that degrade it face apoptosis pressure.",
+    "timestamp": "2026-03-21T14:00:00Z"
+  },
+  {
+    "id": "xp_004",
+    "source_session": "session_006",
+    "target_session": "session_008",
+    "shared_concepts": ["stigmergy", "cross-system"],
+    "insight": "TPP transmissions leave stigmergy marks: every agent handoff via Transmission Prompt Protocol deposits a pheromone trail in the mycelium. Future agents follow high-salience trails, creating emergent routing without central coordination.",
+    "timestamp": "2026-03-19T15:00:00Z"
+  },
+  {
+    "id": "xp_005",
+    "source_session": "session_002",
+    "target_session": "session_012",
+    "shared_concepts": ["graph-nexus", "lodestone", "telos-gradient"],
+    "insight": "Lodestone deep reading daemon uses Graph Nexus as its query backbone: unified graph queries power the director's curated feed. Telos gradient scoring ensures readings align with Jagat Kalyan mission vector.",
+    "timestamp": "2026-03-22T18:00:00Z"
+  },
+  {
+    "id": "xp_006",
+    "source_session": "session_004",
+    "target_session": "session_006",
+    "shared_concepts": ["daemon", "ecosystem-pulse"],
+    "insight": "Garden Daemon and Mycelium Daemon as dual autonomy layers: Garden tends individual skill outputs (archaeology, hum, pulse), while Mycelium connects them via catalytic graph. Together they form the organism's nervous system.",
+    "timestamp": "2026-03-21T11:00:00Z"
+  },
+  {
+    "id": "xp_007",
+    "source_session": "session_011",
+    "target_session": "session_010",
+    "shared_concepts": ["R_V", "COLM-2026"],
+    "insight": "MiroFish reviewer personas stress-test R_V claims before submission: 33 simulated reviewers probe the verified 100/100 claims, catching framing weaknesses that raw verification misses. Adversarial review as quality gate.",
+    "timestamp": "2026-03-17T14:00:00Z"
+  },
+  {
+    "id": "xp_008",
+    "source_session": "session_005",
+    "target_session": "session_015",
+    "shared_concepts": ["self-evolution", "fitness-signal"],
+    "insight": "SCORSESE self-evolution mirrors DarwinEngine pattern: content quality scores (7 to 27/100) function as fitness signals. Same selection pressure logic applies to video production as to agent evolution. Universal pattern: measure, select, amplify.",
+    "timestamp": "2026-03-23T11:00:00Z"
+  },
+  {
+    "id": "xp_009",
+    "source_session": "session_008",
+    "target_session": "session_003",
+    "shared_concepts": ["agent-runner", "feedback-loop"],
+    "insight": "TPP context injection into Strange Loop recognition layer: transmitted context from agent handoffs feeds the L8 recognition system, allowing the cascade to detect patterns across agent boundaries. Cross-agent memory without shared state.",
+    "timestamp": "2026-03-19T20:00:00Z"
+  },
+  {
+    "id": "xp_010",
+    "source_session": "session_009",
+    "target_session": "session_007",
+    "shared_concepts": ["codified-context", "field-intelligence"],
+    "insight": "Shakti trading's Codified Context pattern generalizes to all D3 field intelligence skills: three-tier density (seed/stem/canopy) maps to strategic awareness levels. Every skill could use this layered context architecture.",
+    "timestamp": "2026-03-18T08:00:00Z"
+  }
+]

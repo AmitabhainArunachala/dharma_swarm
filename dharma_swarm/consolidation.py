@@ -32,6 +32,12 @@ from typing import Any
 
 from pydantic import BaseModel, Field
 
+from dharma_swarm.models import LLMRequest, ProviderType
+from dharma_swarm.runtime_provider import (
+    create_runtime_provider,
+    preferred_runtime_provider_configs,
+)
+
 logger = logging.getLogger(__name__)
 
 # ---------------------------------------------------------------------------
@@ -41,6 +47,11 @@ logger = logging.getLogger(__name__)
 DEFAULT_CONSOLIDATION_INTERVAL = int(
     os.environ.get("DGC_CONSOLIDATION_INTERVAL", "86400")
 )  # 24h default
+
+# Overnight mode: consolidate every 4 hours instead of 24
+OVERNIGHT_CONSOLIDATION_INTERVAL = int(
+    os.environ.get("DGC_OVERNIGHT_CONSOLIDATION_INTERVAL", "14400")
+)  # 4h default
 
 # Models for the two sides of the debate — different families for genuine diversity
 DEFAULT_ALPHA_MODEL = os.environ.get(
@@ -140,6 +151,9 @@ class DifferentiationProposal(BaseModel):
     justification: str
     capability_gap: str
     evidence_cycles: list[int] = Field(default_factory=list)
+    parent_agent: str = ""
+    generation: int = 0
+    severity: float = 0.0
     status: str = "proposed"  # requires S5 (Dhyana) approval
 
 
@@ -226,11 +240,56 @@ class SystemObserver:
         return snapshot
 
     def compress_for_llm(self, report: SystemStateReport, max_chars: int = 4000) -> str:
-        """Compress a SystemStateReport into text for LLM context."""
+        """Compress a SystemStateReport into text for LLM context.
+
+        Includes overnight eval verdict and metrics when available, so the
+        consolidation debate has the full picture of system health.
+        """
         parts = [f"# System State ({report.consolidator_id})\n"]
         parts.append(f"Timestamp: {report.timestamp.isoformat()}\n")
         parts.append(f"Stigmergy marks: {report.stigmergy_density}\n")
         parts.append(f"Dream associations: {report.dream_count}\n\n")
+
+        # --- Eval control plane context ---
+        try:
+            eval_dir = self._state_dir / "overnight"
+            if eval_dir.exists():
+                # Find most recent verdict
+                verdict_dirs = sorted(eval_dir.iterdir(), reverse=True)
+                for vd in verdict_dirs[:3]:
+                    verdict_file = vd / "verdict.json"
+                    if verdict_file.exists():
+                        vdata = json.loads(verdict_file.read_text(encoding="utf-8"))
+                        parts.append("## Overnight Eval Verdict\n")
+                        parts.append(f"  Date: {vdata.get('date', '?')}\n")
+                        parts.append(f"  Verdict: **{vdata.get('verdict', '?').upper()}**\n")
+                        for reason in vdata.get("reasons", [])[:5]:
+                            parts.append(f"  - {reason}\n")
+                        scores = vdata.get("scores", {})
+                        if scores:
+                            parts.append(
+                                f"  Scores: test_delta={scores.get('test_delta', 0)}, "
+                                f"dead_ratio={scores.get('dead_loop_ratio', 0):.1%}, "
+                                f"capability={scores.get('capability_delta', 0):.2f}\n"
+                            )
+                        parts.append("\n")
+                        break
+        except Exception:
+            pass
+
+        # --- Latest eval pass rate ---
+        try:
+            from dharma_swarm.ecc_eval_harness import load_latest as _load_eval_latest
+            latest_eval = _load_eval_latest()
+            if latest_eval:
+                parts.append("## Eval Harness\n")
+                parts.append(
+                    f"  pass@1: {latest_eval.get('pass_at_1', 0):.0%} "
+                    f"({latest_eval.get('passed', 0)}/{latest_eval.get('total', 0)})\n"
+                )
+                parts.append(f"  Last run: {latest_eval.get('timestamp', '?')[:19]}\n\n")
+        except Exception:
+            pass
 
         for snap in report.agent_snapshots:
             parts.append(f"## Agent: {snap.name}\n")
@@ -438,35 +497,56 @@ class ContrarianDialogue:
         self, provider: Any, model: str, system: str, user_msg: str,
     ) -> str:
         """Make an LLM call via the dharma_swarm provider."""
-        try:
-            from dharma_swarm.models import LLMRequest
-            request = LLMRequest(
-                model=model,
-                system=system,
-                messages=[{"role": "user", "content": user_msg}],
-                max_tokens=1500,
-                temperature=0.7,
+        request = LLMRequest(
+            model=model,
+            system=system,
+            messages=[{"role": "user", "content": user_msg}],
+            max_tokens=1500,
+            temperature=0.7,
+        )
+        response = await provider.complete(request)
+        return response.content
+
+
+class _PreferredRuntimeProviderChain:
+    """Minimal provider wrapper that enforces local/NIM-before-OpenRouter."""
+
+    async def complete(self, request: LLMRequest) -> Any:
+        configs = preferred_runtime_provider_configs(
+            model_overrides={
+                ProviderType.OPENROUTER_FREE: request.model,
+                ProviderType.OPENROUTER: request.model,
+            }
+        )
+        if not configs:
+            raise RuntimeError(
+                "No preferred providers available; configure Ollama, NVIDIA NIM, or OpenRouter"
             )
-            response = await provider.complete(request)
-            return response.content
-        except ImportError:
-            # Fallback: use openai SDK directly (for testing)
-            from openai import AsyncOpenAI
-            from dharma_swarm.api_keys import get_llm_key
-            client = AsyncOpenAI(
-                api_key=get_llm_key("openrouter") or "",
-                base_url="https://openrouter.ai/api/v1",
-            )
-            resp = await client.chat.completions.create(
-                model=model,
-                messages=[
-                    {"role": "system", "content": system},
-                    {"role": "user", "content": user_msg},
-                ],
-                max_tokens=1500,
-                temperature=0.7,
-            )
-            return resp.choices[0].message.content or ""
+
+        last_exc: Exception | None = None
+        for config in configs:
+            provider = create_runtime_provider(config)
+            try:
+                provider_request = request.model_copy(
+                    update={"model": config.default_model or request.model}
+                )
+                return await provider.complete(provider_request)
+            except Exception as exc:
+                last_exc = exc
+                logger.warning(
+                    "Consolidation provider %s failed for model %s: %s",
+                    config.provider.value,
+                    config.default_model or request.model,
+                    exc,
+                )
+            finally:
+                close = getattr(provider, "close", None)
+                if callable(close):
+                    await close()
+
+        if last_exc is not None:
+            raise last_exc
+        raise RuntimeError("Preferred provider chain exhausted without an explicit error")
 
 
 # ---------------------------------------------------------------------------
@@ -671,11 +751,36 @@ class DifferentiationCheck:
                 if cycle_number not in cycles_seen:
                     cycles_seen.append(cycle_number)
 
+                # Find the matching LossItem to extract parent agent and severity
+                matching_gap = next(
+                    (g for g in current_gaps if g.description == desc), None
+                )
+                parent = (
+                    matching_gap.affected_agents[0]
+                    if matching_gap and matching_gap.affected_agents
+                    else "system"
+                )
+                gap_severity = matching_gap.severity if matching_gap else 0.5
+
+                # Derive generation from parent's actual lineage
+                parent_generation = 0
+                try:
+                    from dharma_swarm.agent_registry import AgentRegistry
+                    _reg = AgentRegistry()
+                    _identity = _reg.load_agent(parent)
+                    if _identity and "prompt_generation" in _identity:
+                        parent_generation = int(_identity["prompt_generation"])
+                except Exception:
+                    pass  # Static founding agents default to gen 0
+
                 return DifferentiationProposal(
                     proposed_role=f"specialist_{desc[:30].replace(' ', '_')}",
                     justification=f"Persistent capability gap detected in {count} cycles",
                     capability_gap=desc,
                     evidence_cycles=cycles_seen,
+                    parent_agent=parent,
+                    generation=parent_generation + 1,
+                    severity=gap_severity,
                 )
 
         return None
@@ -770,6 +875,9 @@ class ConsolidationCycle:
             (cycle_dir / "differentiation_proposal.json").write_text(
                 proposal.model_dump_json(indent=2), encoding="utf-8",
             )
+            # Handoff to ReplicationProtocol: write proposal to durable
+            # proposals.jsonl so the replication monitor loop can pick it up.
+            self._handoff_to_replication(proposal)
 
         # Build outcome
         duration = time.monotonic() - start
@@ -831,14 +939,8 @@ class ConsolidationCycle:
         )
 
     def _get_default_provider(self) -> Any:
-        """Get a default LLM provider for the dialogue."""
-        try:
-            from dharma_swarm.providers import OpenRouterProvider
-            return OpenRouterProvider()
-        except ImportError:
-            raise RuntimeError(
-                "No LLM provider available. Pass a provider explicitly."
-            )
+        """Get the canonical low-cost provider chain for the dialogue."""
+        return _PreferredRuntimeProviderChain()
 
     def _emit_signal(self, outcome: ConsolidationOutcome) -> None:
         """Emit a signal to the SignalBus."""
@@ -853,3 +955,94 @@ class ConsolidationCycle:
             })
         except Exception:
             pass  # Signal bus may not be available in test contexts
+
+    def _handoff_to_replication(self, proposal: DifferentiationProposal) -> None:
+        """Write a DifferentiationProposal to the replication pipeline.
+
+        Appends the proposal dict to ``~/.dharma/replication/proposals.jsonl``
+        (the file ReplicationProtocol.get_pending_proposals() reads) and emits
+        SIGNAL_REPLICATION_PROPOSAL on the signal bus so the replication
+        monitor loop can wake early.
+
+        Wrapped in try/except: handoff failure must never crash the
+        consolidation cycle. The proposal is already persisted in the
+        cycle directory as a fallback.
+        """
+        try:
+            replication_dir = self._state_dir / "replication"
+            replication_dir.mkdir(parents=True, exist_ok=True)
+            proposals_file = replication_dir / "proposals.jsonl"
+
+            # Build a dict compatible with ReplicationProposal.model_validate()
+            proposal_data = proposal.model_dump()
+            proposal_data.setdefault("parent_agent", proposal.parent_agent or "system")
+            proposal_data.setdefault("generation", proposal.generation)
+            proposal_data.setdefault("severity", proposal.severity)
+
+            with open(proposals_file, "a", encoding="utf-8") as f:
+                f.write(json.dumps(proposal_data, default=str) + "\n")
+
+            logger.info(
+                "Replication handoff: proposal '%s' written to %s",
+                proposal.proposed_role,
+                proposals_file,
+            )
+        except Exception as exc:
+            logger.warning("Replication handoff (file write) failed: %s", exc)
+
+        # Emit signal (fast-path trigger for the replication monitor loop)
+        try:
+            from dharma_swarm.signal_bus import SIGNAL_REPLICATION_PROPOSAL, SignalBus
+            SignalBus.get().emit({
+                "type": SIGNAL_REPLICATION_PROPOSAL,
+                "proposed_role": proposal.proposed_role,
+                "capability_gap": proposal.capability_gap,
+                "parent_agent": proposal.parent_agent,
+                "severity": proposal.severity,
+            })
+        except Exception:
+            pass  # Signal bus may not be available in test contexts
+
+    def export_evolution_proposals(self, outcome: ConsolidationOutcome) -> int:
+        """Convert consolidation corrections into evolution proposals.
+
+        Corrections with severity >= SEVERITY_FLAG_REVIEW and category
+        in (capability_gap, fitness_gap) are exported as Proposal-compatible
+        dicts to ``~/.dharma/evolution/pending_proposals.jsonl``.  The
+        evolution loop's ``load_pending_proposals()`` consumes them.
+
+        Returns the number of proposals exported.
+        """
+        if not outcome.loss_report.agreed_issues:
+            return 0
+
+        proposals_path = self._state_dir / "evolution" / "pending_proposals.jsonl"
+        proposals_path.parent.mkdir(parents=True, exist_ok=True)
+
+        exported = 0
+        for issue in outcome.loss_report.agreed_issues:
+            if issue.severity < SEVERITY_FLAG_REVIEW:
+                continue
+            if issue.category not in ("capability_gap", "fitness_gap", "coordination_failure"):
+                continue
+
+            proposal_data = {
+                "component": issue.affected_agents[0] if issue.affected_agents else "system",
+                "change_type": "consolidation_correction",
+                "description": f"[consolidation] {issue.description}",
+                "diff": "",  # No diff yet — evolution engine will generate one
+                "spec_ref": f"consolidation_cycle_{outcome.cycle_number}",
+            }
+            try:
+                with open(proposals_path, "a", encoding="utf-8") as f:
+                    f.write(json.dumps(proposal_data) + "\n")
+                exported += 1
+            except Exception as exc:
+                logger.warning("Failed to export evolution proposal: %s", exc)
+
+        if exported:
+            logger.info(
+                "Exported %d evolution proposals from consolidation cycle %d",
+                exported, outcome.cycle_number,
+            )
+        return exported

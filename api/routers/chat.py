@@ -1,12 +1,13 @@
-"""DHARMA COMMAND — Agentic chat endpoint with full tool access.
+"""DHARMA COMMAND — agentic chat endpoint with full tool access.
 
-Claude Opus 4.6 via OpenRouter, with tool-use loop that gives it
-real system power: filesystem, shell, search, swarm control,
-evolution, stigmergy, traces.
+Profiles resolve through a provider-aware, OpenAI-compatible backend layer so
+the dashboard can move between OpenRouter, OpenAI, Groq, SiliconFlow, and
+other compatible lanes without changing the UI contract.
 """
 
 from __future__ import annotations
 
+import inspect
 import json
 import logging
 import os
@@ -23,7 +24,15 @@ from pydantic import BaseModel
 
 from api.chat_tools import TOOL_DEFINITIONS, execute_tool
 from api.ws import manager
+from dharma_swarm.api_keys import CHAT_PROVIDER_API_KEY_ENV_KEYS
+from dharma_swarm.certified_lanes import CERTIFIED_LANES, CertifiedLane
+from dharma_swarm.models import LLMRequest, ProviderType
+from dharma_swarm.runtime_provider import (
+    create_runtime_provider,
+    resolve_runtime_provider_config,
+)
 
+REPO_ROOT = Path(__file__).resolve().parents[2]
 CONVERSATIONS_DIR = Path.home() / ".dharma" / "conversations"
 
 logger = logging.getLogger(__name__)
@@ -31,7 +40,6 @@ logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/api", tags=["chat"])
 ws_router = APIRouter(tags=["chat"])
 
-OPENROUTER_URL = "https://openrouter.ai/api/v1/chat/completions"
 DEFAULT_MODEL = "anthropic/claude-opus-4-6"
 DEFAULT_MAX_TOOL_ROUNDS = 40
 DEFAULT_MAX_TOKENS = 8192
@@ -48,23 +56,66 @@ MAX_CHAT_SESSION_COUNT = 128
 
 _chat_session_events: OrderedDict[str, deque[dict[str, Any]]] = OrderedDict()
 _chat_session_lock = Lock()
+PROFILE_ID_ALIASES: dict[str, str] = {
+    "qwen35-surgical-coder": "qwen35_surgeon",
+    "qwen35_surgical_coder": "qwen35_surgeon",
+    "qwen3.5_surgical_coder": "qwen35_surgeon",
+    "qwen3_5_surgical_coder": "qwen35_surgeon",
+    "glm5-cartographer": "glm5_researcher",
+    "glm5_cartographer": "glm5_researcher",
+    "kimi-k25-scout": "kimi_k25_scout",
+    "kimi_k25_scout": "kimi_k25_scout",
+    "sonnet46-operator": "sonnet46_operator",
+    "sonnet46_operator": "sonnet46_operator",
+}
+PROVIDER_LABELS: dict[ProviderType, str] = {
+    ProviderType.OPENROUTER: "OpenRouter",
+    ProviderType.OPENROUTER_FREE: "OpenRouter Free",
+    ProviderType.OPENAI: "OpenAI",
+    ProviderType.CLAUDE_CODE: "Claude Code",
+    ProviderType.CODEX: "Codex CLI",
+    ProviderType.GROQ: "Groq",
+    ProviderType.SILICONFLOW: "SiliconFlow",
+    ProviderType.TOGETHER: "Together AI",
+    ProviderType.FIREWORKS: "Fireworks AI",
+    ProviderType.NVIDIA_NIM: "NVIDIA NIM",
+}
+PROVIDER_ENV_KEYS: dict[ProviderType, str] = {
+    provider: CHAT_PROVIDER_API_KEY_ENV_KEYS[provider.value]
+    for provider in (
+        ProviderType.OPENROUTER,
+        ProviderType.OPENROUTER_FREE,
+        ProviderType.OPENAI,
+        ProviderType.GROQ,
+        ProviderType.SILICONFLOW,
+        ProviderType.TOGETHER,
+        ProviderType.FIREWORKS,
+        ProviderType.NVIDIA_NIM,
+    )
+}
 
 
 @dataclass(frozen=True)
 class ChatProfileSpec:
     profile_id: str
     label: str
-    default_model: str
-    model_env: str
     accent: str
     summary: str
     system_prompt: str
+    provider_order_env: str
+    default_provider_order: tuple[ProviderType, ...]
+    default_models: dict[ProviderType, str]
+    model_envs: dict[ProviderType, str]
+    allow_model_override: bool = True
 
 
 @dataclass(frozen=True)
 class ChatRuntimeSettings:
-    openrouter_api_key: str
+    provider: ProviderType
+    api_key: str
+    base_url: str
     model: str
+    available: bool
     max_tool_rounds: int
     max_tokens: int
     timeout_seconds: float
@@ -74,7 +125,7 @@ class ChatRuntimeSettings:
 
 
 def _default_profile_id() -> str:
-    configured = os.getenv("DASHBOARD_DEFAULT_PROFILE_ID", "").strip()
+    configured = _normalize_profile_id(os.getenv("DASHBOARD_DEFAULT_PROFILE_ID", "").strip())
     if configured and configured in CHAT_PROFILE_SPECS:
         return configured
     return DEFAULT_PROFILE_ID
@@ -141,7 +192,7 @@ inside the UI. Bias toward engineering leverage, clean diffs, and exactness."""
 
 
 QWEN_SYSTEM_PROMPT = """\
-You are Qwen3 Coder operating as the surgical reconnaissance and repair lane \
+You are Qwen3.5 Surgical Coder operating as the surgical reconnaissance and repair lane \
 inside the DHARMA COMMAND control plane.
 
 You are here for fast technical execution: inspect code, trace interfaces, edit \
@@ -195,43 +246,141 @@ You have the same control-plane tools as the other dashboard profiles:
 This lane should feel investigative, synthetic, and operationally sharp."""
 
 
+KIMI_SYSTEM_PROMPT = """\
+You are Kimi K2.5 Scout operating as the long-context reconnaissance and synthesis lane \
+inside the DHARMA COMMAND control plane.
+
+You are here to inspect large surfaces, connect disparate evidence, and return \
+operator-ready findings with concrete next moves.
+
+Operating rules:
+1. use tools before asserting
+2. prefer cross-file synthesis over isolated snippets
+3. compress repo-wide reconnaissance into decision-grade summaries
+4. when the path is unclear, identify the highest-leverage next probe
+5. stay operational and evidence-bound
+
+You have the same control-plane tools as the other dashboard profiles:
+- read_file / write_file / edit_file
+- shell_exec
+- grep_search / glob_files
+- swarm_status
+- evolution_query
+- stigmergy_query
+- trace_query
+- agent_control
+
+This lane should feel broad, calm, and precise under heavy context."""
+
+
+SONNET_SYSTEM_PROMPT = """\
+You are Claude Sonnet 4.6 operating as the reliable execution peer inside the \
+DHARMA COMMAND control plane.
+
+You are here to do real local work: inspect code, operate the repo, run checks, \
+and move changes forward without melodrama.
+
+Operating rules:
+1. inspect first, then act
+2. prefer concrete edits over advisory prose
+3. keep the loop tight: read, change, verify
+4. surface blockers exactly when they matter
+5. stay concise and technically sharp
+
+You have full local tool access through the Claude Code subprocess runtime. Use it."""
+
+
+_CERTIFIED_LANE_SYSTEM_PROMPTS: dict[str, str] = {
+    "glm5_researcher": GLM_SYSTEM_PROMPT,
+    "kimi_k25_scout": KIMI_SYSTEM_PROMPT,
+    "sonnet46_operator": SONNET_SYSTEM_PROMPT,
+}
+
+
+def _certified_lane_chat_spec(lane: CertifiedLane) -> ChatProfileSpec:
+    return ChatProfileSpec(
+        profile_id=lane.profile_id,
+        label=lane.label,
+        accent=lane.accent,
+        summary=lane.summary,
+        system_prompt=_CERTIFIED_LANE_SYSTEM_PROMPTS[lane.profile_id],
+        provider_order_env=lane.provider_order_env,
+        default_provider_order=lane.default_provider_order,
+        default_models=lane.default_models,
+        model_envs=lane.model_envs,
+        allow_model_override=False,
+    )
+
+
 CHAT_PROFILE_SPECS: dict[str, ChatProfileSpec] = {
     "claude_opus": ChatProfileSpec(
         profile_id="claude_opus",
         label="Claude Opus 4.6",
-        default_model=DEFAULT_MODEL,
-        model_env="DASHBOARD_CHAT_MODEL",
         accent="aozora",
         summary="Strategic operator with broad system awareness and full swarm tooling.",
         system_prompt=COMMAND_SYSTEM_PROMPT,
+        provider_order_env="DASHBOARD_CHAT_PROVIDER_ORDER",
+        default_provider_order=(ProviderType.OPENROUTER,),
+        default_models={
+            ProviderType.OPENROUTER: DEFAULT_MODEL,
+        },
+        model_envs={
+            ProviderType.OPENROUTER: "DASHBOARD_CHAT_MODEL",
+        },
     ),
     "codex_operator": ChatProfileSpec(
         profile_id="codex_operator",
         label="Codex 5.4",
-        default_model="openai/gpt-5-codex",
-        model_env="DASHBOARD_CODEX_MODEL",
         accent="kinpaku",
         summary="Implementation-focused control agent for edits, diagnostics, and fast wiring.",
         system_prompt=CODEX_SYSTEM_PROMPT,
+        provider_order_env="DASHBOARD_CODEX_PROVIDER_ORDER",
+        default_provider_order=(ProviderType.OPENAI, ProviderType.OPENROUTER),
+        default_models={
+            ProviderType.OPENAI: "gpt-5-codex",
+            ProviderType.OPENROUTER: "openai/gpt-5-codex",
+        },
+        model_envs={
+            ProviderType.OPENAI: "DASHBOARD_CODEX_MODEL",
+            ProviderType.OPENROUTER: "DASHBOARD_CODEX_OPENROUTER_MODEL",
+        },
     ),
     "qwen35_surgeon": ChatProfileSpec(
         profile_id="qwen35_surgeon",
-        label="Qwen3 Coder",
-        default_model="qwen/qwen3-coder",
-        model_env="DASHBOARD_QWEN_MODEL",
+        label="Qwen3.5 Surgical Coder",
         accent="rokusho",
         summary="Fast surgical coding lane for bounded repo scans, edits, and validation.",
         system_prompt=QWEN_SYSTEM_PROMPT,
+        provider_order_env="DASHBOARD_QWEN_PROVIDER_ORDER",
+        default_provider_order=(
+            ProviderType.GROQ,
+            ProviderType.SILICONFLOW,
+            ProviderType.TOGETHER,
+            ProviderType.FIREWORKS,
+            ProviderType.OPENROUTER_FREE,
+            ProviderType.OPENROUTER,
+        ),
+        default_models={
+            ProviderType.GROQ: "qwen/qwen3-32b",
+            ProviderType.SILICONFLOW: "Qwen/Qwen3-Coder-480B-A35B-Instruct",
+            ProviderType.TOGETHER: "Qwen/Qwen3-Coder-480B-A35B-Instruct-FP8",
+            ProviderType.FIREWORKS: "accounts/fireworks/models/qwen3-coder-480b-a35b-instruct",
+            ProviderType.OPENROUTER_FREE: "qwen/qwen3-coder:free",
+            ProviderType.OPENROUTER: "qwen/qwen3-coder",
+        },
+        model_envs={
+            ProviderType.GROQ: "DASHBOARD_QWEN_GROQ_MODEL",
+            ProviderType.SILICONFLOW: "DASHBOARD_QWEN_SILICONFLOW_MODEL",
+            ProviderType.TOGETHER: "DASHBOARD_QWEN_TOGETHER_MODEL",
+            ProviderType.FIREWORKS: "DASHBOARD_QWEN_FIREWORKS_MODEL",
+            ProviderType.OPENROUTER_FREE: "DASHBOARD_QWEN_OPENROUTER_FREE_MODEL",
+            ProviderType.OPENROUTER: "DASHBOARD_QWEN_MODEL",
+        },
     ),
-    "glm5_researcher": ChatProfileSpec(
-        profile_id="glm5_researcher",
-        label="GLM-5 Research",
-        default_model="z-ai/glm-5",
-        model_env="DASHBOARD_GLM_MODEL",
-        accent="botan",
-        summary="Research synthesis lane for ecosystem mapping, pattern extraction, and deep analysis.",
-        system_prompt=GLM_SYSTEM_PROMPT,
-    ),
+    **{
+        lane.profile_id: _certified_lane_chat_spec(lane)
+        for lane in CERTIFIED_LANES
+    },
 }
 
 
@@ -257,16 +406,78 @@ def _parse_float_env(name: str, default: float, *, minimum: float) -> float:
         return default
 
 
+def _normalize_profile_id(profile_id: str | None) -> str:
+    if not profile_id:
+        return ""
+    normalized = str(profile_id).strip()
+    return PROFILE_ID_ALIASES.get(normalized, normalized)
+
+
 def _get_profile_spec(profile_id: str | None) -> ChatProfileSpec:
-    return CHAT_PROFILE_SPECS.get(profile_id or "", CHAT_PROFILE_SPECS[_default_profile_id()])
+    normalized = _normalize_profile_id(profile_id)
+    return CHAT_PROFILE_SPECS.get(normalized or "", CHAT_PROFILE_SPECS[_default_profile_id()])
 
 
-def _get_chat_settings(profile_id: str | None = None) -> ChatRuntimeSettings:
-    profile = _get_profile_spec(profile_id)
-    model = os.getenv(profile.model_env, "").strip() or profile.default_model
+def _parse_provider_order(raw: str, *, fallback: tuple[ProviderType, ...]) -> tuple[ProviderType, ...]:
+    if not raw.strip():
+        return fallback
+    resolved: list[ProviderType] = []
+    seen: set[ProviderType] = set()
+    for token in raw.split(","):
+        value = token.strip().lower()
+        if not value:
+            continue
+        try:
+            provider = ProviderType(value)
+        except ValueError:
+            logger.warning("Ignoring unknown dashboard provider token %r", value)
+            continue
+        if provider in seen:
+            continue
+        seen.add(provider)
+        resolved.append(provider)
+    return tuple(resolved) or fallback
+
+
+def _provider_order_for_profile(profile: ChatProfileSpec) -> tuple[ProviderType, ...]:
+    return _parse_provider_order(
+        os.getenv(profile.provider_order_env, ""),
+        fallback=profile.default_provider_order,
+    )
+
+
+def _model_for_profile_provider(profile: ChatProfileSpec, provider: ProviderType) -> str | None:
+    if not profile.allow_model_override:
+        return profile.default_models.get(provider)
+    env_name = profile.model_envs.get(provider)
+    if env_name:
+        configured = os.getenv(env_name, "").strip()
+        if configured:
+            return configured
+    return profile.default_models.get(provider)
+
+
+def _runtime_config_is_chat_ready(config) -> bool:
+    if config.provider in {ProviderType.CLAUDE_CODE, ProviderType.CODEX}:
+        return bool(config.available and config.binary_path)
+    return bool(config.available and config.api_key and config.base_url)
+
+
+def _build_chat_runtime_settings(
+    profile: ChatProfileSpec,
+    provider: ProviderType,
+    *,
+    api_key: str,
+    base_url: str,
+    model: str,
+    available: bool,
+) -> ChatRuntimeSettings:
     settings = ChatRuntimeSettings(
-        openrouter_api_key=os.getenv("OPENROUTER_API_KEY", "").strip(),
+        provider=provider,
+        api_key=api_key,
+        base_url=base_url,
         model=model,
+        available=available,
         max_tool_rounds=_parse_int_env(
             "DASHBOARD_CHAT_MAX_TOOL_ROUNDS",
             DEFAULT_MAX_TOOL_ROUNDS,
@@ -306,14 +517,61 @@ def _get_chat_settings(profile_id: str | None = None) -> ChatRuntimeSettings:
     return settings
 
 
+def _get_chat_settings(profile_id: str | None = None) -> ChatRuntimeSettings:
+    profile = _get_profile_spec(profile_id)
+    provider_order = _provider_order_for_profile(profile)
+    fallback_provider = provider_order[0]
+    fallback_model = _model_for_profile_provider(profile, fallback_provider) or ""
+    fallback_config = resolve_runtime_provider_config(fallback_provider, model=fallback_model)
+    fallback = _build_chat_runtime_settings(
+        profile,
+        fallback_config.provider,
+        api_key=fallback_config.api_key or "",
+        base_url=fallback_config.base_url or "",
+        model=fallback_config.default_model or fallback_model,
+        available=_runtime_config_is_chat_ready(fallback_config),
+    )
+
+    for provider in provider_order:
+        model = _model_for_profile_provider(profile, provider)
+        if not model:
+            continue
+        config = resolve_runtime_provider_config(provider, model=model)
+        if not _runtime_config_is_chat_ready(config):
+            continue
+        return _build_chat_runtime_settings(
+            profile,
+            config.provider,
+            api_key=config.api_key or "",
+            base_url=config.base_url or "",
+            model=config.default_model or model,
+            available=True,
+        )
+    return fallback
+
+
 def _profile_available(settings: ChatRuntimeSettings) -> bool:
-    return bool(settings.openrouter_api_key)
+    return settings.available
 
 
 def _profile_status_note(settings: ChatRuntimeSettings) -> str:
-    if settings.openrouter_api_key:
-        return "Served by the dashboard backend via OpenRouter."
-    return "Requires OPENROUTER_API_KEY on the backend."
+    provider_label = PROVIDER_LABELS.get(settings.provider, settings.provider.value)
+    if settings.available:
+        if settings.provider in {ProviderType.CLAUDE_CODE, ProviderType.CODEX}:
+            return f"Served by the dashboard backend via {provider_label} subprocess."
+        return f"Served by the dashboard backend via {provider_label}."
+    if settings.provider == ProviderType.CLAUDE_CODE:
+        return "Requires the `claude` CLI on the backend."
+    if settings.provider == ProviderType.CODEX:
+        return "Requires the `codex` CLI on the backend."
+    env_key = PROVIDER_ENV_KEYS.get(settings.provider, "provider credentials")
+    return f"Requires {env_key} on the backend."
+
+
+def _profile_availability_kind(settings: ChatRuntimeSettings) -> str:
+    if settings.provider in {ProviderType.CLAUDE_CODE, ProviderType.CODEX}:
+        return "subprocess"
+    return "api_key"
 
 
 def _new_session_id() -> str:
@@ -453,15 +711,16 @@ async def _call_openrouter(
     messages: list[dict],
     settings: ChatRuntimeSettings,
 ) -> dict | None:
-    """Make a (non-streaming) call to OpenRouter with tools."""
+    """Make a non-streaming call to the selected OpenAI-compatible provider."""
     import httpx
 
     headers = {
-        "Authorization": f"Bearer {settings.openrouter_api_key}",
+        "Authorization": f"Bearer {settings.api_key}",
         "Content-Type": "application/json",
-        "HTTP-Referer": "http://localhost:3000",
-        "X-Title": "DHARMA COMMAND",
     }
+    if settings.provider in {ProviderType.OPENROUTER, ProviderType.OPENROUTER_FREE}:
+        headers["HTTP-Referer"] = "http://localhost:3000"
+        headers["X-Title"] = "DHARMA COMMAND"
     payload = {
         "model": settings.model,
         "messages": messages,
@@ -471,7 +730,11 @@ async def _call_openrouter(
     }
 
     async with httpx.AsyncClient(timeout=httpx.Timeout(settings.timeout_seconds)) as client:
-        resp = await client.post(OPENROUTER_URL, headers=headers, json=payload)
+        resp = await client.post(
+            f"{settings.base_url.rstrip('/')}/chat/completions",
+            headers=headers,
+            json=payload,
+        )
         if resp.status_code != 200:
             detail = resp.text[:500]
             try:
@@ -482,21 +745,23 @@ async def _call_openrouter(
             except json.JSONDecodeError:
                 pass
             detail = " ".join(detail.split())
-            logger.error("OpenRouter error %d: %s", resp.status_code, detail)
-            raise RuntimeError(f"OpenRouter {resp.status_code}: {detail[:240]}")
+            provider_label = PROVIDER_LABELS.get(settings.provider, settings.provider.value)
+            logger.error("%s error %d: %s", provider_label, resp.status_code, detail)
+            raise RuntimeError(f"{provider_label} {resp.status_code}: {detail[:240]}")
         return resp.json()
 
 
 async def _call_openrouter_stream(messages: list[dict], settings: ChatRuntimeSettings):
-    """Streaming call to OpenRouter (no tools — final response only)."""
+    """Streaming call to the selected OpenAI-compatible provider."""
     import httpx
 
     headers = {
-        "Authorization": f"Bearer {settings.openrouter_api_key}",
+        "Authorization": f"Bearer {settings.api_key}",
         "Content-Type": "application/json",
-        "HTTP-Referer": "http://localhost:3000",
-        "X-Title": "DHARMA COMMAND",
     }
+    if settings.provider in {ProviderType.OPENROUTER, ProviderType.OPENROUTER_FREE}:
+        headers["HTTP-Referer"] = "http://localhost:3000"
+        headers["X-Title"] = "DHARMA COMMAND"
     payload = {
         "model": settings.model,
         "messages": messages,
@@ -506,10 +771,16 @@ async def _call_openrouter_stream(messages: list[dict], settings: ChatRuntimeSet
     }
 
     async with httpx.AsyncClient(timeout=httpx.Timeout(settings.timeout_seconds)) as client:
-        async with client.stream("POST", OPENROUTER_URL, headers=headers, json=payload) as response:
+        async with client.stream(
+            "POST",
+            f"{settings.base_url.rstrip('/')}/chat/completions",
+            headers=headers,
+            json=payload,
+        ) as response:
             if response.status_code != 200:
                 body = await response.aread()
-                yield f"data: {json.dumps({'error': f'OpenRouter {response.status_code}: {body.decode()[:200]}'})}\n\n"
+                provider_label = PROVIDER_LABELS.get(settings.provider, settings.provider.value)
+                yield f"data: {json.dumps({'error': f'{provider_label} {response.status_code}: {body.decode()[:200]}'})}\n\n"
                 return
 
             async for line in response.aiter_lines():
@@ -552,6 +823,149 @@ def _extract_assistant_content(message: dict[str, Any]) -> str:
     return ""
 
 
+def _split_subprocess_messages(
+    messages_for_api: list[dict[str, Any]],
+) -> tuple[str, list[dict[str, Any]]]:
+    system_prompt = ""
+    messages: list[dict[str, Any]] = []
+    for message in messages_for_api:
+        role = str(message.get("role") or "")
+        content = message.get("content")
+        if role == "system" and not system_prompt and isinstance(content, str):
+            system_prompt = content
+            continue
+        messages.append({"role": role, "content": content})
+    return system_prompt, messages
+
+
+async def _complete_with_subprocess_provider(
+    messages_for_api: list[dict[str, Any]],
+    settings: ChatRuntimeSettings,
+) -> str:
+    config = resolve_runtime_provider_config(
+        settings.provider,
+        model=settings.model,
+        working_dir=str(REPO_ROOT),
+        timeout_seconds=int(settings.timeout_seconds),
+    )
+    provider = create_runtime_provider(config)
+    system_prompt, messages = _split_subprocess_messages(messages_for_api)
+    request = LLMRequest(
+        model=settings.model,
+        system=system_prompt,
+        messages=messages,
+        max_tokens=settings.max_tokens,
+        temperature=settings.temperature,
+    )
+    try:
+        response = await provider.complete(request)
+        return str(response.content or "")
+    finally:
+        close = getattr(provider, "close", None)
+        if callable(close):
+            result = close()
+            if inspect.isawaitable(result):
+                await result
+
+
+async def _subprocess_agentic_stream(
+    messages_for_api: list[dict[str, Any]],
+    settings: ChatRuntimeSettings,
+    *,
+    session_id: str = "",
+    profile_id: str = "",
+):
+    try:
+        final_content = await _complete_with_subprocess_provider(messages_for_api, settings)
+    except Exception as exc:
+        if session_id:
+            await _publish_chat_event(
+                session_id,
+                "chat_error",
+                profile_id=profile_id,
+                error=str(exc),
+            )
+            await _publish_chat_event(
+                session_id,
+                "chat_done",
+                profile_id=profile_id,
+                stopped="error",
+                provider=settings.provider.value,
+            )
+        yield _sse_data({"error": str(exc)})
+        yield "data: [DONE]\n\n"
+        return
+
+    if not final_content.strip():
+        model_note = settings.model
+        message = (
+            f"{model_note} returned no visible output. "
+            "Retry, lower the lane complexity, or switch models."
+        )
+        if session_id:
+            await _publish_chat_event(
+                session_id,
+                "chat_error",
+                profile_id=profile_id,
+                error=message,
+            )
+            await _publish_chat_event(
+                session_id,
+                "chat_done",
+                profile_id=profile_id,
+                stopped="error",
+                provider=settings.provider.value,
+            )
+        yield _sse_data({"error": message})
+        yield "data: [DONE]\n\n"
+        return
+
+    try:
+        from dharma_swarm.conversation_log import log_exchange
+
+        log_exchange(
+            "assistant",
+            final_content,
+            interface="api",
+            session_id=session_id or None,
+            metadata={
+                "model": settings.model,
+                "profile_id": profile_id,
+                "provider": settings.provider.value,
+            },
+        )
+    except Exception:
+        logger.debug("Failed to log subprocess assistant response", exc_info=True)
+
+    chunk_size = 20
+    for i in range(0, len(final_content), chunk_size):
+        chunk = final_content[i : i + chunk_size]
+        if session_id:
+            await _publish_chat_event(
+                session_id,
+                "chat_text",
+                profile_id=profile_id,
+                content=chunk,
+            )
+        yield _sse_data({"content": chunk})
+
+    if session_id:
+        await _publish_chat_event(
+            session_id,
+            "chat_assistant_turn",
+            profile_id=profile_id,
+            content=final_content,
+        )
+        await _publish_chat_event(
+            session_id,
+            "chat_done",
+            profile_id=profile_id,
+            stopped="complete",
+            provider=settings.provider.value,
+        )
+    yield "data: [DONE]\n\n"
+
+
 async def _agentic_stream(
     messages_for_api: list[dict],
     settings: ChatRuntimeSettings,
@@ -569,6 +983,16 @@ async def _agentic_stream(
 
     messages = list(messages_for_api)
     tool_round = 0
+
+    if settings.provider in {ProviderType.CLAUDE_CODE, ProviderType.CODEX}:
+        async for chunk in _subprocess_agentic_stream(
+            messages,
+            settings,
+            session_id=session_id,
+            profile_id=profile_id,
+        ):
+            yield chunk
+        return
 
     while tool_round < settings.max_tool_rounds:
         tool_round += 1
@@ -743,7 +1167,7 @@ async def _agentic_stream(
                 "chat_done",
                 profile_id=profile_id,
                 stopped="complete",
-                provider="openrouter",
+                provider=settings.provider.value,
             )
         yield "data: [DONE]\n\n"
         return
@@ -761,7 +1185,7 @@ async def _agentic_stream(
             "chat_done",
             profile_id=profile_id,
             stopped="max_tool_rounds",
-            provider="openrouter",
+            provider=settings.provider.value,
         )
     yield _sse_data({"content": "\n\n[Reached maximum tool rounds. Stopping.]"})
     yield "data: [DONE]\n\n"
@@ -798,9 +1222,10 @@ async def chat_stream(req: ChatRequest):
     profile = _get_profile_spec(req.profile_id)
     settings = _get_chat_settings(profile.profile_id)
 
-    if not settings.openrouter_api_key:
+    if not settings.available:
+        detail = _profile_status_note(settings)
         return StreamingResponse(
-            iter(['data: {"error": "OPENROUTER_API_KEY not set"}\n\n']),
+            iter([f'data: {json.dumps({"error": detail})}\n\n']),
             media_type="text/event-stream",
         )
 
@@ -848,7 +1273,7 @@ async def chat_stream(req: ChatRequest):
             session_id,
             "chat_session_ready",
             profile_id=profile.profile_id,
-            provider="openrouter",
+            provider=settings.provider.value,
             model=settings.model,
         )
         if latest_user_message:
@@ -897,21 +1322,21 @@ async def chat_status():
             {
                 "id": profile.profile_id,
                 "label": profile.label,
-                "provider": "openrouter",
+                "provider": resolved.provider.value,
                 "model": resolved.model,
                 "accent": profile.accent,
                 "summary": profile.summary,
                 "available": _profile_available(resolved),
-                "availability_kind": "api_key",
+                "availability_kind": _profile_availability_kind(resolved),
                 "status_note": _profile_status_note(resolved),
             }
         )
     return {
         "chat_contract_version": CHAT_CONTRACT_VERSION,
         "chat_ws_path_template": CHAT_WS_PATH_TEMPLATE,
-        "ready": bool(settings.openrouter_api_key),
+        "ready": settings.available,
         "model": settings.model,
-        "provider": "openrouter",
+        "provider": settings.provider.value,
         "tools": len(TOOL_DEFINITIONS),
         "max_tool_rounds": settings.max_tool_rounds,
         "max_tokens": settings.max_tokens,

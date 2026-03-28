@@ -10,7 +10,10 @@ a foreign key back to ``messages(id)``.
 
 from __future__ import annotations
 
+import asyncio
 import json
+import sqlite3
+from contextlib import asynccontextmanager
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
@@ -108,8 +111,48 @@ def _row_to_message(row: aiosqlite.Row) -> Message:
 class MessageBus:
     """Async SQLite message bus for inter-agent communication."""
 
+    _BUSY_TIMEOUT_S = 30
+    _LOCK_RETRY_DELAYS_S = (0.05, 0.1, 0.25, 0.5, 1.0)
+
     def __init__(self, db_path: Path) -> None:
         self.db_path = db_path
+
+    def _open(self) -> aiosqlite.Connection:
+        """Open a connection with enough headroom for concurrent writers."""
+        return aiosqlite.connect(self.db_path, timeout=self._BUSY_TIMEOUT_S)
+
+    @staticmethod
+    async def _configure_connection(db: aiosqlite.Connection) -> None:
+        """Apply per-connection pragmas for cross-process safety."""
+        await db.execute("PRAGMA busy_timeout=30000")
+        await db.execute("PRAGMA synchronous=NORMAL")
+
+    @asynccontextmanager
+    async def _connect(
+        self,
+        *,
+        row_factory: Any | None = None,
+    ):
+        """Yield a configured connection for all runtime bus operations."""
+        async with self._open() as db:
+            await self._configure_connection(db)
+            if row_factory is not None:
+                db.row_factory = row_factory
+            yield db
+
+    @staticmethod
+    def _is_locked_error(exc: BaseException) -> bool:
+        return "database is locked" in str(exc).lower()
+
+    async def _run_with_lock_retry(self, operation):
+        """Retry transient SQLite contention without dropping the operation."""
+        for attempt, delay in enumerate((0.0, *self._LOCK_RETRY_DELAYS_S)):
+            try:
+                return await operation()
+            except sqlite3.OperationalError as exc:
+                if not self._is_locked_error(exc) or attempt == len(self._LOCK_RETRY_DELAYS_S):
+                    raise
+                await asyncio.sleep(delay)
 
     async def init_db(self) -> None:
         """Create messages, heartbeats, subscriptions, events, and artifacts tables.
@@ -117,10 +160,9 @@ class MessageBus:
         Enables WAL mode for safe cross-process concurrent access.
         """
         self.db_path.parent.mkdir(parents=True, exist_ok=True)
-        async with aiosqlite.connect(self.db_path) as db:
+        async with self._open() as db:
             await db.execute("PRAGMA journal_mode=WAL")
-            await db.execute("PRAGMA busy_timeout=5000")
-            await db.execute("PRAGMA synchronous=NORMAL")
+            await self._configure_connection(db)
             for ddl in (
                 _MESSAGES_DDL, _HEARTBEATS_DDL, _SUBSCRIPTIONS_DDL,
                 _ARTIFACTS_DDL, _EVENTS_DDL,
@@ -132,25 +174,27 @@ class MessageBus:
 
     async def send(self, message: Message) -> str:
         """Insert a message into the bus. Returns the message ID."""
-        async with aiosqlite.connect(self.db_path) as db:
-            await db.execute(
-                "INSERT INTO messages (id, from_agent, to_agent, subject, body,"
-                " priority, status, created_at, reply_to, metadata)"
-                " VALUES (?,?,?,?,?,?,?,?,?,?)",
-                (message.id, message.from_agent, message.to_agent,
-                 message.subject, message.body, message.priority.value,
-                 message.status.value, message.created_at.isoformat(),
-                 message.reply_to, json.dumps(message.metadata)),
-            )
-            await db.commit()
-        return message.id
+        async def _send() -> str:
+            async with self._connect() as db:
+                await db.execute(
+                    "INSERT INTO messages (id, from_agent, to_agent, subject, body,"
+                    " priority, status, created_at, reply_to, metadata)"
+                    " VALUES (?,?,?,?,?,?,?,?,?,?)",
+                    (message.id, message.from_agent, message.to_agent,
+                     message.subject, message.body, message.priority.value,
+                     message.status.value, message.created_at.isoformat(),
+                     message.reply_to, json.dumps(message.metadata)),
+                )
+                await db.commit()
+            return message.id
+
+        return await self._run_with_lock_retry(_send)
 
     async def receive(
         self, agent_id: str, status: str = "unread", limit: int = 50,
     ) -> list[Message]:
         """Fetch messages for an agent, ordered by priority then time."""
-        async with aiosqlite.connect(self.db_path) as db:
-            db.row_factory = aiosqlite.Row
+        async with self._connect(row_factory=aiosqlite.Row) as db:
             query = ("SELECT id, from_agent, to_agent, subject, body, priority,"
                      " status, created_at, read_at, reply_to, metadata"
                      " FROM messages WHERE to_agent = ?")
@@ -166,17 +210,19 @@ class MessageBus:
 
     async def mark_read(self, msg_id: str) -> None:
         """Update message status to read."""
-        async with aiosqlite.connect(self.db_path) as db:
-            await db.execute(
-                "UPDATE messages SET status='read', read_at=? WHERE id=?",
-                (_now_iso(), msg_id),
-            )
-            await db.commit()
+        async def _mark() -> None:
+            async with self._connect() as db:
+                await db.execute(
+                    "UPDATE messages SET status='read', read_at=? WHERE id=?",
+                    (_now_iso(), msg_id),
+                )
+                await db.commit()
+
+        await self._run_with_lock_retry(_mark)
 
     async def reply(self, original_id: str, from_agent: str, body: str) -> str:
         """Reply to an existing message. Returns the reply message ID."""
-        async with aiosqlite.connect(self.db_path) as db:
-            db.row_factory = aiosqlite.Row
+        async with self._connect(row_factory=aiosqlite.Row) as db:
             cursor = await db.execute(
                 "SELECT from_agent, subject FROM messages WHERE id=?",
                 (original_id,),
@@ -195,17 +241,20 @@ class MessageBus:
 
     async def subscribe(self, agent_id: str, topic: str) -> None:
         """Add a topic subscription for an agent."""
-        async with aiosqlite.connect(self.db_path) as db:
-            await db.execute(
-                "INSERT OR IGNORE INTO subscriptions (agent_id, topic, created_at)"
-                " VALUES (?,?,?)",
-                (agent_id, topic, _now_iso()),
-            )
-            await db.commit()
+        async def _subscribe() -> None:
+            async with self._connect() as db:
+                await db.execute(
+                    "INSERT OR IGNORE INTO subscriptions (agent_id, topic, created_at)"
+                    " VALUES (?,?,?)",
+                    (agent_id, topic, _now_iso()),
+                )
+                await db.commit()
+
+        await self._run_with_lock_retry(_subscribe)
 
     async def publish(self, topic: str, message: Message) -> list[str]:
         """Fan-out a message to every subscriber of a topic. Returns sent IDs."""
-        async with aiosqlite.connect(self.db_path) as db:
+        async with self._connect() as db:
             cursor = await db.execute(
                 "SELECT agent_id FROM subscriptions WHERE topic=?", (topic,),
             )
@@ -224,18 +273,20 @@ class MessageBus:
         self, agent_id: str, metadata: dict[str, Any] | None = None,
     ) -> None:
         """Upsert a heartbeat for an agent."""
-        async with aiosqlite.connect(self.db_path) as db:
-            await db.execute(
-                "INSERT OR REPLACE INTO heartbeats"
-                " (agent_id, last_seen, status, metadata) VALUES (?,?,'online',?)",
-                (agent_id, _now_iso(), json.dumps(metadata or {})),
-            )
-            await db.commit()
+        async def _heartbeat() -> None:
+            async with self._connect() as db:
+                await db.execute(
+                    "INSERT OR REPLACE INTO heartbeats"
+                    " (agent_id, last_seen, status, metadata) VALUES (?,?,'online',?)",
+                    (agent_id, _now_iso(), json.dumps(metadata or {})),
+                )
+                await db.commit()
+
+        await self._run_with_lock_retry(_heartbeat)
 
     async def get_agent_status(self, agent_id: str) -> dict[str, Any] | None:
         """Check agent liveness. Returns None if agent unknown."""
-        async with aiosqlite.connect(self.db_path) as db:
-            db.row_factory = aiosqlite.Row
+        async with self._connect(row_factory=aiosqlite.Row) as db:
             cursor = await db.execute(
                 "SELECT last_seen, status, metadata FROM heartbeats WHERE agent_id=?",
                 (agent_id,),
@@ -255,7 +306,7 @@ class MessageBus:
 
     async def list_subscriptions(self, agent_id: str) -> list[str]:
         """Return ordered topic subscriptions for one agent."""
-        async with aiosqlite.connect(self.db_path) as db:
+        async with self._connect() as db:
             cursor = await db.execute(
                 "SELECT topic FROM subscriptions WHERE agent_id=? ORDER BY topic",
                 (agent_id,),
@@ -265,7 +316,7 @@ class MessageBus:
 
     async def get_stats(self) -> dict[str, Any]:
         """Message counts, unread counts per agent, and known agent count."""
-        async with aiosqlite.connect(self.db_path) as db:
+        async with self._connect() as db:
             total = (await (await db.execute(
                 "SELECT COUNT(*) FROM messages")).fetchone())[0]  # type: ignore[index]
             unread = (await (await db.execute(
@@ -290,8 +341,7 @@ class MessageBus:
         agent_id: str | None = None,
     ) -> list[Message]:
         """List recent messages, optionally filtered to one agent."""
-        async with aiosqlite.connect(self.db_path) as db:
-            db.row_factory = aiosqlite.Row
+        async with self._connect(row_factory=aiosqlite.Row) as db:
             query = (
                 "SELECT id, from_agent, to_agent, subject, body, priority,"
                 " status, created_at, read_at, reply_to, metadata"
@@ -337,30 +387,33 @@ class MessageBus:
             ValueError: If *message_id* does not reference an existing message.
         """
         artifact_id = _new_id()
-        async with aiosqlite.connect(self.db_path) as db:
-            # Verify the parent message exists.
-            cursor = await db.execute(
-                "SELECT id FROM messages WHERE id=?", (message_id,),
-            )
-            if await cursor.fetchone() is None:
-                raise ValueError(f"Message {message_id} not found")
-            await db.execute(
-                "INSERT INTO artifacts"
-                " (id, message_id, artifact_type, content, summary,"
-                "  files_touched, metadata, created_at)"
-                " VALUES (?,?,?,?,?,?,?,?)",
-                (
-                    artifact_id,
-                    message_id,
-                    artifact_type,
-                    content,
-                    summary,
-                    json.dumps(files_touched or []),
-                    json.dumps(metadata or {}),
-                    _now_iso(),
-                ),
-            )
-            await db.commit()
+
+        async def _attach() -> None:
+            async with self._connect() as db:
+                cursor = await db.execute(
+                    "SELECT id FROM messages WHERE id=?", (message_id,),
+                )
+                if await cursor.fetchone() is None:
+                    raise ValueError(f"Message {message_id} not found")
+                await db.execute(
+                    "INSERT INTO artifacts"
+                    " (id, message_id, artifact_type, content, summary,"
+                    "  files_touched, metadata, created_at)"
+                    " VALUES (?,?,?,?,?,?,?,?)",
+                    (
+                        artifact_id,
+                        message_id,
+                        artifact_type,
+                        content,
+                        summary,
+                        json.dumps(files_touched or []),
+                        json.dumps(metadata or {}),
+                        _now_iso(),
+                    ),
+                )
+                await db.commit()
+
+        await self._run_with_lock_retry(_attach)
         return artifact_id
 
     async def get_artifacts(
@@ -379,8 +432,7 @@ class MessageBus:
             ``artifact_type``, ``content``, ``summary``, ``files_touched``,
             ``metadata``, ``created_at``.
         """
-        async with aiosqlite.connect(self.db_path) as db:
-            db.row_factory = aiosqlite.Row
+        async with self._connect(row_factory=aiosqlite.Row) as db:
             query = (
                 "SELECT id, message_id, artifact_type, content, summary,"
                 " files_touched, metadata, created_at"
@@ -425,46 +477,47 @@ class MessageBus:
         Returns:
             The message ID.
         """
-        async with aiosqlite.connect(self.db_path) as db:
-            # Insert the message.
-            await db.execute(
-                "INSERT INTO messages (id, from_agent, to_agent, subject, body,"
-                " priority, status, created_at, reply_to, metadata)"
-                " VALUES (?,?,?,?,?,?,?,?,?,?)",
-                (
-                    message.id,
-                    message.from_agent,
-                    message.to_agent,
-                    message.subject,
-                    message.body,
-                    message.priority.value,
-                    message.status.value,
-                    message.created_at.isoformat(),
-                    message.reply_to,
-                    json.dumps(message.metadata),
-                ),
-            )
-            # Insert each artifact in the same transaction.
-            for art in artifacts:
-                artifact_id = _new_id()
+        async def _send_with_artifacts() -> str:
+            async with self._connect() as db:
                 await db.execute(
-                    "INSERT INTO artifacts"
-                    " (id, message_id, artifact_type, content, summary,"
-                    "  files_touched, metadata, created_at)"
-                    " VALUES (?,?,?,?,?,?,?,?)",
+                    "INSERT INTO messages (id, from_agent, to_agent, subject, body,"
+                    " priority, status, created_at, reply_to, metadata)"
+                    " VALUES (?,?,?,?,?,?,?,?,?,?)",
                     (
-                        artifact_id,
                         message.id,
-                        art["artifact_type"],
-                        art["content"],
-                        art.get("summary", ""),
-                        json.dumps(art.get("files_touched", [])),
-                        json.dumps(art.get("metadata", {})),
-                        _now_iso(),
+                        message.from_agent,
+                        message.to_agent,
+                        message.subject,
+                        message.body,
+                        message.priority.value,
+                        message.status.value,
+                        message.created_at.isoformat(),
+                        message.reply_to,
+                        json.dumps(message.metadata),
                     ),
                 )
-            await db.commit()
-        return message.id
+                for art in artifacts:
+                    artifact_id = _new_id()
+                    await db.execute(
+                        "INSERT INTO artifacts"
+                        " (id, message_id, artifact_type, content, summary,"
+                        "  files_touched, metadata, created_at)"
+                        " VALUES (?,?,?,?,?,?,?,?)",
+                        (
+                            artifact_id,
+                            message.id,
+                            art["artifact_type"],
+                            art["content"],
+                            art.get("summary", ""),
+                            json.dumps(art.get("files_touched", [])),
+                            json.dumps(art.get("metadata", {})),
+                            _now_iso(),
+                        ),
+                    )
+                await db.commit()
+            return message.id
+
+        return await self._run_with_lock_retry(_send_with_artifacts)
 
     async def build_context_from_artifacts(
         self,
@@ -537,20 +590,24 @@ class MessageBus:
         """Persist a cross-process event.  Returns the event_id."""
         import os
         event_id = _new_id()
-        async with aiosqlite.connect(self.db_path) as db:
-            await db.execute("PRAGMA busy_timeout=5000")
-            await db.execute(
-                "INSERT INTO events (event_id, event_type, task_id, agent_id,"
-                " source_pid, occurred_at, payload)"
-                " VALUES (?,?,?,?,?,?,?)",
-                (
-                    event_id, event_type, task_id, agent_id,
-                    os.getpid(), _now_iso(),
-                    json.dumps(payload or {}, default=str),
-                ),
-            )
-            await db.commit()
-        return event_id
+
+        async def _emit() -> str:
+            async with self._open() as db:
+                await self._configure_connection(db)
+                await db.execute(
+                    "INSERT INTO events (event_id, event_type, task_id, agent_id,"
+                    " source_pid, occurred_at, payload)"
+                    " VALUES (?,?,?,?,?,?,?)",
+                    (
+                        event_id, event_type, task_id, agent_id,
+                        os.getpid(), _now_iso(),
+                        json.dumps(payload or {}, default=str),
+                    ),
+                )
+                await db.commit()
+            return event_id
+
+        return await self._run_with_lock_retry(_emit)
 
     async def consume_events(
         self,
@@ -561,36 +618,39 @@ class MessageBus:
 
         Marks consumed events with a timestamp so they aren't re-read.
         """
-        async with aiosqlite.connect(self.db_path) as db:
-            db.row_factory = aiosqlite.Row
-            await db.execute("PRAGMA busy_timeout=5000")
-            cursor = await db.execute(
-                "SELECT * FROM events WHERE event_type = ? AND consumed_at IS NULL"
-                " ORDER BY occurred_at ASC LIMIT ?",
-                (event_type, limit),
-            )
-            rows = await cursor.fetchall()
-            events: list[dict[str, Any]] = []
-            now = _now_iso()
-            for row in rows:
-                event = dict(row)
-                if event.get("payload"):
-                    try:
-                        event["payload"] = json.loads(event["payload"])
-                    except (json.JSONDecodeError, TypeError):
-                        pass
-                events.append(event)
-                await db.execute(
-                    "UPDATE events SET consumed_at = ? WHERE event_id = ?",
-                    (now, event["event_id"]),
+
+        async def _consume() -> list[dict[str, Any]]:
+            async with self._open() as db:
+                db.row_factory = aiosqlite.Row
+                await self._configure_connection(db)
+                cursor = await db.execute(
+                    "SELECT * FROM events WHERE event_type = ? AND consumed_at IS NULL"
+                    " ORDER BY occurred_at ASC LIMIT ?",
+                    (event_type, limit),
                 )
-            await db.commit()
-        return events
+                rows = await cursor.fetchall()
+                events: list[dict[str, Any]] = []
+                now = _now_iso()
+                for row in rows:
+                    event = dict(row)
+                    if event.get("payload"):
+                        try:
+                            event["payload"] = json.loads(event["payload"])
+                        except (json.JSONDecodeError, TypeError):
+                            pass
+                    events.append(event)
+                    await db.execute(
+                        "UPDATE events SET consumed_at = ? WHERE event_id = ?",
+                        (now, event["event_id"]),
+                    )
+                await db.commit()
+            return events
+
+        return await self._run_with_lock_retry(_consume)
 
     async def event_stats(self) -> dict[str, Any]:
         """Return bus metrics: queued, consumed, stale heartbeats."""
-        async with aiosqlite.connect(self.db_path) as db:
-            await db.execute("PRAGMA busy_timeout=5000")
+        async with self._connect() as db:
             queued_cur = await db.execute(
                 "SELECT COUNT(*) FROM events WHERE consumed_at IS NULL"
             )

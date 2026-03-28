@@ -10,7 +10,9 @@ import asyncio
 import json
 import logging
 import os
+import re
 import time
+from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Protocol, runtime_checkable
@@ -29,7 +31,25 @@ from dharma_swarm.models import (
     TaskPriority,
 )
 from dharma_swarm.agent_memory import AgentMemoryBank
+from dharma_swarm.agent_memory_manager import AgentMemoryManager, Scope as MemoryScope
+from dharma_swarm.model_catalog import (
+    apply_model_pack_metadata,
+    selector_from_metadata,
+)
+from dharma_swarm.agent_runner_quality import (
+    CompletionAssessment as _CompletionAssessment,
+    assess_completion_semantics as _assess_completion_semantics,
+    assess_honors_checkpoint as _assess_honors_checkpoint,
+    build_semantic_repair_request as _build_semantic_repair_request,
+    semantic_attempt_timeout_seconds as _semantic_attempt_timeout_seconds,
+    semantic_repair_attempts as _semantic_repair_attempts,
+)
 from dharma_swarm.jikoku_samaya import get_global_tracer as _jikoku_tracer
+from dharma_swarm.runtime_fields import (
+    RuntimeFieldRegistry,
+    build_runtime_field_registry_from_agent_config,
+    runtime_field_manifest_for_agent_config,
+)
 from dharma_swarm.telos_gates import check_with_reflective_reroute
 
 logger = logging.getLogger(__name__)
@@ -95,6 +115,147 @@ _PRIVILEGED_HINTS = (
     "ssh",
     "sudo",
 )
+_REASONING_LEAK_MARKERS = ("<think", "</think>", "<analysis", "</analysis>")
+_EXPLORATION_PREAMBLE_MARKERS = (
+    "i'll begin by",
+    "i will begin by",
+    "let me explore",
+    "let me check",
+    "first, i'll",
+)
+_FILE_REFERENCE_PATTERN = re.compile(
+    r"(?<![\w/])(?:[A-Za-z0-9_.-]+/)+(?:[A-Za-z0-9_.-]+\.(?:py|md|json|yaml|yml|toml|txt|ts|tsx|js|jsx|sh))(?![\w/])"
+)
+_META_OBSERVATION_HINTS = (
+    "system",
+    "control plane",
+    "orchestrator",
+    "router",
+    "feedback",
+    "active inference",
+    "mission contract",
+    "evolution",
+    "archive",
+    "downstream",
+    "upstream",
+)
+_OPENAI_TOOL_PROVIDER_TYPES = {
+    ProviderType.OPENAI,
+    ProviderType.OPENROUTER,
+    ProviderType.OPENROUTER_FREE,
+    ProviderType.NVIDIA_NIM,
+    ProviderType.GROQ,
+    ProviderType.CEREBRAS,
+    ProviderType.SILICONFLOW,
+    ProviderType.TOGETHER,
+    ProviderType.FIREWORKS,
+    ProviderType.GOOGLE_AI,
+    ProviderType.SAMBANOVA,
+    ProviderType.MISTRAL,
+    ProviderType.CHUTES,
+}
+_LOCAL_TOOL_RUNTIME_DIRECTIVE = (
+    "You have real local tool access for this task. "
+    "Use `read_file`, `edit_file`, `write_file`, `glob_files`, `grep_search`, "
+    "and `shell_exec` to inspect, modify, and verify the workspace. "
+    "Do not roleplay tool use. Call tools directly when you need evidence or side effects."
+)
+_LOCAL_OPENAI_TOOL_DEFINITIONS: list[dict[str, Any]] = [
+    {
+        "type": "function",
+        "function": {
+            "name": "read_file",
+            "description": "Read a file from the local workspace.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "path": {"type": "string"},
+                    "offset": {"type": "integer", "default": 1},
+                    "limit": {"type": "integer", "default": 200},
+                },
+                "required": ["path"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "write_file",
+            "description": "Write a file in the local workspace, creating parents if needed.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "path": {"type": "string"},
+                    "content": {"type": "string"},
+                },
+                "required": ["path", "content"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "edit_file",
+            "description": "Replace one exact string inside a file.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "path": {"type": "string"},
+                    "old_string": {"type": "string"},
+                    "new_string": {"type": "string"},
+                },
+                "required": ["path", "old_string", "new_string"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "shell_exec",
+            "description": "Execute a shell command inside the local workspace.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "command": {"type": "string"},
+                    "timeout": {"type": "integer", "default": 30},
+                },
+                "required": ["command"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "glob_files",
+            "description": "List files matching a glob pattern in the local workspace.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "pattern": {"type": "string"},
+                    "path": {"type": "string"},
+                },
+                "required": ["pattern"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "grep_search",
+            "description": "Search file contents with a regex pattern in the local workspace.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "pattern": {"type": "string"},
+                    "path": {"type": "string"},
+                    "glob": {"type": "string"},
+                    "max_results": {"type": "integer", "default": 30},
+                },
+                "required": ["pattern"],
+            },
+        },
+    },
+]
 
 
 # ---------------------------------------------------------------------------
@@ -290,26 +451,15 @@ def _is_privileged_action(task: Task) -> bool:
 
 
 def _allow_provider_routing(task: Task, config: AgentConfig) -> bool:
-    metadata = _task_metadata(task)
-    override = _metadata_bool(
-        metadata,
-        "allow_provider_routing",
-        "routed_execution",
-        "use_router",
-    )
+    metadata = _resolved_routing_metadata(task, config)
+    override = _metadata_bool(metadata, "allow_provider_routing", "routed_execution", "use_router")
     if override is not None:
         return override
-    override = _metadata_bool(
-        config.metadata,
-        "allow_provider_routing",
-        "routed_execution",
-        "use_router",
-    )
-    if override is not None:
-        return override
-    return (
-        os.environ.get("DGC_AGENT_ROUTED_EXECUTION", "").strip().lower() in _TRUE_VALUES
-    )
+    # Keep agents pinned to their configured lane unless the task/config
+    # explicitly widens execution. A global env toggle is too coarse here:
+    # it can silently hijack dedicated seats such as cyber-glm5 onto a
+    # primary-driver lane and invalidate model/provider provenance.
+    return False
 
 
 def _parse_provider_types(value: Any) -> list[ProviderType]:
@@ -341,18 +491,44 @@ def _available_provider_types(
     task: Task,
     config: AgentConfig,
 ) -> list[ProviderType] | None:
-    metadata = _task_metadata(task)
+    metadata = _resolved_routing_metadata(task, config)
     explicit = _parse_provider_types(
         metadata.get("available_provider_types")
         or metadata.get("provider_allowlist")
-        or config.metadata.get("available_provider_types")
-        or config.metadata.get("provider_allowlist")
     )
     if explicit:
         return explicit
     if _allow_provider_routing(task, config):
         return None
     return [config.provider]
+
+
+def _resolved_routing_metadata(task: Task, config: AgentConfig) -> dict[str, Any]:
+    config_metadata = (
+        apply_model_pack_metadata(config.metadata)
+        if isinstance(config.metadata, dict)
+        else {}
+    )
+    task_metadata = apply_model_pack_metadata(_task_metadata(task))
+    merged = dict(config_metadata)
+    merged.update(task_metadata)
+    return merged
+
+
+def _preferred_model_hint(task: Task, config: AgentConfig) -> str | None:
+    metadata = _resolved_routing_metadata(task, config)
+    value = metadata.get("preferred_model")
+    if isinstance(value, str) and value.strip():
+        return value.strip()
+    return None
+
+
+def _preferred_provider_hint(task: Task, config: AgentConfig) -> ProviderType | None:
+    metadata = _resolved_routing_metadata(task, config)
+    providers = _parse_provider_types(metadata.get("preferred_provider"))
+    if providers:
+        return providers[0]
+    return None
 
 
 def _estimate_requested_tokens(request: LLMRequest, *, requires_tooling: bool) -> int:
@@ -376,7 +552,7 @@ def _build_route_request(
 ) -> Any:
     from dharma_swarm.provider_policy import ProviderRouteRequest
 
-    metadata = _task_metadata(task)
+    metadata = _resolved_routing_metadata(task, config)
     lowered = _task_text(task).lower()
     requires_tooling = _requires_tooling(task, config)
     requires_frontier = _requires_frontier_precision(task, config)
@@ -456,6 +632,8 @@ def _build_route_request(
 
     route_context = metadata.get("route_context")
     context = dict(route_context) if isinstance(route_context, dict) else {}
+    preferred_provider = _preferred_provider_hint(task, config) or config.provider
+    preferred_model = _preferred_model_hint(task, config) or request.model
     context.update(
         {
             "task_id": task.id,
@@ -464,7 +642,8 @@ def _build_route_request(
             "agent_id": config.id,
             "agent_name": config.name,
             "agent_role": config.role.value,
-            "preferred_provider": config.provider.value,
+            "preferred_provider": preferred_provider.value,
+            "preferred_model": preferred_model,
             "session_id": str(
                 metadata.get("session_id")
                 or metadata.get("trace_id")
@@ -484,8 +663,11 @@ def _build_route_request(
     context["preserve_requested_model"] = bool(
         available_provider_types
         and len(available_provider_types) == 1
-        and available_provider_types[0] == config.provider
+        and available_provider_types[0] == preferred_provider
     )
+    selector = selector_from_metadata(metadata)
+    if selector:
+        context["model_catalog_selector"] = str(metadata.get("model_catalog_selector") or selector)
 
     return ProviderRouteRequest(
         action_name=_task_action_name(task),
@@ -550,7 +732,6 @@ def _feedback_quality_score(
     if any(marker in lowered for marker in ("i can't", "i cannot", "not sure", "todo")):
         score -= 0.15
     return _clamp01(score)
-
 
 def _state_from_config(config: AgentConfig) -> AgentState:
     """Derive initial runtime state from a static config."""
@@ -639,6 +820,15 @@ def _build_system_prompt(config: AgentConfig) -> str:
         else:
             parts.append(f"You are a {config.role.value} agent in the DHARMA SWARM.")
 
+    # Inject dharmic ground — the Gnani field (ambient recognition environment)
+    try:
+        from dharma_swarm.dharma_attractor import DharmaAttractor
+        _seed = DharmaAttractor().ambient_seed()
+        if _seed:
+            parts.append(_seed)
+    except Exception:
+        logger.debug("Attractor seed injection failed for %s", config.name, exc_info=True)
+
     # Inject agent self-state: identity, organism state, recent memory
     try:
         self_state = _build_self_state_block(config.name)
@@ -659,14 +849,19 @@ def _build_system_prompt(config: AgentConfig) -> str:
     # Inject multi-layer context for real Claude Code agents
     if config.provider == ProviderType.CLAUDE_CODE:
         from dharma_swarm.context import build_agent_context
-        from dharma_swarm.shakti import SHAKTI_HOOK
         ctx = build_agent_context(
             role=config.role.value,
             thread=config.thread,
         )
         if ctx:
             parts.append(ctx)
+
+    # Inject SHAKTI_HOOK for ALL agents (universal perception mode)
+    try:
+        from dharma_swarm.shakti import SHAKTI_HOOK
         parts.append(SHAKTI_HOOK)
+    except Exception:
+        logger.debug("Shakti hook injection failed for %s", config.name, exc_info=True)
 
     prompt = "\n\n".join(parts)
 
@@ -771,6 +966,17 @@ def _build_prompt(
     user_parts = [f"## Task: {task.title}\n\n{task.description}"]
     metadata = task.metadata if isinstance(task.metadata, dict) else {}
     metadata.pop("_memory_recall_consumer", None)
+    try:
+        from dharma_swarm.mission_contract import (
+            load_completion_contract,
+            render_completion_contract_brief,
+        )
+
+        completion_contract = load_completion_contract(metadata)
+        if completion_contract is not None:
+            user_parts.append("\n\n" + render_completion_contract_brief(completion_contract))
+    except Exception:
+        logger.debug("Completion contract prompt injection failed", exc_info=True)
     prompt_state_dir = _resolve_prompt_state_dir(task, config)
     memory_query = "\n".join(
         part.strip()
@@ -846,6 +1052,60 @@ def _build_prompt(
     )
 
 
+async def _inject_stigmergy_context(
+    request: LLMRequest,
+    task: Task,
+    config: AgentConfig,
+) -> None:
+    """Add relevant stigmergy marks to the prompt before execution."""
+    prompt_state_dir = _resolve_prompt_state_dir(task, config)
+    if prompt_state_dir is None or not request.messages:
+        return
+
+    raw_parts = [
+        part.strip()
+        for part in (task.title, task.description, _task_file_path(task))
+        if isinstance(part, str) and part.strip()
+    ]
+    task_keywords: list[str] = []
+    for part in raw_parts:
+        task_keywords.append(part)
+        for token in re.findall(r"[A-Za-z0-9_./-]{4,}", part.lower()):
+            if token not in task_keywords:
+                task_keywords.append(token)
+    if not task_keywords:
+        return
+
+    try:
+        from dharma_swarm.stigmergy import StigmergyStore, _derive_channel
+
+        store = StigmergyStore(base_path=prompt_state_dir / "stigmergy")
+        marks = await store.query_relevant(
+            task_keywords,
+            limit=3,
+            channel=_derive_channel(config.name),
+        )
+    except Exception:
+        logger.debug("Stigmergy prompt injection failed", exc_info=True)
+        return
+
+    if not marks:
+        return
+
+    lines = ["## Stigmergy Recall"]
+    for mark in marks:
+        observation = " ".join(mark.observation.split())
+        if len(observation) > 220:
+            observation = observation[:217] + "..."
+        lines.append(f"- [{mark.agent}] {mark.file_path}: {observation}")
+
+    request.messages[0]["content"] = (
+        str(request.messages[0]["content"]).rstrip()
+        + "\n\n"
+        + "\n".join(lines)
+    )
+
+
 def _looks_like_provider_failure(content: str) -> bool:
     """Heuristic guard against error strings being marked as completed work."""
     normalized = (content or "").strip().lower()
@@ -879,6 +1139,164 @@ def _task_file_path(task: Task) -> str:
         return match.group(0)
 
     return f"task:{task.id}"
+
+
+def _required_artifact_paths(task: Task) -> list[Path]:
+    """Return required artifact paths declared in task metadata."""
+    metadata = _task_metadata(task)
+    raw_values: list[Any] = []
+    for key in ("target_file", "target_path", "artifact_path", "required_artifact"):
+        value = metadata.get(key)
+        if value:
+            raw_values.append(value)
+    for key in ("required_artifacts", "artifact_paths", "target_files"):
+        value = metadata.get(key)
+        if isinstance(value, list):
+            raw_values.extend(value)
+        elif value:
+            raw_values.append(value)
+
+    out: list[Path] = []
+    seen: set[str] = set()
+    for raw in raw_values:
+        if not isinstance(raw, str):
+            continue
+        text = raw.strip()
+        if not text:
+            continue
+        path = Path(text).expanduser()
+        norm = str(path)
+        if norm in seen:
+            continue
+        seen.add(norm)
+        out.append(path)
+    return out
+
+
+def _task_requires_local_side_effects(task: Task) -> bool:
+    """Whether the task contract requires file or command side effects."""
+    metadata = _task_metadata(task)
+    if _required_artifact_paths(task):
+        return True
+    for key in (
+        "required_command",
+        "shell_command",
+        "command",
+        "pytest_command",
+        "expected_command",
+    ):
+        value = metadata.get(key)
+        if isinstance(value, str) and value.strip():
+            return True
+    return False
+
+
+def _provider_supports_local_tool_loop(
+    config: AgentConfig,
+    provider: CompletionProvider | RoutedCompletionProvider | None,
+) -> bool:
+    if config.provider in {ProviderType.CLAUDE_CODE, ProviderType.CODEX}:
+        return False
+    capabilities = getattr(provider, "capabilities", None)
+    supports_tools = getattr(capabilities, "supports_tools", None)
+    if isinstance(supports_tools, bool):
+        return supports_tools
+    return config.provider in _OPENAI_TOOL_PROVIDER_TYPES
+
+
+def _provider_can_execute_local_tooling(
+    config: AgentConfig,
+    sandbox: CodeSandbox | None,
+) -> bool:
+    """Only subprocess agents or an attached sandbox can actually mutate local state."""
+    if sandbox is not None:
+        return True
+    return config.provider in {ProviderType.CLAUDE_CODE, ProviderType.CODEX}
+
+
+def _tool_loop_max_rounds(task: Task, config: AgentConfig) -> int:
+    metadata = _task_metadata(task)
+    raw = (
+        metadata.get("max_tool_rounds")
+        or config.metadata.get("max_tool_rounds")
+        or 8
+    )
+    try:
+        return max(1, min(32, int(raw)))
+    except (TypeError, ValueError):
+        return 8
+
+
+def _local_tool_workdir(task: Task, config: AgentConfig) -> Path:
+    metadata = _task_metadata(task)
+    for source in (metadata, config.metadata):
+        for key in ("working_dir", "workdir", "workspace_root", "repo_root", "cwd"):
+            value = source.get(key)
+            if not isinstance(value, str) or not value.strip():
+                continue
+            candidate = Path(value).expanduser()
+            if candidate.exists():
+                return candidate.resolve()
+            if candidate.parent.exists():
+                return candidate.resolve(strict=False)
+    for artifact in _required_artifact_paths(task):
+        parent = artifact.parent
+        if parent.exists():
+            return parent.resolve()
+        if parent.parent.exists():
+            return parent.resolve(strict=False)
+    return Path.cwd().resolve()
+
+
+def _resolve_local_tool_path(raw_path: str, *, workdir: Path) -> Path:
+    candidate = Path(raw_path).expanduser()
+    if not candidate.is_absolute():
+        candidate = workdir / candidate
+    return candidate.resolve(strict=False)
+
+
+def _tool_result_text(result: Any) -> str:
+    if hasattr(result, "stdout") and hasattr(result, "stderr") and hasattr(result, "exit_code"):
+        stdout = str(getattr(result, "stdout", "") or "")
+        stderr = str(getattr(result, "stderr", "") or "")
+        exit_code = getattr(result, "exit_code", "")
+        parts = [f"exit_code: {exit_code}"]
+        if stdout:
+            parts.append(f"stdout:\n{stdout}")
+        if stderr:
+            parts.append(f"stderr:\n{stderr}")
+        return "\n".join(parts)
+    return str(result)
+
+
+def _normalized_tool_call_payload(tool_call: dict[str, Any], *, ordinal: int) -> dict[str, Any]:
+    call_id = str(tool_call.get("id") or f"tool-call-{ordinal}")
+    params = _tool_call_parameters(tool_call)
+    return {
+        "id": call_id,
+        "type": "function",
+        "function": {
+            "name": str(tool_call.get("name") or ""),
+            "arguments": json.dumps(params),
+        },
+    }
+
+
+def _tool_call_parameters(tool_call: dict[str, Any]) -> dict[str, Any]:
+    params = tool_call.get("parameters")
+    if isinstance(params, dict):
+        return params
+    raw = tool_call.get("arguments")
+    if isinstance(raw, str):
+        try:
+            parsed = json.loads(raw)
+        except json.JSONDecodeError:
+            return {}
+        return parsed if isinstance(parsed, dict) else {}
+    if isinstance(raw, dict):
+        return raw
+    raw = tool_call.get("input")
+    return raw if isinstance(raw, dict) else {}
 
 
 def _task_action(task: Task) -> str:
@@ -948,6 +1366,7 @@ class AgentRunner:
         message_bus: Any | None = None,
         worker_spawner: Any | None = None,
         ontology_path: Path | str | None = None,
+        advanced_memory: AgentMemoryManager | None = None,
     ) -> None:
         self._config = config
         self._provider = provider
@@ -959,6 +1378,9 @@ class AgentRunner:
         self._state = _state_from_config(config)
         self._lock = asyncio.Lock()
         self._background_tasks: set[asyncio.Task[Any]] = set()
+        self._runtime_fields = build_runtime_field_registry_from_agent_config(config)
+        # Letta-inspired self-managing memory (SQLite-backed)
+        self._advanced_memory = advanced_memory
 
         # Sprint 3: Economic tracking
         self._economic_spine: Any = None
@@ -982,6 +1404,375 @@ class AgentRunner:
     @property
     def agent_id(self) -> str:
         return self._config.id
+
+    @property
+    def runtime_fields(self) -> RuntimeFieldRegistry:
+        """Expose runtime mutation targets for prompt/parameter evolution."""
+        return self._runtime_fields
+
+    @property
+    def advanced_memory(self) -> AgentMemoryManager | None:
+        """Access the SQLite-backed self-managing memory, if configured."""
+        return self._advanced_memory
+
+    async def run_auto_research_workflow(
+        self,
+        brief: Any,
+        *,
+        research_engine: Any,
+        grade_engine: Any,
+        trace_store: Any | None = None,
+        lineage_graph: Any | None = None,
+        checkpoint_dir: Path | None = None,
+        grade_kwargs: dict[str, Any] | None = None,
+    ) -> Any:
+        """Execute AutoResearch + AutoGrade through the canonical workflow runtime."""
+        from dharma_swarm.workflow import execute_auto_research_workflow
+
+        return await execute_auto_research_workflow(
+            brief=brief,
+            research_engine=research_engine,
+            grade_engine=grade_engine,
+            agent_name=self._config.name,
+            trace_store=trace_store,
+            lineage_graph=lineage_graph,
+            checkpoint_dir=checkpoint_dir,
+            grade_kwargs=grade_kwargs,
+            runtime_field_names=self._runtime_fields.names(),
+        )
+
+    def get_memory_tools(self) -> dict[str, Any]:
+        """Return callable memory tools for agent sandbox injection.
+
+        These tools let the agent explicitly manage its own memory
+        during task execution (Letta/MemGPT pattern).
+
+        Returns:
+            Dict of tool_name -> async callable, or empty dict if no
+            advanced_memory is configured.
+        """
+        if self._advanced_memory is None:
+            return {}
+
+        mgr = self._advanced_memory
+
+        async def remember(key: str, content: str, scope: str = "working", ttl: int | None = None) -> str:
+            """Store a memory. Scope: working, short_term, long_term, shared."""
+            s = MemoryScope(scope)
+            mem = await mgr.remember(key, content, scope=s, ttl=ttl)
+            return f"Remembered '{key}' in {scope}"
+
+        async def recall(query: str, scope: str | None = None, limit: int = 5) -> str:
+            """Search memories by keyword. Returns matching memories."""
+            s = MemoryScope(scope) if scope else None
+            results = await mgr.recall(query, scope=s, limit=limit)
+            if not results:
+                return "No memories found."
+            lines = [f"Found {len(results)} memories:"]
+            for m in results:
+                lines.append(f"  [{m.scope.value}] {m.key}: {m.content[:200]}")
+            return "\n".join(lines)
+
+        async def forget(key: str) -> str:
+            """Delete a memory by key."""
+            deleted = await mgr.forget(key)
+            return f"Forgot '{key}'" if deleted else f"No memory found for '{key}'"
+
+        async def share(key: str, content: str, tags: str = "") -> str:
+            """Share a memory with all agents in the swarm."""
+            await mgr.share(key, content, tags=tags)
+            return f"Shared '{key}' with swarm"
+
+        return {
+            "remember": remember,
+            "recall": recall,
+            "forget": forget,
+            "share": share,
+        }
+
+    async def _ensure_local_tool_sandbox(self, task: Task) -> None:
+        if self._sandbox is not None:
+            return
+        if not _provider_supports_local_tool_loop(self._config, self._provider):
+            return
+        from dharma_swarm.sandbox import LocalSandbox
+
+        self._sandbox = LocalSandbox(workdir=_local_tool_workdir(task, self._config))
+
+    async def _invoke_provider(
+        self,
+        task: Task,
+        request: LLMRequest,
+    ) -> tuple[Any | None, Any | None, LLMResponse]:
+        if self._provider is None:
+            raise RuntimeError("Provider unavailable")
+        if _is_routed_provider(self._provider):
+            available_provider_types = _available_provider_types(task, self._config)
+            route_request = _build_route_request(
+                task,
+                self._config,
+                request,
+                available_provider_types=available_provider_types,
+            )
+            route_decision, response = await self._provider.complete_for_task(
+                route_request,
+                request,
+                available_provider_types=available_provider_types,
+            )
+            return route_request, route_decision, response
+        return None, None, await self._provider.complete(request)
+
+    async def _execute_local_tool(
+        self,
+        tool_name: str,
+        parameters: dict[str, Any],
+        *,
+        task: Task,
+    ) -> str:
+        workdir = _local_tool_workdir(task, self._config)
+
+        if tool_name == "read_file":
+            path = _resolve_local_tool_path(str(parameters.get("path", "")), workdir=workdir)
+            if not path.exists():
+                return f"ERROR: File not found: {path}"
+            if not path.is_file():
+                return f"ERROR: Not a file: {path}"
+            try:
+                offset = max(1, int(parameters.get("offset", 1) or 1))
+                limit = max(1, min(500, int(parameters.get("limit", 200) or 200)))
+            except (TypeError, ValueError):
+                offset = 1
+                limit = 200
+            lines = path.read_text(encoding="utf-8", errors="replace").splitlines()
+            selected = lines[offset - 1 : offset - 1 + limit]
+            numbered = [f"{offset + idx:>5} | {line}" for idx, line in enumerate(selected)]
+            return "\n".join(numbered) if numbered else ""
+
+        if tool_name == "write_file":
+            path = _resolve_local_tool_path(str(parameters.get("path", "")), workdir=workdir)
+            content = str(parameters.get("content", ""))
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_text(content, encoding="utf-8")
+            return f"OK: wrote {len(content)} chars to {path}"
+
+        if tool_name == "edit_file":
+            path = _resolve_local_tool_path(str(parameters.get("path", "")), workdir=workdir)
+            if not path.exists():
+                return f"ERROR: File not found: {path}"
+            old = str(parameters.get("old_string", ""))
+            new = str(parameters.get("new_string", ""))
+            content = path.read_text(encoding="utf-8", errors="replace")
+            count = content.count(old)
+            if count == 0:
+                return f"ERROR: old_string not found in {path}"
+            if count > 1:
+                return f"ERROR: old_string found {count} times in {path}"
+            path.write_text(content.replace(old, new, 1), encoding="utf-8")
+            return f"OK: edited {path}"
+
+        if tool_name in {"shell_exec", "bash"}:
+            if self._sandbox is None:
+                raise RuntimeError("Local tool sandbox unavailable")
+            command = str(parameters.get("command", "")).strip()
+            try:
+                timeout = float(parameters.get("timeout", 30) or 30)
+            except (TypeError, ValueError):
+                timeout = 30.0
+            result = await self._sandbox.execute(command, timeout=max(1.0, min(timeout, 300.0)))
+            return _tool_result_text(result)
+
+        if tool_name in {"glob_files", "search_files"}:
+            pattern = str(parameters.get("pattern", "")).strip()
+            base = _resolve_local_tool_path(str(parameters.get("path", "") or parameters.get("directory", "") or "."), workdir=workdir)
+            matches = sorted(base.glob(pattern))[:50]
+            if not matches:
+                return f"No files matching {pattern!r}"
+            return "\n".join(str(match) for match in matches)
+
+        if tool_name in {"grep_search", "search_content"}:
+            pattern = str(parameters.get("pattern", "")).strip()
+            if not pattern:
+                return "ERROR: pattern required"
+            base = _resolve_local_tool_path(str(parameters.get("path", "") or parameters.get("directory", "") or "."), workdir=workdir)
+            file_glob = str(parameters.get("glob", "") or parameters.get("file_glob", "") or "**/*")
+            try:
+                compiled = re.compile(pattern)
+            except re.error as exc:
+                return f"ERROR: invalid regex: {exc}"
+            try:
+                max_results = max(1, min(50, int(parameters.get("max_results", 30) or 30)))
+            except (TypeError, ValueError):
+                max_results = 30
+            results: list[str] = []
+            for candidate in base.glob(file_glob):
+                if not candidate.is_file():
+                    continue
+                try:
+                    for line_no, line in enumerate(
+                        candidate.read_text(encoding="utf-8", errors="replace").splitlines(),
+                        start=1,
+                    ):
+                        if compiled.search(line):
+                            results.append(f"{candidate}:{line_no}:{line}")
+                            if len(results) >= max_results:
+                                return "\n".join(results)
+                except Exception:
+                    continue
+            return "\n".join(results) if results else f"No matches for {pattern!r}"
+
+        return f"ERROR: unknown tool {tool_name}"
+
+    async def _complete_with_tool_loop(
+        self,
+        task: Task,
+        request: LLMRequest,
+    ) -> tuple[Any | None, Any | None, LLMResponse, str]:
+        tool_request = request.model_copy(
+            update={
+                "system": (
+                    request.system
+                    if _LOCAL_TOOL_RUNTIME_DIRECTIVE in request.system
+                    else f"{request.system}\n\n{_LOCAL_TOOL_RUNTIME_DIRECTIVE}".strip()
+                ),
+                "tools": list(_LOCAL_OPENAI_TOOL_DEFINITIONS),
+            }
+        )
+        current_request = tool_request
+        last_route_request: Any | None = None
+        last_route_decision: Any | None = None
+
+        for round_index in range(1, _tool_loop_max_rounds(task, self._config) + 1):
+            route_request, route_decision, response = await self._invoke_provider(
+                task,
+                current_request,
+            )
+            if route_request is not None:
+                last_route_request = route_request
+            if route_decision is not None:
+                last_route_decision = route_decision
+
+            if not response.tool_calls:
+                return last_route_request, last_route_decision, response, response.content
+
+            updated_messages = list(current_request.messages)
+            updated_messages.append(
+                {
+                    "role": "assistant",
+                    "content": response.content or "",
+                    "tool_calls": [
+                        _normalized_tool_call_payload(tool_call, ordinal=index)
+                        for index, tool_call in enumerate(response.tool_calls, start=1)
+                    ],
+                }
+            )
+
+            for index, tool_call in enumerate(response.tool_calls, start=1):
+                params = _tool_call_parameters(tool_call)
+                tool_name = str(tool_call.get("name") or "")
+                tool_id = str(tool_call.get("id") or f"tool-call-{round_index}-{index}")
+                tool_result = await self._execute_local_tool(
+                    tool_name,
+                    params,
+                    task=task,
+                )
+                updated_messages.append(
+                    {
+                        "role": "tool",
+                        "tool_call_id": tool_id,
+                        "content": tool_result[:16000],
+                    }
+                )
+
+            current_request = current_request.model_copy(update={"messages": updated_messages})
+
+        raise RuntimeError(
+            f"Local tool loop exceeded max rounds ({_tool_loop_max_rounds(task, self._config)})"
+        )
+
+    async def _execute_completion_attempt(
+        self,
+        task: Task,
+        request: LLMRequest,
+        *,
+        attempt_index: int,
+    ) -> tuple[Any | None, Any | None, LLMResponse, str, float]:
+        response: LLMResponse | None = None
+        completion_latency_ms = 0.0
+        _tracer = _jikoku_tracer()
+        _jspan = _tracer.start(
+            "execute.llm_call",
+            f"Agent {self._config.name}: {task.title[:80]} [attempt {attempt_index}]",
+            agent_id=self._config.name,
+            task_id=task.id,
+        )
+        try:
+            if _is_routed_provider(self._provider):
+                preferred_model = _preferred_model_hint(task, self._config)
+                if preferred_model and preferred_model != request.model:
+                    request = request.model_copy(update={"model": preferred_model})
+            completion_started = time.monotonic()
+            if (
+                self._sandbox is not None
+                and _provider_supports_local_tool_loop(self._config, self._provider)
+                and _requires_tooling(task, self._config)
+            ):
+                route_request, route_decision, response, result = (
+                    await self._complete_with_tool_loop(task, request)
+                )
+            else:
+                route_request, route_decision, response = await self._invoke_provider(
+                    task,
+                    request,
+                )
+                result = response.content
+            completion_latency_ms = (time.monotonic() - completion_started) * 1000.0
+            return route_request, route_decision, response, result, completion_latency_ms
+        finally:
+            try:
+                _tracer.end(
+                    _jspan,
+                    latency_ms=completion_latency_ms,
+                    model=getattr(response, "model", "") if response else "",
+                    provider=getattr(response, "provider", "") if response else "",
+                    success=(
+                        response is not None
+                        and not _looks_like_provider_failure(response.content)
+                    )
+                    if response
+                    else False,
+                )
+            except Exception:
+                logger.debug("Trace recording failed", exc_info=True)
+
+    def _start_active_inference(self, task: Task) -> tuple[Any | None, Any | None]:
+        state_dir = _resolve_prompt_state_dir(task, self._config)
+        if state_dir is None:
+            return None, None
+        try:
+            from dharma_swarm.active_inference import get_engine
+
+            engine = get_engine(state_dir=state_dir / "active_inference")
+            task_type = str(
+                _task_metadata(task).get("task_type", "general") or "general"
+            )
+            prediction = engine.predict(self.agent_id, task.id, task_type)
+            return engine, prediction
+        except Exception:
+            logger.debug("Active inference prediction failed", exc_info=True)
+            return None, None
+
+    def _observe_active_inference(
+        self,
+        engine: Any,
+        prediction: Any,
+        observed_quality: float,
+    ) -> None:
+        if engine is None or prediction is None:
+            return
+        try:
+            engine.observe(prediction, observed_quality)
+        except Exception:
+            logger.debug("Active inference observation failed", exc_info=True)
 
     # -- lifecycle ----------------------------------------------------------
 
@@ -1029,6 +1820,9 @@ class AgentRunner:
         route_decision: Any | None = None
         response: LLMResponse | None = None
         completion_latency_ms = 0.0
+        active_inference_engine: Any | None = None
+        active_inference_prediction: Any | None = None
+        observed_quality_score: float | None = None
 
         _task_tracer = _jikoku_tracer()
         _task_span = _task_tracer.start(
@@ -1079,6 +1873,7 @@ class AgentRunner:
                     + "\n".join(f"  - {s}" for s in gate.suggestions)
                 )
             request = _build_prompt(task, self._config, plan_context=plan_context)
+            await _inject_stigmergy_context(request, task, self._config)
             self._record_conversation_turn(
                 task,
                 role="user",
@@ -1103,49 +1898,135 @@ class AgentRunner:
                 if memory_ctx.strip():
                     request.system = request.system + "\n\n" + memory_ctx
 
-            if self._provider is not None:
-                _tracer = _jikoku_tracer()
-                _jspan = _tracer.start(
-                    "execute.llm_call",
-                    f"Agent {self._config.name}: {task.title[:80]}",
-                    agent_id=self._config.name,
-                    task_id=task.id,
+            if _requires_tooling(task, self._config):
+                await self._ensure_local_tool_sandbox(task)
+
+            if (
+                _task_requires_local_side_effects(task)
+                and not _provider_can_execute_local_tooling(self._config, self._sandbox)
+            ):
+                raise RuntimeError(
+                    f"Provider {self._config.provider.value} cannot execute local tooling task "
+                    "without a subprocess agent or attached sandbox"
                 )
-                completion_started = time.monotonic()
-                try:
-                    if _is_routed_provider(self._provider):
-                        available_provider_types = _available_provider_types(task, self._config)
-                        route_request = _build_route_request(
+
+            active_inference_engine, active_inference_prediction = (
+                self._start_active_inference(task)
+            )
+
+            if self._provider is not None:
+                current_request = request
+                attempts_remaining = _semantic_repair_attempts(task, self._config)
+                attempt_index = 1
+                accepted_checkpoint: Any | None = None
+                while True:
+                    attempt_timeout_seconds = _semantic_attempt_timeout_seconds(
+                        task,
+                        self._config,
+                        attempts_remaining=attempts_remaining,
+                    )
+                    try:
+                        attempt_result = self._execute_completion_attempt(
                             task,
-                            self._config,
-                            request,
-                            available_provider_types=available_provider_types,
+                            current_request,
+                            attempt_index=attempt_index,
                         )
-                        route_decision, response = await self._provider.complete_for_task(
-                            route_request,
-                            request,
-                            available_provider_types=available_provider_types,
+                        if attempt_timeout_seconds is not None:
+                            (
+                                route_request,
+                                route_decision,
+                                response,
+                                result,
+                                attempt_latency_ms,
+                            ) = await asyncio.wait_for(
+                                attempt_result,
+                                timeout=attempt_timeout_seconds,
+                            )
+                        else:
+                            (
+                                route_request,
+                                route_decision,
+                                response,
+                                result,
+                                attempt_latency_ms,
+                            ) = await attempt_result
+                    except asyncio.TimeoutError:
+                        attempt_label = (
+                            f"{attempt_timeout_seconds:.2f}s"
+                            if attempt_timeout_seconds is not None
+                            else "the attempt budget"
                         )
-                    else:
-                        response = await self._provider.complete(request)
-                    completion_latency_ms = (time.monotonic() - completion_started) * 1000.0
-                    result = response.content
+                        completion_latency_ms += (
+                            max(0.0, attempt_timeout_seconds) * 1000.0
+                            if attempt_timeout_seconds is not None
+                            else 0.0
+                        )
+                        assessment = _CompletionAssessment(
+                            accepted=False,
+                            quality_score=0.0,
+                            reason=(
+                                "Semantic acceptance failed: attempt timeout, timed out after "
+                                f"{attempt_label}"
+                            ),
+                        )
+                        observed_quality_score = 0.0
+                        if attempts_remaining <= 0:
+                            raise RuntimeError(assessment.reason)
+                        current_request = _build_semantic_repair_request(
+                            current_request,
+                            failed_result=f"ATTEMPT TIMED OUT after {attempt_label}",
+                            assessment=assessment,
+                            attempt_index=attempt_index,
+                        )
+                        attempts_remaining -= 1
+                        attempt_index += 1
+                        continue
+                    completion_latency_ms += attempt_latency_ms
                     if _looks_like_provider_failure(result):
                         raise RuntimeError(result or "Provider returned empty response")
-                finally:
-                    try:
-                        _tracer.end(
-                            _jspan,
-                            latency_ms=completion_latency_ms,
-                            model=getattr(response, "model", "") if response else "",
-                            provider=getattr(response, "provider", "") if response else "",
-                            success=response is not None and not _looks_like_provider_failure(response.content) if response else False,
+                    assessment = await _assess_completion_semantics(
+                        task,
+                        self._config,
+                        result,
+                        requires_tooling=_requires_tooling(task, self._config),
+                        requires_local_side_effects=_task_requires_local_side_effects(task),
+                    )
+                    accepted_checkpoint = None
+                    if assessment.accepted:
+                        assessment, accepted_checkpoint = _assess_honors_checkpoint(
+                            task,
+                            result,
+                            semantic_quality_score=assessment.quality_score,
                         )
-                    except Exception:
-                        logger.debug("Trace recording failed", exc_info=True)
+                    observed_quality_score = assessment.quality_score
+                    if assessment.accepted:
+                        if accepted_checkpoint is not None:
+                            updated_meta = _task_metadata(task)
+                            updated_meta["honors_checkpoint"] = accepted_checkpoint.model_dump(mode="json")
+                            task.metadata = updated_meta
+                        break
+                    if attempts_remaining <= 0:
+                        raise RuntimeError(assessment.reason)
+                    current_request = _build_semantic_repair_request(
+                        current_request,
+                        failed_result=result,
+                        assessment=assessment,
+                        attempt_index=attempt_index,
+                    )
+                    attempts_remaining -= 1
+                    attempt_index += 1
             else:
                 result = (
                     f"[mock] Agent {self._config.name} completed: {task.title}"
+                )
+                observed_quality_score = 1.0
+
+            required_artifacts = _required_artifact_paths(task)
+            missing_artifacts = [path for path in required_artifacts if not path.exists()]
+            if missing_artifacts:
+                missing_str = ", ".join(str(path) for path in missing_artifacts[:5])
+                raise RuntimeError(
+                    f"Completion contract failed: required artifact missing ({missing_str})"
                 )
             self._record_conversation_turn(
                 task,
@@ -1175,7 +2056,27 @@ class AgentRunner:
                 latency_ms=completion_latency_ms,
                 success=True,
                 result_text=result,
+                quality_score_override=observed_quality_score,
             )
+
+            # ── Langfuse / local observability trace ──
+            try:
+                from dharma_swarm.observability import get_observer
+                _usage = response.usage if response else {}
+                get_observer().trace_agent_dispatch(
+                    agent=self._config.name,
+                    task_id=task.id,
+                    task_title=task.title[:200],
+                    provider=getattr(response, "provider", "") if response else "",
+                    model=getattr(response, "model", "") if response else "",
+                    prompt_tokens=int(_usage.get("prompt_tokens", 0)),
+                    completion_tokens=int(_usage.get("completion_tokens", 0)),
+                    latency_ms=completion_latency_ms,
+                    success=True,
+                    result_preview=result[:300] if result else "",
+                )
+            except Exception:
+                logger.debug("Observability trace failed", exc_info=True)
 
             # ── Output guardrails: check agent output before accepting ──
             try:
@@ -1199,6 +2100,12 @@ class AgentRunner:
                     )
             except Exception:
                 logger.debug("Guardrail check failed", exc_info=True)
+
+            self._observe_active_inference(
+                active_inference_engine,
+                active_inference_prediction,
+                observed_quality_score if observed_quality_score is not None else 0.0,
+            )
 
             async with self._lock:
                 self._state.turns_used += 1
@@ -1373,6 +2280,12 @@ class AgentRunner:
                 latency_ms=completion_latency_ms,
                 success=False,
                 result_text=str(exc),
+                quality_score_override=observed_quality_score,
+            )
+            self._observe_active_inference(
+                active_inference_engine,
+                active_inference_prediction,
+                observed_quality_score if observed_quality_score is not None else 0.0,
             )
             await _leave_task_mark(
                 agent_name=self._config.name,
@@ -1380,6 +2293,25 @@ class AgentRunner:
                 result_text=str(exc),
                 success=False,
             )
+
+            # ── Langfuse / local observability trace (failure) ──
+            try:
+                from dharma_swarm.observability import get_observer
+                _usage = response.usage if response else {}
+                get_observer().trace_agent_dispatch(
+                    agent=self._config.name,
+                    task_id=task.id,
+                    task_title=task.title[:200],
+                    provider=getattr(response, "provider", "") if response else "",
+                    model=getattr(response, "model", "") if response else "",
+                    prompt_tokens=int(_usage.get("prompt_tokens", 0)),
+                    completion_tokens=int(_usage.get("completion_tokens", 0)),
+                    latency_ms=completion_latency_ms,
+                    success=False,
+                    error=str(exc)[:500],
+                )
+            except Exception:
+                logger.debug("Observability trace (failure) failed", exc_info=True)
 
             # Record failure as a learned lesson
             await self._record_failure_memory(task, exc)
@@ -1477,6 +2409,31 @@ class AgentRunner:
 
         from dharma_swarm.worker_spawn import WorkerSpec
 
+        worker_metadata = apply_model_pack_metadata(dict(kwargs.pop("metadata", {}) or {}))
+        parent_metadata = (
+            apply_model_pack_metadata(self._config.metadata)
+            if isinstance(self._config.metadata, dict)
+            else {}
+        )
+        for key in (
+            "model_catalog_selector",
+            "model_pack",
+            "provider_pack",
+            "model_selector",
+            "allow_provider_routing",
+            "available_provider_types",
+            "provider_allowlist",
+            "preferred_provider",
+            "preferred_model",
+        ):
+            if key not in worker_metadata and key in parent_metadata:
+                value = parent_metadata.get(key)
+                worker_metadata[key] = list(value) if isinstance(value, list) else value
+        worker_metadata.setdefault("preferred_provider", self._config.provider.value)
+        worker_metadata.setdefault("preferred_model", self._config.model)
+        worker_metadata = apply_model_pack_metadata(worker_metadata)
+        kwargs["metadata"] = worker_metadata
+
         spec = WorkerSpec(
             worker_type=worker_type,
             task_title=task_title,
@@ -1497,6 +2454,7 @@ class AgentRunner:
         latency_ms: float,
         success: bool,
         result_text: str,
+        quality_score_override: float | None = None,
     ) -> None:
         if (
             route_request is None
@@ -1523,11 +2481,15 @@ class AgentRunner:
                 route_request=route_request,
                 request=request,
                 decision=route_decision,
-                quality_score=_feedback_quality_score(
-                    task,
-                    self._config,
-                    success=success,
-                    result_text=result_text,
+                quality_score=(
+                    _clamp01(float(quality_score_override))
+                    if quality_score_override is not None
+                    else _feedback_quality_score(
+                        task,
+                        self._config,
+                        success=success,
+                        result_text=result_text,
+                    )
                 ),
                 total_tokens=_response_total_tokens(response),
                 latency_ms=latency_ms,
@@ -1551,25 +2513,41 @@ class AgentRunner:
         derived from task priority. Consolidates every 5 completed tasks.
         Best-effort: never fails the task if memory operations error.
         """
-        if self._memory is None:
-            return
-        try:
-            salience = _PRIORITY_SALIENCE.get(task.priority, 0.5)
-            await self._memory.remember(
-                key=f"task:{task.id}",
-                value=result[:200],
-                category="working",
-                importance=salience,
-                source=self._config.name,
-            )
-            # Consolidate periodically
-            if self._state.tasks_completed % 5 == 0:
-                await self._memory.consolidate()
-            await self._memory.save()
-        except Exception as exc:
-            logger.debug(
-                "Memory record failed for %s: %s", self._config.name, exc
-            )
+        if self._memory is not None:
+            try:
+                salience = _PRIORITY_SALIENCE.get(task.priority, 0.5)
+                await self._memory.remember(
+                    key=f"task:{task.id}",
+                    value=result[:200],
+                    category="working",
+                    importance=salience,
+                    source=self._config.name,
+                )
+                # Consolidate periodically
+                if self._state.tasks_completed % 5 == 0:
+                    await self._memory.consolidate()
+                await self._memory.save()
+            except Exception as exc:
+                logger.debug(
+                    "Memory record failed for %s: %s", self._config.name, exc
+                )
+
+        # Also record in advanced memory (SQLite-backed, Letta-inspired)
+        if self._advanced_memory is not None:
+            try:
+                await self._advanced_memory.remember(
+                    key=f"task:{task.id}",
+                    content=result[:500],
+                    scope=MemoryScope.SHORT_TERM,
+                    ttl=86400,  # 24h TTL for task results
+                )
+                if self._state.tasks_completed % 5 == 0:
+                    await self._advanced_memory.consolidate()
+            except Exception as exc:
+                logger.debug(
+                    "Advanced memory record failed for %s: %s",
+                    self._config.name, exc,
+                )
 
     def _emit_fitness_signal(self, task: Task, result: str) -> None:
         """Score agent output and emit fitness signal to the bus.
@@ -1828,6 +2806,13 @@ class AgentRunner:
         except Exception:
             logger.debug("Ontology agent retirement skipped", exc_info=True)
 
+        cleanup = getattr(self._sandbox, "cleanup", None)
+        if callable(cleanup):
+            try:
+                await cleanup()
+            except Exception:
+                logger.debug("Sandbox cleanup failed for %s", self._config.name, exc_info=True)
+
         logger.info("Agent %s stopping", self._config.name)
         async with self._lock:
             self._state.status = AgentStatus.DEAD
@@ -1894,6 +2879,7 @@ class AgentPool:
         message_bus: Any | None = None,
         worker_spawner: Any | None = None,
         ontology_path: Path | str | None = None,
+        advanced_memory: AgentMemoryManager | None = None,
     ) -> AgentRunner:
         """Create, start, and register an agent.
 
@@ -1905,6 +2891,7 @@ class AgentPool:
             message_bus: Optional persistent MessageBus for durable fitness events.
             worker_spawner: Optional WorkerSpawner for ephemeral worker delegation.
             ontology_path: Optional ontology DB path to isolate runtime projection.
+            advanced_memory: Optional SQLite-backed self-managing memory (Letta-inspired).
 
         Returns:
             The started AgentRunner.
@@ -1919,6 +2906,13 @@ class AgentPool:
         except Exception:
             logger.debug("Constitutional enrichment skipped", exc_info=True)
 
+        # Auto-create advanced memory if not provided
+        if advanced_memory is None:
+            try:
+                advanced_memory = AgentMemoryManager(config.name)
+            except Exception:
+                logger.debug("Auto-create advanced memory failed", exc_info=True)
+
         runner = AgentRunner(
             config,
             provider=provider,
@@ -1927,6 +2921,7 @@ class AgentPool:
             message_bus=message_bus,
             worker_spawner=worker_spawner,
             ontology_path=ontology_path,
+            advanced_memory=advanced_memory,
         )
         await runner.start()
         async with self._lock:
@@ -1952,6 +2947,7 @@ class AgentPool:
                     role=config.role.value if hasattr(config.role, "value") else str(config.role),
                     model=config.model or "",
                     system_prompt=config.system_prompt or "",
+                    runtime_fields=runtime_field_manifest_for_agent_config(config),
                 )
         except Exception:
             logger.debug("AgentRegistry registration skipped", exc_info=True)

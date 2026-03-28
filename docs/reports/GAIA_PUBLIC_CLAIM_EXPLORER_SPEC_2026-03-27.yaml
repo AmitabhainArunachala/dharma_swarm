@@ -1,0 +1,246 @@
+generated: 2026-03-27
+artifact: GAIA_PUBLIC_CLAIM_EXPLORER_SPEC
+status: validator_draft
+objective: >
+  Define an auditable public ecological-claim surface for GAIA-ECO that stays
+  grounded in the current ledger and verification kernel while preventing
+  greenwashing, consent laundering, and silent reversals.
+
+anchors:
+  current_runtime:
+    - dharma_swarm/gaia_ledger.py
+    - dharma_swarm/gaia_verification.py
+    - dharma_swarm/gaia_fitness.py
+    - dharma_swarm/claim_graph.py
+    - dharma_swarm/contradiction_registry.py
+    - dharma_swarm/citation_index.py
+  governance_sources:
+    - docs/reports/GAIA_ECO_CONCEPTUAL_FRAMEWORK_2026-03-27.md
+    - docs/reports/GAIA_ECO_ARCHITECTURE_2026-03-27.yaml
+    - docs/reports/PLANETARY_RECIPROCITY_COMMONS_GOVERNANCE_CHARTER_2026-03-11.md
+    - docs/reports/AI_RECIPROCITY_LEDGER_V0_SCHEMA_2026-03-11.yaml
+
+public_claim_invariant:
+  - no public ecological claim without a bounded claim statement
+  - no public ecological claim without methodology_ref
+  - no public ecological claim without integrity_class
+  - no public ecological claim without evidence_path
+  - no public ecological claim without audit_status
+  - no public ecological claim without challenge_path
+  - no public ecological claim involving communities without explicit consent_status
+
+integrity_card:
+  required_fields:
+    claim_id: stable immutable identifier
+    project_id: linked initiative or site identifier
+    claim_statement: bounded public claim text
+    claim_type: activity|output|outcome|livelihood|mixed
+    claim_scope: geography plus time window and affected population or ecosystem
+    integrity_class: experimental|emerging|high_integrity
+    methodology_ref: method or source identifier
+    evidence_path: list of evidence bundle refs with hashes
+    audit_status: pending|passed|qualified|failed|challenged
+    challenge_status: submitted|acknowledged|needs_evidence|open_review|material_challenge|dismissed|upheld|resolved|appeal_open
+    consent_status: not_applicable|pending|documented|verified|disputed|withdrawn|expired
+    grievance_status: none|open|material|resolved
+    oracle_summary: agreeing and dissenting oracle types
+    reversal_status: none|watch|partial_reversal|full_reversal
+    last_reviewed_at: timestamp
+    public_notes: uncertainty and limitation text
+  evidence_lanes:
+    G:
+      meaning: direct mechanistic or measurement evidence
+      public_rule: may support quantified ecological outcome claims
+    B:
+      meaning: observed field or human behavior evidence
+      public_rule: may support operational and stewardship claims
+    P:
+      meaning: proxy or heuristic signal
+      public_rule: never display as verified impact
+    I:
+      meaning: inference derived from other claims
+      public_rule: label as interpretation
+    S:
+      meaning: speculative or hypothesis content
+      public_rule: never display as settled public outcome
+
+integrity_classes:
+  experimental:
+    minimum:
+      - methodology_ref present
+      - at least one evidence bundle
+      - at least one audit record exists
+      - challenge path open
+    wording_limits:
+      - may describe pilot activity
+      - may describe early signals
+      - may not describe verified impact
+  emerging:
+    minimum:
+      - methodology_ref present
+      - at least two independent evidence bundles
+      - at least one non-operator review or audit
+      - no hidden material challenge
+    wording_limits:
+      - may describe measured trends with uncertainty
+      - may not describe settled durable impact
+  high_integrity:
+    minimum:
+      - methodology_ref present
+      - evidence path complete
+      - audit_status is passed or qualified with visible note
+      - no unresolved material challenge
+      - grievance_status is not material
+      - consent_status is verified when applicable
+      - quantified ecological outcome claims satisfy current 3-of-5 oracle threshold
+    wording_limits:
+      - may describe verified impact only within bounded scope
+
+challenge_path:
+  standing:
+    - local_or_indigenous_community_member
+    - worker_or_steward
+    - auditor
+    - researcher
+    - ngo_partner
+    - funder_or_buyer
+    - public_observer_with_evidence
+  valid_grounds:
+    - factual_error
+    - misleading_scope_or_wording
+    - missing_evidence_path
+    - audit_conflict_of_interest
+    - consent_dispute
+    - grievance_or_harm
+    - conservation_violation
+    - ecological_reversal
+    - fabricated_or_unverifiable_evidence
+  states:
+    submitted:
+      visibility: challenge count visible, reporter may stay private
+      next: acknowledged
+    acknowledged:
+      visibility: visible on claim card
+      next: needs_evidence|open_review
+    needs_evidence:
+      visibility: visible with deadline
+      next: open_review|dismissed
+    open_review:
+      visibility: visible banner
+      next: material_challenge|dismissed|upheld
+    material_challenge:
+      visibility: red banner and promotional freeze
+      next: upheld|resolved
+    dismissed:
+      visibility: visible with rationale
+      next: appeal_open|closed
+    upheld:
+      visibility: visible with findings
+      next: remediation_in_progress
+    resolved:
+      visibility: visible with remediation outcome
+      next: closed|appeal_open
+    appeal_open:
+      visibility: visible
+      next: resolved|dismissed|upheld
+  service_levels:
+    acknowledge_within_business_days: 5
+    triage_publish_within_business_days: 10
+    initial_finding_within_calendar_days: 30
+  automatic_suspension_triggers:
+    - plausible_evidence_fabrication
+    - consent_status_disputed_or_withdrawn
+    - grievance_status_material
+    - audit_failed
+    - conservation_violation_material
+    - reversal_beyond_disclosed_uncertainty
+
+consent_workflow:
+  required_when:
+    - land_access_or_land_use_intervention
+    - indigenous_or_local_community_impacted
+    - local_or_traditional_knowledge_used
+    - livelihood_or_benefit_sharing_claim_published
+    - community_testimony_used_as_evidence
+  statuses:
+    not_applicable:
+      effect: no consent gate if rationale is documented
+    pending:
+      effect: blocks high_integrity
+    documented:
+      effect: operator has records, still blocks sensitive high_integrity claims until verified
+    verified:
+      effect: eligible for high_integrity if other gates pass
+    disputed:
+      effect: forces material_challenge
+    withdrawn:
+      effect: freezes public claim
+    expired:
+      effect: blocks continued publication until refreshed
+  required_artifacts:
+    - decision_making_body
+    - date_place_language
+    - approved_scope
+    - benefit_sharing_terms
+    - grievance_route
+    - evidence_bundle_hash
+    - privacy_tier
+  invariants:
+    - unknown is not a valid public consent status
+    - operator_attested_consent_alone is insufficient for high_integrity
+    - consent_to_intervention is not consent_to_public_storytelling
+    - unresolved_grievance blocks high_integrity
+    - consent_withdrawal appends history rather than deleting it
+
+remediation_workflow:
+  outcomes:
+    - clarification
+    - numerical_correction
+    - methodology_correction
+    - integrity_downgrade
+    - claim_freeze
+    - claim_withdrawal
+    - claim_reissue
+  steps:
+    - case_opened
+    - owner_assigned
+    - containment
+    - repair_plan
+    - verification
+    - decision
+    - historical_append
+  reinstatement_requirements:
+    - original_challenge_resolved
+    - required_evidence_corrected_or_replaced
+    - consent_and_grievance_status_eligible
+    - fresh_review_confirms_integrity_class
+    - quantified_outcome_claims_again_satisfy_3_of_5_threshold
+
+unsupported_claim_patterns:
+  - proxy_metrics_presented_as_verified_outcomes
+  - durable_restoration_claimed_without_durable_monitoring_window
+  - biodiversity_recovery_inferred_from_carbon_signal_alone
+  - community_benefit_claimed_from_participant_counts_alone
+  - community_consented_claim_based_only_on_operator_attestation
+  - aptavani_or_dharmic_language_used_as_evidence_of_project_effectiveness
+  - one_site_or_time_window_generalized_to_all_sites
+  - reversal_or_failed_audit_hidden_by_refreshing_summary_card
+
+blockers:
+  - jurisdiction_specific_legal_review_for_consent_and_grievance_sufficiency
+  - no_current_typed_models_for_consent_grievance_challenge_or_remediation_records
+  - reversal_materiality_thresholds_not_yet_defined_by_methodology
+  - final_authority_for_high_integrity_designation_not_decided
+  - reporter_privacy_vs_public_transparency_policy_not_defined
+
+implementation_boundary:
+  build_next:
+    - typed models for PublicClaimCard ChallengeRecord ConsentRecord RemediationCase
+    - append_only_event_logging_for_state_transitions
+    - integrity_class_evaluator_reusing_current_verification_outcomes
+    - public_serializer_with_redacted_and_full_audit_views
+  do_not_build_yet:
+    - irreversible_auto_publishing
+    - automated_legal_sufficiency_judgments
+    - automated_dismissal_of_consent_disputes
+    - aggregate_marketing_badges_divorced_from_claim_level_evidence

@@ -63,6 +63,36 @@ def test_enrich_route_request_promotes_quality_for_japanese() -> None:
     assert out.context["complexity_tier"] == "REASONING"
 
 
+def test_enrich_route_request_includes_tiny_router_shadow_metadata() -> None:
+    route = ProviderRouteRequest(
+        action_name="calendar_update",
+        risk_score=0.1,
+        uncertainty=0.1,
+        novelty=0.1,
+        urgency=0.2,
+        expected_impact=0.2,
+    )
+    request = LLMRequest(
+        model="x",
+        messages=[
+            {"role": "user", "content": "Set a reminder for Friday"},
+            {"role": "assistant", "content": "Done."},
+            {"role": "user", "content": "Actually next Monday"},
+        ],
+    )
+
+    out = enrich_route_request(route, request)
+
+    assert out.context["relation_to_previous"] == "correction"
+    assert out.context["actionability"] == "act"
+    assert out.context["retention"] == "useful"
+    assert out.context["ingress_urgency_label"] in {"medium", "high"}
+    assert out.context["tiny_router_source"] in {
+        "heuristic-shadow",
+        "hf-tgupj-tiny-router-shadow",
+    }
+
+
 def test_model_hint_for_provider_prefers_kimi_for_japanese() -> None:
     request = LLMRequest(
         model="x",
