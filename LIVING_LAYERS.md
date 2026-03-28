@@ -367,34 +367,32 @@ layers (living), and the constraint intensity scales with impact scope.
 
 ---
 
-## 7. What Is Not Yet Wired
+## 7. Wiring Status (Updated 2026-03-27)
 
 Honest assessment of remaining gaps:
 
-1. **SHAKTI_HOOK is not injected into agent system prompts.** The text exists
-   in `shakti.py` (line 196) but `startup_crew.py` does not include it. Agents
-   do not currently perceive through the Shakti lens unless manually instructed.
+1. ✅ **SHAKTI_HOOK is now injected into ALL agent system prompts.** As of 2026-03-27,
+   `agent_runner.py` line 1282-1287 injects `SHAKTI_HOOK` for all providers, not just
+   CLAUDE_CODE. Agents now perceive through the Shakti lens automatically.
 
-2. **Stigmergy marks are not automatically left by agent tasks.** The
-   `leave_stigmergic_mark()` convenience function exists (line 201), but
-   `agent_runner.py` does not call it after task completion. Marks must be left
-   manually or through the living layers loop's own observations.
+2. ✅ **Stigmergy marks ARE automatically left by agent tasks.** `agent_runner.py`
+   line 2407 calls `_leave_task_mark()` (defined at line 1670) on every task completion.
+   Marks include agent, file_path, action, observation, salience, and connections.
+   This was ALREADY wired, but the documentation was outdated.
 
-3. **Shakti escalations are not routed to the Darwin Engine.** `ShaktiLoop`
+3. ❌ **Shakti escalations are not routed to the Darwin Engine.** `ShaktiLoop`
    can produce escalation dicts, and these are logged in the orchestrator
    summary, but there is no automatic path from a Shakti escalation to a
-   Darwin Engine `Proposal`. This routing logic is a v2 task.
+   Darwin Engine `Proposal`. This routing logic is still a v2 task.
 
-4. **Dream marks are not weighted differently from agent marks.** The lattice
+4. ❌ **Dream marks are not weighted differently from agent marks.** The lattice
    treats `action="dream"` marks identically to `action="write"` marks when
    computing hot paths. A future refinement could weight dream marks differently
    in the hot path and salience calculations.
 
-These are wiring gaps, not architectural gaps. Each component works
-independently and is tested. The living layers loop in `orchestrate_live.py`
-connects them at the 180-second interval level. The remaining work is tighter
-integration: auto-marks from agent tasks, hook injection at spawn, and routing
-Shakti escalations into the evolution pipeline.
+**Current status:** 2/4 wired (50%), 2/4 remaining. The living layers loop in
+`orchestrate_live.py` connects stigmergy, shakti, and subconscious at the 180-second
+interval level. The remaining work is: Shakti → Darwin routing and dream mark weighting.
 
 ---
 

@@ -34,6 +34,10 @@ from typing import Any
 logger = logging.getLogger(__name__)
 
 from dharma_swarm.config import DEFAULT_CONFIG
+from dharma_swarm.runtime_artifacts import (
+    freshest_pulse_log_path,
+    write_dgc_health_snapshot,
+)
 
 HOME = Path.home()
 STATE_DIR = HOME / ".dharma"
@@ -47,6 +51,17 @@ EVOLUTION_INTERVAL = _ll.evolution_interval_seconds
 HEALTH_INTERVAL = _ll.health_interval_seconds
 LIVING_INTERVAL = _ll.living_interval_seconds
 MAX_DAILY = _ll.max_daily_tasks
+_RUNTIME_HEALTH_STATE: dict[str, int] = {
+    "agent_count": 0,
+    "task_count": 0,
+}
+
+
+def _update_runtime_health_state(*, agent_count: int | None = None, task_count: int | None = None) -> None:
+    if agent_count is not None:
+        _RUNTIME_HEALTH_STATE["agent_count"] = max(0, int(agent_count))
+    if task_count is not None:
+        _RUNTIME_HEALTH_STATE["task_count"] = max(0, int(task_count))
 
 
 def _log(system: str, msg: str) -> None:
@@ -54,6 +69,17 @@ def _log(system: str, msg: str) -> None:
     line = f"[{ts}] [{system}] {msg}"
     print(line, flush=True)
     logger.info("[%s] %s", system, msg)
+
+
+async def _wait_or_shutdown(shutdown_event: asyncio.Event, delay: float) -> bool:
+    """Sleep for a backoff window unless shutdown is requested first."""
+    if delay <= 0:
+        return shutdown_event.is_set()
+    try:
+        await asyncio.wait_for(shutdown_event.wait(), timeout=delay)
+        return True
+    except asyncio.TimeoutError:
+        return shutdown_event.is_set()
 
 
 async def run_swarm_loop(
@@ -75,6 +101,14 @@ async def run_swarm_loop(
 
     swarm = SwarmManager(state_dir=str(STATE_DIR), daemon_config=cfg)
     await swarm.init()
+    try:
+        from dharma_swarm.startup_crew import spawn_cybernetics_crew
+
+        cyber_crew = await spawn_cybernetics_crew(swarm)
+        if cyber_crew:
+            _log("swarm", f"Cybernetics crew asserted: {len(cyber_crew)} seats")
+    except Exception as exc:
+        _log("swarm", f"Cybernetics crew assertion failed: {exc}")
 
     # MessageBus for instinct signal consumption
     from dharma_swarm.message_bus import MessageBus as _MBus
@@ -82,6 +116,16 @@ async def run_swarm_loop(
     await _instinct_bus.init_db()
 
     agents = await swarm.list_agents()
+    swarm_state = await swarm.status()
+    _update_runtime_health_state(
+        agent_count=len(swarm_state.agents),
+        task_count=(
+            swarm_state.tasks_pending
+            + swarm_state.tasks_running
+            + swarm_state.tasks_completed
+            + swarm_state.tasks_failed
+        ),
+    )
     _log("swarm", f"Ready: {len(agents)} agents, thread={swarm.current_thread}")
 
     try:
@@ -122,6 +166,16 @@ async def run_swarm_loop(
                     logger.debug("Swarm: instinct drain failed", exc_info=True)
 
                 activity = await swarm.tick()
+                swarm_state = await swarm.status()
+                _update_runtime_health_state(
+                    agent_count=len(swarm_state.agents),
+                    task_count=(
+                        swarm_state.tasks_pending
+                        + swarm_state.tasks_running
+                        + swarm_state.tasks_completed
+                        + swarm_state.tasks_failed
+                    ),
+                )
 
                 if activity.get("paused"):
                     _log("swarm", "Paused (.PAUSE file)")
@@ -549,7 +603,7 @@ async def run_health_loop(shutdown_event: asyncio.Event) -> None:
             else:
                 # Quick summary
                 pid_file = STATE_DIR / "daemon.pid"
-                pulse_log = STATE_DIR / "pulse.log"
+                pulse_log = freshest_pulse_log_path(STATE_DIR)
                 status_parts = []
                 if pid_file.exists():
                     try:
@@ -558,10 +612,19 @@ async def run_health_loop(shutdown_event: asyncio.Event) -> None:
                         status_parts.append(f"daemon=PID:{pid}")
                     except (ValueError, OSError):
                         status_parts.append("daemon=dead")
-                if pulse_log.exists():
+                if pulse_log is not None and pulse_log.exists():
                     lines = pulse_log.read_text().split("--- PULSE @")
                     status_parts.append(f"pulses={len(lines)-1}")
                 _log("health", f"OK ({', '.join(status_parts) or 'nominal'})")
+
+            write_dgc_health_snapshot(
+                STATE_DIR,
+                daemon_pid=os.getpid(),
+                agent_count=_RUNTIME_HEALTH_STATE.get("agent_count", 0),
+                task_count=_RUNTIME_HEALTH_STATE.get("task_count", 0),
+                anomaly_count=len(anomalies),
+                source="orchestrate_live",
+            )
 
         except Exception as e:
             _log("health", f"Error: {e}")
@@ -610,6 +673,23 @@ async def run_living_layers(shutdown_event: asyncio.Event) -> None:
                 if high:
                     summary.append(f"high_salience={len(high)}")
 
+                    # Route high-salience escalations to Darwin Engine
+                    try:
+                        from dharma_swarm.evolution import DarwinEngine
+                        darwin = DarwinEngine()
+                        await darwin.init()
+                        for perception in high:
+                            if perception.impact in ("module", "system"):
+                                await darwin.propose(
+                                    component=perception.file_path or "system",
+                                    change_type="mutation",
+                                    description=f"Shakti {perception.energy} perception: {perception.observation}",
+                                    think_notes=f"Impact: {perception.impact}, Salience: {perception.salience:.2f}",
+                                )
+                        summary.append(f"darwin_proposals={len([p for p in high if p.impact in ('module', 'system')])}")
+                    except Exception as e:
+                        logger.debug("Shakti→Darwin routing failed: %s", e, exc_info=True)
+
             _log("living", " ".join(summary))
 
         except Exception as e:
@@ -646,9 +726,9 @@ CONSOLIDATION_INTERVAL = _ll.consolidation_interval_seconds
 
 WITNESS_INTERVAL = 3600  # 60 minutes between S3* sporadic audits
 
-ZEITGEIST_INTERVAL = 300  # 5 minutes between S4 environmental scans
+ZEITGEIST_INTERVAL = 600  # 10 minutes between S4 environmental scans
 
-REPLICATION_INTERVAL = _ll.replication_check_interval_seconds
+REPLICATION_INTERVAL = 3600  # 1 hour between replication checks
 
 RECOGNITION_INTERVAL = 7200  # 2 hours between recognition synthesis
 
@@ -791,6 +871,270 @@ async def _run_consolidation_loop(shutdown_event: asyncio.Event) -> None:
             pass
 
     _log("consolidation", "Sleep cycle stopped")
+
+
+# ---------------------------------------------------------------------------
+# Loop 13: Free Evolution Grind — nonstop free-tier evolution with hunger signal
+# ---------------------------------------------------------------------------
+
+# Hunger thresholds: when hunger > HIGH, run fast. When < LOW, run slow.
+_GRIND_HUNGER_HIGH = 0.7
+_GRIND_HUNGER_LOW = 0.3
+_GRIND_INTERVAL_FAST = 60      # seconds — when hungry
+_GRIND_INTERVAL_SLOW = 300     # seconds — when satisfied
+_GRIND_STAGNATION_WINDOW = 10  # meta-archive entries to check for plateau
+
+# Free-tier providers only — zero cost, can run 24/7
+_FREE_PROVIDER_TYPES = ("ollama", "nvidia_nim", "openrouter_free", "groq", "siliconflow")
+
+# Free coding-capable models on OpenRouter for evolution proposals
+_FREE_CODING_MODELS = (
+    "qwen/qwen3-coder:free",
+    "qwen/qwen3-next-80b-a3b-instruct:free",
+    "qwen/qwen3-4b:free",
+    "meta-llama/llama-3.3-70b-instruct:free",
+    "deepseek/deepseek-chat-v3-0324:free",
+)
+
+# Core Python modules to target for evolution — actual testable source
+_GRIND_EVOLUTION_TARGETS = (
+    "swarm.py", "orchestrator.py", "agent_runner.py", "providers.py",
+    "evolution.py", "thinkodynamic_director.py", "consolidation.py",
+    "stigmergy.py", "monitor.py", "auto_proposer.py", "self_improve.py",
+    "fitness_predictor.py", "training_flywheel.py", "overnight_evaluator.py",
+)
+
+
+def _compute_hunger(meta_archive_path: Path, last_improvement_time: float) -> float:
+    """Hunger = how badly the system wants to evolve right now.
+
+    Inputs:
+        - meta_fitness plateau (are recent meta-fitness values flat?)
+        - time since last real improvement
+        - gap between current fitness and 1.0
+
+    Returns 0.0 (satisfied) to 1.0 (starving).
+    """
+    import json as _hj
+    import time as _ht
+
+    if not meta_archive_path.exists():
+        return 0.5  # neutral
+
+    # Read last N meta-archive entries
+    try:
+        lines = meta_archive_path.read_text().strip().split("\n")
+        recent = []
+        for line in lines[-_GRIND_STAGNATION_WINDOW:]:
+            if line.strip():
+                recent.append(_hj.loads(line))
+    except Exception:
+        return 0.5
+
+    if len(recent) < 3:
+        return 0.6  # slight hunger — need more data
+
+    # Component 1: fitness gap (how far from 1.0)
+    latest_mf = recent[-1].get("meta_fitness", 0.5)
+    fitness_gap = max(0.0, 1.0 - latest_mf)
+
+    # Component 2: stagnation (are recent values flat?)
+    mf_values = [e.get("meta_fitness", 0.5) for e in recent]
+    if len(mf_values) >= 2:
+        diffs = [abs(b - a) for a, b in zip(mf_values, mf_values[1:])]
+        avg_diff = sum(diffs) / len(diffs)
+        stagnation = max(0.0, 1.0 - (avg_diff * 20))  # flat = high stagnation
+    else:
+        stagnation = 0.5
+
+    # Component 3: time since last improvement (decays every hour)
+    time_since = _ht.time() - last_improvement_time
+    time_pressure = min(1.0, time_since / 7200.0)  # maxes at 2 hours
+
+    hunger = (0.4 * fitness_gap) + (0.35 * stagnation) + (0.25 * time_pressure)
+    return max(0.0, min(1.0, hunger))
+
+
+def _hunger_to_interval(hunger: float) -> float:
+    """Map hunger to sleep interval: high hunger = short interval."""
+    if hunger >= _GRIND_HUNGER_HIGH:
+        return _GRIND_INTERVAL_FAST
+    if hunger <= _GRIND_HUNGER_LOW:
+        return _GRIND_INTERVAL_SLOW
+    # Linear interpolation
+    ratio = (hunger - _GRIND_HUNGER_LOW) / (_GRIND_HUNGER_HIGH - _GRIND_HUNGER_LOW)
+    return _GRIND_INTERVAL_SLOW - (ratio * (_GRIND_INTERVAL_SLOW - _GRIND_INTERVAL_FAST))
+
+
+async def run_free_evolution_grind(shutdown_event: asyncio.Event) -> None:
+    """Nonstop free-tier evolution loop with adaptive hunger signal.
+
+    Runs AutoProposer → DarwinEngine → MetaEvolution using ONLY free providers.
+    Adjusts its own cadence: runs every 60s when hungry, every 300s when satisfied.
+    Cost: $0. Runs 24/7.
+
+    This is loop #13 in the orchestrator — the system's metabolic drive.
+    """
+    await asyncio.sleep(90)  # Let swarm + evolution init first
+
+    _log("grind", "Free Evolution Grind starting (loop #13)")
+    _log("grind", f"  Free providers: {_FREE_PROVIDER_TYPES}")
+    _log("grind", f"  Interval range: {_GRIND_INTERVAL_FAST}s (hungry) → {_GRIND_INTERVAL_SLOW}s (satisfied)")
+
+    # Init DarwinEngine (separate instance, reads same archive)
+    from dharma_swarm.evolution import DarwinEngine, Proposal
+    from dharma_swarm.meta_evolution import MetaEvolutionEngine
+
+    evo_dir = STATE_DIR / "evolution"
+    traces_dir = STATE_DIR / "traces"
+    meta_archive_path = evo_dir / "meta_archive.jsonl"
+
+    engine = DarwinEngine(
+        archive_path=evo_dir / "archive.jsonl",
+        traces_path=traces_dir,
+        predictor_path=evo_dir / "predictor_data.jsonl",
+    )
+    await engine.init()
+
+    meta_engine = MetaEvolutionEngine(
+        engine,
+        meta_archive_path=meta_archive_path,
+        n_object_cycles_per_meta=2,
+        auto_apply=True,
+    )
+
+    cycle_count = 0
+    last_improvement_time = __import__("time").time()
+    last_best_fitness = 0.0
+
+    while not shutdown_event.is_set():
+        cycle_count += 1
+
+        # Compute hunger
+        hunger = _compute_hunger(meta_archive_path, last_improvement_time)
+        interval = _hunger_to_interval(hunger)
+
+        try:
+            import random as _grng
+            _src_root = Path(__file__).resolve().parent
+            proposals: list[Proposal] = []
+
+            # Phase 1: Read pending proposals from consolidation bridge
+            try:
+                pending = engine.load_pending_proposals()
+                if pending:
+                    # Filter to only Python source targets
+                    for p in pending[:3]:
+                        comp = p.component
+                        if comp.endswith(".py") or "/" not in comp:
+                            proposals.append(p)
+                    if proposals:
+                        _log("grind", f"Loaded {len(proposals)} pending proposals from consolidation")
+            except Exception:
+                pass
+
+            # Phase 2: AutoProposer observations (only those targeting .py files)
+            if len(proposals) < 3:
+                try:
+                    import json as _gj
+                    obs_file = STATE_DIR / "auto_proposer" / "observations.jsonl"
+                    if obs_file.exists():
+                        obs_lines = obs_file.read_text().strip().split("\n")
+                        for line in obs_lines[-5:]:
+                            if not line.strip():
+                                continue
+                            obs = _gj.loads(line)
+                            fp = obs.get("source_data", {}).get("file_path", "")
+                            # Only accept Python file paths
+                            if fp.endswith(".py"):
+                                proposals.append(Proposal(
+                                    component=fp,
+                                    change_type="mutation",
+                                    description=obs.get("description", "auto-observation"),
+                                    spec_ref=f"auto_proposer:{obs.get('observation_type', '?')}",
+                                ))
+                except Exception as exc:
+                    _log("grind", f"Observation read error: {exc}")
+
+            # Phase 3: Always include a random core Python module target
+            # This ensures every cycle has at least one testable proposal
+            available_targets = [
+                t for t in _GRIND_EVOLUTION_TARGETS
+                if (_src_root / t).exists()
+            ]
+            if available_targets:
+                target = _grng.choice(available_targets)
+                proposals.append(Proposal(
+                    component=target,
+                    change_type="mutation",
+                    description=f"Grind probe: evolve {target} (hunger={hunger:.2f})",
+                    spec_ref="grind_probe",
+                ))
+
+            # Phase 4: Run evolution cycle via DarwinEngine.run_cycle
+            # (takes proposals directly — no LLM needed for proposal gen)
+            result = await engine.run_cycle(proposals)
+
+            # Phase 4b: LLM-powered evolution via Qwen3-coder:free (every 5th cycle)
+            # This uses auto_evolve with free coding models for deeper mutations
+            if cycle_count % 5 == 0 and hunger > 0.4:
+                try:
+                    import os as _gos
+                    if _gos.environ.get("OPENROUTER_API_KEY"):
+                        from dharma_swarm.providers import OpenRouterProvider
+                        _free_provider = OpenRouterProvider()
+                        _llm_targets = _grng.sample(available_targets, min(2, len(available_targets)))
+                        _llm_files = [_src_root / t for t in _llm_targets]
+                        _model = _grng.choice(_FREE_CODING_MODELS)
+                        _log("grind", f"LLM evolve via {_model}: {_llm_targets}")
+                        llm_result = await engine.auto_evolve(
+                            provider=_free_provider,
+                            source_files=_llm_files,
+                            model=_model,
+                            shadow=True,  # Shadow mode — evaluate but don't apply
+                            timeout=30.0,
+                            context=f"Grind cycle {cycle_count}, hunger={hunger:.2f}",
+                        )
+                        if llm_result.best_fitness > result.best_fitness:
+                            result = llm_result  # Use the better result
+                            _log("grind", f"LLM result: fitness={llm_result.best_fitness:.3f} (better)")
+                except Exception as _llm_err:
+                    _log("grind", f"LLM evolve error: {_llm_err}")
+
+            # Phase 5: Feed to meta-evolution
+            meta_result = meta_engine.observe_cycle_result(result)
+
+            # Track improvement
+            if result.best_fitness > last_best_fitness + 0.01:
+                last_best_fitness = result.best_fitness
+                last_improvement_time = __import__("time").time()
+
+            # Phase 5: Log
+            meta_note = ""
+            if meta_result is not None:
+                if meta_result.evolved_parameters:
+                    meta_note = f" | META EVOLVED (mf={meta_result.meta_fitness:.3f})"
+                else:
+                    meta_note = f" | meta ok (mf={meta_result.meta_fitness:.3f})"
+
+            _log(
+                "grind",
+                f"Cycle {cycle_count}: hunger={hunger:.2f} interval={interval:.0f}s "
+                f"proposals={len(proposals)} fitness={result.best_fitness:.3f} "
+                f"archived={result.proposals_archived}{meta_note}",
+            )
+
+        except Exception as exc:
+            _log("grind", f"Cycle {cycle_count} error: {exc}")
+
+        # Adaptive sleep — hunger controls the pace
+        try:
+            await asyncio.wait_for(shutdown_event.wait(), timeout=interval)
+            break
+        except asyncio.TimeoutError:
+            pass
+
+    _log("grind", f"Free Evolution Grind stopped after {cycle_count} cycles")
 
 
 async def _run_replication_monitor_loop(shutdown_event: asyncio.Event) -> None:
@@ -1025,6 +1369,16 @@ async def orchestrate(background: bool = False) -> None:
     _log("orchestrator", f"  Signal bus: active")
     _log("orchestrator", "=" * 60)
 
+    # Constitutional size check (Power Prompt Commandment #3)
+    try:
+        from dharma_swarm.constitutional_size_check import enforce_constitutional_size
+        enforce_constitutional_size()
+    except RuntimeError as e:
+        _log("orchestrator", f"FATAL: {e}")
+        raise
+    except Exception as e:
+        _log("orchestrator", f"Constitutional size check failed (non-fatal): {e}")
+
     # Strange Loop Phase 0: unified swarm tick handles evolution + living layers + health
     # Only genuinely independent loops remain as separate tasks
     from dharma_swarm.context_agent import run_context_agent_loop
@@ -1037,55 +1391,86 @@ async def orchestrate(background: bool = False) -> None:
         os.environ["DHARMA_SELF_IMPROVE"] = "1"
         _log("orchestrator", "Auto-enabled DHARMA_SELF_IMPROVE (autonomy >= 1)")
 
-    tasks = [
-        asyncio.create_task(run_swarm_loop(shutdown_event, signal_bus=bus), name="swarm"),
-        asyncio.create_task(run_pulse_loop(shutdown_event), name="pulse"),
-        asyncio.create_task(
-            _run_recognition_loop(shutdown_event), name="recognition"
-        ),
-        asyncio.create_task(run_conductor_loop(shutdown_event), name="conductors"),
-        asyncio.create_task(
-            run_context_agent_loop(shutdown_event, signal_bus=bus), name="context-agent"
-        ),
-        asyncio.create_task(
-            _run_zeitgeist_loop(shutdown_event), name="zeitgeist"
-        ),
-        asyncio.create_task(
-            _run_witness_loop(shutdown_event), name="witness"
-        ),
-        asyncio.create_task(
-            _run_consolidation_loop(shutdown_event), name="consolidation"
-        ),
-        asyncio.create_task(
-            _run_replication_monitor_loop(shutdown_event), name="replication"
-        ),
-        asyncio.create_task(
-            run_training_flywheel_loop(shutdown_event), name="flywheel"
-        ),
-        asyncio.create_task(
-            run_health_loop(shutdown_event), name="health"
-        ),
-        asyncio.create_task(
-            run_self_improvement_loop(shutdown_event, interval=3600),
-            name="self-improve"
-        ),
-    ]
+    task_factories: dict[str, Any] = {
+        "swarm": lambda: run_swarm_loop(shutdown_event, signal_bus=bus),
+        "pulse": lambda: run_pulse_loop(shutdown_event),
+        "recognition": lambda: _run_recognition_loop(shutdown_event),
+        "conductors": lambda: run_conductor_loop(shutdown_event),
+        "context-agent": lambda: run_context_agent_loop(shutdown_event, signal_bus=bus),
+        "zeitgeist": lambda: _run_zeitgeist_loop(shutdown_event),
+        "witness": lambda: _run_witness_loop(shutdown_event),
+        "consolidation": lambda: _run_consolidation_loop(shutdown_event),
+        "replication": lambda: _run_replication_monitor_loop(shutdown_event),
+        "flywheel": lambda: run_training_flywheel_loop(shutdown_event),
+        "health": lambda: run_health_loop(shutdown_event),
+        "self-improve": lambda: run_self_improvement_loop(shutdown_event, interval=3600),
+        "free-grind": lambda: run_free_evolution_grind(shutdown_event),
+    }
+    optional_clean_exit = {"pulse"}
+    tasks = {
+        name: asyncio.create_task(factory(), name=name)
+        for name, factory in task_factories.items()
+    }
 
-    _log("orchestrator", f"All {len(tasks)} systems launched ({len(tasks)} loops incl. self-improve)")
+    _log("orchestrator", f"All {len(tasks)} systems launched ({len(tasks)} loops incl. free-grind)")
 
     try:
-        # Wait for shutdown or first failure
-        done, pending = await asyncio.wait(tasks, return_when=asyncio.FIRST_EXCEPTION)
-        for t in done:
-            if t.exception():
-                _log("orchestrator", f"System {t.get_name()} failed: {t.exception()}")
+        # Resilient loop: restart failed tasks instead of dying on first error.
+        # Transient failures (e.g. "database is locked") should not kill all
+        # 13 loops — just log, wait a beat, and let the system heal.
+        max_restarts = 5
+        restart_counts: dict[str, int] = {}
+
+        while tasks and not shutdown_event.is_set():
+            done, pending = await asyncio.wait(
+                list(tasks.values()), return_when=asyncio.FIRST_COMPLETED, timeout=60.0,
+            )
+            if not done:
+                continue  # timeout, check shutdown flag
+
+            restart_queue: list[str] = []
+            for t in done:
+                name = t.get_name() or "unknown"
+                tasks.pop(name, None)
+                if t.cancelled():
+                    if shutdown_event.is_set():
+                        _log("orchestrator", f"System {name} cancelled during shutdown")
+                    else:
+                        _log("orchestrator", f"System {name} cancelled unexpectedly")
+                        if name not in optional_clean_exit:
+                            restart_queue.append(name)
+                    continue
+
+                exc = t.exception()
+                if exc is not None:
+                    _log("orchestrator", f"System {name} failed: {exc}")
+                    restart_queue.append(name)
+                    continue
+
+                if shutdown_event.is_set() or name in optional_clean_exit:
+                    _log("orchestrator", f"System {name} exited cleanly")
+                else:
+                    _log("orchestrator", f"System {name} exited unexpectedly; scheduling restart")
+                    restart_queue.append(name)
+
+            for name in restart_queue:
+                count = restart_counts.get(name, 0) + 1
+                restart_counts[name] = count
+                if count <= max_restarts:
+                    _log("orchestrator", f"Restarting {name} (attempt {count}/{max_restarts})")
+                    if await _wait_or_shutdown(shutdown_event, min(count * 5, 30)):
+                        break
+                    tasks[name] = asyncio.create_task(task_factories[name](), name=name)
+                else:
+                    _log("orchestrator", f"System {name} exceeded max restarts, abandoning")
+
     except asyncio.CancelledError:
         pass
     finally:
         shutdown_event.set()
-        for t in tasks:
+        for t in tasks.values():
             t.cancel()
-        await asyncio.gather(*tasks, return_exceptions=True)
+        await asyncio.gather(*tasks.values(), return_exceptions=True)
         pid_file.unlink(missing_ok=True)
         _log("orchestrator", "All systems stopped")
 

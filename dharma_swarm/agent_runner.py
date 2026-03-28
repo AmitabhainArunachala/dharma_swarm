@@ -10,7 +10,9 @@ import asyncio
 import json
 import logging
 import os
+import re
 import time
+from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Protocol, runtime_checkable
@@ -101,6 +103,147 @@ _PRIVILEGED_HINTS = (
     "ssh",
     "sudo",
 )
+_REASONING_LEAK_MARKERS = ("<think", "</think>", "<analysis", "</analysis>")
+_EXPLORATION_PREAMBLE_MARKERS = (
+    "i'll begin by",
+    "i will begin by",
+    "let me explore",
+    "let me check",
+    "first, i'll",
+)
+_FILE_REFERENCE_PATTERN = re.compile(
+    r"(?<![\w/])(?:[A-Za-z0-9_.-]+/)+(?:[A-Za-z0-9_.-]+\.(?:py|md|json|yaml|yml|toml|txt|ts|tsx|js|jsx|sh))(?![\w/])"
+)
+_META_OBSERVATION_HINTS = (
+    "system",
+    "control plane",
+    "orchestrator",
+    "router",
+    "feedback",
+    "active inference",
+    "mission contract",
+    "evolution",
+    "archive",
+    "downstream",
+    "upstream",
+)
+_OPENAI_TOOL_PROVIDER_TYPES = {
+    ProviderType.OPENAI,
+    ProviderType.OPENROUTER,
+    ProviderType.OPENROUTER_FREE,
+    ProviderType.NVIDIA_NIM,
+    ProviderType.GROQ,
+    ProviderType.CEREBRAS,
+    ProviderType.SILICONFLOW,
+    ProviderType.TOGETHER,
+    ProviderType.FIREWORKS,
+    ProviderType.GOOGLE_AI,
+    ProviderType.SAMBANOVA,
+    ProviderType.MISTRAL,
+    ProviderType.CHUTES,
+}
+_LOCAL_TOOL_RUNTIME_DIRECTIVE = (
+    "You have real local tool access for this task. "
+    "Use `read_file`, `edit_file`, `write_file`, `glob_files`, `grep_search`, "
+    "and `shell_exec` to inspect, modify, and verify the workspace. "
+    "Do not roleplay tool use. Call tools directly when you need evidence or side effects."
+)
+_LOCAL_OPENAI_TOOL_DEFINITIONS: list[dict[str, Any]] = [
+    {
+        "type": "function",
+        "function": {
+            "name": "read_file",
+            "description": "Read a file from the local workspace.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "path": {"type": "string"},
+                    "offset": {"type": "integer", "default": 1},
+                    "limit": {"type": "integer", "default": 200},
+                },
+                "required": ["path"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "write_file",
+            "description": "Write a file in the local workspace, creating parents if needed.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "path": {"type": "string"},
+                    "content": {"type": "string"},
+                },
+                "required": ["path", "content"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "edit_file",
+            "description": "Replace one exact string inside a file.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "path": {"type": "string"},
+                    "old_string": {"type": "string"},
+                    "new_string": {"type": "string"},
+                },
+                "required": ["path", "old_string", "new_string"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "shell_exec",
+            "description": "Execute a shell command inside the local workspace.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "command": {"type": "string"},
+                    "timeout": {"type": "integer", "default": 30},
+                },
+                "required": ["command"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "glob_files",
+            "description": "List files matching a glob pattern in the local workspace.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "pattern": {"type": "string"},
+                    "path": {"type": "string"},
+                },
+                "required": ["pattern"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "grep_search",
+            "description": "Search file contents with a regex pattern in the local workspace.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "pattern": {"type": "string"},
+                    "path": {"type": "string"},
+                    "glob": {"type": "string"},
+                    "max_results": {"type": "integer", "default": 30},
+                },
+                "required": ["pattern"],
+            },
+        },
+    },
+]
 
 
 # ---------------------------------------------------------------------------
@@ -313,9 +456,11 @@ def _allow_provider_routing(task: Task, config: AgentConfig) -> bool:
     )
     if override is not None:
         return override
-    return (
-        os.environ.get("DGC_AGENT_ROUTED_EXECUTION", "").strip().lower() in _TRUE_VALUES
-    )
+    # Keep agents pinned to their configured lane unless the task/config
+    # explicitly widens execution. A global env toggle is too coarse here:
+    # it can silently hijack dedicated seats such as cyber-glm5 onto a
+    # primary-driver lane and invalidate model/provider provenance.
+    return False
 
 
 def _parse_provider_types(value: Any) -> list[ProviderType]:
@@ -558,6 +703,614 @@ def _feedback_quality_score(
     return _clamp01(score)
 
 
+@dataclass(slots=True)
+class _CompletionAssessment:
+    accepted: bool
+    quality_score: float
+    reason: str = ""
+
+
+def _dedupe_keep_order(items: list[str]) -> list[str]:
+    seen: set[str] = set()
+    out: list[str] = []
+    for item in items:
+        text = str(item or "").strip()
+        if not text or text in seen:
+            continue
+        seen.add(text)
+        out.append(text)
+    return out
+
+
+def _normalize_bullet_text(line: str) -> str:
+    text = str(line or "").strip()
+    text = re.sub(r"^[-*]\s+", "", text)
+    text = re.sub(r"^\d+\.\s+", "", text)
+    return text.strip()
+
+
+def _extract_named_sections(content: str) -> dict[str, list[str]]:
+    sections: dict[str, list[str]] = {}
+    current: str | None = None
+    for raw_line in (content or "").splitlines():
+        stripped = raw_line.strip()
+        if re.match(r"^[A-Za-z][A-Za-z ]{1,40}:$", stripped):
+            current = stripped[:-1].strip().lower()
+            sections.setdefault(current, [])
+            continue
+        if current is not None and stripped:
+            sections[current].append(stripped)
+    return sections
+
+
+def _section_items(sections: dict[str, list[str]], name: str) -> list[str]:
+    return [
+        item
+        for item in (
+            _normalize_bullet_text(line)
+            for line in sections.get(name.lower(), [])
+        )
+        if item
+    ]
+
+
+def _extract_file_references(content: str) -> list[str]:
+    files = [match.group(0) for match in _FILE_REFERENCE_PATTERN.finditer(content or "")]
+    return _dedupe_keep_order(files)
+
+
+def _extract_test_references(content: str) -> list[str]:
+    refs = []
+    for path in _extract_file_references(content):
+        lowered = path.lower()
+        if lowered.startswith("tests/") or "/tests/" in lowered or "/test_" in lowered or lowered.endswith("_test.py"):
+            refs.append(path)
+    return _dedupe_keep_order(refs)
+
+
+def _match_required_references(
+    required: list[str],
+    observed: list[str],
+    *,
+    lowered_content: str,
+) -> tuple[list[str], list[str]]:
+    observed_lower = {item.lower() for item in observed if item}
+    matched: list[str] = []
+    missing: list[str] = []
+    for item in required:
+        text = str(item or "").strip()
+        if not text:
+            continue
+        lowered_item = text.lower()
+        if lowered_item in observed_lower or lowered_item in lowered_content:
+            matched.append(text)
+        else:
+            missing.append(text)
+    return _dedupe_keep_order(matched), _dedupe_keep_order(missing)
+
+
+def _extract_meta_observations(
+    content: str,
+    *,
+    system_effects: list[str],
+) -> list[str]:
+    observations = list(system_effects)
+    for sentence in re.split(r"(?<=[.!?])\s+", content or ""):
+        text = sentence.strip()
+        lowered = text.lower()
+        if text and any(marker in lowered for marker in _META_OBSERVATION_HINTS):
+            observations.append(text)
+    return _dedupe_keep_order(observations)
+
+
+def _build_honors_defense_packet(task: Task, content: str) -> Any:
+    from dharma_swarm.mission_contract import DefensePacket, load_completion_contract
+
+    contract = load_completion_contract(_task_metadata(task))
+    lowered = (content or "").lower()
+    sections = _extract_named_sections(content)
+    files_listed = [
+        path
+        for path in _extract_file_references(content)
+        if path not in _extract_test_references(content)
+    ]
+    tests_flagged = _extract_test_references(content)
+    context_refs_used = []
+    stakeholder_mentions = []
+    matched_evidence_paths: list[str] = []
+    matched_file_references: list[str] = []
+    matched_test_references: list[str] = []
+    missing_evidence_paths: list[str] = []
+    missing_file_references: list[str] = []
+    missing_test_references: list[str] = []
+    missing_context_refs: list[str] = []
+    missing_stakeholders: list[str] = []
+    if contract is not None:
+        context_refs_used = [
+            ref
+            for ref in contract.required_context_refs
+            if ref.lower() in lowered
+        ]
+        stakeholder_mentions = [
+            stake
+            for stake in contract.stakeholders
+            if stake.lower() in lowered
+        ]
+        missing_context_refs = [
+            ref
+            for ref in contract.required_context_refs
+            if ref not in context_refs_used
+        ]
+        missing_stakeholders = [
+            stake
+            for stake in contract.stakeholders
+            if stake not in stakeholder_mentions
+        ]
+    fix_proposals = _section_items(sections, "next actions")
+    residual_risks = _section_items(sections, "residual risks")
+    system_effects = _section_items(sections, "system effects")
+    evidence_paths = _dedupe_keep_order(
+        _section_items(sections, "evidence")
+        + _extract_file_references("\n".join(sections.get("evidence", [])))
+        + files_listed
+        + tests_flagged
+    )
+    if contract is not None:
+        matched_evidence_paths, missing_evidence_paths = _match_required_references(
+            contract.required_evidence_paths,
+            evidence_paths,
+            lowered_content=lowered,
+        )
+        matched_file_references, missing_file_references = _match_required_references(
+            contract.required_file_references,
+            files_listed + evidence_paths,
+            lowered_content=lowered,
+        )
+        matched_test_references, missing_test_references = _match_required_references(
+            contract.required_test_references,
+            tests_flagged + evidence_paths,
+            lowered_content=lowered,
+        )
+    findings = _section_items(sections, "findings")
+    meta_observations = _extract_meta_observations(
+        content,
+        system_effects=system_effects,
+    )
+    strong_claim_count = len(findings) + len(system_effects)
+    if strong_claim_count == 0 and any(marker in lowered for marker in ("findings:", "evidence:", "system effects:")):
+        strong_claim_count = 1
+    support_signals = _dedupe_keep_order(
+        evidence_paths
+        + context_refs_used
+        + matched_evidence_paths
+        + matched_file_references
+        + matched_test_references
+    )
+    supported_claim_count = min(
+        strong_claim_count,
+        len(support_signals),
+    )
+    unsupported_claim_ratio = (
+        0.0
+        if strong_claim_count <= 0
+        else max(0.0, min(1.0, (strong_claim_count - supported_claim_count) / strong_claim_count))
+    )
+    return DefensePacket(
+        files_listed=files_listed,
+        tests_flagged=tests_flagged,
+        evidence_paths=evidence_paths,
+        context_refs_used=context_refs_used,
+        stakeholder_mentions=stakeholder_mentions,
+        matched_evidence_paths=matched_evidence_paths,
+        matched_file_references=matched_file_references,
+        matched_test_references=matched_test_references,
+        missing_evidence_paths=missing_evidence_paths,
+        missing_file_references=missing_file_references,
+        missing_test_references=missing_test_references,
+        missing_context_refs=missing_context_refs,
+        missing_stakeholders=missing_stakeholders,
+        fix_proposals=fix_proposals,
+        residual_risks=residual_risks,
+        system_effects=system_effects,
+        meta_observations=meta_observations,
+        strong_claim_count=strong_claim_count,
+        supported_claim_count=supported_claim_count,
+        unsupported_claim_ratio=unsupported_claim_ratio,
+    )
+
+
+def _assess_honors_checkpoint(
+    task: Task,
+    content: str,
+    *,
+    semantic_quality_score: float,
+) -> tuple[_CompletionAssessment, Any | None]:
+    from dharma_swarm.mission_contract import (
+        HonorsCheckpoint,
+        JudgeGate,
+        JudgePack,
+        load_completion_contract,
+    )
+
+    contract = load_completion_contract(_task_metadata(task))
+    if contract is None or contract.mode != "honors":
+        return _CompletionAssessment(accepted=True, quality_score=semantic_quality_score), None
+
+    packet = _build_honors_defense_packet(task, content)
+    lowered = (content or "").lower()
+
+    def _gate(name: str, passed: bool, score: float, reason: str) -> JudgeGate:
+        return JudgeGate(name=name, passed=passed, score=max(0.0, min(score, 1.0)), reason=reason)
+
+    def _detail_bits(*groups: tuple[str, list[str] | int | float]) -> list[str]:
+        details: list[str] = []
+        for label, value in groups:
+            if isinstance(value, list):
+                if value:
+                    details.append(f"{label}: {', '.join(str(item) for item in value[:5])}")
+            elif isinstance(value, float):
+                details.append(f"{label}: {value:.2f}")
+            else:
+                details.append(f"{label}: {value}")
+        return details
+
+    missing_sections = [
+        section
+        for section in contract.required_sections
+        if f"{section.lower()}:" not in lowered
+    ]
+    matched_sections = len(contract.required_sections) - len(missing_sections)
+    section_score = (
+        1.0
+        if not contract.required_sections
+        else matched_sections / max(len(contract.required_sections), 1)
+    )
+    responsiveness_passed = not missing_sections
+    responsiveness = _gate(
+        "responsiveness",
+        responsiveness_passed,
+        section_score,
+        (
+            "covered required sections"
+            if responsiveness_passed
+            else "; ".join(_detail_bits(("missing required sections", missing_sections)))
+        ),
+    )
+
+    file_score = (
+        1.0
+        if contract.minimum_file_references <= 0
+        else min(len(packet.files_listed) / contract.minimum_file_references, 1.0)
+    )
+    test_score = (
+        1.0
+        if contract.minimum_test_references <= 0
+        else min(len(packet.tests_flagged) / contract.minimum_test_references, 1.0)
+    )
+    fix_score = (
+        1.0
+        if contract.minimum_fix_proposals <= 0
+        else min(len(packet.fix_proposals) / contract.minimum_fix_proposals, 1.0)
+    )
+    required_file_score = (
+        1.0
+        if not contract.required_file_references
+        else min(
+            len(packet.matched_file_references) / max(len(contract.required_file_references), 1),
+            1.0,
+        )
+    )
+    required_test_score = (
+        1.0
+        if not contract.required_test_references
+        else min(
+            len(packet.matched_test_references) / max(len(contract.required_test_references), 1),
+            1.0,
+        )
+    )
+    auditability_passed = (
+        len(packet.files_listed) >= contract.minimum_file_references
+        and len(packet.tests_flagged) >= contract.minimum_test_references
+        and len(packet.fix_proposals) >= contract.minimum_fix_proposals
+        and not packet.missing_file_references
+        and not packet.missing_test_references
+    )
+    auditability_reason = "completion is auditable"
+    if not auditability_passed:
+        auditability_reason = "; ".join(
+            _detail_bits(
+                ("missing file refs", packet.missing_file_references),
+                ("missing test refs", packet.missing_test_references),
+                ("file refs", len(packet.files_listed)),
+                ("test refs", len(packet.tests_flagged)),
+                ("fix proposals", len(packet.fix_proposals)),
+            )
+        )
+    auditability = _gate(
+        "auditability",
+        auditability_passed,
+        (file_score + test_score + fix_score + required_file_score + required_test_score) / 5.0,
+        auditability_reason,
+    )
+
+    context_score = (
+        1.0
+        if contract.minimum_context_references <= 0
+        else min(len(packet.context_refs_used) / contract.minimum_context_references, 1.0)
+    )
+    evidence_score = (
+        1.0
+        if not contract.required_evidence_paths
+        else min(len(packet.matched_evidence_paths) / max(len(contract.required_evidence_paths), 1), 1.0)
+    )
+    required_supported_claims = (
+        0
+        if packet.strong_claim_count <= 0
+        else min(packet.strong_claim_count, max(1, contract.minimum_supported_claim_count))
+    )
+    supported_claim_score = (
+        1.0
+        if required_supported_claims <= 0
+        else min(packet.supported_claim_count / required_supported_claims, 1.0)
+    )
+    unsupported_ratio_score = (
+        1.0
+        if packet.unsupported_claim_ratio <= contract.maximum_unsupported_claim_ratio
+        else max(
+            0.0,
+            1.0
+            - (
+                (packet.unsupported_claim_ratio - contract.maximum_unsupported_claim_ratio)
+                / max(1.0 - contract.maximum_unsupported_claim_ratio, 0.01)
+            ),
+        )
+    )
+    grounding_passed = (
+        packet.supported_claim_count >= required_supported_claims
+        and packet.unsupported_claim_ratio <= contract.maximum_unsupported_claim_ratio
+        and len(packet.context_refs_used) >= contract.minimum_context_references
+        and not packet.missing_context_refs
+        and not packet.missing_evidence_paths
+    )
+    grounding_reason = "claims are grounded in evidence/context"
+    if not grounding_passed:
+        grounding_reason = "; ".join(
+            _detail_bits(
+                ("missing evidence paths", packet.missing_evidence_paths),
+                ("missing context refs", packet.missing_context_refs),
+                ("supported claims", packet.supported_claim_count),
+                ("required supported claims", required_supported_claims),
+                ("unsupported claim ratio", packet.unsupported_claim_ratio),
+            )
+        )
+    grounding = _gate(
+        "grounding",
+        grounding_passed,
+        (unsupported_ratio_score + context_score + evidence_score + supported_claim_score) / 4.0,
+        grounding_reason,
+    )
+
+    meta_score = (
+        1.0
+        if contract.minimum_meta_observations <= 0
+        else min(len(packet.meta_observations) / contract.minimum_meta_observations, 1.0)
+    )
+    system_effect_score = 1.0 if (not contract.require_system_effects or packet.system_effects) else 0.0
+    stakeholder_score = (
+        1.0
+        if not contract.stakeholders
+        else min(len(packet.stakeholder_mentions) / max(len(contract.stakeholders), 1), 1.0)
+    )
+    causal_passed = (
+        len(packet.meta_observations) >= contract.minimum_meta_observations
+        and (not contract.require_system_effects or len(packet.system_effects) > 0)
+        and not packet.missing_stakeholders
+    )
+    causal_reason = "explains system-level effects"
+    if not causal_passed:
+        causal_reason = "; ".join(
+            _detail_bits(
+                ("missing stakeholders", packet.missing_stakeholders),
+                ("meta observations", len(packet.meta_observations)),
+                ("system effects", len(packet.system_effects)),
+            )
+        )
+    causal_awareness = _gate(
+        "causal_awareness",
+        causal_passed,
+        (meta_score + system_effect_score + stakeholder_score) / 3.0,
+        causal_reason,
+    )
+
+    gates = [responsiveness, grounding, auditability, causal_awareness]
+    gate_failures = [gate.name for gate in gates if not gate.passed]
+    final_score = sum(gate.score for gate in gates) / len(gates)
+    failure_details = [f"{gate.name}: {gate.reason}" for gate in gates if not gate.passed]
+    judge_pack = JudgePack(
+        accepted=not gate_failures,
+        final_score=final_score,
+        gate_failures=gate_failures,
+        gates=gates,
+        summary=(
+            "All honors gates passed"
+            if not gate_failures
+            else "Failed honors gates: " + "; ".join(failure_details)
+        ),
+    )
+    checkpoint = HonorsCheckpoint(
+        contract=contract,
+        defense_packet=packet,
+        judge_pack=judge_pack,
+    )
+    quality_score = max(0.0, min((semantic_quality_score + final_score) / 2.0, 1.0))
+    if judge_pack.accepted:
+        return _CompletionAssessment(accepted=True, quality_score=quality_score), checkpoint
+    return (
+        _CompletionAssessment(
+            accepted=False,
+            quality_score=quality_score,
+            reason=judge_pack.summary.replace("Failed honors gates", "Honors checkpoint failed"),
+        ),
+        checkpoint,
+    )
+
+
+def _semantic_quality_threshold(task: Task, config: AgentConfig) -> float:
+    metadata = _task_metadata(task)
+    explicit = _metadata_number(
+        metadata,
+        "semantic_quality_threshold",
+        "completion_quality_threshold",
+    )
+    if explicit is None:
+        explicit = _metadata_number(
+            config.metadata,
+            "semantic_quality_threshold",
+            "completion_quality_threshold",
+        )
+    if explicit is not None:
+        return max(30.0, min(90.0, explicit))
+
+    task_type = str(metadata.get("task_type", "") or "").strip().lower()
+    threshold = 45.0
+    if task_type in {"analysis", "architectural", "planning", "research"}:
+        threshold += 10.0
+    if _requires_tooling(task, config) or _task_requires_local_side_effects(task):
+        threshold -= 10.0
+    return max(35.0, min(80.0, threshold))
+
+
+def _semantic_repair_attempts(task: Task, config: AgentConfig) -> int:
+    metadata = _task_metadata(task)
+    task_type = str(metadata.get("task_type", "") or "").strip().lower()
+    default_attempts = 2 if task_type in {"analysis", "architectural", "planning", "research"} else 1
+    raw = (
+        metadata.get("semantic_repair_attempts")
+        or config.metadata.get("semantic_repair_attempts")
+        or default_attempts
+    )
+    try:
+        return max(0, min(3, int(raw)))
+    except (TypeError, ValueError):
+        return 1
+
+
+async def _assess_completion_semantics(
+    task: Task,
+    config: AgentConfig,
+    content: str,
+) -> _CompletionAssessment:
+    from dharma_swarm.quality_gates import ContentQualityGate
+
+    normalized = (content or "").strip()
+    if _looks_like_provider_failure(normalized):
+        return _CompletionAssessment(
+            accepted=False,
+            quality_score=0.0,
+            reason="Semantic acceptance failed: provider returned an invalid completion",
+        )
+
+    gate = ContentQualityGate(
+        threshold=_semantic_quality_threshold(task, config),
+        use_llm=False,
+        cache_enabled=False,
+    )
+    gate_result = await gate.evaluate(
+        normalized,
+        {"description": task.description or task.title},
+    )
+    quality_score = _clamp01(gate_result.score.overall / 100.0)
+    threshold_score = _clamp01(gate_result.threshold / 100.0)
+
+    lowered = normalized.lower()
+    if len(normalized.split()) >= 60:
+        quality_score = _clamp01(quality_score + 0.05)
+    if any(marker in lowered for marker in ("evidence:", "finding:", "findings:", "observed", "confirmed")):
+        quality_score = _clamp01(quality_score + 0.07)
+    if any(marker in lowered for marker in ("next actions:", "next steps:", "action items:", "\n- ", "\n1.")):
+        quality_score = _clamp01(quality_score + 0.05)
+
+    if any(marker in lowered for marker in _REASONING_LEAK_MARKERS):
+        return _CompletionAssessment(
+            accepted=False,
+            quality_score=min(quality_score, 0.15),
+            reason="Semantic acceptance failed: leaked reasoning tags in completion",
+        )
+
+    if (
+        normalized
+        and any(lowered.startswith(marker) for marker in _EXPLORATION_PREAMBLE_MARKERS)
+        and any(
+            marker in lowered
+            for marker in (
+                "```bash",
+                "```sh",
+                "before i finalize the answer",
+                "before producing the brief",
+                "let me explore",
+            )
+        )
+    ):
+        return _CompletionAssessment(
+            accepted=False,
+            quality_score=min(quality_score, 0.25),
+            reason=(
+                "Semantic acceptance failed: response stayed in exploration mode "
+                "instead of delivering the final answer"
+            ),
+        )
+
+    if gate_result.passed or quality_score >= threshold_score:
+        return _CompletionAssessment(
+            accepted=True,
+            quality_score=quality_score,
+        )
+
+    detail = gate_result.reason or gate_result.score.feedback
+    if not detail:
+        detail = (
+            f"overall score {gate_result.score.overall:.1f} below threshold "
+            f"{gate_result.threshold:.1f}"
+        )
+    return _CompletionAssessment(
+        accepted=False,
+        quality_score=quality_score,
+        reason=f"Semantic acceptance failed: {detail}",
+    )
+
+
+def _build_semantic_repair_request(
+    request: LLMRequest,
+    *,
+    failed_result: str,
+    assessment: _CompletionAssessment,
+    attempt_index: int,
+) -> LLMRequest:
+    critique = "\n".join(
+        [
+            "Your previous response failed the completion acceptance gate.",
+            f"Failure reason: {assessment.reason}",
+            f"Repair attempt: {attempt_index}",
+            "Rewrite the answer for the exact same task.",
+            "Requirements:",
+            "- No reasoning tags or scratchpad markup.",
+            "- Answer the task directly rather than describing the failure.",
+            "- Be concrete, context-aware, and action-oriented.",
+            "- If the task is analytical, include findings and next actions.",
+            "- Do not output shell commands, grep commands, or pseudo-tool plans.",
+            "- Do not say you will investigate first; deliver the best bounded final brief now.",
+            "- Start directly with the final answer.",
+            "",
+            "Previous response:",
+            failed_result[:6000],
+        ]
+    )
+    updated_messages = list(request.messages)
+    updated_messages.append({"role": "assistant", "content": failed_result[:12000]})
+    updated_messages.append({"role": "user", "content": critique})
+    return request.model_copy(update={"messages": updated_messages})
+
+
 def _state_from_config(config: AgentConfig) -> AgentState:
     """Derive initial runtime state from a static config."""
     return AgentState(
@@ -674,14 +1427,19 @@ def _build_system_prompt(config: AgentConfig) -> str:
     # Inject multi-layer context for real Claude Code agents
     if config.provider == ProviderType.CLAUDE_CODE:
         from dharma_swarm.context import build_agent_context
-        from dharma_swarm.shakti import SHAKTI_HOOK
         ctx = build_agent_context(
             role=config.role.value,
             thread=config.thread,
         )
         if ctx:
             parts.append(ctx)
+
+    # Inject SHAKTI_HOOK for ALL agents (universal perception mode)
+    try:
+        from dharma_swarm.shakti import SHAKTI_HOOK
         parts.append(SHAKTI_HOOK)
+    except Exception:
+        logger.debug("Shakti hook injection failed for %s", config.name, exc_info=True)
 
     return "\n\n".join(parts)
 
@@ -777,6 +1535,17 @@ def _build_prompt(
     user_parts = [f"## Task: {task.title}\n\n{task.description}"]
     metadata = task.metadata if isinstance(task.metadata, dict) else {}
     metadata.pop("_memory_recall_consumer", None)
+    try:
+        from dharma_swarm.mission_contract import (
+            load_completion_contract,
+            render_completion_contract_brief,
+        )
+
+        completion_contract = load_completion_contract(metadata)
+        if completion_contract is not None:
+            user_parts.append("\n\n" + render_completion_contract_brief(completion_contract))
+    except Exception:
+        logger.debug("Completion contract prompt injection failed", exc_info=True)
     prompt_state_dir = _resolve_prompt_state_dir(task, config)
     memory_query = "\n".join(
         part.strip()
@@ -852,6 +1621,60 @@ def _build_prompt(
     )
 
 
+async def _inject_stigmergy_context(
+    request: LLMRequest,
+    task: Task,
+    config: AgentConfig,
+) -> None:
+    """Add relevant stigmergy marks to the prompt before execution."""
+    prompt_state_dir = _resolve_prompt_state_dir(task, config)
+    if prompt_state_dir is None or not request.messages:
+        return
+
+    raw_parts = [
+        part.strip()
+        for part in (task.title, task.description, _task_file_path(task))
+        if isinstance(part, str) and part.strip()
+    ]
+    task_keywords: list[str] = []
+    for part in raw_parts:
+        task_keywords.append(part)
+        for token in re.findall(r"[A-Za-z0-9_./-]{4,}", part.lower()):
+            if token not in task_keywords:
+                task_keywords.append(token)
+    if not task_keywords:
+        return
+
+    try:
+        from dharma_swarm.stigmergy import StigmergyStore, _derive_channel
+
+        store = StigmergyStore(base_path=prompt_state_dir / "stigmergy")
+        marks = await store.query_relevant(
+            task_keywords,
+            limit=3,
+            channel=_derive_channel(config.name),
+        )
+    except Exception:
+        logger.debug("Stigmergy prompt injection failed", exc_info=True)
+        return
+
+    if not marks:
+        return
+
+    lines = ["## Stigmergy Recall"]
+    for mark in marks:
+        observation = " ".join(mark.observation.split())
+        if len(observation) > 220:
+            observation = observation[:217] + "..."
+        lines.append(f"- [{mark.agent}] {mark.file_path}: {observation}")
+
+    request.messages[0]["content"] = (
+        str(request.messages[0]["content"]).rstrip()
+        + "\n\n"
+        + "\n".join(lines)
+    )
+
+
 def _looks_like_provider_failure(content: str) -> bool:
     """Heuristic guard against error strings being marked as completed work."""
     normalized = (content or "").strip().lower()
@@ -885,6 +1708,164 @@ def _task_file_path(task: Task) -> str:
         return match.group(0)
 
     return f"task:{task.id}"
+
+
+def _required_artifact_paths(task: Task) -> list[Path]:
+    """Return required artifact paths declared in task metadata."""
+    metadata = _task_metadata(task)
+    raw_values: list[Any] = []
+    for key in ("target_file", "target_path", "artifact_path", "required_artifact"):
+        value = metadata.get(key)
+        if value:
+            raw_values.append(value)
+    for key in ("required_artifacts", "artifact_paths", "target_files"):
+        value = metadata.get(key)
+        if isinstance(value, list):
+            raw_values.extend(value)
+        elif value:
+            raw_values.append(value)
+
+    out: list[Path] = []
+    seen: set[str] = set()
+    for raw in raw_values:
+        if not isinstance(raw, str):
+            continue
+        text = raw.strip()
+        if not text:
+            continue
+        path = Path(text).expanduser()
+        norm = str(path)
+        if norm in seen:
+            continue
+        seen.add(norm)
+        out.append(path)
+    return out
+
+
+def _task_requires_local_side_effects(task: Task) -> bool:
+    """Whether the task contract requires file or command side effects."""
+    metadata = _task_metadata(task)
+    if _required_artifact_paths(task):
+        return True
+    for key in (
+        "required_command",
+        "shell_command",
+        "command",
+        "pytest_command",
+        "expected_command",
+    ):
+        value = metadata.get(key)
+        if isinstance(value, str) and value.strip():
+            return True
+    return False
+
+
+def _provider_supports_local_tool_loop(
+    config: AgentConfig,
+    provider: CompletionProvider | RoutedCompletionProvider | None,
+) -> bool:
+    if config.provider in {ProviderType.CLAUDE_CODE, ProviderType.CODEX}:
+        return False
+    capabilities = getattr(provider, "capabilities", None)
+    supports_tools = getattr(capabilities, "supports_tools", None)
+    if isinstance(supports_tools, bool):
+        return supports_tools
+    return config.provider in _OPENAI_TOOL_PROVIDER_TYPES
+
+
+def _provider_can_execute_local_tooling(
+    config: AgentConfig,
+    sandbox: CodeSandbox | None,
+) -> bool:
+    """Only subprocess agents or an attached sandbox can actually mutate local state."""
+    if sandbox is not None:
+        return True
+    return config.provider in {ProviderType.CLAUDE_CODE, ProviderType.CODEX}
+
+
+def _tool_loop_max_rounds(task: Task, config: AgentConfig) -> int:
+    metadata = _task_metadata(task)
+    raw = (
+        metadata.get("max_tool_rounds")
+        or config.metadata.get("max_tool_rounds")
+        or 8
+    )
+    try:
+        return max(1, min(32, int(raw)))
+    except (TypeError, ValueError):
+        return 8
+
+
+def _local_tool_workdir(task: Task, config: AgentConfig) -> Path:
+    metadata = _task_metadata(task)
+    for source in (metadata, config.metadata):
+        for key in ("working_dir", "workdir", "workspace_root", "repo_root", "cwd"):
+            value = source.get(key)
+            if not isinstance(value, str) or not value.strip():
+                continue
+            candidate = Path(value).expanduser()
+            if candidate.exists():
+                return candidate.resolve()
+            if candidate.parent.exists():
+                return candidate.resolve(strict=False)
+    for artifact in _required_artifact_paths(task):
+        parent = artifact.parent
+        if parent.exists():
+            return parent.resolve()
+        if parent.parent.exists():
+            return parent.resolve(strict=False)
+    return Path.cwd().resolve()
+
+
+def _resolve_local_tool_path(raw_path: str, *, workdir: Path) -> Path:
+    candidate = Path(raw_path).expanduser()
+    if not candidate.is_absolute():
+        candidate = workdir / candidate
+    return candidate.resolve(strict=False)
+
+
+def _tool_result_text(result: Any) -> str:
+    if hasattr(result, "stdout") and hasattr(result, "stderr") and hasattr(result, "exit_code"):
+        stdout = str(getattr(result, "stdout", "") or "")
+        stderr = str(getattr(result, "stderr", "") or "")
+        exit_code = getattr(result, "exit_code", "")
+        parts = [f"exit_code: {exit_code}"]
+        if stdout:
+            parts.append(f"stdout:\n{stdout}")
+        if stderr:
+            parts.append(f"stderr:\n{stderr}")
+        return "\n".join(parts)
+    return str(result)
+
+
+def _normalized_tool_call_payload(tool_call: dict[str, Any], *, ordinal: int) -> dict[str, Any]:
+    call_id = str(tool_call.get("id") or f"tool-call-{ordinal}")
+    params = _tool_call_parameters(tool_call)
+    return {
+        "id": call_id,
+        "type": "function",
+        "function": {
+            "name": str(tool_call.get("name") or ""),
+            "arguments": json.dumps(params),
+        },
+    }
+
+
+def _tool_call_parameters(tool_call: dict[str, Any]) -> dict[str, Any]:
+    params = tool_call.get("parameters")
+    if isinstance(params, dict):
+        return params
+    raw = tool_call.get("arguments")
+    if isinstance(raw, str):
+        try:
+            parsed = json.loads(raw)
+        except json.JSONDecodeError:
+            return {}
+        return parsed if isinstance(parsed, dict) else {}
+    if isinstance(raw, dict):
+        return raw
+    raw = tool_call.get("input")
+    return raw if isinstance(raw, dict) else {}
 
 
 def _task_action(task: Task) -> str:
@@ -1065,6 +2046,286 @@ class AgentRunner:
             "share": share,
         }
 
+    async def _ensure_local_tool_sandbox(self, task: Task) -> None:
+        if self._sandbox is not None:
+            return
+        if not _provider_supports_local_tool_loop(self._config, self._provider):
+            return
+        from dharma_swarm.sandbox import LocalSandbox
+
+        self._sandbox = LocalSandbox(workdir=_local_tool_workdir(task, self._config))
+
+    async def _invoke_provider(
+        self,
+        task: Task,
+        request: LLMRequest,
+    ) -> tuple[Any | None, Any | None, LLMResponse]:
+        if self._provider is None:
+            raise RuntimeError("Provider unavailable")
+        if _is_routed_provider(self._provider):
+            available_provider_types = _available_provider_types(task, self._config)
+            route_request = _build_route_request(
+                task,
+                self._config,
+                request,
+                available_provider_types=available_provider_types,
+            )
+            route_decision, response = await self._provider.complete_for_task(
+                route_request,
+                request,
+                available_provider_types=available_provider_types,
+            )
+            return route_request, route_decision, response
+        return None, None, await self._provider.complete(request)
+
+    async def _execute_local_tool(
+        self,
+        tool_name: str,
+        parameters: dict[str, Any],
+        *,
+        task: Task,
+    ) -> str:
+        workdir = _local_tool_workdir(task, self._config)
+
+        if tool_name == "read_file":
+            path = _resolve_local_tool_path(str(parameters.get("path", "")), workdir=workdir)
+            if not path.exists():
+                return f"ERROR: File not found: {path}"
+            if not path.is_file():
+                return f"ERROR: Not a file: {path}"
+            try:
+                offset = max(1, int(parameters.get("offset", 1) or 1))
+                limit = max(1, min(500, int(parameters.get("limit", 200) or 200)))
+            except (TypeError, ValueError):
+                offset = 1
+                limit = 200
+            lines = path.read_text(encoding="utf-8", errors="replace").splitlines()
+            selected = lines[offset - 1 : offset - 1 + limit]
+            numbered = [f"{offset + idx:>5} | {line}" for idx, line in enumerate(selected)]
+            return "\n".join(numbered) if numbered else ""
+
+        if tool_name == "write_file":
+            path = _resolve_local_tool_path(str(parameters.get("path", "")), workdir=workdir)
+            content = str(parameters.get("content", ""))
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_text(content, encoding="utf-8")
+            return f"OK: wrote {len(content)} chars to {path}"
+
+        if tool_name == "edit_file":
+            path = _resolve_local_tool_path(str(parameters.get("path", "")), workdir=workdir)
+            if not path.exists():
+                return f"ERROR: File not found: {path}"
+            old = str(parameters.get("old_string", ""))
+            new = str(parameters.get("new_string", ""))
+            content = path.read_text(encoding="utf-8", errors="replace")
+            count = content.count(old)
+            if count == 0:
+                return f"ERROR: old_string not found in {path}"
+            if count > 1:
+                return f"ERROR: old_string found {count} times in {path}"
+            path.write_text(content.replace(old, new, 1), encoding="utf-8")
+            return f"OK: edited {path}"
+
+        if tool_name in {"shell_exec", "bash"}:
+            if self._sandbox is None:
+                raise RuntimeError("Local tool sandbox unavailable")
+            command = str(parameters.get("command", "")).strip()
+            try:
+                timeout = float(parameters.get("timeout", 30) or 30)
+            except (TypeError, ValueError):
+                timeout = 30.0
+            result = await self._sandbox.execute(command, timeout=max(1.0, min(timeout, 300.0)))
+            return _tool_result_text(result)
+
+        if tool_name in {"glob_files", "search_files"}:
+            pattern = str(parameters.get("pattern", "")).strip()
+            base = _resolve_local_tool_path(str(parameters.get("path", "") or parameters.get("directory", "") or "."), workdir=workdir)
+            matches = sorted(base.glob(pattern))[:50]
+            if not matches:
+                return f"No files matching {pattern!r}"
+            return "\n".join(str(match) for match in matches)
+
+        if tool_name in {"grep_search", "search_content"}:
+            pattern = str(parameters.get("pattern", "")).strip()
+            if not pattern:
+                return "ERROR: pattern required"
+            base = _resolve_local_tool_path(str(parameters.get("path", "") or parameters.get("directory", "") or "."), workdir=workdir)
+            file_glob = str(parameters.get("glob", "") or parameters.get("file_glob", "") or "**/*")
+            try:
+                compiled = re.compile(pattern)
+            except re.error as exc:
+                return f"ERROR: invalid regex: {exc}"
+            try:
+                max_results = max(1, min(50, int(parameters.get("max_results", 30) or 30)))
+            except (TypeError, ValueError):
+                max_results = 30
+            results: list[str] = []
+            for candidate in base.glob(file_glob):
+                if not candidate.is_file():
+                    continue
+                try:
+                    for line_no, line in enumerate(
+                        candidate.read_text(encoding="utf-8", errors="replace").splitlines(),
+                        start=1,
+                    ):
+                        if compiled.search(line):
+                            results.append(f"{candidate}:{line_no}:{line}")
+                            if len(results) >= max_results:
+                                return "\n".join(results)
+                except Exception:
+                    continue
+            return "\n".join(results) if results else f"No matches for {pattern!r}"
+
+        return f"ERROR: unknown tool {tool_name}"
+
+    async def _complete_with_tool_loop(
+        self,
+        task: Task,
+        request: LLMRequest,
+    ) -> tuple[Any | None, Any | None, LLMResponse, str]:
+        tool_request = request.model_copy(
+            update={
+                "system": (
+                    request.system
+                    if _LOCAL_TOOL_RUNTIME_DIRECTIVE in request.system
+                    else f"{request.system}\n\n{_LOCAL_TOOL_RUNTIME_DIRECTIVE}".strip()
+                ),
+                "tools": list(_LOCAL_OPENAI_TOOL_DEFINITIONS),
+            }
+        )
+        current_request = tool_request
+        last_route_request: Any | None = None
+        last_route_decision: Any | None = None
+
+        for round_index in range(1, _tool_loop_max_rounds(task, self._config) + 1):
+            route_request, route_decision, response = await self._invoke_provider(
+                task,
+                current_request,
+            )
+            if route_request is not None:
+                last_route_request = route_request
+            if route_decision is not None:
+                last_route_decision = route_decision
+
+            if not response.tool_calls:
+                return last_route_request, last_route_decision, response, response.content
+
+            updated_messages = list(current_request.messages)
+            updated_messages.append(
+                {
+                    "role": "assistant",
+                    "content": response.content or "",
+                    "tool_calls": [
+                        _normalized_tool_call_payload(tool_call, ordinal=index)
+                        for index, tool_call in enumerate(response.tool_calls, start=1)
+                    ],
+                }
+            )
+
+            for index, tool_call in enumerate(response.tool_calls, start=1):
+                params = _tool_call_parameters(tool_call)
+                tool_name = str(tool_call.get("name") or "")
+                tool_id = str(tool_call.get("id") or f"tool-call-{round_index}-{index}")
+                tool_result = await self._execute_local_tool(
+                    tool_name,
+                    params,
+                    task=task,
+                )
+                updated_messages.append(
+                    {
+                        "role": "tool",
+                        "tool_call_id": tool_id,
+                        "content": tool_result[:16000],
+                    }
+                )
+
+            current_request = current_request.model_copy(update={"messages": updated_messages})
+
+        raise RuntimeError(
+            f"Local tool loop exceeded max rounds ({_tool_loop_max_rounds(task, self._config)})"
+        )
+
+    async def _execute_completion_attempt(
+        self,
+        task: Task,
+        request: LLMRequest,
+        *,
+        attempt_index: int,
+    ) -> tuple[Any | None, Any | None, LLMResponse, str, float]:
+        response: LLMResponse | None = None
+        completion_latency_ms = 0.0
+        _tracer = _jikoku_tracer()
+        _jspan = _tracer.start(
+            "execute.llm_call",
+            f"Agent {self._config.name}: {task.title[:80]} [attempt {attempt_index}]",
+            agent_id=self._config.name,
+            task_id=task.id,
+        )
+        try:
+            completion_started = time.monotonic()
+            if (
+                self._sandbox is not None
+                and _provider_supports_local_tool_loop(self._config, self._provider)
+                and _requires_tooling(task, self._config)
+            ):
+                route_request, route_decision, response, result = (
+                    await self._complete_with_tool_loop(task, request)
+                )
+            else:
+                route_request, route_decision, response = await self._invoke_provider(
+                    task,
+                    request,
+                )
+                result = response.content
+            completion_latency_ms = (time.monotonic() - completion_started) * 1000.0
+            return route_request, route_decision, response, result, completion_latency_ms
+        finally:
+            try:
+                _tracer.end(
+                    _jspan,
+                    latency_ms=completion_latency_ms,
+                    model=getattr(response, "model", "") if response else "",
+                    provider=getattr(response, "provider", "") if response else "",
+                    success=(
+                        response is not None
+                        and not _looks_like_provider_failure(response.content)
+                    )
+                    if response
+                    else False,
+                )
+            except Exception:
+                logger.debug("Trace recording failed", exc_info=True)
+
+    def _start_active_inference(self, task: Task) -> tuple[Any | None, Any | None]:
+        state_dir = _resolve_prompt_state_dir(task, self._config)
+        if state_dir is None:
+            return None, None
+        try:
+            from dharma_swarm.active_inference import get_engine
+
+            engine = get_engine(state_dir=state_dir / "active_inference")
+            task_type = str(
+                _task_metadata(task).get("task_type", "general") or "general"
+            )
+            prediction = engine.predict(self.agent_id, task.id, task_type)
+            return engine, prediction
+        except Exception:
+            logger.debug("Active inference prediction failed", exc_info=True)
+            return None, None
+
+    def _observe_active_inference(
+        self,
+        engine: Any,
+        prediction: Any,
+        observed_quality: float,
+    ) -> None:
+        if engine is None or prediction is None:
+            return
+        try:
+            engine.observe(prediction, observed_quality)
+        except Exception:
+            logger.debug("Active inference observation failed", exc_info=True)
+
     # -- lifecycle ----------------------------------------------------------
 
     async def start(self) -> None:
@@ -1111,6 +2372,9 @@ class AgentRunner:
         route_decision: Any | None = None
         response: LLMResponse | None = None
         completion_latency_ms = 0.0
+        active_inference_engine: Any | None = None
+        active_inference_prediction: Any | None = None
+        observed_quality_score: float | None = None
 
         _task_tracer = _jikoku_tracer()
         _task_span = _task_tracer.start(
@@ -1161,6 +2425,7 @@ class AgentRunner:
                     + "\n".join(f"  - {s}" for s in gate.suggestions)
                 )
             request = _build_prompt(task, self._config, plan_context=plan_context)
+            await _inject_stigmergy_context(request, task, self._config)
             self._record_conversation_turn(
                 task,
                 role="user",
@@ -1185,49 +2450,83 @@ class AgentRunner:
                 if memory_ctx.strip():
                     request.system = request.system + "\n\n" + memory_ctx
 
-            if self._provider is not None:
-                _tracer = _jikoku_tracer()
-                _jspan = _tracer.start(
-                    "execute.llm_call",
-                    f"Agent {self._config.name}: {task.title[:80]}",
-                    agent_id=self._config.name,
-                    task_id=task.id,
+            if _requires_tooling(task, self._config):
+                await self._ensure_local_tool_sandbox(task)
+
+            if (
+                _task_requires_local_side_effects(task)
+                and not _provider_can_execute_local_tooling(self._config, self._sandbox)
+            ):
+                raise RuntimeError(
+                    f"Provider {self._config.provider.value} cannot execute local tooling task "
+                    "without a subprocess agent or attached sandbox"
                 )
-                completion_started = time.monotonic()
-                try:
-                    if _is_routed_provider(self._provider):
-                        available_provider_types = _available_provider_types(task, self._config)
-                        route_request = _build_route_request(
-                            task,
-                            self._config,
-                            request,
-                            available_provider_types=available_provider_types,
-                        )
-                        route_decision, response = await self._provider.complete_for_task(
-                            route_request,
-                            request,
-                            available_provider_types=available_provider_types,
-                        )
-                    else:
-                        response = await self._provider.complete(request)
-                    completion_latency_ms = (time.monotonic() - completion_started) * 1000.0
-                    result = response.content
+
+            active_inference_engine, active_inference_prediction = (
+                self._start_active_inference(task)
+            )
+
+            if self._provider is not None:
+                current_request = request
+                attempts_remaining = _semantic_repair_attempts(task, self._config)
+                attempt_index = 1
+                accepted_checkpoint: Any | None = None
+                while True:
+                    (
+                        route_request,
+                        route_decision,
+                        response,
+                        result,
+                        attempt_latency_ms,
+                    ) = await self._execute_completion_attempt(
+                        task,
+                        current_request,
+                        attempt_index=attempt_index,
+                    )
+                    completion_latency_ms += attempt_latency_ms
                     if _looks_like_provider_failure(result):
                         raise RuntimeError(result or "Provider returned empty response")
-                finally:
-                    try:
-                        _tracer.end(
-                            _jspan,
-                            latency_ms=completion_latency_ms,
-                            model=getattr(response, "model", "") if response else "",
-                            provider=getattr(response, "provider", "") if response else "",
-                            success=response is not None and not _looks_like_provider_failure(response.content) if response else False,
+                    assessment = await _assess_completion_semantics(
+                        task,
+                        self._config,
+                        result,
+                    )
+                    accepted_checkpoint = None
+                    if assessment.accepted:
+                        assessment, accepted_checkpoint = _assess_honors_checkpoint(
+                            task,
+                            result,
+                            semantic_quality_score=assessment.quality_score,
                         )
-                    except Exception:
-                        logger.debug("Trace recording failed", exc_info=True)
+                    observed_quality_score = assessment.quality_score
+                    if assessment.accepted:
+                        if accepted_checkpoint is not None:
+                            updated_meta = _task_metadata(task)
+                            updated_meta["honors_checkpoint"] = accepted_checkpoint.model_dump(mode="json")
+                            task.metadata = updated_meta
+                        break
+                    if attempts_remaining <= 0:
+                        raise RuntimeError(assessment.reason)
+                    current_request = _build_semantic_repair_request(
+                        current_request,
+                        failed_result=result,
+                        assessment=assessment,
+                        attempt_index=attempt_index,
+                    )
+                    attempts_remaining -= 1
+                    attempt_index += 1
             else:
                 result = (
                     f"[mock] Agent {self._config.name} completed: {task.title}"
+                )
+                observed_quality_score = 1.0
+
+            required_artifacts = _required_artifact_paths(task)
+            missing_artifacts = [path for path in required_artifacts if not path.exists()]
+            if missing_artifacts:
+                missing_str = ", ".join(str(path) for path in missing_artifacts[:5])
+                raise RuntimeError(
+                    f"Completion contract failed: required artifact missing ({missing_str})"
                 )
             self._record_conversation_turn(
                 task,
@@ -1257,6 +2556,7 @@ class AgentRunner:
                 latency_ms=completion_latency_ms,
                 success=True,
                 result_text=result,
+                quality_score_override=observed_quality_score,
             )
 
             # ── Langfuse / local observability trace ──
@@ -1300,6 +2600,12 @@ class AgentRunner:
                     )
             except Exception:
                 logger.debug("Guardrail check failed", exc_info=True)
+
+            self._observe_active_inference(
+                active_inference_engine,
+                active_inference_prediction,
+                observed_quality_score if observed_quality_score is not None else 0.0,
+            )
 
             async with self._lock:
                 self._state.turns_used += 1
@@ -1434,6 +2740,12 @@ class AgentRunner:
                 latency_ms=completion_latency_ms,
                 success=False,
                 result_text=str(exc),
+                quality_score_override=observed_quality_score,
+            )
+            self._observe_active_inference(
+                active_inference_engine,
+                active_inference_prediction,
+                observed_quality_score if observed_quality_score is not None else 0.0,
             )
             await _leave_task_mark(
                 agent_name=self._config.name,
@@ -1577,6 +2889,7 @@ class AgentRunner:
         latency_ms: float,
         success: bool,
         result_text: str,
+        quality_score_override: float | None = None,
     ) -> None:
         if (
             route_request is None
@@ -1603,11 +2916,15 @@ class AgentRunner:
                 route_request=route_request,
                 request=request,
                 decision=route_decision,
-                quality_score=_feedback_quality_score(
-                    task,
-                    self._config,
-                    success=success,
-                    result_text=result_text,
+                quality_score=(
+                    _clamp01(float(quality_score_override))
+                    if quality_score_override is not None
+                    else _feedback_quality_score(
+                        task,
+                        self._config,
+                        success=success,
+                        result_text=result_text,
+                    )
                 ),
                 total_tokens=_response_total_tokens(response),
                 latency_ms=latency_ms,
@@ -1923,6 +3240,13 @@ class AgentRunner:
             )
         except Exception:
             logger.debug("Ontology agent retirement skipped", exc_info=True)
+
+        cleanup = getattr(self._sandbox, "cleanup", None)
+        if callable(cleanup):
+            try:
+                await cleanup()
+            except Exception:
+                logger.debug("Sandbox cleanup failed for %s", self._config.name, exc_info=True)
 
         logger.info("Agent %s stopping", self._config.name)
         async with self._lock:
