@@ -172,12 +172,24 @@ class CitationIndex:
         import os
 
         results: dict[str, bool] = {}
-        ns: dict[str, object] = {"Path": Path, "os": os}
         for cid, citation in self._citations.items():
             if not citation.verification_test:
                 continue
             try:
-                passed = bool(eval(citation.verification_test, ns))  # noqa: S307
+                # Safety: use compile+eval with restricted builtins instead of open eval
+                # Allows simple expressions (1+1==2, Path(...).exists()) but blocks
+                # os.system, __import__, exec, open, etc.
+                test_expr = citation.verification_test.strip()
+                _safe_builtins = {"True": True, "False": False, "None": None,
+                                  "int": int, "float": float, "str": str,
+                                  "bool": bool, "len": len, "abs": abs,
+                                  "Path": Path, "min": min, "max": max}
+                try:
+                    code = compile(test_expr, "<verification>", "eval")
+                    # Block any name not in safe_builtins
+                    passed = bool(eval(code, {"__builtins__": {}}, _safe_builtins))  # noqa: S307
+                except Exception:
+                    passed = False
             except Exception:
                 passed = False
             results[cid] = passed

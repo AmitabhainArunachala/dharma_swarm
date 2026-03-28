@@ -275,16 +275,17 @@ class TFIDFEmbedder:
         if self._state_path is None:
             return
         try:
+            import json as _json
             state = {
-                "vectorizer": self._vectorizer,
-                "svd": self._svd,
-                "corpus": self._corpus[-2000:],  # Save last 2000 for space
+                # vectorizer/svd are sklearn objects — not JSON-serializable
+                # persist only the corpus and metadata; refit on next load
+                "corpus": self._corpus[-2000:],
                 "corpus_hash": self._corpus_hash,
                 "dim": self._dim,
-                "fitted": self._fitted,
+                "fitted": False,
             }
-            with open(self._state_path, "wb") as fh:
-                pickle.dump(state, fh, protocol=4)
+            with open(self._state_path, "w", encoding="utf-8") as fh:
+                _json.dump(state, fh)
         except Exception as exc:
             logger.debug("TFIDFEmbedder._save_state failed: %s", exc)
 
@@ -293,13 +294,15 @@ class TFIDFEmbedder:
         if self._state_path is None or not Path(self._state_path).exists():
             return
         try:
-            with open(self._state_path, "rb") as fh:
-                state = pickle.load(fh)
-            self._vectorizer = state.get("vectorizer")
-            self._svd = state.get("svd")
+            import json as _json
+            with open(self._state_path, "r", encoding="utf-8") as fh:
+                state = _json.load(fh)
+            # vectorizer and svd cannot be serialized to JSON — rebuild on next fit
+            self._vectorizer = None
+            self._svd = None
             self._corpus = state.get("corpus", [])
             self._corpus_hash = state.get("corpus_hash", "")
-            self._fitted = state.get("fitted", False)
+            self._fitted = False  # must refit since models aren't persisted
         except Exception as exc:
             logger.debug("TFIDFEmbedder._load_state failed: %s", exc)
 

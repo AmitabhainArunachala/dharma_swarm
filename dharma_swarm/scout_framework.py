@@ -204,8 +204,9 @@ def _read_file(path: Path, max_chars: int = 8000) -> str:
 
 def _run_cmd(label: str, cmd: str) -> str:
     try:
+        import shlex
         result = subprocess.run(
-            cmd, shell=True, capture_output=True, text=True,
+            shlex.split(cmd), capture_output=True, text=True,
             timeout=60, cwd=str(ROOT),
         )
         return f"$ {label}\n{(result.stdout + result.stderr).strip()}"
