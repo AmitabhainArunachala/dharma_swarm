@@ -1,6 +1,6 @@
 # dharma_swarm Navigation Map
 
-Generated: 2026-03-24 | 274 Python modules | 351 test files | 4,300+ tests
+Generated: 2026-03-29 | 500 Python modules | 494 test files | 8,848 tests
 
 ---
 
