@@ -229,7 +229,6 @@ class ObservedState(Generic[S]):
             state=state,
             rv_reading=reading,
             rv_measurement=reading.rv,
-            rv_reading=reading,
             pr_early=reading.pr_early,
             pr_late=reading.pr_late,
             observation_depth=1,
