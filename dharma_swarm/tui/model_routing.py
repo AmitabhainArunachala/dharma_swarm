@@ -23,6 +23,36 @@ class ModelTarget:
 
 
 MODEL_TARGETS: tuple[ModelTarget, ...] = (
+    # Free frontier (Ollama Cloud)
+    ModelTarget(
+        alias="glm-5",
+        provider_id="ollama",
+        model_id="glm-5:cloud",
+        label="GLM-5 744B [FREE]",
+        aliases=("glm5", "glm 5", "zhipu"),
+    ),
+    ModelTarget(
+        alias="deepseek-v3.2",
+        provider_id="ollama",
+        model_id="deepseek-v3.2:cloud",
+        label="DeepSeek V3.2 [FREE]",
+        aliases=("deepseek", "ds", "deepseek v3"),
+    ),
+    ModelTarget(
+        alias="kimi-k2.5",
+        provider_id="ollama",
+        model_id="kimi-k2.5:cloud",
+        label="Kimi K2.5 [FREE]",
+        aliases=("kimi", "moonshot"),
+    ),
+    ModelTarget(
+        alias="minimax-m2.7",
+        provider_id="ollama",
+        model_id="minimax-m2.7:cloud",
+        label="MiniMax M2.7 [FREE]",
+        aliases=("minimax", "m2.7", "minimax m2.7"),
+    ),
+    # Paid models
     ModelTarget(
         alias="sonnet-4.5",
         provider_id="claude",

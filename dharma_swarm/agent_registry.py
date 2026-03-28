@@ -31,6 +31,7 @@ GINKO_DIR = Path(os.getenv("DHARMA_HOME", Path.home() / ".dharma")) / "ginko"
 # $/token pricing for cost computation.
 # Keys are full OpenRouter model identifiers.
 MODEL_PRICING: dict[str, float] = {
+    "xiaomi/mimo-v2-pro": 1.0e-6,  # Xiaomi MiMo-V2-Pro 1T MoE (42B active, 1M ctx) $1/M in $3/M out
     "moonshotai/kimi-k2.5": 0.45e-6,
     "deepseek/deepseek-chat-v3-0324": 0.26e-6,
     "nvidia/llama-3.1-nemotron-70b-instruct:free": 0.0,

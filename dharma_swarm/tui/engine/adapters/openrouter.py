@@ -9,6 +9,9 @@ from typing import Any, AsyncIterator
 
 import httpx
 
+from dharma_swarm.model_hierarchy import DEFAULT_MODELS
+from dharma_swarm.models import ProviderType
+
 from .base import Capability, CompletionRequest, ModelProfile, ProviderAdapter, ProviderConfig
 from ..events import ErrorEvent, SessionEnd, SessionStart, TextComplete, UsageReport
 
@@ -28,10 +31,16 @@ class OpenRouterAdapter(ProviderAdapter):
         self._config = config or ProviderConfig(
             provider_id=self.provider_id,
             base_url="https://openrouter.ai/api/v1",
-            default_model="openai/gpt-5-codex",
+            default_model=DEFAULT_MODELS[ProviderType.OPENROUTER],
         )
         self._cancelled = False
         self._profiles: dict[str, ModelProfile] = {
+            DEFAULT_MODELS[ProviderType.OPENROUTER]: ModelProfile(
+                provider_id=self.provider_id,
+                model_id=DEFAULT_MODELS[ProviderType.OPENROUTER],
+                display_name="GPT-4o Mini (OpenRouter)",
+                capabilities=OPENROUTER_CAPABILITIES,
+            ),
             "openai/gpt-5-codex": ModelProfile(
                 provider_id=self.provider_id,
                 model_id="openai/gpt-5-codex",
@@ -50,7 +59,7 @@ class OpenRouterAdapter(ProviderAdapter):
         return list(self._profiles.values())
 
     def get_profile(self, model_id: str | None = None) -> ModelProfile:
-        model = model_id or self._config.default_model or "openai/gpt-5-codex"
+        model = model_id or self._config.default_model or DEFAULT_MODELS[ProviderType.OPENROUTER]
         return self._profiles.get(model, next(iter(self._profiles.values())))
 
     async def stream(
@@ -225,7 +234,8 @@ def _extract_content(data: Any) -> str:
     if isinstance(msg, dict):
         content = msg.get("content", "")
         if isinstance(content, str):
-            return content
+            if content.strip():
+                return content
         if isinstance(content, list):
             chunks: list[str] = []
             for item in content:
@@ -233,7 +243,21 @@ def _extract_content(data: Any) -> str:
                     txt = item.get("text")
                     if isinstance(txt, str):
                         chunks.append(txt)
-            return "\n".join(chunks)
+            if chunks:
+                return "\n".join(chunks)
+        reasoning = msg.get("reasoning", "")
+        if isinstance(reasoning, str) and reasoning.strip():
+            return reasoning
+        details = msg.get("reasoning_details", [])
+        if isinstance(details, list):
+            chunks = []
+            for item in details:
+                if isinstance(item, dict):
+                    txt = item.get("text")
+                    if isinstance(txt, str) and txt.strip():
+                        chunks.append(txt)
+            if chunks:
+                return "\n".join(chunks)
     return ""
 
 

@@ -23,6 +23,7 @@ from __future__ import annotations
 
 import json
 import logging
+import sqlite3
 import time
 from collections import deque
 from datetime import datetime
@@ -32,8 +33,28 @@ from typing import Any, Optional
 from pydantic import BaseModel, Field
 
 from dharma_swarm.models import _new_id, _utc_now
+from dharma_swarm.runtime_artifacts import freshest_pulse_log_path, pulse_log_fresh
 
 logger = logging.getLogger(__name__)
+
+_SEMANTIC_PULSE_FAILURES: tuple[tuple[str, str, str, float], ...] = (
+    ("claude cli not found", "pulse_binary_missing", "critical", 0.35),
+    ("not logged in", "pulse_auth_missing", "critical", 0.30),
+    ("please run /login", "pulse_auth_missing", "critical", 0.30),
+    (
+        "unattended claude bare mode requires anthropic_api_key",
+        "pulse_bare_auth_missing",
+        "critical",
+        0.30,
+    ),
+    (
+        "selected model",
+        "pulse_model_unavailable",
+        "degraded",
+        0.20,
+    ),
+    ("credit balance is too low", "provider_credit_exhausted", "degraded", 0.20),
+)
 
 
 # ---------------------------------------------------------------------------
@@ -510,13 +531,22 @@ class LiveCoherenceSensor:
         freshness_ratio = fresh_count / len(freshness) if freshness else 0.0
 
         # Score: 40% daemon, 60% subsystem freshness
-        score = (0.4 if daemon_alive else 0.0) + 0.6 * freshness_ratio
+        base_score = (0.4 if daemon_alive else 0.0) + 0.6 * freshness_ratio
+        semantic_failures = self._semantic_failures()
+        semantic_penalty = min(
+            0.7,
+            sum(float(item.get("penalty", 0.0)) for item in semantic_failures),
+        )
+        score = max(0.0, base_score - semantic_penalty)
 
         return {
             "score": round(score, 4),
+            "base_score": round(base_score, 4),
             "daemon_alive": daemon_alive,
             "subsystem_freshness": freshness,
             "freshness_ratio": round(freshness_ratio, 4),
+            "semantic_penalty": round(semantic_penalty, 4),
+            "semantic_failures": semantic_failures,
         }
 
     def _check_daemon(self) -> bool:
@@ -538,6 +568,12 @@ class LiveCoherenceSensor:
         cutoff = self.FRESHNESS_HOURS * 3600
         result: dict[str, bool] = {}
         for name, rel_path in self.SUBSYSTEMS.items():
+            if name == "pulse":
+                result[name] = pulse_log_fresh(
+                    self._state_dir,
+                    freshness_seconds=cutoff,
+                )
+                continue
             path = self._state_dir / rel_path
             if path.exists():
                 age = now - path.stat().st_mtime
@@ -545,3 +581,133 @@ class LiveCoherenceSensor:
             else:
                 result[name] = False
         return result
+
+    def _semantic_failures(self) -> list[dict[str, Any]]:
+        failures: list[dict[str, Any]] = []
+        failures.extend(self._pulse_semantic_failures())
+        failures.extend(self._task_backlog_failures())
+        failures.extend(self._stigmergy_corruption_failures())
+        return failures
+
+    def _freshest_pulse_artifact(self) -> Path | None:
+        candidates: list[Path] = []
+        pulse_log = freshest_pulse_log_path(self._state_dir)
+        if pulse_log is not None and pulse_log.exists():
+            candidates.append(pulse_log)
+
+        cron_dir = self._state_dir / "cron"
+        if cron_dir.exists():
+            cron_candidates = list(cron_dir.glob("pulse_*.md"))
+            if cron_candidates:
+                candidates.append(max(cron_candidates, key=lambda path: path.stat().st_mtime))
+
+        if not candidates:
+            return None
+        return max(candidates, key=lambda path: path.stat().st_mtime)
+
+    def _pulse_semantic_failures(self) -> list[dict[str, Any]]:
+        artifact = self._freshest_pulse_artifact()
+        if artifact is None or not artifact.exists():
+            return []
+
+        try:
+            text = artifact.read_text(encoding="utf-8", errors="replace")[-8000:]
+        except Exception:
+            logger.debug("Pulse artifact read failed", exc_info=True)
+            return []
+
+        lowered = text.lower()
+        failures: list[dict[str, Any]] = []
+        seen_kinds: set[str] = set()
+
+        for marker, kind, severity, penalty in _SEMANTIC_PULSE_FAILURES:
+            if marker not in lowered or kind in seen_kinds:
+                continue
+            seen_kinds.add(kind)
+            failures.append(
+                {
+                    "kind": kind,
+                    "severity": severity,
+                    "penalty": penalty,
+                    "evidence": {
+                        "path": str(artifact),
+                        "marker": marker,
+                    },
+                }
+            )
+        return failures
+
+    def _task_backlog_failures(self) -> list[dict[str, Any]]:
+        db_path = self._state_dir / "db" / "tasks.db"
+        if not db_path.exists():
+            return []
+
+        conn: sqlite3.Connection | None = None
+        try:
+            conn = sqlite3.connect(str(db_path))
+            row = conn.execute(
+                "SELECT status, COUNT(*) FROM tasks GROUP BY status"
+            ).fetchall()
+        except sqlite3.DatabaseError:
+            logger.debug("Task backlog read failed", exc_info=True)
+            return []
+        finally:
+            if conn is not None:
+                conn.close()
+
+        counts = {str(status): int(count) for status, count in row}
+        pending = counts.get("pending", 0)
+        running = counts.get("running", 0)
+        if pending > 0 and running == 0:
+            return [
+                {
+                    "kind": "task_backlog_stalled",
+                    "severity": "degraded",
+                    "penalty": 0.15,
+                    "evidence": {
+                        "path": str(db_path),
+                        "pending": pending,
+                        "running": running,
+                    },
+                }
+            ]
+        return []
+
+    def _stigmergy_corruption_failures(self) -> list[dict[str, Any]]:
+        marks_path = self._state_dir / "stigmergy" / "marks.jsonl"
+        if not marks_path.exists():
+            return []
+
+        try:
+            lines = [line for line in marks_path.read_text(encoding="utf-8").splitlines() if line.strip()]
+        except Exception:
+            logger.debug("Stigmergy corruption scan failed", exc_info=True)
+            return []
+
+        if not lines:
+            return []
+
+        invalid = 0
+        for line in lines:
+            try:
+                json.loads(line)
+            except Exception:
+                invalid += 1
+
+        if invalid == 0:
+            return []
+
+        ratio = invalid / len(lines)
+        penalty = min(0.12, ratio * 3.0)
+        return [
+            {
+                "kind": "stigmergy_corruption",
+                "severity": "degraded",
+                "penalty": round(penalty, 4),
+                "evidence": {
+                    "path": str(marks_path),
+                    "invalid_lines": invalid,
+                    "total_lines": len(lines),
+                },
+            }
+        ]

@@ -351,7 +351,7 @@ class TestPropagateDependencyFailures:
         child = await board.create("child task")
         await _add_dependency(board, child.id, parent.id)
 
-        # Parent: FAILED with auto_rescue_count >= 2 (exhausted)
+        # Parent: FAILED with rescue count at or above the configured cap.
         await _force_task_state(
             board,
             parent.id,
@@ -379,12 +379,12 @@ class TestPropagateDependencyFailures:
         child = await board.create("waiting child")
         await _add_dependency(board, child.id, parent.id)
 
-        # Parent: FAILED but auto_rescue_count < 2 (still has retries)
+        # Parent: FAILED but still below the configured rescue cap.
         await _force_task_state(
             board,
             parent.id,
             status=TaskStatus.FAILED.value,
-            metadata={"auto_rescue_count": 1},
+            metadata={"auto_rescue_count": 0, "last_failure_class": "long_timeout"},
         )
 
         pool = _FakeAgentPool([])
@@ -553,7 +553,7 @@ class TestPropagateDependencyFailures:
     async def test_dep_with_zero_rescue_count_is_not_propagated(
         self, tmp_path: Path,
     ) -> None:
-        """auto_rescue_count=0 means the task failed but has never been retried."""
+        """A fresh failure with no rescue/timeout evidence is not terminal yet."""
         board = await _make_board(tmp_path)
 
         parent = await board.create("fresh failure")
@@ -598,6 +598,104 @@ class TestPropagateDependencyFailures:
         propagated = await sm._propagate_dependency_failures()
 
         assert len(propagated) == 0
+
+    @pytest.mark.asyncio
+    async def test_failed_dep_at_configured_rescue_limit_is_propagated(
+        self, tmp_path: Path,
+    ) -> None:
+        """A failed dependency at the live rescue cap is terminal."""
+        board = await _make_board(tmp_path)
+
+        parent = await board.create("rescue-limit parent")
+        child = await board.create("blocked by exhausted rescue")
+        await _add_dependency(board, child.id, parent.id)
+
+        pool = _FakeAgentPool([])
+        sm = await _make_swarm(tmp_path, board, pool)
+
+        await _force_task_state(
+            board,
+            parent.id,
+            status=TaskStatus.FAILED.value,
+            metadata={
+                "auto_rescue_count": sm._auto_rescue_max_attempts,
+                "retry_count": 1,
+                "max_retries": 1,
+                "last_failure_class": "long_timeout",
+            },
+        )
+
+        propagated = await sm._propagate_dependency_failures()
+
+        assert len(propagated) == 1
+        assert propagated[0].id == child.id
+        assert propagated[0].status == TaskStatus.FAILED
+
+    @pytest.mark.asyncio
+    async def test_old_failed_dep_outside_rescue_window_is_propagated(
+        self, tmp_path: Path,
+    ) -> None:
+        """An old failed dependency should not block descendants forever."""
+        board = await _make_board(tmp_path)
+
+        parent = await board.create("stale failed parent")
+        child = await board.create("child blocked by stale failure")
+        await _add_dependency(board, child.id, parent.id)
+
+        pool = _FakeAgentPool([])
+        sm = await _make_swarm(tmp_path, board, pool)
+        stale_time = datetime.now(timezone.utc) - timedelta(days=3)
+
+        await _force_task_state(
+            board,
+            parent.id,
+            status=TaskStatus.FAILED.value,
+            updated_at=stale_time,
+            metadata={
+                "auto_rescue_count": 0,
+                "retry_count": 1,
+                "max_retries": 1,
+                "last_failure_class": "long_timeout",
+            },
+        )
+
+        propagated = await sm._propagate_dependency_failures()
+
+        assert len(propagated) == 1
+        assert propagated[0].id == child.id
+        assert propagated[0].status == TaskStatus.FAILED
+
+    @pytest.mark.asyncio
+    async def test_non_rescuable_failed_dep_is_propagated_when_retries_exhausted(
+        self, tmp_path: Path,
+    ) -> None:
+        """Failure classes outside auto-rescue policy should be terminal."""
+        board = await _make_board(tmp_path)
+
+        parent = await board.create("non-rescuable parent")
+        child = await board.create("child blocked by non-rescuable failure")
+        await _add_dependency(board, child.id, parent.id)
+
+        pool = _FakeAgentPool([])
+        sm = await _make_swarm(tmp_path, board, pool)
+
+        await _force_task_state(
+            board,
+            parent.id,
+            status=TaskStatus.FAILED.value,
+            metadata={
+                "auto_rescue_count": 0,
+                "retry_count": 1,
+                "max_retries": 1,
+                "last_failure_class": "policy_block",
+            },
+        )
+
+        propagated = await sm._propagate_dependency_failures()
+
+        assert len(propagated) == 1
+        assert propagated[0].id == child.id
+        assert propagated[0].status == TaskStatus.FAILED
 
 
 # ===================================================================
@@ -646,3 +744,32 @@ class TestReapAndPropagateIntegration:
         child_refreshed = await board.get(child.id)
         assert child_refreshed is not None
         assert child_refreshed.status == TaskStatus.FAILED
+
+
+class TestTaskQueueSnapshot:
+    @pytest.mark.asyncio
+    async def test_queue_snapshot_counts_blocked_pending_tasks(
+        self, tmp_path: Path,
+    ) -> None:
+        board = await _make_board(tmp_path)
+
+        parent = await board.create("failed parent")
+        blocked_child = await board.create("blocked child")
+        ready_task = await board.create("independent ready task")
+        await _add_dependency(board, blocked_child.id, parent.id)
+
+        await _force_task_state(
+            board,
+            parent.id,
+            status=TaskStatus.FAILED.value,
+            metadata={"auto_rescue_count": 1, "last_failure_class": "long_timeout"},
+        )
+
+        sm = await _make_swarm(tmp_path, board, _FakeAgentPool([]))
+
+        snapshot = await sm._task_queue_snapshot()
+
+        assert snapshot["pending"] == 2
+        assert snapshot["ready"] == 1
+        assert snapshot["blocked_pending"] == 1
+        assert snapshot["failed"] == 1

@@ -8,7 +8,7 @@ No LLM calls. No API keys. Pure static analysis. Works on any Python repo.
 
 Usage:
     from dharma_swarm.xray import run_xray
-    report_path = run_xray(Path("~/projects/my-saas"))
+    report_path = run_xray(Path("~/dharma_swarm"))
 """
 
 from __future__ import annotations

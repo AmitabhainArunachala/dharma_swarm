@@ -241,6 +241,17 @@ class TestLiveCoherenceSensor:
         assert result["freshness_ratio"] == 0.8
         assert result["score"] > 0.4
 
+    def test_fresh_subsystems_accept_runner_pulse_log(self, state_dir: Path):
+        """Runner pulse logs under logs/ should count as live pulse evidence."""
+        pulse_log = state_dir / "logs" / "pulse.log"
+        pulse_log.parent.mkdir(parents=True)
+        pulse_log.write_text("OK: pulse -> /tmp/pulse_1.md", encoding="utf-8")
+
+        sensor = LiveCoherenceSensor(state_dir)
+        result = sensor.measure()
+
+        assert result["subsystem_freshness"]["pulse"] is True
+
     def test_stale_files_not_fresh(self, state_dir: Path):
         pulse = state_dir / "pulse.log"
         pulse.write_text("old")
@@ -250,6 +261,18 @@ class TestLiveCoherenceSensor:
         sensor = LiveCoherenceSensor(state_dir)
         result = sensor.measure()
         assert not result["subsystem_freshness"].get("pulse", True)
+
+    def test_runner_pulse_log_counts_as_fresh_pulse(self, state_dir: Path):
+        runner_log = state_dir / "logs" / "pulse.log"
+        runner_log.parent.mkdir(parents=True, exist_ok=True)
+        runner_log.write_text(
+            "OK: pulse -> /Users/dhyana/.dharma/cron/pulse_20260326_125100.md\n",
+            encoding="utf-8",
+        )
+
+        sensor = LiveCoherenceSensor(state_dir)
+        result = sensor.measure()
+        assert result["subsystem_freshness"].get("pulse") is True
 
     def test_daemon_pid_check(self, state_dir: Path):
         """If PID file exists with current process PID, should report alive."""
@@ -268,3 +291,21 @@ class TestLiveCoherenceSensor:
         sensor = LiveCoherenceSensor(state_dir)
         result = sensor.measure()
         assert not result["daemon_alive"]
+
+    def test_semantic_pulse_failures_reduce_live_score(self, state_dir: Path):
+        pid_file = state_dir / "daemon.pid"
+        pid_file.write_text(str(os.getpid()))
+        (state_dir / "pulse.log").write_text("ERROR: claude CLI not found in PATH")
+        (state_dir / "stigmergy" / "marks.jsonl").write_text("{}")
+        (state_dir / "evolution" / "archive.jsonl").write_text("{}")
+        (state_dir / "db" / "memory.db").write_text("db")
+
+        sensor = LiveCoherenceSensor(state_dir)
+        result = sensor.measure()
+
+        assert result["base_score"] > result["score"]
+        assert result["semantic_penalty"] >= 0.35
+        assert any(
+            item["kind"] == "pulse_binary_missing"
+            for item in result["semantic_failures"]
+        )

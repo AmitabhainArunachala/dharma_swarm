@@ -23,6 +23,7 @@ _COST_PER_M_INPUT: dict[str, float] = {
     # T0 — Ollama Cloud
     "kimi-k2.5": 0.0,
     "glm-5": 0.0,
+    "minimax-m2.7": 0.0,
     # T1 — Free/cheap
     "llama-3.3-70b-instruct:free": 0.0,
     "mistral-small": 0.10,

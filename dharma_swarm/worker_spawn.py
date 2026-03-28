@@ -36,6 +36,7 @@ from dharma_swarm.models import (
     _new_id,
     _utc_now,
 )
+from dharma_swarm.model_catalog import apply_model_pack_metadata
 
 logger = logging.getLogger(__name__)
 
@@ -52,6 +53,59 @@ _PROVIDER_ROTATION: list[ProviderType] = [
     ProviderType.OPENAI,
     ProviderType.OPENROUTER_FREE,
 ]
+
+
+def _coerce_bool(value: Any) -> bool | None:
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, str):
+        normalized = value.strip().lower()
+        if normalized in {"1", "true", "yes", "on"}:
+            return True
+        if normalized in {"0", "false", "no", "off"}:
+            return False
+    return None
+
+
+def _parse_provider_types(value: Any) -> list[ProviderType]:
+    if value is None:
+        return []
+    if isinstance(value, (str, ProviderType)):
+        items = [value]
+    elif isinstance(value, list):
+        items = value
+    else:
+        return []
+    out: list[ProviderType] = []
+    for item in items:
+        provider: ProviderType | None = None
+        if isinstance(item, ProviderType):
+            provider = item
+        elif isinstance(item, str):
+            normalized = item.strip().lower()
+            provider = next(
+                (candidate for candidate in ProviderType if candidate.value == normalized),
+                None,
+            )
+        if provider is not None and provider not in out:
+            out.append(provider)
+    return out
+
+
+def _worker_available_provider_types(metadata: dict[str, Any]) -> list[ProviderType] | None:
+    metadata = apply_model_pack_metadata(metadata)
+    explicit = _parse_provider_types(
+        metadata.get("available_provider_types") or metadata.get("provider_allowlist")
+    )
+    if explicit:
+        return explicit
+    allow_provider_routing = _coerce_bool(metadata.get("allow_provider_routing"))
+    if allow_provider_routing:
+        return None
+    preferred = _parse_provider_types(metadata.get("preferred_provider"))
+    if preferred:
+        return preferred
+    return None
 
 
 # ---------------------------------------------------------------------------
@@ -268,10 +322,11 @@ class WorkerSpawner:
             except Exception:
                 logger.debug("Best-effort memory injection failed", exc_info=True)
 
+        metadata = apply_model_pack_metadata(spec.metadata)
         model = spec.model
         if not model:
             # Use provider rotation for diversity
-            model = "claude-sonnet-4-20250514"  # Default; real routing via provider
+            model = str(metadata.get("preferred_model") or "claude-sonnet-4-20250514")
 
         request = LLMRequest(
             model=model,
@@ -279,10 +334,51 @@ class WorkerSpawner:
             system="\n\n".join(system_parts),
         )
 
-        response: LLMResponse = await asyncio.wait_for(
-            provider.complete(request),
-            timeout=spec.timeout_seconds,
-        )
+        complete_for_task = getattr(provider, "complete_for_task", None)
+        if callable(complete_for_task):
+            from dharma_swarm.provider_policy import ProviderRouteRequest
+
+            available_provider_types = _worker_available_provider_types(metadata)
+            preferred_provider = _parse_provider_types(metadata.get("preferred_provider"))
+            preserve_requested_model = bool(
+                available_provider_types
+                and len(available_provider_types) == 1
+                and preferred_provider
+                and available_provider_types[0] == preferred_provider[0]
+            )
+            route_request = ProviderRouteRequest(
+                action_name=spec.worker_type,
+                risk_score=0.18,
+                uncertainty=0.24,
+                novelty=0.20,
+                urgency=0.30,
+                expected_impact=0.22,
+                context={
+                    "source": "worker_spawn",
+                    "worker_type": spec.worker_type,
+                    "parent_agent": spec.parent_agent,
+                    "task_brief": spec.task_description or spec.task_title,
+                    "preferred_provider": (
+                        preferred_provider[0].value if preferred_provider else ""
+                    ),
+                    "preferred_model": model,
+                    "preserve_requested_model": preserve_requested_model,
+                    "model_catalog_selector": str(metadata.get("model_catalog_selector", "")),
+                },
+            )
+            _, response = await asyncio.wait_for(
+                complete_for_task(
+                    route_request,
+                    request,
+                    available_provider_types=available_provider_types,
+                ),
+                timeout=spec.timeout_seconds,
+            )
+        else:
+            response = await asyncio.wait_for(
+                provider.complete(request),
+                timeout=spec.timeout_seconds,
+            )
         return response.content
 
     def _emit_worker_fitness(self, result: WorkerResult) -> None:

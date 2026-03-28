@@ -6,6 +6,7 @@ from pathlib import Path
 from dharma_swarm.assurance import (
     scanner_api_envelope,
     scanner_context_isolation,
+    scanner_lifecycle,
     scanner_providers,
     scanner_routes,
     scanner_storage,
@@ -131,6 +132,127 @@ def test_api_envelope_scanner_detects_typed_wrapper_mismatch(tmp_path: Path) -> 
 
     assert len(report.findings) == 1
     assert report.findings[0].category == "typed_fetch_envelope_mismatch"
+
+
+def test_api_envelope_scanner_accepts_unwrapped_typed_wrapper(tmp_path: Path) -> None:
+    repo_root = tmp_path
+    _write(
+        repo_root / "api" / "models.py",
+        "class ApiResponse:\n    pass\n",
+    )
+    _write(
+        repo_root / "dashboard" / "src" / "lib" / "api.ts",
+        "\n".join(
+            [
+                "async function _fetchWrapped<T>(): Promise<ApiResponse<T>> {",
+                "  const json = await res.json();",
+                "  if (json && typeof json === 'object' && 'data' in json && 'status' in json) {",
+                "    return { status: json.status, data: json.data as T, error: '', timestamp: '' };",
+                "  }",
+                "  return { status: 'ok', data: json as T, error: '', timestamp: '' };",
+                "}",
+                "export async function apiFetch<T>(): Promise<T> {",
+                "  const json = await res.json();",
+                "  if (json && typeof json === 'object' && 'data' in json && 'status' in json) {",
+                "    return json.data as T;",
+                "  }",
+                "  return json as T;",
+                "}",
+            ]
+        ),
+    )
+
+    report = scanner_api_envelope.scan(repo_root=repo_root)
+
+    assert report.findings == []
+
+
+def test_provider_scan_derives_known_providers_from_enum(tmp_path: Path) -> None:
+    repo_root = tmp_path
+    _write(
+        repo_root / "dharma_swarm" / "models.py",
+        "\n".join(
+            [
+                "from enum import Enum",
+                "class ProviderType(str, Enum):",
+                "    ANTHROPIC = 'anthropic'",
+                "    SILICONFLOW = 'siliconflow'",
+                "    TOGETHER = 'together'",
+                "    FIREWORKS = 'fireworks'",
+            ]
+        ),
+    )
+    _write(
+        repo_root / "dharma_swarm" / "provider_policy.py",
+        "\n".join(
+            [
+                "from dharma_swarm.models import ProviderType",
+                "PREFERRED = (",
+                "    ProviderType.SILICONFLOW,",
+                "    ProviderType.TOGETHER,",
+                "    ProviderType.FIREWORKS,",
+                ")",
+            ]
+        ),
+    )
+
+    report = scanner_providers.scan(repo_root=repo_root)
+
+    assert not any(f.category == "unknown_provider" for f in report.findings)
+
+
+def test_provider_scan_accepts_codex_lane_mapping(tmp_path: Path) -> None:
+    repo_root = tmp_path
+    _write(
+        repo_root / "dharma_swarm" / "models.py",
+        "\n".join(
+            [
+                "from enum import Enum",
+                "class ProviderType(str, Enum):",
+                "    CODEX = 'codex'",
+            ]
+        ),
+    )
+    _write(
+        repo_root / "dharma_swarm" / "persistent_agent.py",
+        "\n".join(
+            [
+                "from dharma_swarm.models import ProviderType",
+                "def _provider_string(provider_type: ProviderType) -> str:",
+                "    if provider_type == ProviderType.CODEX:",
+                '        return "codex"',
+                '    return "anthropic"',
+            ]
+        ),
+    )
+
+    report = scanner_providers.scan(repo_root=repo_root)
+
+    assert not any(f.category == "provider_alias_mismatch" for f in report.findings)
+
+
+def test_lifecycle_scanner_accepts_gate_decision_alias_and_optional_steps(tmp_path: Path) -> None:
+    repo_root = tmp_path
+    _write(
+        repo_root / "dharma_swarm" / "ontology.py",
+        "\n".join(
+            [
+                "ActionProposal = object()",
+                "GateDecisionRecord = object()",
+                "ExecutionLease = object()",
+                "ActionExecution = object()",
+                "Outcome = object()",
+                "ValueEvent = object()",
+                "Contribution = object()",
+            ]
+        ),
+    )
+    _write(repo_root / "dharma_swarm" / "telic_seam.py", "GateDecisionRecord = object()\n")
+    _write(repo_root / "dharma_swarm" / "orchestrator.py", "ExecutionLease = object()\n")
+
+    report = scanner_lifecycle.scan(repo_root=repo_root)
+
+    assert report.findings == []
 
 
 def test_context_isolation_scanner_detects_global_note_leak(tmp_path: Path) -> None:

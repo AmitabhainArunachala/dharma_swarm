@@ -141,7 +141,7 @@ def test_send_to_claude_plan_mode_uses_strict_prompt_and_default_permissions(
     assert len(runner.calls) == 1
     req, sid, provider = runner.calls[0]
     assert sid == "sid-plan"
-    assert provider == "claude"
+    assert provider == "ollama"  # default target is now free frontier (GLM-5)
     assert req.provider_options["permission_mode"] == "default"
     assert req.system_prompt is not None
     assert "PLAN MODE CONTRACT" in req.system_prompt
@@ -314,6 +314,9 @@ def test_report_provider_inactivity_explains_codex_offstream_gap(monkeypatch) ->
 
 def test_restore_last_session_context_populates_resume_state(monkeypatch) -> None:
     app = DGCApp()
+    # Auto-resume requires the preferred provider to be "claude"
+    app._preferred_provider = "claude"  # type: ignore[attr-defined]
+    app._active_provider = "claude"
     meta = {
         "session_id": "dgc-20260308-000001-abcd",
         "provider_session_id": "prov-abc-123456789",
@@ -538,8 +541,9 @@ def test_model_set_action_accepts_index(monkeypatch) -> None:
 
     app._handle_action("model:set 3", "model set 3")
 
-    assert app._active_provider == "claude"
-    assert app._active_model == "claude-opus-4-6"
+    # Index 3 is now kimi-k2.5 (free frontier) per model_hierarchy.py
+    assert app._active_provider == "ollama"
+    assert app._active_model == "kimi-k2.5:cloud"
 
 
 def test_model_auto_strategy_sets_profile(monkeypatch) -> None:

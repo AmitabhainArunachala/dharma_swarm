@@ -453,6 +453,138 @@ async def action_sec_analysis(
     }
 
 
+async def action_ensemble_predict(
+    question: str,
+    resolve_by: str,
+    category: str = "macro",
+) -> dict[str, Any]:
+    """Run a transcendence trial: fan out prediction to all Ginko agents.
+
+    Each agent independently estimates a probability. The ensemble
+    aggregates via quality-weighted temperature concentration.
+    Both individual and ensemble predictions are recorded for Brier scoring.
+
+    Args:
+        question: The prediction question (yes/no with probability).
+        resolve_by: ISO timestamp for resolution deadline.
+        category: Prediction category for Brier tracking.
+
+    Returns:
+        Summary dict with individual and ensemble probabilities.
+    """
+    from dharma_swarm.ginko_agents import GinkoFleet, agent_task
+    from dharma_swarm.transcendence_aggregation import (
+        temperature_concentrate,
+        inverse_brier_weights,
+    )
+
+    # Bootstrap the fleet (loads existing agent state)
+    fleet = GinkoFleet()
+    agents = fleet.list_agents()
+    if not agents:
+        return {"action": "ensemble_predict", "error": "No agents available"}
+
+    # Fan out: each agent independently predicts
+    prompt = (
+        f"You are making a probabilistic prediction.\n"
+        f"Question: {question}\n"
+        f"Respond with ONLY a number between 0.0 and 1.0 representing "
+        f"the probability that the answer is YES.\n"
+        f"Example: 0.72\n"
+    )
+
+    individual_results: list[dict[str, Any]] = []
+    probabilities: list[float] = []
+    brier_scores_list: list[float] = []
+
+    for agent in agents:
+        try:
+            result = await agent_task(fleet, agent.name, prompt, temperature=0.4)
+            if not result.get("success"):
+                continue
+            response = result.get("response", "")
+            prob = _extract_probability_from_response(response)
+            if prob is not None:
+                individual_results.append({
+                    "agent": agent.name,
+                    "model": agent.model,
+                    "probability": prob,
+                })
+                probabilities.append(prob)
+
+                # Get agent's historical Brier score for weighting
+                dashboard = build_dashboard()
+                agent_brier = dashboard.brier_by_source.get(agent.name, 0.25)
+                brier_scores_list.append(agent_brier)
+
+                # Record individual prediction
+                record_prediction(
+                    question=question,
+                    probability=prob,
+                    category=category,
+                    source=agent.name,
+                    resolve_by=resolve_by,
+                )
+        except Exception as exc:
+            logger.warning("Agent %s failed in ensemble predict: %s", agent.name, exc)
+
+    if len(probabilities) < 2:
+        return {
+            "action": "ensemble_predict",
+            "error": f"Only {len(probabilities)} agents responded (need 2+)",
+            "individual_results": individual_results,
+        }
+
+    # Aggregate: quality-weighted + temperature concentration
+    weights = inverse_brier_weights(brier_scores_list)
+    ensemble_prob = temperature_concentrate(probabilities, weights, temperature=0.5)
+
+    # Record ensemble prediction
+    record_prediction(
+        question=question,
+        probability=ensemble_prob,
+        category=category,
+        source="ensemble",
+        resolve_by=resolve_by,
+        metadata={
+            "n_agents": len(probabilities),
+            "individual_probs": probabilities,
+            "weights": weights,
+            "method": "temperature_concentrate_0.5",
+        },
+    )
+
+    state = load_state()
+    state.total_predictions = (state.total_predictions or 0) + 1
+    save_state(state)
+
+    return {
+        "action": "ensemble_predict",
+        "question": question,
+        "individual_results": individual_results,
+        "ensemble_probability": ensemble_prob,
+        "n_agents": len(probabilities),
+        "diversity": max(probabilities) - min(probabilities),
+    }
+
+
+def _extract_probability_from_response(text: str) -> float | None:
+    """Extract a probability from agent response text."""
+    import re
+    for pattern in [
+        r'(\d*\.\d+)',
+        r'(\d+)%',
+    ]:
+        match = re.search(pattern, text.strip())
+        if match:
+            val = float(match.group(1))
+            if val > 1.0:
+                val /= 100.0
+            if 0.0 <= val <= 1.0:
+                return val
+    return None
+
+
 async def action_full_cycle() -> dict[str, Any]:
     """Run the complete daily Ginko cycle.
 
@@ -529,6 +661,18 @@ async def action_full_cycle() -> dict[str, Any]:
         results["report"] = await action_generate_report()
     except Exception as e:
         results["report"] = {"error": str(e)}
+
+    # Phase 7: Ensemble Prediction (Transcendence measurement)
+    try:
+        from datetime import timedelta
+        resolve_by = (_utc_now() + timedelta(days=7)).isoformat()
+        results["ensemble_predict"] = await action_ensemble_predict(
+            question="Will BTC be above its current price in 7 days?",
+            resolve_by=resolve_by,
+            category="crypto",
+        )
+    except Exception as e:
+        results["ensemble_predict"] = {"error": str(e)}
 
     results["total_duration_ms"] = round((time.monotonic() - start) * 1000)
     return results

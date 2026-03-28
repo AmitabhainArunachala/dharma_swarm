@@ -11,6 +11,8 @@ from typing import Any
 
 import httpx
 
+from dharma_swarm.api_keys import DGC_DATA_FLYWHEEL_API_KEY_ENV
+
 
 class DataFlywheelError(RuntimeError):
     """Raised when Data Flywheel API requests fail."""
@@ -33,7 +35,7 @@ class DataFlywheelConfig:
         return cls(
             base_url=os.getenv("DGC_DATA_FLYWHEEL_URL", "http://127.0.0.1:8000/api"),
             timeout_sec=float(os.getenv("DGC_DATA_FLYWHEEL_TIMEOUT_SEC", "30")),
-            api_key=os.getenv("DGC_DATA_FLYWHEEL_API_KEY"),
+            api_key=os.getenv(DGC_DATA_FLYWHEEL_API_KEY_ENV),
         )
 
 

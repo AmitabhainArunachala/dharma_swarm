@@ -34,6 +34,7 @@ from typing import Any
 logger = logging.getLogger(__name__)
 
 from dharma_swarm.config import DEFAULT_CONFIG
+from dharma_swarm.pending_proposals import append_pending_proposals
 from dharma_swarm.runtime_artifacts import (
     freshest_pulse_log_path,
     write_dgc_health_snapshot,
@@ -69,6 +70,43 @@ def _log(system: str, msg: str) -> None:
     line = f"[{ts}] [{system}] {msg}"
     print(line, flush=True)
     logger.info("[%s] %s", system, msg)
+
+
+def _enqueue_shakti_escalations(
+    perceptions: list[Any],
+    *,
+    proposals_path: Path | None = None,
+) -> int:
+    """Durably hand Shakti escalations to Darwin through the shared queue."""
+    payloads: list[dict[str, Any]] = []
+    for perception in perceptions:
+        impact_level = str(getattr(perception, "impact_level", "") or "").strip().lower()
+        if impact_level not in {"module", "system"}:
+            continue
+        connection = str(getattr(perception, "connection", "") or "system").strip() or "system"
+        observation = str(
+            getattr(perception, "proposal", "") or getattr(perception, "observation", "") or ""
+        ).strip()
+        energy = getattr(getattr(perception, "energy", None), "value", None) or str(
+            getattr(perception, "energy", "unknown")
+        )
+        salience = float(getattr(perception, "salience", 0.0) or 0.0)
+        payloads.append(
+            {
+                "component": connection,
+                "change_type": "shakti_escalation",
+                "description": f"[shakti:{energy}] {observation}",
+                "diff": "",
+                "spec_ref": "shakti_loop",
+                "metadata": {
+                    "source": "living_layers",
+                    "impact_level": impact_level,
+                    "salience": salience,
+                    "energy": str(energy),
+                },
+            }
+        )
+    return append_pending_proposals(payloads, path=proposals_path)
 
 
 async def _wait_or_shutdown(shutdown_event: asyncio.Event, delay: float) -> bool:
@@ -675,18 +713,9 @@ async def run_living_layers(shutdown_event: asyncio.Event) -> None:
 
                     # Route high-salience escalations to Darwin Engine
                     try:
-                        from dharma_swarm.evolution import DarwinEngine
-                        darwin = DarwinEngine()
-                        await darwin.init()
-                        for perception in high:
-                            if perception.impact in ("module", "system"):
-                                await darwin.propose(
-                                    component=perception.file_path or "system",
-                                    change_type="mutation",
-                                    description=f"Shakti {perception.energy} perception: {perception.observation}",
-                                    think_notes=f"Impact: {perception.impact}, Salience: {perception.salience:.2f}",
-                                )
-                        summary.append(f"darwin_proposals={len([p for p in high if p.impact in ('module', 'system')])}")
+                        queued = _enqueue_shakti_escalations(high)
+                        if queued:
+                            summary.append(f"darwin_proposals={queued}")
                     except Exception as e:
                         logger.debug("Shakti→Darwin routing failed: %s", e, exc_info=True)
 

@@ -269,3 +269,51 @@ def test_check_and_run_cron_jobs_ignores_invalid_job_payload(tmp_path: Path, mon
     monkeypatch.setattr(pulse, "run_claude_headless", _fake_run)
     pulse._check_and_run_cron_jobs()
     assert called["n"] == 0
+
+
+def test_check_and_run_cron_jobs_runs_due_interval_job_once(tmp_path: Path, monkeypatch):
+    fixed_now = datetime(2026, 3, 6, 4, 30, 10)
+
+    class _FixedDateTime(datetime):
+        @classmethod
+        def now(cls, tz=None):
+            return fixed_now if tz is None else fixed_now.astimezone(tz)
+
+    monkeypatch.setattr(pulse, "datetime", _FixedDateTime)
+    monkeypatch.setattr(pulse.Path, "home", lambda: tmp_path)
+
+    state_dir = tmp_path / ".dharma"
+    state_dir.mkdir(parents=True, exist_ok=True)
+    monkeypatch.setattr(pulse, "STATE_DIR", state_dir)
+
+    cron_dir = tmp_path / "dharma_swarm"
+    cron_dir.mkdir(parents=True, exist_ok=True)
+    cron_file = cron_dir / "cron_jobs.json"
+    cron_file.write_text(
+        json.dumps(
+            [
+                {
+                    "id": "agni_check",
+                    "name": "AGNI State Check",
+                    "trigger": "interval",
+                    "enabled": True,
+                    "interval_seconds": 300,
+                    "model": "haiku",
+                    "prompt": "say hi",
+                }
+            ]
+        )
+    )
+
+    calls: list[tuple[str, str | None]] = []
+
+    def _fake_run(prompt: str, timeout: int = 600, model: str | None = None) -> str:
+        calls.append((prompt, model))
+        return "ok"
+
+    monkeypatch.setattr(pulse, "run_claude_headless", _fake_run)
+
+    pulse._check_and_run_cron_jobs()
+    pulse._check_and_run_cron_jobs()
+
+    assert calls == [("say hi", "haiku")]

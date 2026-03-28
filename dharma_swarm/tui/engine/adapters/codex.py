@@ -11,6 +11,7 @@ import tempfile
 import time
 from typing import Any, AsyncIterator
 
+from dharma_swarm.codex_cli import dgc_codex_exec_prefix
 from .base import Capability, CompletionRequest, ModelProfile, ProviderAdapter, ProviderConfig
 from ..events import (
     ErrorEvent,
@@ -263,21 +264,21 @@ class CodexAdapter(ProviderAdapter):
         output_path: Path,
     ) -> list[str]:
         model = request.model or self._config.default_model or "gpt-5.4"
-        cmd = [
-            self._cli_path,
-            "exec",
-            "-m",
-            model,
-            "--json",
-            "--full-auto",
-            "--color",
-            "never",
-            "-C",
-            str(self._workdir),
-            "-o",
-            str(output_path),
-            "-",
-        ]
+        cmd = dgc_codex_exec_prefix(cli_path=self._cli_path)
+        cmd.extend(
+            [
+                "-m",
+                model,
+                "--json",
+                "--color",
+                "never",
+                "-C",
+                str(self._workdir),
+                "-o",
+                str(output_path),
+                "-",
+            ]
+        )
         return cmd
 
     async def _write_prompt(

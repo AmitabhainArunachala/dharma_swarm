@@ -98,6 +98,24 @@ class _FakeProc:
         self.returncode = -9
 
 
+def test_codex_build_command_uses_dangerous_bypass(tmp_path: Path) -> None:
+    adapter = CodexAdapter(
+        config=ProviderConfig(provider_id="codex", default_model="gpt-5.4"),
+        workdir=tmp_path,
+    )
+
+    cmd = adapter._build_command(
+        CompletionRequest(messages=[{"role": "user", "content": "hello"}]),
+        output_path=tmp_path / "last.txt",
+    )
+
+    assert cmd[:2] == ["codex", "exec"]
+    assert "--dangerously-bypass-approvals-and-sandbox" in cmd
+    assert "--json" in cmd
+    assert "-m" in cmd
+    assert "gpt-5.4" in cmd
+
+
 @pytest.mark.asyncio
 async def test_codex_success_reads_output_file(monkeypatch: pytest.MonkeyPatch) -> None:
     adapter = CodexAdapter(

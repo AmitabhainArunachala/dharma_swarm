@@ -7,18 +7,8 @@ from pathlib import Path
 
 from dharma_swarm.assurance.report_schema import Finding, ScanReport, Severity
 
-KNOWN_PROVIDERS = {
-    "anthropic",
-    "openai",
-    "openrouter",
-    "nvidia_nim",
-    "local",
-    "claude_code",
-    "codex",
-    "openrouter_free",
-    "ollama",
-}
 PROVIDER_PATTERN = re.compile(r"""ProviderType\.(\w+)""", re.IGNORECASE)
+ENUM_VALUE_PATTERN = re.compile(r"""^\s*\w+\s*=\s*["']([^"']+)["']\s*$""")
 MODEL_STRING_PATTERN = re.compile(r"""["']?model["']?\s*[:=]\s*["']([^"']+)["']""")
 MODEL_PROVIDER_MAP = {
     "claude-": "anthropic",
@@ -69,6 +59,38 @@ def _resolve_target_files(
     return root, [path for path in pkg_dir.rglob("*.py") if _eligible(path)]
 
 
+def _load_known_providers(root: Path) -> set[str]:
+    models_path = root / "dharma_swarm" / "models.py"
+    if not models_path.exists():
+        return {
+            "anthropic",
+            "openai",
+            "openrouter",
+            "nvidia_nim",
+            "local",
+            "claude_code",
+            "codex",
+            "openrouter_free",
+            "ollama",
+        }
+
+    providers: set[str] = set()
+    in_provider_enum = False
+    for line in models_path.read_text(encoding="utf-8", errors="replace").splitlines():
+        stripped = line.strip()
+        if stripped.startswith("class ProviderType("):
+            in_provider_enum = True
+            continue
+        if in_provider_enum and stripped.startswith("class "):
+            break
+        if not in_provider_enum:
+            continue
+        match = ENUM_VALUE_PATTERN.match(line)
+        if match:
+            providers.add(match.group(1).lower())
+    return providers
+
+
 def scan(
     *,
     repo_root: Path | None = None,
@@ -78,6 +100,7 @@ def scan(
     findings: list[Finding] = []
     fid = 0
     root, target_files = _resolve_target_files(repo_root=repo_root, changed_files=changed_files)
+    known_providers = _load_known_providers(root)
 
     for pyfile in target_files:
         if not pyfile.exists():
@@ -123,7 +146,7 @@ def scan(
                     ))
 
         for line_no, provider in providers_in_file:
-            if provider not in KNOWN_PROVIDERS:
+            if provider not in known_providers:
                 fid += 1
                 findings.append(Finding(
                     id=f"PC-{fid:03d}",
@@ -140,6 +163,8 @@ def scan(
             if "ProviderType.CODEX" not in line:
                 continue
             window = "\n".join(lines[idx - 1: min(len(lines), idx + 4)])
+            if 'return "codex"' in window:
+                continue
             if 'return "anthropic"' not in window:
                 continue
             fid += 1

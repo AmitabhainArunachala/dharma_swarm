@@ -23,7 +23,8 @@ class TestModelRoutingFormat:
         t3_model, t3_provider = OrganismRouter._TIER_MODELS["T3"]
         assert t2_provider == "anthropic"
         assert t3_provider == "anthropic"
-        assert t3_model == "claude-sonnet-4-20250514"
+        assert t2_model == "claude-sonnet-4-6"
+        assert t3_model == "claude-opus-4-6"
 
 
 class TestGnaniVerdictAccessible:

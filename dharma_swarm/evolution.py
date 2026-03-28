@@ -50,6 +50,7 @@ from dharma_swarm.fitness_predictor import FitnessPredictor, ProposalFeatures
 from dharma_swarm.jikoku_instrumentation import jikoku_auto_span
 from dharma_swarm.landscape import FitnessLandscapeMapper, LandscapeProbe
 from dharma_swarm.models import GateDecision, GateResult, SandboxResult, _new_id, _utc_now
+from dharma_swarm.pending_proposals import PENDING_PROPOSALS_FILE
 from dharma_swarm.quality_gates import QualityGateResult, run_quality_gate
 from dharma_swarm.router_retrospective import (
     DriftGuardDecision,
@@ -284,6 +285,10 @@ class DarwinEngine:
         self._adaptive_strategy = "explore"
         self._max_cycle_tokens = max(0, int(max_cycle_tokens))
         self._session_tokens_used = 0
+        # Mutation budget: max mutations per day (prevents runaway self-modification)
+        self._daily_mutation_budget = 5
+        self._mutations_today = 0
+        self._budget_reset_date = ""
         self.last_landscape_probe: LandscapeProbe | None = None
         self.last_experiment_memory: ExperimentMemorySnapshot | None = None
         self.landscape_mapper = FitnessLandscapeMapper(self)
@@ -1837,12 +1842,31 @@ class DarwinEngine:
         For each proposal: gate-check, and if it passes, evaluate and
         archive. Tracks aggregate statistics.
 
+        Respects the daily mutation budget (default 5/day). When exhausted,
+        the cycle evaluates existing population only — no new mutations.
+
         Args:
             proposals: List of proposals to process.
 
         Returns:
             A ``CycleResult`` summarising the cycle.
         """
+        # Check and reset daily mutation budget
+        from datetime import date
+        today = date.today().isoformat()
+        if self._budget_reset_date != today:
+            self._mutations_today = 0
+            self._budget_reset_date = today
+
+        if self._mutations_today >= self._daily_mutation_budget:
+            logger.warning(
+                "Daily mutation budget exhausted (%d/%d). "
+                "Skipping mutations, eval-only mode.",
+                self._mutations_today,
+                self._daily_mutation_budget,
+            )
+            proposals = []  # Empty proposals = eval-only
+
         start = time.monotonic()
         plan = await self.plan_cycle(proposals)
         result = CycleResult(
@@ -1945,6 +1969,7 @@ class DarwinEngine:
             # Archive
             entry_id = await self.archive_result(proposal)
             result.proposals_archived += 1
+            self._mutations_today += 1
             archived_entry = await self.archive.get_entry(entry_id)
             if archived_entry is not None:
                 new_entries.append(archived_entry)
@@ -2234,6 +2259,7 @@ class DarwinEngine:
             # Archive
             entry_id = await self.archive_result(proposal)
             result.proposals_archived += 1
+            self._mutations_today += 1
             archived_entry = await self.archive.get_entry(entry_id)
             if archived_entry is not None:
                 new_entries.append(archived_entry)
@@ -2525,7 +2551,7 @@ class DarwinEngine:
         provider: Any,
         source_file: Path,
         context: str = "",
-        model: str = "meta-llama/llama-3.3-70b-instruct",
+        model: str = "",
     ) -> Proposal | None:
         """Use an LLM to generate an evolution proposal from a source file.
 
@@ -2542,6 +2568,10 @@ class DarwinEngine:
             A Proposal ready for gate_check(), or None if the LLM says no-op.
         """
         from dharma_swarm.models import LLMRequest
+        if not model:
+            from dharma_swarm.model_hierarchy import default_model as _dm
+            from dharma_swarm.models import ProviderType as _PT
+            model = _dm(_PT.OPENROUTER)
 
         if not source_file.exists():
             logger.warning("Source file not found: %s", source_file)
@@ -2691,7 +2721,7 @@ class DarwinEngine:
 
     # -- pending proposals (from consolidation / skill bridge) ----------------
 
-    _PENDING_PROPOSALS_PATH = Path.home() / ".dharma" / "evolution" / "pending_proposals.jsonl"
+    _PENDING_PROPOSALS_PATH = PENDING_PROPOSALS_FILE
 
     def load_pending_proposals(self) -> list[Proposal]:
         """Load and clear pending proposals written by consolidation or skill bridge.
@@ -2725,7 +2755,7 @@ class DarwinEngine:
         self,
         provider: Any,
         source_files: list[Path],
-        model: str = "meta-llama/llama-3.3-70b-instruct",
+        model: str = "",
         test_command: str = "python3 -m pytest tests/ -q --tb=short -x --timeout=10",
         timeout: float = 60.0,
         context: str = "",
@@ -2762,6 +2792,11 @@ class DarwinEngine:
             A CycleResult summarizing the autonomous evolution cycle.
         """
         _emit = on_progress or (lambda _e, _d: None)
+
+        if not model:
+            from dharma_swarm.model_hierarchy import default_model as _dm
+            from dharma_swarm.models import ProviderType as _PT
+            model = _dm(_PT.OPENROUTER)
 
         await self.refresh_experiment_memory()
         _emit("cycle_start", {
@@ -2949,7 +2984,7 @@ class DarwinEngine:
         self,
         think_provider: Any,
         source_dir: Path | None = None,
-        model: str = "meta-llama/llama-3.3-70b-instruct",
+        model: str = "",
         interval: float = 1800.0,
         fitness_threshold: float = 0.6,
         max_cycles: int | None = None,
@@ -2978,6 +3013,11 @@ class DarwinEngine:
             shadow: If True, do not apply diffs or commit.
             on_progress: Optional callback ``(event_name, data)`` for real-time UX.
         """
+        if not model:
+            from dharma_swarm.model_hierarchy import default_model as _dm
+            from dharma_swarm.models import ProviderType as _PT
+            model = _dm(_PT.OPENROUTER)
+
         src = source_dir or (Path.home() / "dharma_swarm" / "dharma_swarm")
         cycle_count = 0
         context_parts: list[str] = []

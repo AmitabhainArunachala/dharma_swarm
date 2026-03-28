@@ -387,6 +387,34 @@ class CatalyticGraph:
         return False
 
     # ------------------------------------------------------------------
+    # ------------------------------------------------------------------
+    # Matrix representation
+    # ------------------------------------------------------------------
+
+    def adjacency_matrix(self) -> tuple[Any, list[str]]:
+        """Return the weighted adjacency matrix and node ordering.
+
+        Returns:
+            (matrix, node_list) where matrix[i][j] is the total edge
+            strength from node_list[i] to node_list[j].
+            Returns empty if no nodes exist.
+        """
+        import numpy as np
+
+        nodes = sorted(self._nodes.keys())
+        n = len(nodes)
+        if n == 0:
+            return np.zeros((0, 0)), []
+
+        idx = {name: i for i, name in enumerate(nodes)}
+        mat = np.zeros((n, n))
+        for edge in self._edges:
+            i, j = idx.get(edge.source), idx.get(edge.target)
+            if i is not None and j is not None:
+                mat[i, j] += edge.strength
+        return mat, nodes
+
+    # ------------------------------------------------------------------
     # Properties & summaries
     # ------------------------------------------------------------------
 

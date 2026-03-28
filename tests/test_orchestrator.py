@@ -609,6 +609,51 @@ async def test_orchestrator_writes_task_and_progress_ledgers(tmp_path):
 
 
 @pytest.mark.asyncio
+async def test_orchestrator_fail_closes_when_honors_checkpoint_missing(tmp_path):
+    board = MockTaskBoard()
+    board.tasks = [
+        Task(
+            id="t-honors-missing",
+            title="Defended analysis",
+            description="safe",
+            metadata={
+                "max_retries": 0,
+                "completion_contract": {
+                    "mode": "honors",
+                    "minimum_file_references": 1,
+                },
+            },
+        )
+    ]
+    pool = MockAgentPool(
+        [AgentState(id="a1", name="agent-1", role=AgentRole.GENERAL, status=AgentStatus.IDLE)]
+    )
+    pool.set_runner("a1", DummyRunner(result="Looks polished but carried no checkpoint packet."))
+
+    orch = Orchestrator(
+        task_board=board,
+        agent_pool=pool,
+        ledger_dir=tmp_path,
+        session_id="sess_honors_missing",
+    )
+
+    await orch.route_next()
+    for _ in range(50):
+        if not orch._running_tasks:
+            break
+        await orch._collect_completed()
+        await asyncio.sleep(0.01)
+    await orch._collect_completed()
+
+    assert any(
+        task_id == "t-honors-missing"
+        and fields.get("status") == TaskStatus.FAILED
+        and "honors checkpoint" in str(fields.get("result", "")).lower()
+        for task_id, fields in board.updates
+    )
+
+
+@pytest.mark.asyncio
 async def test_orchestrator_failure_records_signature(tmp_path):
     """Failure path should emit a normalized failure signature in progress ledger."""
     board = MockTaskBoard()

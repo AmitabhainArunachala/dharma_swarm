@@ -387,6 +387,8 @@ class AutonomousAgent:
             return await self._call_anthropic(system, messages, tools)
         if self.identity.provider in ("openrouter", "OPENROUTER"):
             return await self._call_openrouter(system, messages, tools)
+        if self.identity.provider in ("codex", "CODEX"):
+            return await self._call_codex(system, messages, tools)
         raise ValueError(f"Unsupported provider: {self.identity.provider}")
 
     async def _call_anthropic(
@@ -524,6 +526,64 @@ class AutonomousAgent:
         if last_exc is not None:
             raise last_exc
         raise RuntimeError("Preferred provider chain exhausted without an explicit error")
+
+    async def _call_codex(
+        self, system: str, messages: list[dict], tools: list[dict],
+    ) -> dict[str, Any]:
+        del tools
+
+        from dharma_swarm.models import LLMRequest, ProviderType
+
+        configs = preferred_runtime_provider_configs(
+            provider_order=(ProviderType.CODEX,),
+            model_overrides={ProviderType.CODEX: self.identity.model},
+            working_dir=self.identity.working_directory,
+        )
+        if not configs:
+            raise RuntimeError("Codex provider unavailable; install the codex CLI")
+
+        last_exc: Exception | None = None
+        for config in configs:
+            provider = create_runtime_provider(config)
+            try:
+                response = await provider.complete(
+                    LLMRequest(
+                        model=config.default_model or self.identity.model,
+                        system=system,
+                        messages=messages,
+                        max_tokens=4096,
+                        temperature=0.0,
+                    )
+                )
+                usage = response.usage or {}
+                return {
+                    "text": [response.content] if response.content else [],
+                    "tool_uses": [],
+                    "raw_content": response.content or "",
+                    "stop_reason": response.stop_reason,
+                    "tokens_in": int(
+                        usage.get("prompt_tokens", usage.get("input_tokens", 0)) or 0
+                    ),
+                    "tokens_out": int(
+                        usage.get("completion_tokens", usage.get("output_tokens", 0)) or 0
+                    ),
+                }
+            except Exception as exc:
+                last_exc = exc
+                logger.warning(
+                    "[%s] provider %s failed for codex lane: %s",
+                    self.identity.name,
+                    config.provider.value,
+                    exc,
+                )
+            finally:
+                close = getattr(provider, "close", None)
+                if callable(close):
+                    await close()
+
+        if last_exc is not None:
+            raise last_exc
+        raise RuntimeError("Codex provider chain exhausted without an explicit error")
 
     @staticmethod
     def _to_openai_message(msg: dict) -> dict:

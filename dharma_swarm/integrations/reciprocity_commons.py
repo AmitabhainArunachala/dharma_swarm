@@ -12,6 +12,8 @@ from typing import Any
 
 import httpx
 
+from dharma_swarm.api_keys import DGC_RECIPROCITY_COMMONS_API_KEY_ENV
+
 
 class ReciprocityCommonsError(RuntimeError):
     """Raised when Reciprocity Commons API requests fail."""
@@ -35,7 +37,7 @@ class ReciprocityCommonsConfig:
             timeout_sec=float(
                 os.getenv("DGC_RECIPROCITY_COMMONS_TIMEOUT_SEC", "30")
             ),
-            api_key=os.getenv("DGC_RECIPROCITY_COMMONS_API_KEY"),
+            api_key=os.getenv(DGC_RECIPROCITY_COMMONS_API_KEY_ENV),
         )
 
 

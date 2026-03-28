@@ -28,12 +28,17 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
+from dharma_swarm.pending_proposals import (
+    PENDING_PROPOSALS_FILE as _DEFAULT_PENDING_PROPOSALS_FILE,
+    append_pending_proposals,
+)
+
 logger = logging.getLogger(__name__)
 
 STATE_DIR = Path.home() / ".dharma"
 INBOX_DIR = STATE_DIR / "skill_bridge"
 INBOX_FILE = INBOX_DIR / "inbox.jsonl"
-PROPOSALS_FILE = STATE_DIR / "evolution" / "pending_proposals.jsonl"
+PROPOSALS_FILE = _DEFAULT_PENDING_PROPOSALS_FILE
 
 
 class SkillBridge:
@@ -121,17 +126,19 @@ class SkillBridge:
         findings = payload.get("findings", [])
         if not findings:
             return
-        PROPOSALS_FILE.parent.mkdir(parents=True, exist_ok=True)
-        with open(PROPOSALS_FILE, "a", encoding="utf-8") as f:
-            for finding in findings:
-                proposal = {
+        append_pending_proposals(
+            [
+                {
                     "component": finding.get("component", "system"),
                     "change_type": "retro_finding",
                     "description": f"[retro] {finding.get('description', '')}",
                     "diff": "",
                     "spec_ref": "skill_bridge_retro",
                 }
-                f.write(json.dumps(proposal) + "\n")
+                for finding in findings
+            ],
+            path=PROPOSALS_FILE,
+        )
         logger.info("Ingested %d retro findings as proposals", len(findings))
 
     def _ingest_fitness_evaluation(self, payload: dict[str, Any]) -> None:
@@ -165,17 +172,19 @@ class SkillBridge:
         hypotheses = payload.get("hypotheses", [])
         if not hypotheses:
             return
-        PROPOSALS_FILE.parent.mkdir(parents=True, exist_ok=True)
-        with open(PROPOSALS_FILE, "a", encoding="utf-8") as f:
-            for hyp in hypotheses:
-                proposal = {
+        append_pending_proposals(
+            [
+                {
                     "component": hyp.get("target_module", "system"),
                     "change_type": "hypothesis_test",
                     "description": f"[hypothesis] {hyp.get('statement', '')}",
                     "diff": "",
                     "spec_ref": "skill_bridge_hypothesis",
                 }
-                f.write(json.dumps(proposal) + "\n")
+                for hyp in hypotheses
+            ],
+            path=PROPOSALS_FILE,
+        )
         logger.info("Ingested %d hypotheses as proposals", len(hypotheses))
 
     def _ingest_knowledge_distiller(self, payload: dict[str, Any]) -> None:

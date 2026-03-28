@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 from dataclasses import dataclass
 from datetime import datetime, timezone
 
@@ -45,6 +46,23 @@ class _FakeSwarm:
         for spec in specs:
             self.create_calls.append(spec)
         return list(specs)
+
+
+class _ConcurrentSwarm(_FakeSwarm):
+    def __init__(self) -> None:
+        super().__init__()
+        self.release = asyncio.Event()
+        self.inflight = 0
+        self.max_inflight = 0
+
+    async def spawn_agent(self, **kwargs):
+        self.spawn_calls.append(kwargs)
+        self.inflight += 1
+        self.max_inflight = max(self.max_inflight, self.inflight)
+        await asyncio.sleep(0)
+        await self.release.wait()
+        self.inflight -= 1
+        return _AgentStateStub(name=kwargs["name"])
 
 
 def _effective_crew() -> list[dict]:
@@ -122,6 +140,79 @@ async def test_spawn_default_crew_merges_existing_system_prompt(monkeypatch):
 
 
 @pytest.mark.asyncio
+async def test_spawn_default_crew_spawns_in_parallel(monkeypatch):
+    custom = [
+        {"name": "a", "role": AgentRole.GENERAL, "thread": "mechanistic"},
+        {"name": "b", "role": AgentRole.GENERAL, "thread": "mechanistic"},
+        {"name": "c", "role": AgentRole.GENERAL, "thread": "mechanistic"},
+    ]
+    monkeypatch.setattr(sc, "DEFAULT_CREW", custom)
+    monkeypatch.setattr(sc, "_crew_from_skills", lambda: None)
+    swarm = _ConcurrentSwarm()
+
+    task = asyncio.create_task(sc.spawn_default_crew(swarm))
+    for _ in range(20):
+        if swarm.max_inflight > 1:
+            break
+        await asyncio.sleep(0)
+
+    assert swarm.max_inflight > 1
+
+    swarm.release.set()
+    await task
+
+
+@pytest.mark.asyncio
+async def test_spawn_cybernetics_crew_spawns_all_when_none_exist():
+    swarm = _FakeSwarm(existing_names=[])
+
+    spawned = await sc.spawn_cybernetics_crew(swarm)
+
+    assert len(spawned) == len(sc.CYBERNETICS_CREW)
+    assert len(swarm.spawn_calls) == len(sc.CYBERNETICS_CREW)
+
+
+@pytest.mark.asyncio
+async def test_spawn_cybernetics_crew_skips_existing_names():
+    existing = ["cyber-glm5", "cyber-codex"]
+    swarm = _FakeSwarm(existing_names=existing)
+
+    await sc.spawn_cybernetics_crew(swarm)
+
+    spawned_names = {call["name"] for call in swarm.spawn_calls}
+    assert spawned_names == {"cyber-kimi25", "cyber-opus"}
+
+
+@pytest.mark.asyncio
+async def test_spawn_cybernetics_crew_passes_provider_model_and_prompt():
+    swarm = _FakeSwarm(existing_names=[])
+
+    await sc.spawn_cybernetics_crew(swarm)
+
+    glm_call = next(call for call in swarm.spawn_calls if call["name"] == "cyber-glm5")
+    kimi_call = next(call for call in swarm.spawn_calls if call["name"] == "cyber-kimi25")
+    codex_call = next(call for call in swarm.spawn_calls if call["name"] == "cyber-codex")
+    opus_call = next(call for call in swarm.spawn_calls if call["name"] == "cyber-opus")
+
+    assert glm_call["provider_type"] == ProviderType.OLLAMA
+    assert glm_call["model"] == "glm-5:cloud"
+    assert glm_call["thread"] == "cybernetics"
+    assert "Variety Cartographer" in glm_call["system_prompt"]
+    assert "MEMORY SURVIVAL INSTINCT" in glm_call["system_prompt"]
+
+    assert kimi_call["provider_type"] == ProviderType.OLLAMA
+    assert kimi_call["model"] == "kimi-k2.5:cloud"
+
+    assert codex_call["provider_type"] == ProviderType.OLLAMA
+    assert codex_call["model"] == "qwen3-coder:480b-cloud"
+    assert "hot-path control improvement" in codex_call["system_prompt"]
+
+    assert opus_call["provider_type"] == ProviderType.OLLAMA
+    assert opus_call["model"] == "deepseek-v3.2:cloud"
+    assert "identity and architecture seat" in opus_call["system_prompt"]
+
+
+@pytest.mark.asyncio
 async def test_create_seed_tasks_skips_when_pending_exist():
     swarm = _FakeSwarm(pending_tasks=2)
     tasks = await sc.create_seed_tasks(swarm)
@@ -172,6 +263,20 @@ def test_default_crew_roles_threads_and_provider_types_present():
         assert isinstance(agent["thread"], str) and agent["thread"]
         assert isinstance(agent["provider"], ProviderType)
         assert isinstance(agent["model"], str) and agent["model"]
+
+
+def test_cybernetics_crew_names_are_unique():
+    names = [a["name"] for a in sc.CYBERNETICS_CREW]
+    assert len(names) == len(set(names))
+
+
+def test_cybernetics_crew_roles_threads_and_provider_types_present():
+    for agent in sc.CYBERNETICS_CREW:
+        assert isinstance(agent["role"], AgentRole)
+        assert agent["thread"] == "cybernetics"
+        assert isinstance(agent["provider"], ProviderType)
+        assert isinstance(agent["model"], str) and agent["model"]
+        assert isinstance(agent.get("system_prompt"), str) and agent["system_prompt"]
 
 
 def test_seed_tasks_include_high_and_normal_priority():

@@ -38,7 +38,7 @@ class TestProviderCapabilities:
         assert OpenAIProvider.capabilities.provider_family == "openai"
 
     def test_openrouter_caps(self) -> None:
-        assert OpenRouterProvider.capabilities.supports_tools is False
+        assert OpenRouterProvider.capabilities.supports_tools is True
         assert OpenRouterProvider.capabilities.provider_family == "openrouter"
 
     def test_nvidia_caps(self) -> None:

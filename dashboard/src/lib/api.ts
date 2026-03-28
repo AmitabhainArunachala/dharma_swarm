@@ -82,10 +82,27 @@ async function _fetchWrapped<T>(
       };
     }
 
-    const data: T = await res.json();
+    const json = await res.json();
+    if (
+      json &&
+      typeof json === "object" &&
+      "data" in json &&
+      "status" in json
+    ) {
+      return {
+        status: String(json.status ?? "ok"),
+        data: json.data as T,
+        error: String(json.error ?? ""),
+        timestamp:
+          typeof json.timestamp === "string"
+            ? json.timestamp
+            : new Date().toISOString(),
+      };
+    }
+
     return {
       status: "ok",
-      data,
+      data: json as T,
       error: "",
       timestamp: new Date().toISOString(),
     };
@@ -235,9 +252,9 @@ export function fetchStigmergy(params?: {
 
 // -- Heatmap ----------------------------------------------------------------
 
-export function fetchHeatmap(metric: string): Promise<ApiResponse<HeatmapCell[]>> {
+export function fetchHeatmap(windowHours = 168): Promise<ApiResponse<HeatmapCell[]>> {
   return apiGet<HeatmapCell[]>(
-    `/api/heatmap/${encodeURIComponent(metric)}`,
+    `/api/stigmergy/heatmap?window_hours=${encodeURIComponent(String(windowHours))}`,
   );
 }
 
@@ -247,14 +264,18 @@ export function fetchProvenance(
   artifactId: string,
 ): Promise<ApiResponse<ProvenanceOut>> {
   return apiGet<ProvenanceOut>(
-    `/api/provenance/${encodeURIComponent(artifactId)}`,
+    `/api/lineage/${encodeURIComponent(artifactId)}/provenance`,
   );
 }
 
 // -- Impact -----------------------------------------------------------------
 
-export function fetchImpact(): Promise<ApiResponse<ImpactOut[]>> {
-  return apiGet<ImpactOut[]>("/api/impact");
+export function fetchImpact(
+  artifactId: string,
+): Promise<ApiResponse<ImpactOut>> {
+  return apiGet<ImpactOut>(
+    `/api/lineage/${encodeURIComponent(artifactId)}/impact`,
+  );
 }
 
 // -- Chat -------------------------------------------------------------------

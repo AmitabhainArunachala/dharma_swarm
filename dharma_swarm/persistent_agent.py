@@ -28,11 +28,7 @@ def _provider_string(provider_type: ProviderType) -> str:
     if provider_type in (ProviderType.ANTHROPIC, ProviderType.CLAUDE_CODE):
         return "anthropic"
     if provider_type == ProviderType.CODEX:
-        logger.warning(
-            "ProviderType.CODEX passed to PersistentAgent — remapping to 'anthropic'. "
-            "If this agent uses an Anthropic model, set provider_type=ANTHROPIC instead."
-        )
-        return "anthropic"
+        return "codex"
     if provider_type in (ProviderType.OPENROUTER, ProviderType.OPENROUTER_FREE):
         return "openrouter"
     return "anthropic"

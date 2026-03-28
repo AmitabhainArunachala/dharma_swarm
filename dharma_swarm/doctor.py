@@ -22,6 +22,10 @@ import sys
 from typing import Any
 from urllib.parse import urlparse
 
+from dharma_swarm.api_keys import RUNTIME_PROVIDER_API_KEY_ENV_KEYS
+from dharma_swarm.claude_cli import unattended_claude_auth_error
+from dharma_swarm.runtime_artifacts import dgc_health_snapshot_summary
+
 logger = logging.getLogger(__name__)
 
 HOME = Path.home()
@@ -67,6 +71,20 @@ def _parse_iso_datetime(raw: Any) -> datetime | None:
     if parsed.tzinfo is None:
         parsed = parsed.replace(tzinfo=timezone.utc)
     return parsed.astimezone(timezone.utc)
+
+
+def _format_age(seconds: float) -> str:
+    seconds = max(0.0, seconds)
+    if seconds < 60:
+        return f"{int(seconds)}s"
+    minutes = seconds / 60
+    if minutes < 60:
+        return f"{int(minutes)}m"
+    hours = minutes / 60
+    if hours < 24:
+        return f"{hours:.1f}h"
+    days = hours / 24
+    return f"{days:.1f}d"
 
 
 def _venv_python() -> Path | None:
@@ -203,15 +221,30 @@ def _check_daemon_integrity(checks: list[DoctorCheck], timeout_seconds: float) -
         )
         return
 
-    if stale or invalid:
+    daemon_pid, daemon_status = pid_statuses["daemon"]
+    orchestrator_pid, orchestrator_status = pid_statuses["orchestrator"]
+    legacy_details: list[str] = []
+    if orchestrator_status == "alive":
+        legacy_details.append(f"orchestrator={orchestrator_pid}")
+    elif orchestrator_status == "stale":
+        legacy_details.append(f"orchestrator={orchestrator_pid}")
+    elif orchestrator_status == "invalid":
+        legacy_details.append("orchestrator=invalid")
+
+    owner_stale = [item for item in stale if not item.startswith("orchestrator=")]
+    owner_invalid = [item for item in invalid if item != "orchestrator"]
+
+    if owner_stale or owner_invalid:
         detail_parts: list[str] = []
-        if stale:
-            detail_parts.append("stale pid files: " + ", ".join(stale))
-        if invalid:
-            detail_parts.append("invalid pid files: " + ", ".join(invalid))
+        if owner_stale:
+            detail_parts.append("stale pid files: " + ", ".join(owner_stale))
+        if owner_invalid:
+            detail_parts.append("invalid pid files: " + ", ".join(owner_invalid))
         if live_processes:
             pid, command = live_processes[0]
             detail_parts.append(f"live process: {pid}:{command}")
+        if legacy_details:
+            detail_parts.append("legacy pid files: " + ", ".join(legacy_details))
         _add(
             checks,
             name="daemon_integrity",
@@ -219,6 +252,36 @@ def _check_daemon_integrity(checks: list[DoctorCheck], timeout_seconds: float) -
             summary="pid file state is inconsistent with runtime",
             detail=" | ".join(detail_parts),
             fix="Remove stale/invalid pid files and ensure only one daemon launcher owns the runtime.",
+        )
+        return
+
+    if daemon_status != "alive" and orchestrator_status == "alive":
+        detail_parts = ["legacy owner: orchestrator.pid"]
+        if live_processes:
+            pid, command = live_processes[0]
+            detail_parts.append(f"live process: {pid}:{command}")
+        _add(
+            checks,
+            name="daemon_integrity",
+            status="WARN",
+            summary="runtime is tracked only by legacy orchestrator.pid",
+            detail=" | ".join(detail_parts),
+            fix="Rewrite runtime ownership to ~/.dharma/daemon.pid and remove orchestrator.pid.",
+        )
+        return
+
+    if daemon_status == "alive" and legacy_details and (live_processes or orchestrator_status == "alive"):
+        detail_parts = ["legacy pid files: " + ", ".join(legacy_details)]
+        if live_processes:
+            pid, command = live_processes[0]
+            detail_parts.append(f"live process: {pid}:{command}")
+        _add(
+            checks,
+            name="daemon_integrity",
+            status="WARN",
+            summary="legacy pid file leftovers detected",
+            detail=" | ".join(detail_parts),
+            fix="Remove ~/.dharma/orchestrator.pid leftovers; ~/.dharma/daemon.pid is the runtime owner.",
         )
         return
 
@@ -264,6 +327,7 @@ def _check_message_bus_integrity(checks: list[DoctorCheck], timeout_seconds: flo
         with sqlite3.connect(canonical) as conn:
             cur = conn.cursor()
             journal_mode = str(cur.execute("PRAGMA journal_mode").fetchone()[0]).lower()
+            busy_timeout_ms = int(cur.execute("PRAGMA busy_timeout").fetchone()[0])
             counts = {
                 "messages": int(cur.execute("SELECT COUNT(*) FROM messages").fetchone()[0]),
                 "heartbeats": int(cur.execute("SELECT COUNT(*) FROM heartbeats").fetchone()[0]),
@@ -280,6 +344,8 @@ def _check_message_bus_integrity(checks: list[DoctorCheck], timeout_seconds: flo
                     ).fetchone()[0]
                 ),
             }
+            oldest_heartbeat = cur.execute("SELECT MIN(last_seen) FROM heartbeats").fetchone()[0]
+            latest_heartbeat = cur.execute("SELECT MAX(last_seen) FROM heartbeats").fetchone()[0]
     except Exception as exc:
         _add(
             checks,
@@ -295,8 +361,11 @@ def _check_message_bus_integrity(checks: list[DoctorCheck], timeout_seconds: flo
     detail_parts = [
         f"db={canonical}",
         f"journal={journal_mode}",
+        f"busy_timeout_ms={busy_timeout_ms}",
         f"messages={counts['messages']}",
         f"heartbeats={counts['heartbeats']}",
+        f"oldest_heartbeat={oldest_heartbeat or 'none'}",
+        f"latest_heartbeat={latest_heartbeat or 'none'}",
         f"subscriptions={counts['subscriptions']}",
         f"events={counts['events_total']}",
         f"queued_events={counts['events_unconsumed']}",
@@ -346,6 +415,71 @@ def _check_message_bus_integrity(checks: list[DoctorCheck], timeout_seconds: flo
         name="message_bus_integrity",
         status="PASS",
         summary="shared message bus is present and looks coherent",
+        detail=" | ".join(detail_parts),
+    )
+
+
+def _check_dgc_health_snapshot(checks: list[DoctorCheck]) -> None:
+    snapshot = dgc_health_snapshot_summary(HOME / ".dharma")
+    if not snapshot["exists"]:
+        _add(
+            checks,
+            name="dgc_health_snapshot",
+            status="WARN",
+            summary="dgc_health snapshot is missing",
+            detail=str(snapshot["path"]),
+            fix="Either restore a canonical snapshot publisher or stop depending on dgc_health.json in operator surfaces.",
+        )
+        return
+
+    if snapshot["status"] == "unreadable":
+        _add(
+            checks,
+            name="dgc_health_snapshot",
+            status="WARN",
+            summary="dgc_health snapshot is unreadable",
+            detail=f"{snapshot['path']}: {snapshot.get('error', 'unknown error')}",
+            fix="Repair or replace ~/.dharma/stigmergy/dgc_health.json before trusting snapshot-based dashboards.",
+        )
+        return
+
+    detail_parts = [f"path={snapshot['path']}"]
+    if snapshot["timestamp"] is not None:
+        detail_parts.append(f"age={_format_age(float(snapshot['age_seconds'] or 0.0))}")
+    if snapshot["daemon_pid"] is not None:
+        detail_parts.append(f"daemon_pid={snapshot['daemon_pid']}")
+    if snapshot["live_pid"] is not None:
+        detail_parts.append(f"live_pid={snapshot['live_pid']}")
+    if snapshot["daemon_pid_mismatch"]:
+        detail_parts.append("daemon_pid_mismatch")
+
+    if snapshot["status"] == "stale":
+        _add(
+            checks,
+            name="dgc_health_snapshot",
+            status="WARN",
+            summary="dgc_health snapshot is stale",
+            detail=" | ".join(detail_parts),
+            fix="Refresh or retire the dgc_health publisher; stale snapshot state should not be treated as live runtime truth.",
+        )
+        return
+
+    if snapshot["status"] == "unknown":
+        _add(
+            checks,
+            name="dgc_health_snapshot",
+            status="WARN",
+            summary="dgc_health snapshot has no parseable timestamp",
+            detail=" | ".join(detail_parts),
+            fix="Persist an ISO timestamp in ~/.dharma/stigmergy/dgc_health.json or retire the snapshot.",
+        )
+        return
+
+    _add(
+        checks,
+        name="dgc_health_snapshot",
+        status="PASS",
+        summary="dgc_health snapshot looks fresh",
         detail=" | ".join(detail_parts),
     )
 
@@ -592,17 +726,7 @@ def _check_worker_bins(checks: list[DoctorCheck], timeout_seconds: float) -> Non
 
 
 def _check_provider_env(checks: list[DoctorCheck]) -> None:
-    provider_keys = (
-        "ANTHROPIC_API_KEY",
-        "OPENAI_API_KEY",
-        "OPENROUTER_API_KEY",
-        "GROQ_API_KEY",
-        "SILICONFLOW_API_KEY",
-        "TOGETHER_API_KEY",
-        "FIREWORKS_API_KEY",
-        "NVIDIA_NIM_API_KEY",
-        "OLLAMA_API_KEY",
-    )
+    provider_keys = RUNTIME_PROVIDER_API_KEY_ENV_KEYS
     present: list[str] = []
     for key in provider_keys:
         value = os.getenv(key, "").strip()
@@ -629,6 +753,86 @@ def _check_provider_env(checks: list[DoctorCheck]) -> None:
         status="WARN",
         summary="no provider credentials/endpoints found in env",
         fix="Set at least one provider key in env (.env or shell).",
+    )
+
+
+def _recent_unattended_claude_auth_failures() -> list[str]:
+    findings: list[str] = []
+    auth_markers = (
+        "Not logged in",
+        "unattended Claude bare mode requires ANTHROPIC_API_KEY",
+    )
+
+    pulse_last_run = HOME / ".dharma" / "cron" / "last_run" / "pulse.json"
+    try:
+        if pulse_last_run.exists():
+            payload = json.loads(pulse_last_run.read_text(encoding="utf-8"))
+            error = str(payload.get("error", "")).strip()
+            if any(marker in error for marker in auth_markers):
+                findings.append(f"pulse={pulse_last_run}")
+    except Exception:
+        pass
+
+    garden_latest = HOME / ".dharma" / "garden" / "latest_cycle.json"
+    try:
+        if garden_latest.exists():
+            payload = json.loads(garden_latest.read_text(encoding="utf-8"))
+            for result in payload.get("results", []):
+                preview = str(result.get("output_preview", "")).strip()
+                if any(marker in preview for marker in auth_markers):
+                    skill = result.get("skill") or result.get("key") or "unknown"
+                    findings.append(f"garden:{skill}={garden_latest}")
+                    break
+    except Exception:
+        pass
+
+    return findings
+
+
+def _check_claude_unattended_auth(checks: list[DoctorCheck]) -> None:
+    claude_bin = shutil.which("claude")
+    if not claude_bin:
+        _add(
+            checks,
+            name="claude_unattended_auth",
+            status="WARN",
+            summary="claude CLI unavailable for unattended auth check",
+            fix="Install Claude Code or keep unattended jobs off the Claude lane.",
+        )
+        return
+
+    auth_error = unattended_claude_auth_error(bare=True)
+    if auth_error is None:
+        _add(
+            checks,
+            name="claude_unattended_auth",
+            status="PASS",
+            summary="unattended Claude bare-mode auth configured",
+            detail="ANTHROPIC_API_KEY present for `claude -p --bare` lanes.",
+        )
+        return
+
+    failures = _recent_unattended_claude_auth_failures()
+    detail = auth_error
+    if failures:
+        detail = " | ".join([detail, *failures])
+        _add(
+            checks,
+            name="claude_unattended_auth",
+            status="FAIL",
+            summary="unattended Claude lanes lack bare-mode auth and are actively failing",
+            detail=detail,
+            fix="Set ANTHROPIC_API_KEY for unattended `claude -p --bare` runs, or rework those jobs off bare mode.",
+        )
+        return
+
+    _add(
+        checks,
+        name="claude_unattended_auth",
+        status="WARN",
+        summary="unattended Claude bare-mode auth is not configured",
+        detail=detail,
+        fix="Set ANTHROPIC_API_KEY for unattended `claude -p --bare` runs, or rework those jobs off bare mode.",
     )
 
 
@@ -922,10 +1126,18 @@ def write_doctor_artifacts(
     target_dir.mkdir(parents=True, exist_ok=True)
     history_dir.mkdir(parents=True, exist_ok=True)
 
-    rendered = render_doctor_report(report)
+    persisted_report = dict(report)
+    if not persisted_report.get("generated_at"):
+        legacy_timestamp = _parse_iso_datetime(persisted_report.get("timestamp_utc"))
+        if legacy_timestamp is not None:
+            persisted_report["generated_at"] = legacy_timestamp.isoformat()
+        else:
+            persisted_report["generated_at"] = datetime.now(timezone.utc).isoformat()
+
+    rendered = render_doctor_report(persisted_report)
     latest_json = target_dir / "latest_report.json"
     latest_markdown = target_dir / "latest_report.md"
-    latest_json.write_text(json.dumps(report, indent=2), encoding="utf-8")
+    latest_json.write_text(json.dumps(persisted_report, indent=2), encoding="utf-8")
     latest_markdown.write_text(rendered + "\n", encoding="utf-8")
 
     history_json = ""
@@ -934,7 +1146,7 @@ def write_doctor_artifacts(
         stamp = datetime.now(timezone.utc).strftime("%Y%m%d_%H%M%S")
         history_json_path = history_dir / f"doctor_{stamp}.json"
         history_markdown_path = history_dir / f"doctor_{stamp}.md"
-        history_json_path.write_text(json.dumps(report, indent=2), encoding="utf-8")
+        history_json_path.write_text(json.dumps(persisted_report, indent=2), encoding="utf-8")
         history_markdown_path.write_text(rendered + "\n", encoding="utf-8")
         history_json = str(history_json_path)
         history_markdown = str(history_markdown_path)
@@ -1006,11 +1218,13 @@ def run_doctor(
     checks: list[DoctorCheck] = []
     _check_env_autoload(checks)
     _check_daemon_integrity(checks, timeout_seconds=timeout_seconds)
+    _check_dgc_health_snapshot(checks)
     _check_message_bus_integrity(checks, timeout_seconds=timeout_seconds)
     _check_doctor_schedule(checks)
     _check_router_env(checks)
     _check_worker_bins(checks, timeout_seconds=timeout_seconds)
     _check_provider_env(checks)
+    _check_claude_unattended_auth(checks)
     _check_fasttext(checks)
     _check_redis(checks, timeout_seconds=timeout_seconds, quick=quick)
     _check_router_paths(checks)

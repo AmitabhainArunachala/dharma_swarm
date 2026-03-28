@@ -350,11 +350,11 @@ class Orchestrator:
             logger.info("orchestrator.tick: entering coordination refresh (%.0fs since last)", _since_last_refresh)
             try:
                 coordination = await asyncio.wait_for(
-                    self._refresh_coordination_state(), timeout=15.0
+                    self._refresh_coordination_state(), timeout=30.0
                 )
                 self._last_coordination_refresh_at = _tt.monotonic()
             except asyncio.TimeoutError:
-                logger.warning("Coordination refresh timed out after 15s — skipping")
+                logger.warning("Coordination refresh timed out after 30s — skipping")
             except Exception as exc:
                 logger.warning("Coordination refresh failed: %s", exc)
             logger.info("orchestrator.tick: coordination done")
@@ -1062,7 +1062,7 @@ class Orchestrator:
         list_tasks = getattr(self._board, "list_tasks", None)
         if list_tasks:
             try:
-                result = list_tasks(limit=500)
+                result = list_tasks(limit=200)
             except TypeError:
                 result = list_tasks()
             if inspect.isawaitable(result):
@@ -1071,11 +1071,8 @@ class Orchestrator:
                 return [task for task in result if isinstance(task, Task)]
         task_items = getattr(self._board, "tasks", None)
         if isinstance(task_items, list):
-            return [
-                task.model_copy(deep=True)
-                for task in task_items
-                if isinstance(task, Task)
-            ]
+            # Read-only for coordination analysis — skip expensive deep copy
+            return [task for task in task_items if isinstance(task, Task)][:200]
         return []
 
     async def _list_coordination_messages(self, *, limit: int = 200) -> list[Message]:
@@ -1440,7 +1437,7 @@ class Orchestrator:
         logger.info("_refresh_coordination: agents=%.1fs (n=%d)", _t.monotonic() - _cs_t0, len(agents))
         tasks = await self._list_coordination_tasks()
         logger.info("_refresh_coordination: tasks=%.1fs", _t.monotonic() - _cs_t0)
-        messages = await self._list_coordination_messages(limit=500)
+        messages = await self._list_coordination_messages(limit=200)
         logger.info("_refresh_coordination: messages=%.1fs (n=%d)", _t.monotonic() - _cs_t0, len(messages))
         agent_ids = {agent.id for agent in agents}
 
@@ -1936,11 +1933,56 @@ class Orchestrator:
                 runner.run_task(task),
                 timeout=timeout_seconds,
             )
+            try:
+                from dharma_swarm.mission_contract import (
+                    honors_checkpoint_passed,
+                    load_completion_contract,
+                    load_honors_checkpoint,
+                )
+
+                completion_contract = load_completion_contract(task.metadata)
+                honors_checkpoint = load_honors_checkpoint(task.metadata)
+                if completion_contract is not None and not honors_checkpoint_passed(task.metadata):
+                    error = (
+                        "Honors checkpoint missing or failed: task returned a result "
+                        "without a passing judge pack"
+                    )
+                    if self._pool is not None:
+                        await self._pool.release(td.agent_id)
+                    self._active_dispatches.pop(td.task_id, None)
+                    await self._handle_task_failure(
+                        td=td,
+                        task=task,
+                        error=error,
+                        source="honors_checkpoint",
+                    )
+                    return
+            except Exception as exc:
+                logger.exception("Task %s honors checkpoint validation failed: %s", td.task_id, exc)
+                if self._pool is not None:
+                    await self._pool.release(td.agent_id)
+                self._active_dispatches.pop(td.task_id, None)
+                await self._handle_task_failure(
+                    td=td,
+                    task=task,
+                    error=f"Honors checkpoint validation failed: {exc}",
+                    source="honors_checkpoint",
+                )
+                return
             success_meta = self._task_meta(task)
             success_meta.pop("active_claim", None)
             success_meta.pop("retry_not_before_epoch", None)
             success_meta["last_completed_at"] = datetime.now(timezone.utc).isoformat()
             success_meta["last_result_chars"] = len(result or "")
+            try:
+                from dharma_swarm.mission_contract import load_honors_checkpoint
+
+                honors_checkpoint = load_honors_checkpoint(success_meta)
+                if honors_checkpoint is not None:
+                    success_meta["honors_checkpoint_score"] = honors_checkpoint.judge_pack.final_score
+                    success_meta["honors_checkpoint_accepted"] = honors_checkpoint.judge_pack.accepted
+            except Exception:
+                logger.debug("Honors checkpoint summary extraction failed", exc_info=True)
             await self._safe_update_task(
                 td.task_id,
                 status=TaskStatus.COMPLETED,

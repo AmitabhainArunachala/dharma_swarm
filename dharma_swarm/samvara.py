@@ -27,6 +27,8 @@ from enum import Enum
 from pathlib import Path
 from typing import Any, Optional
 
+from dharma_swarm.runtime_artifacts import freshest_pulse_log_path
+
 logger = logging.getLogger(__name__)
 
 
@@ -304,14 +306,14 @@ class SamvaraEngine:
         wiring_checks = [
             ("evolution → dispatch", self._state_dir / "evolution" / "archive.jsonl"),
             ("stigmergy → marks", self._state_dir / "stigmergy" / "marks.jsonl"),
-            ("pulse → log", self._state_dir / "pulse.log"),
+            ("pulse → log", freshest_pulse_log_path(self._state_dir)),
             ("memory → db", self._state_dir / "db" / "memory.db"),
             ("identity → history", self._state_dir / "meta" / "identity_history.jsonl"),
         ]
 
         connected = 0
         for name, path in wiring_checks:
-            if path.exists() and path.stat().st_size > 0:
+            if path is not None and path.exists() and path.stat().st_size > 0:
                 # Check freshness — is it being written to?
                 age_hours = (time.time() - path.stat().st_mtime) / 3600
                 if age_hours < 24:

@@ -174,6 +174,37 @@ class TestMahalakshmi:
         findings_text = " ".join(result.findings)
         assert "stale" in findings_text.lower() or "missing" in findings_text.lower()
 
+    def test_runner_pulse_log_satisfies_pulse_wiring(self, state_dir: Path):
+        runner_log = state_dir / "logs" / "pulse.log"
+        runner_log.parent.mkdir(parents=True, exist_ok=True)
+        runner_log.write_text(
+            "OK: pulse -> /Users/dhyana/.dharma/cron/pulse_20260326_125100.md\n",
+            encoding="utf-8",
+        )
+
+        engine = SamvaraEngine(state_dir)
+        for _ in range(3):
+            asyncio.run(engine.on_hold(coherence=0.35))
+        result = asyncio.run(engine.on_hold(coherence=0.35))
+
+        findings_text = " ".join(result.findings)
+        assert "pulse → log: missing or empty" not in findings_text.lower()
+
+    def test_accepts_runner_pulse_log_as_live_wiring(self, state_dir: Path):
+        """Canonical runner pulse logs should satisfy the pulse wiring check."""
+        pulse_log = state_dir / "logs" / "pulse.log"
+        pulse_log.parent.mkdir(parents=True)
+        pulse_log.write_text("OK: pulse -> /tmp/pulse_1.md", encoding="utf-8")
+
+        engine = SamvaraEngine(state_dir)
+        for _ in range(3):
+            asyncio.run(engine.on_hold(coherence=0.35))
+        result = asyncio.run(engine.on_hold(coherence=0.35))
+
+        assert result.power == Power.MAHALAKSHMI
+        findings_text = " ".join(result.findings)
+        assert "pulse → log" not in findings_text
+
 
 # ---------------------------------------------------------------------------
 # Mahakali diagnostics

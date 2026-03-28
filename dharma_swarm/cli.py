@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import asyncio
+from contextlib import contextmanager
+import os
 from pathlib import Path
 from typing import Optional
 
@@ -21,10 +23,27 @@ def _run(coro):
     return asyncio.run(coro)
 
 
-async def _get_swarm(state_dir: str = ".dharma"):
+@contextmanager
+def _temporary_env(overrides: dict[str, str]):
+    previous = {key: os.environ.get(key) for key in overrides}
+    try:
+        for key, value in overrides.items():
+            os.environ[key] = value
+        yield
+    finally:
+        for key, value in previous.items():
+            if value is None:
+                os.environ.pop(key, None)
+            else:
+                os.environ[key] = value
+
+
+async def _get_swarm(state_dir: str = ".dharma", *, read_only_boot: bool = False):
     from dharma_swarm.swarm import SwarmManager
-    swarm = SwarmManager(state_dir=state_dir)
-    await swarm.init()
+    overrides = {"DHARMA_READ_ONLY_BOOT": "1"} if read_only_boot else {}
+    with _temporary_env(overrides):
+        swarm = SwarmManager(state_dir=state_dir)
+        await swarm.init()
     return swarm
 
 
@@ -52,7 +71,7 @@ def init(
 def spawn(
     name: str = typer.Option(..., help="Agent name"),
     role: str = typer.Option("general", help="Agent role"),
-    model: str = typer.Option("anthropic/claude-sonnet-4", help="Model ID (OpenRouter format)"),
+    model: str = typer.Option("anthropic/claude-opus-4-6", help="Model ID (OpenRouter format)"),
     state_dir: str = typer.Option(".dharma", help="State directory"),
 ):
     """Spawn a new agent."""
@@ -78,7 +97,7 @@ def status(
 ):
     """Show swarm status."""
     async def _status():
-        swarm = await _get_swarm(state_dir)
+        swarm = await _get_swarm(state_dir, read_only_boot=True)
         state = await swarm.status()
 
         table = Table(title="DHARMA SWARM Status")

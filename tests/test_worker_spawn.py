@@ -156,3 +156,129 @@ async def test_agent_runner_spawn_worker_with_spawner():
     assert result.status == WorkerStatus.COMPLETED
     assert result.parent_agent == "delegator"
     assert spawner.get_stats()["total_spawns"] == 1
+
+
+async def test_agent_runner_spawn_worker_uses_routed_provider_when_available():
+    """Workers should use the shared routed provider path when the provider supports it."""
+    from dharma_swarm.agent_runner import AgentRunner
+    from dharma_swarm.decision_router import RoutePath
+    from dharma_swarm.models import (
+        AgentConfig,
+        AgentRole,
+        LLMRequest,
+        LLMResponse,
+        ProviderType,
+    )
+    from dharma_swarm.provider_policy import ProviderRouteDecision
+
+    class _RoutedProvider:
+        def __init__(self) -> None:
+            self.calls: list[tuple[object, LLMRequest, list[ProviderType] | None]] = []
+
+        async def complete_for_task(
+            self,
+            route_request,
+            request: LLMRequest,
+            *,
+            available_provider_types: list[ProviderType] | None = None,
+        ) -> tuple[ProviderRouteDecision, LLMResponse]:
+            self.calls.append((route_request, request, available_provider_types))
+            return (
+                ProviderRouteDecision(
+                    path=RoutePath.DELIBERATIVE,
+                    selected_provider=ProviderType.OPENAI,
+                    selected_model_hint=request.model,
+                    fallback_providers=[],
+                    fallback_model_hints=[],
+                    confidence=0.9,
+                    requires_human=False,
+                    reasons=["worker-test"],
+                ),
+                LLMResponse(content="worker routed ok", model=request.model),
+            )
+
+    spawner = WorkerSpawner(parent_name="delegator", max_concurrent=5)
+    provider = _RoutedProvider()
+    config = AgentConfig(
+        name="delegator",
+        role=AgentRole.GENERAL,
+        provider=ProviderType.OPENAI,
+        model="gpt-4.1",
+        metadata={"allow_provider_routing": True},
+    )
+    runner = AgentRunner(config, provider=provider, worker_spawner=spawner)
+    result = await runner.spawn_worker(
+        worker_type="code_worker",
+        task_title="Write patch",
+        task_description="Fix the bug",
+    )
+
+    route_request, request, allowlist = provider.calls[0]
+    assert result.result == "worker routed ok"
+    assert request.model == "gpt-4.1"
+    assert allowlist is None
+    assert route_request.context["preferred_provider"] == "openai"
+    assert route_request.context["preserve_requested_model"] is False
+
+
+async def test_agent_runner_spawn_worker_resolves_model_catalog_selector():
+    """Workers should inherit canonical model-pack selectors from the parent agent."""
+    from dharma_swarm.agent_runner import AgentRunner
+    from dharma_swarm.decision_router import RoutePath
+    from dharma_swarm.models import (
+        AgentConfig,
+        AgentRole,
+        LLMRequest,
+        LLMResponse,
+        ProviderType,
+    )
+    from dharma_swarm.provider_policy import ProviderRouteDecision
+
+    class _RoutedProvider:
+        def __init__(self) -> None:
+            self.calls: list[tuple[object, LLMRequest, list[ProviderType] | None]] = []
+
+        async def complete_for_task(
+            self,
+            route_request,
+            request: LLMRequest,
+            *,
+            available_provider_types: list[ProviderType] | None = None,
+        ) -> tuple[ProviderRouteDecision, LLMResponse]:
+            self.calls.append((route_request, request, available_provider_types))
+            return (
+                ProviderRouteDecision(
+                    path=RoutePath.DELIBERATIVE,
+                    selected_provider=ProviderType.OPENROUTER_FREE,
+                    selected_model_hint=request.model,
+                    fallback_providers=[],
+                    fallback_model_hints=[],
+                    confidence=0.9,
+                    requires_human=False,
+                    reasons=["worker-pack-test"],
+                ),
+                LLMResponse(content="worker pack ok", model=request.model),
+            )
+
+    spawner = WorkerSpawner(parent_name="delegator", max_concurrent=5)
+    provider = _RoutedProvider()
+    config = AgentConfig(
+        name="delegator",
+        role=AgentRole.GENERAL,
+        provider=ProviderType.ANTHROPIC,
+        model="claude-sonnet-4-20250514",
+        metadata={"model_catalog_selector": "tier one models"},
+    )
+    runner = AgentRunner(config, provider=provider, worker_spawner=spawner)
+    result = await runner.spawn_worker(
+        worker_type="code_worker",
+        task_title="Write patch",
+        task_description="Fix the bug",
+    )
+
+    route_request, request, allowlist = provider.calls[0]
+    assert result.result == "worker pack ok"
+    assert allowlist == [ProviderType.OPENROUTER_FREE]
+    assert request.model.endswith(":free")
+    assert route_request.context["preferred_provider"] == "openrouter_free"
+    assert route_request.context["preserve_requested_model"] is True

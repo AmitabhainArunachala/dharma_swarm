@@ -208,7 +208,9 @@ class StigmergyStore:
                 or m.salience >= CROSS_CHANNEL_SALIENCE_THRESHOLD
             ]
         marks.sort(key=lambda m: m.timestamp, reverse=True)
-        return marks[:limit]
+        result = marks[:limit]
+        await self._record_access(result)
+        return result
 
     async def hot_paths(
         self,
@@ -240,7 +242,9 @@ class StigmergyStore:
         marks = await self._load_marks()
         filtered = [m for m in marks if m.salience >= threshold]
         filtered.sort(key=lambda m: m.salience, reverse=True)
-        return filtered[:limit]
+        result = filtered[:limit]
+        await self._record_access(result)
+        return result
 
     async def connections_for(self, file_path: str) -> list[str]:
         """Collect unique connections from all marks referencing *file_path*."""
@@ -276,7 +280,38 @@ class StigmergyStore:
             return await self.high_salience(limit=limit)
         relevant = [m for m in marks if any(kw in (m.observation + " " + m.file_path).lower() for kw in keywords_lower)]
         relevant.sort(key=lambda m: m.salience, reverse=True)
-        return relevant[:limit]
+        result = relevant[:limit]
+        await self._record_access(result)
+        return result
+
+    async def _record_access(self, marks: list[StigmergicMark]) -> None:
+        """Persist access-count increments for read marks."""
+        if not marks:
+            return
+
+        mark_ids = {mark.id for mark in marks if getattr(mark, "id", "")}
+        if not mark_ids:
+            return
+
+        async with self._write_lock:
+            persisted = await self._load_marks()
+            touched = False
+            for mark in persisted:
+                if mark.id in mark_ids:
+                    mark.access_count += 1
+                    touched = True
+            if not touched:
+                return
+
+            self.base_path.mkdir(parents=True, exist_ok=True)
+            tmp = self._marks_file.with_suffix(".tmp")
+            async with aiofiles.open(tmp, "w") as f:
+                for mark in persisted:
+                    await f.write(mark.model_dump_json() + "\n")
+            tmp.replace(self._marks_file)
+
+        for mark in marks:
+            mark.access_count += 1
 
     # -- maintenance ---------------------------------------------------------
 

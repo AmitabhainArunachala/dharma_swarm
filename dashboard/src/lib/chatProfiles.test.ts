@@ -7,6 +7,7 @@ import {
   resolveCanonicalChatStatus,
   resolveChatProfileId,
   resolveCommandPostPeerProfileId,
+  shortProfileLabel,
 } from "./chatProfiles.ts";
 import type { ChatStatusOut } from "./types.ts";
 
@@ -236,4 +237,31 @@ test("isAdvertisedChatProfileAvailable distinguishes advertised readiness from m
     false,
   );
   assert.equal(isAdvertisedChatProfileAvailable(advertisedReady, "missing_lane"), false);
+});
+
+test("shortProfileLabel keeps certified peer lanes compact in the dropdown", () => {
+  assert.equal(
+    shortProfileLabel({
+      id: "sonnet46_operator",
+      label: "Claude Sonnet 4.6",
+      provider: "claude_code",
+      model: "claude-sonnet-4-6",
+      accent: "fuji",
+      summary: "Certified execution peer.",
+      available: true,
+    }),
+    "Sonnet",
+  );
+  assert.equal(
+    shortProfileLabel({
+      id: "kimi_k25_scout",
+      label: "Kimi K2.5 Scout",
+      provider: "openrouter",
+      model: "moonshotai/kimi-k2.5",
+      accent: "bengara",
+      summary: "Certified reconnaissance lane.",
+      available: true,
+    }),
+    "Kimi",
+  );
 });

@@ -25,7 +25,16 @@ from typing import Literal
 
 logger = logging.getLogger(__name__)
 
+from dharma_swarm.claim_graph import Contradiction
+from dharma_swarm.dharma_corpus import Claim
+from dharma_swarm.dharma_kernel import DharmaKernel
 from dharma_swarm.injection_scanner import scan_and_sanitize
+from dharma_swarm.orientation_packet import (
+    DirectiveSummary,
+    OrientationPacket,
+    OrientationPacketBuilder,
+    RuntimeStateSummary,
+)
 
 HOME = Path.home()
 AGNI_WORKSPACE = HOME / "agni-workspace"
@@ -1342,3 +1351,37 @@ def build_agent_context(
         result = result[:CONTEXT_BUDGET] + "\n\n... [context budget exceeded, truncated]"
 
     return result
+
+
+def build_orientation_packet(
+    *,
+    role: str,
+    claims: list[Claim],
+    kernel: DharmaKernel | None = None,
+    contradictions: list[Contradiction] | None = None,
+    directives: list[DirectiveSummary | dict] | None = None,
+    runtime_state: RuntimeStateSummary | dict | None = None,
+    role_context: str = "",
+    task: str | None = None,
+    provenance: list[str] | None = None,
+    stale_sources: list[str] | None = None,
+) -> OrientationPacket:
+    """Build a typed orientation packet alongside the legacy text context path.
+
+    This intentionally keeps the existing string-based context engine intact while
+    exposing a structured initialization surface for runtimes that want something
+    more inspectable than a monolithic prompt blob.
+    """
+    builder = OrientationPacketBuilder()
+    return builder.build(
+        role=role,
+        kernel=kernel or DharmaKernel.create_default(),
+        claims=claims,
+        contradictions=contradictions,
+        directives=directives,
+        runtime_state=runtime_state,
+        role_context=role_context,
+        task=task,
+        provenance=provenance,
+        stale_sources=stale_sources,
+    )

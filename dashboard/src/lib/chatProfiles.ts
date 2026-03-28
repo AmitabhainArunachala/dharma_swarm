@@ -109,8 +109,10 @@ export function resolveChatProfile(
 }
 
 export function shortProfileLabel(profile: ChatProfileOut): string {
+  if (profile.label.startsWith("Claude Sonnet")) return "Sonnet";
   if (profile.label.startsWith("Claude")) return "Claude";
   if (profile.label.startsWith("Codex")) return "Codex";
+  if (profile.label.startsWith("Kimi")) return "Kimi";
   if (profile.label.startsWith("GLM")) return "GLM";
   if (profile.label.startsWith("Qwen")) return "Qwen";
   return profile.label;

@@ -16,6 +16,7 @@ from dharma_swarm.engine.event_memory import (
     ensure_memory_plane_schema_sync,
 )
 from dharma_swarm.engine.knowledge_store import _jaccard, _tokenize
+from dharma_swarm.tiny_router_shadow import TinyRouterShadowInput, infer_tiny_router_shadow
 
 
 def _utc_now_iso() -> str:
@@ -200,6 +201,13 @@ class ConversationMemoryStore:
 
         with sqlite3.connect(str(self.db_path)) as db:
             ensure_memory_plane_schema_sync(db)
+            for key, value in self._transition_metadata(
+                db,
+                session_id=session_id,
+                role=role,
+                content=content,
+            ).items():
+                payload.setdefault(key, value)
             db.execute(
                 "INSERT INTO conversation_turns"
                 " (turn_id, session_id, task_id, role, content, flow_state, turn_index, metadata_json, created_at)"
@@ -221,6 +229,62 @@ class ConversationMemoryStore:
         if harvest:
             self.harvest_turn(turn_id)
         return turn_id
+
+    def _transition_metadata(
+        self,
+        db: sqlite3.Connection,
+        *,
+        session_id: str,
+        role: str,
+        content: str,
+    ) -> dict[str, Any]:
+        normalized_role = role.strip().lower()
+        previous_text = ""
+        if normalized_role == "user":
+            row = db.execute(
+                "SELECT content FROM conversation_turns"
+                " WHERE session_id = ? AND role = ?"
+                " ORDER BY turn_index DESC, created_at DESC LIMIT 1",
+                (session_id, role),
+            ).fetchone()
+            if row is not None:
+                previous_text = str(row[0] or "")
+        if not previous_text:
+            row = db.execute(
+                "SELECT content FROM conversation_turns"
+                " WHERE session_id = ?"
+                " ORDER BY turn_index DESC, created_at DESC LIMIT 1",
+                (session_id,),
+            ).fetchone()
+            if row is not None:
+                previous_text = str(row[0] or "")
+
+        signal = infer_tiny_router_shadow(
+            TinyRouterShadowInput(
+                current_text=content,
+                previous_text=previous_text or None,
+            )
+        )
+        return {
+            "relation_to_previous": signal.relation_to_previous.label,
+            "relation_confidence": round(signal.relation_to_previous.confidence, 4),
+            "actionability": signal.actionability.label,
+            "actionability_confidence": round(signal.actionability.confidence, 4),
+            "retention": signal.retention.label,
+            "retention_confidence": round(signal.retention.confidence, 4),
+            "ingress_urgency_label": signal.urgency.label,
+            "ingress_urgency_confidence": round(signal.urgency.confidence, 4),
+            "tiny_router_overall_confidence": round(signal.overall_confidence, 4),
+            "tiny_router_source": signal.source,
+            "tiny_router_shadow": True,
+            "updates_existing_thread": signal.relation_to_previous.label in {
+                "follow_up",
+                "correction",
+                "confirmation",
+                "cancellation",
+                "closure",
+            },
+        }
 
     def harvest_turn(self, turn_id: str) -> list[IdeaShard]:
         turn = self.get_turn(turn_id)
@@ -248,6 +312,16 @@ class ConversationMemoryStore:
                     "flow_state": turn.flow_state,
                     "candidate_index": len(harvested),
                 }
+                for key in (
+                    "relation_to_previous",
+                    "actionability",
+                    "retention",
+                    "ingress_urgency_label",
+                    "tiny_router_source",
+                    "updates_existing_thread",
+                ):
+                    if key in turn.metadata:
+                        metadata[key] = turn.metadata[key]
                 db.execute(
                     "INSERT INTO idea_shards"
                     " (shard_id, turn_id, session_id, task_id, shard_kind, state, text,"
@@ -477,17 +551,27 @@ class ConversationMemoryStore:
             db.commit()
         return int(cursor.rowcount or 0)
 
-    def latent_gold(self, query: str, *, limit: int = 5) -> list[IdeaShard]:
+    def latent_gold(
+        self,
+        query: str,
+        *,
+        limit: int = 5,
+        min_salience: float = 0.0,
+    ) -> list[IdeaShard]:
         normalized_query = query.strip()
         with sqlite3.connect(str(self.db_path)) as db:
             ensure_memory_plane_schema_sync(db)
             db.row_factory = sqlite3.Row
+            # Push salience floor into SQL so we scan far fewer rows.
+            # The idx_shard_state_created index covers (state, created_at DESC).
             rows = db.execute(
                 "SELECT shard_id, turn_id, session_id, task_id, shard_kind, state, text,"
                 " salience, novelty, flow_score, metadata_json, created_at"
                 " FROM idea_shards"
                 " WHERE state IN ('orphaned', 'deferred', 'proposed', 'connected')"
-                " ORDER BY created_at DESC LIMIT 500",
+                "   AND salience >= ?"
+                " ORDER BY salience DESC, created_at DESC LIMIT 200",
+                (min_salience,),
             ).fetchall()
 
         scored: list[tuple[IdeaShard, float]] = []

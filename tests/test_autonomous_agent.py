@@ -598,6 +598,16 @@ class TestCallLLM:
         await agent._call_llm("sys", [], [])
         agent._call_openrouter.assert_awaited_once()
 
+    @pytest.mark.asyncio
+    async def test_codex_dispatch(self):
+        ident = AgentIdentity(
+            name="t", role="r", system_prompt="s", provider="codex",
+        )
+        agent = AutonomousAgent(ident)
+        agent._call_codex = AsyncMock(return_value={"text": [], "tool_uses": []})
+        await agent._call_llm("sys", [], [])
+        agent._call_codex.assert_awaited_once()
+
 
 # ---------------------------------------------------------------------------
 # Memory and stigmergy tools (mocked backends)

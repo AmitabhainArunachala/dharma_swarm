@@ -405,8 +405,9 @@ class AutoResearchLoop:
         if len(user_prompt) > 12000:
             user_prompt = user_prompt[:12000] + "\n... (truncated)"
 
+        from dharma_swarm.model_hierarchy import default_model as _default_model
         request = LLMRequest(
-            model="meta-llama/llama-3.3-70b-instruct",
+            model=_default_model(ProviderType.OPENROUTER),
             messages=[{"role": "user", "content": user_prompt}],
             system=system_prompt,
             max_tokens=2048,
