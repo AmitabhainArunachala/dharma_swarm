@@ -1454,6 +1454,14 @@ class SwarmManager:
             result["focus"] = self._thread_mgr.check_focus_override(self.state_dir)
             result["inject"] = self._thread_mgr.check_inject_override(self.state_dir)
 
+        # Read .FOCUS file text for Wire 3 routing governance
+        focus_path = self.state_dir / ".FOCUS"
+        if focus_path.exists():
+            try:
+                result["focus_text"] = focus_path.read_text(encoding="utf-8")[:500]
+            except Exception:
+                pass
+
         return result
 
     def _in_quiet_hours(self) -> bool:
@@ -2014,6 +2022,18 @@ class SwarmManager:
             return result
         if overrides["focus"] and self._thread_mgr:
             self._thread_mgr._current_thread = overrides["focus"]
+            # Wire 3: .FOCUS governs routing, not just thread selection.
+            # When identity TCS is drifting, boost routing toward corrective behavior.
+            focus_text = str(overrides.get("focus_text", ""))
+            if "GPR" in focus_text and self._router:
+                # Low gate passage rate → route through reflective reroute path
+                self._router._routing_bias = min(
+                    getattr(self._router, "_routing_bias", 0.0) + 0.1, 0.5
+                )
+                logger.info(".FOCUS(GPR): routing bias increased to favor frontier models")
+            elif "RM" in focus_text and self._engine:
+                # Low research momentum → prioritize research tasks
+                logger.info(".FOCUS(RM): flagging research task priority boost")
         if self._daemon.circuit_breaker.is_broken:
             result["circuit_broken"] = True
             return result
@@ -2847,6 +2867,83 @@ class SwarmManager:
         return {"key": entry.key, "category": entry.category,
                 "importance": entry.importance}
 
+    # --- Session Digest (Wire 5: temporal continuity) ---
+
+    async def _persist_session_digest(self) -> None:
+        """Write session summary as memory_facts for cross-session learning.
+
+        This is the temporal continuity wire. Before this, memory_facts
+        had 0 rows. After this, the system can recall what happened in
+        previous sessions and learn from outcomes.
+        """
+        from dharma_swarm.runtime_state import RuntimeStateStore, MemoryFact
+        from uuid import uuid4
+
+        store = RuntimeStateStore(db_path=self.state_dir / "db" / "runtime.db")
+        await store.init_db()
+
+        now = datetime.now(timezone.utc)
+        session_id = f"swarm-{now.strftime('%Y%m%dT%H%M%S')}"
+
+        # Gather session metrics
+        facts: list[MemoryFact] = []
+
+        # Fact 1: What tasks were completed
+        if self._task_board:
+            try:
+                completed = await self._task_board.list_tasks(status="completed")
+                count = len(completed) if completed else 0
+                if count > 0:
+                    titles = [t.title[:60] for t in (completed or [])[:5]]
+                    facts.append(MemoryFact(
+                        fact_id=f"fact_{uuid4().hex[:12]}",
+                        fact_kind="session_outcome",
+                        truth_state="observed",
+                        text=f"Completed {count} tasks: {', '.join(titles)}",
+                        confidence=0.9,
+                        session_id=session_id,
+                        valid_from=now,
+                    ))
+            except Exception:
+                pass
+
+        # Fact 2: Identity coherence state
+        if self._organism:
+            try:
+                hb = self._organism.last_heartbeat
+                if hb and hasattr(hb, "tcs"):
+                    facts.append(MemoryFact(
+                        fact_id=f"fact_{uuid4().hex[:12]}",
+                        fact_kind="identity_state",
+                        truth_state="observed",
+                        text=f"Session ended with TCS={hb.tcs:.3f}, regime={hb.regime}",
+                        confidence=0.95,
+                        session_id=session_id,
+                        valid_from=now,
+                    ))
+            except Exception:
+                pass
+
+        # Fact 3: Tick count and uptime
+        facts.append(MemoryFact(
+            fact_id=f"fact_{uuid4().hex[:12]}",
+            fact_kind="session_stats",
+            truth_state="observed",
+            text=f"Session ran {self._tick_count} ticks, {self._contribution_count} contributions",
+            confidence=1.0,
+            session_id=session_id,
+            valid_from=now,
+        ))
+
+        for fact in facts:
+            try:
+                await store.record_memory_fact(fact)
+            except Exception as exc:
+                logger.debug("Failed to record memory fact: %s", exc)
+
+        if facts:
+            logger.info("Persisted %d session memory facts (session=%s)", len(facts), session_id)
+
     # --- Shutdown ---
 
     async def shutdown(self, drain_timeout: float = 30.0) -> None:
@@ -2858,6 +2955,14 @@ class SwarmManager:
         """
         self._running = False
         logger.info("Swarm shutdown initiated (drain_timeout=%.1fs)", drain_timeout)
+
+        # Wire 5: Persist session digest as memory facts before teardown.
+        # This is THE temporal continuity wire — gives the system cross-session learning.
+        # memory_facts schema has been empty (0 rows) since creation. This populates it.
+        try:
+            await self._persist_session_digest()
+        except Exception as exc:
+            logger.debug("Session digest persistence failed (non-fatal): %s", exc)
 
         # 1. Stop orchestrator (cancel in-flight tasks with drain)
         if self._orchestrator:
