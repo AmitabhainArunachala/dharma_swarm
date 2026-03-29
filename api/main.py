@@ -151,6 +151,7 @@ def _get_api_key() -> str | None:
 # Routes that never require authentication (method, path).
 _PUBLIC_ROUTES: set[tuple[str, str]] = {
     ("GET", "/"),
+    ("GET", "/health"),
     ("GET", "/api/health"),
     ("GET", "/api/verify/health"),
     ("GET", "/docs"),
@@ -290,4 +291,44 @@ async def root():
         "version": "0.1.0",
         "docs": "/docs",
         "health": "/api/health",
+    }
+
+
+# ── Process Supervision Health ────────────────────────────────────
+
+@app.get("/health")
+async def daemon_health():
+    """Process supervision health — daemon PID, uptime, and last tick timestamp."""
+    import json
+    import time
+
+    state_dir = Path.home() / ".dharma"
+    pid_file = state_dir / "daemon.pid"
+    health_file = state_dir / "stigmergy" / "dgc_health.json"
+
+    daemon_pid: int | None = None
+    pid_started_at: float | None = None
+    try:
+        daemon_pid = int(pid_file.read_text(encoding="utf-8").strip())
+        pid_started_at = pid_file.stat().st_mtime
+    except (OSError, ValueError):
+        pass
+
+    dgc_health: dict = {}
+    try:
+        dgc_health = json.loads(health_file.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        pass
+
+    uptime_seconds: float | None = None
+    if pid_started_at is not None:
+        uptime_seconds = round(time.time() - pid_started_at, 1)
+
+    return {
+        "daemon_pid": daemon_pid,
+        "uptime_seconds": uptime_seconds,
+        "dgc_health_status": dgc_health.get("source", "unknown"),
+        "last_tick": dgc_health.get("timestamp"),
+        "agent_count": dgc_health.get("agent_count"),
+        "task_count": dgc_health.get("task_count"),
     }
