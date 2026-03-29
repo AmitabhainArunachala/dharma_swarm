@@ -80,6 +80,14 @@ def _score(query: str, text: str) -> float:
     return round(score, 4)
 
 
+def _fts5_query(query: str) -> str:
+    """Build a safe FTS5 match expression from a raw query string."""
+    tokens = _tokenize(query.replace("_", " "))
+    if not tokens:
+        return ""
+    return " OR ".join(f'"{t}"' for t in tokens)
+
+
 def _decode_metadata(raw: str | None) -> dict[str, Any]:
     if not raw:
         return {}
@@ -240,13 +248,66 @@ class UnifiedIndex:
         limit: int = 10,
         filters: dict[str, Any] | None = None,
     ) -> list[tuple[KnowledgeRecord, float]]:
-        """Search indexed chunks and runtime events through one retrieval surface."""
+        """Search indexed chunks and runtime events through one retrieval surface.
+
+        Uses FTS5 for candidate selection on source_chunks (top 100),
+        then reranks with Jaccard/overlap scoring.  Events are scanned
+        directly (typically low volume).
+        """
+        fts_expr = _fts5_query(query)
         results: list[tuple[KnowledgeRecord, float]] = []
-        for record in self.records(filters=filters):
-            score = _score(query, _search_text_for_record(record))
-            if score <= 0:
+
+        with connect_sync(self.db_path, row_factory=sqlite3.Row) as db:
+            ensure_memory_plane_schema_sync(db)
+
+            # FTS5 candidate selection for chunks (top 100)
+            if fts_expr:
+                try:
+                    chunk_rows = db.execute(
+                        "SELECT c.chunk_id, c.text, c.metadata_json,"
+                        " d.source_kind, d.source_path, d.source_ref,"
+                        " d.metadata_json AS doc_metadata_json, d.updated_at"
+                        " FROM source_chunks c"
+                        " JOIN source_documents d ON d.doc_id = c.doc_id"
+                        " WHERE c.rowid IN ("
+                        "  SELECT rowid FROM source_chunks_fts"
+                        "  WHERE source_chunks_fts MATCH ? LIMIT 100"
+                        ")",
+                        (fts_expr,),
+                    ).fetchall()
+                except sqlite3.OperationalError:
+                    # FTS5 unavailable — fall back to full scan
+                    chunk_rows = db.execute(
+                        "SELECT c.chunk_id, c.text, c.metadata_json,"
+                        " d.source_kind, d.source_path, d.source_ref,"
+                        " d.metadata_json AS doc_metadata_json, d.updated_at"
+                        " FROM source_chunks c"
+                        " JOIN source_documents d ON d.doc_id = c.doc_id"
+                    ).fetchall()
+            else:
+                chunk_rows = []
+
+            # Events: direct scan (typically small volume)
+            event_rows = db.execute(
+                "SELECT event_id, session_id, trace_id, event_type, source, agent_id,"
+                " emitted_at, payload_json FROM event_log"
+            ).fetchall()
+
+        for row in chunk_rows:
+            record = _build_chunk_record(row)
+            if filters and not _metadata_match(record.metadata, filters):
                 continue
-            results.append((record, score))
+            score = _score(query, _search_text_for_record(record))
+            if score > 0:
+                results.append((record, score))
+
+        for row in event_rows:
+            record = _build_event_record(row)
+            if filters and not _metadata_match(record.metadata, filters):
+                continue
+            score = _score(query, _search_text_for_record(record))
+            if score > 0:
+                results.append((record, score))
 
         results.sort(key=lambda item: (item[1], item[0].created_at), reverse=True)
         return results[: max(1, limit)]

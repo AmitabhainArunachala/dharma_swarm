@@ -135,6 +135,29 @@ CREATE TABLE IF NOT EXISTS idea_uptake (
     recorded_at TEXT NOT NULL
 )"""
 
+_SOURCE_CHUNKS_FTS_DDL = (
+    "CREATE VIRTUAL TABLE IF NOT EXISTS source_chunks_fts"
+    " USING fts5(text, content=source_chunks, content_rowid=rowid)"
+)
+
+_FTS_TRIGGERS = [
+    """CREATE TRIGGER IF NOT EXISTS source_chunks_fts_insert
+    AFTER INSERT ON source_chunks BEGIN
+      INSERT INTO source_chunks_fts(rowid, text) VALUES (new.rowid, new.text);
+    END""",
+    """CREATE TRIGGER IF NOT EXISTS source_chunks_fts_delete
+    BEFORE DELETE ON source_chunks BEGIN
+      INSERT INTO source_chunks_fts(source_chunks_fts, rowid, text)
+        VALUES('delete', old.rowid, old.text);
+    END""",
+    """CREATE TRIGGER IF NOT EXISTS source_chunks_fts_update
+    AFTER UPDATE ON source_chunks BEGIN
+      INSERT INTO source_chunks_fts(source_chunks_fts, rowid, text)
+        VALUES('delete', old.rowid, old.text);
+      INSERT INTO source_chunks_fts(rowid, text) VALUES (new.rowid, new.text);
+    END""",
+]
+
 _INDEXES = [
     "CREATE INDEX IF NOT EXISTS idx_event_session_emitted ON event_log(session_id, emitted_at)",
     "CREATE INDEX IF NOT EXISTS idx_event_trace_emitted ON event_log(trace_id, emitted_at)",
@@ -175,6 +198,7 @@ def ensure_memory_plane_schema_sync(db: Any) -> None:
         db.execute(idx)
     _ensure_retrieval_log_columns_sync(db)
     _ensure_source_documents_columns_sync(db)
+    _ensure_fts_sync(db)
     db.commit()
 
 
@@ -196,6 +220,7 @@ async def ensure_memory_plane_schema_async(db: aiosqlite.Connection) -> None:
         await db.execute(idx)
     await _ensure_retrieval_log_columns_async(db)
     await _ensure_source_documents_columns_async(db)
+    await _ensure_fts_async(db)
     await db.commit()
 
 
@@ -217,6 +242,26 @@ async def _ensure_source_documents_columns_async(db: aiosqlite.Connection) -> No
         await db.execute(
             "ALTER TABLE source_documents ADD COLUMN source_confidence REAL NOT NULL DEFAULT 1.0"
         )
+
+
+def _ensure_fts_sync(db: Any) -> None:
+    """Create FTS5 virtual table and sync triggers for source_chunks."""
+    try:
+        db.execute(_SOURCE_CHUNKS_FTS_DDL)
+        for trigger in _FTS_TRIGGERS:
+            db.execute(trigger)
+    except Exception:
+        pass  # FTS5 not available — search falls back to full scan
+
+
+async def _ensure_fts_async(db: aiosqlite.Connection) -> None:
+    """Create FTS5 virtual table and sync triggers for source_chunks (async)."""
+    try:
+        await db.execute(_SOURCE_CHUNKS_FTS_DDL)
+        for trigger in _FTS_TRIGGERS:
+            await db.execute(trigger)
+    except Exception:
+        pass  # FTS5 not available — search falls back to full scan
 
 
 def _ensure_retrieval_log_columns_sync(db: Any) -> None:
