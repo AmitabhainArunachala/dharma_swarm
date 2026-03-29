@@ -368,6 +368,20 @@ def _pulse_sort_key(last_seen: str | None, source: Path) -> float:
         return 0.0
 
 
+def _pulse_timestamp_or_mtime(
+    timestamp: datetime | None,
+    source: Path,
+    *,
+    future_tolerance_seconds: float = 300.0,
+) -> datetime:
+    """Use parsed pulse timestamps unless they are implausibly in the future."""
+    if timestamp is not None:
+        now = datetime.now(timezone.utc)
+        if (timestamp - now).total_seconds() <= future_tolerance_seconds:
+            return timestamp
+    return datetime.fromtimestamp(source.stat().st_mtime, timezone.utc)
+
+
 def _pulse_summary_from_log(path: Path) -> tuple[int, str | None, Path] | None:
     if not path.exists():
         return None
@@ -393,8 +407,8 @@ def _pulse_summary_from_log(path: Path) -> tuple[int, str | None, Path] | None:
             count += 1
             raw_stamp = line[start + len(marker):end]
             try:
-                timestamp = datetime.strptime(raw_stamp, "%Y%m%d_%H%M%S").replace(tzinfo=timezone.utc)
-                last_seen = timestamp.isoformat()
+                parsed = datetime.strptime(raw_stamp, "%Y%m%d_%H%M%S").replace(tzinfo=timezone.utc)
+                last_seen = _pulse_timestamp_or_mtime(parsed, path).isoformat()
             except ValueError:
                 last_seen = datetime.fromtimestamp(path.stat().st_mtime, timezone.utc).isoformat()
         if last_seen:
@@ -419,7 +433,8 @@ def _canonical_pulse_summary() -> tuple[int, str | None, Path | None]:
     if pulse_artifacts:
         latest = pulse_artifacts[-1].stem.removeprefix("pulse_")
         try:
-            timestamp = datetime.strptime(latest, "%Y%m%d_%H%M%S").replace(tzinfo=timezone.utc)
+            parsed = datetime.strptime(latest, "%Y%m%d_%H%M%S").replace(tzinfo=timezone.utc)
+            timestamp = _pulse_timestamp_or_mtime(parsed, pulse_artifacts[-1])
             candidates.append((len(pulse_artifacts), timestamp.isoformat(), pulse_artifacts[-1]))
         except ValueError:
             candidates.append(
@@ -431,6 +446,15 @@ def _canonical_pulse_summary() -> tuple[int, str | None, Path | None]:
             )
 
     if candidates:
+        log_candidates = [
+            item for item in candidates
+            if item[2].name == "pulse.log"
+        ]
+        if log_candidates:
+            freshest_log = max(log_candidates, key=lambda item: _pulse_sort_key(item[1], item[2]))
+            freshest_log_ts = _pulse_sort_key(freshest_log[1], freshest_log[2])
+            if freshest_log_ts >= datetime.now(timezone.utc).timestamp() - 3600:
+                return freshest_log
         count, last_seen, source = max(candidates, key=lambda item: _pulse_sort_key(item[1], item[2]))
         return (count, last_seen, source)
 
@@ -1244,6 +1268,25 @@ def cmd_gates(action: str) -> None:
     result = DEFAULT_GATEKEEPER.check(action=action)
     print(f"Decision: {result.decision.value.upper()}")
     print(f"Reason: {result.reason}")
+
+
+def cmd_maintenance(*, dry_run: bool = False, max_mb: float = 50.0) -> None:
+    """Run WAL checkpoint + JSONL rotation for ~/.dharma/ housekeeping."""
+    from dharma_swarm.maintenance import checkpoint_wal_files, rotate_jsonl_files
+
+    print("=== WAL Checkpoint ===")
+    wal = checkpoint_wal_files()
+    for path, pages in wal.items():
+        status = f"{pages} pages" if pages >= 0 else "FAILED"
+        print(f"  {Path(path).name}: {status}")
+
+    print(f"\n=== JSONL Rotation (threshold={max_mb}MB{', DRY-RUN' if dry_run else ''}) ===")
+    rotated = rotate_jsonl_files(max_mb=max_mb, dry_run=dry_run)
+    if rotated:
+        for p in rotated:
+            print(f"  Rotated: {Path(p).name}")
+    else:
+        print("  No files above threshold.")
 
 
 def cmd_health() -> None:
