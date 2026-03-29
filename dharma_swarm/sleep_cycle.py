@@ -14,6 +14,7 @@ not prevent subsequent phases from running.
 
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
 from datetime import datetime, timezone
@@ -56,6 +57,8 @@ class SleepReport(BaseModel):
     hot_paths_found: list[str] = Field(default_factory=list)
     high_salience_observations: list[str] = Field(default_factory=list)
     errors: list[str] = Field(default_factory=list)
+    # Semantic ingestion stats
+    files_ingested: int = 0
     # Neural consolidation stats
     neural_losses: int = 0
     neural_corrections: int = 0
@@ -285,29 +288,50 @@ class SleepCycle:
         return result
 
     async def _semantic_sleep(self) -> dict[str, Any]:
-        """Phase 4: Semantic evolution + recognition synthesis.
+        """Phase 4: Semantic ingestion + evolution + recognition synthesis.
 
-        Runs semantic indexing, then generates a recognition seed that
-        closes the strange loop: artifacts -> scores -> synthesis ->
-        agent context -> artifacts.
+        First ingests new documents via SemanticIngestionSpine, then runs
+        semantic indexing and recognition seed synthesis.
         """
         import sqlite3 as _sqlite3
 
+        from dharma_swarm.semantic_ingestion import SemanticIngestionSpine
         from dharma_swarm.semantic_memory_bridge import run_semantic_sleep_phase
 
+        result: dict[str, Any] = {}
         state_root = self._memory_dir.parent
+
+        # --- Semantic ingestion pass ---
+        try:
+            spine = SemanticIngestionSpine(state_dir=state_root)
+            if not spine.list_sources(enabled_only=True):
+                spine.register_default_sources()
+            ingestion_report = await asyncio.to_thread(spine.run, max_files=50)
+            result["ingestion_files_ingested"] = ingestion_report.files_ingested
+            result["ingestion_files_scanned"] = ingestion_report.files_scanned
+            logger.info(
+                "Semantic ingestion: %d/%d files ingested",
+                ingestion_report.files_ingested,
+                ingestion_report.files_scanned,
+            )
+        except Exception as exc:
+            logger.warning("Semantic ingestion pass failed: %s", exc)
+            result["ingestion_error"] = str(exc)
+
         project_root = Path(__file__).resolve().parent.parent
         try:
-            result = await run_semantic_sleep_phase(
+            phase_result = await run_semantic_sleep_phase(
                 project_root=project_root,
                 graph_path=state_root / "semantic" / "concept_graph.json",
                 db_path=state_root / "memory" / "semantic_sleep.db",
             )
+            result.update(phase_result)
         except _sqlite3.OperationalError as exc:
             lowered = str(exc).lower()
             if "locked" in lowered or "readonly" in lowered:
                 logger.warning("Semantic sleep skipped: DB locked (%s)", exc)
-                return {"phase": "semantic", "skipped": True}
+                result["skipped"] = True
+                return result
             raise
 
         # Recognition synthesis — the strange loop closure
@@ -455,9 +479,17 @@ class SleepCycle:
                     f"{divisions} division proposals"
                 )
         elif phase == SleepPhase.SEMANTIC:
+            # Semantic ingestion stats
+            ingested = result.get("ingestion_files_ingested", 0)
+            report.files_ingested += ingested
             # Semantic phase results are informational; log key stats
             concepts = result.get("concepts_digested", 0)
             clusters = result.get("clusters_generated", 0)
+            scanned = result.get("ingestion_files_scanned", 0)
+            if ingested:
+                report.high_salience_observations.append(
+                    f"ingestion: {ingested}/{scanned} files ingested"
+                )
             if concepts:
                 report.high_salience_observations.append(
                     f"semantic: {concepts} concepts digested, {clusters} clusters"
