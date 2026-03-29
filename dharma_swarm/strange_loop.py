@@ -50,6 +50,59 @@ class OrganismConfig:
 
 
 @dataclass
+class MutationRule:
+    """Declarative rule for proposing parameter mutations."""
+
+    parameter: str
+    direction: int       # +1 increase, -1 decrease
+    step: float
+    bounds: tuple        # (min, max)
+    conditions: list     # [(metric_or_config, operator, reference), ...]
+    reason_template: str
+
+
+MUTATION_RULES: list[MutationRule] = [
+    MutationRule(
+        parameter="routing_bias",
+        direction=1,
+        step=0.05,
+        bounds=(0.0, 0.5),
+        conditions=[
+            ("avg_failure", ">", "algedonic_failure_threshold"),
+            ("routing_bias", "<", 0.4),
+        ],
+        reason_template="Avg failure rate {avg_failure:.2f} > threshold {algedonic_failure_threshold}",
+    ),
+    MutationRule(
+        parameter="scaling_health_threshold",
+        direction=-1,
+        step=0.05,
+        bounds=(0.15, 0.5),
+        conditions=[
+            ("unhealthy_ratio", ">", 0.5),
+            ("scaling_health_threshold", ">", 0.2),
+        ],
+        reason_template="Unhealthy ratio {unhealthy_ratio:.2f} — lower scaling threshold",
+    ),
+    MutationRule(
+        parameter="routing_bias",
+        direction=-1,
+        step=0.05,
+        bounds=(0.0, 0.5),
+        conditions=[
+            ("avg_health", ">", 0.8),
+            ("avg_failure", "<", 0.1),
+            ("routing_bias", ">", 0.05),
+        ],
+        reason_template=(
+            "Healthy (avg_health={avg_health:.2f}, avg_failure={avg_failure:.2f})"
+            " — reduce routing bias to save cost"
+        ),
+    ),
+]
+
+
+@dataclass
 class Mutation:
     """A proposed change to an organism parameter."""
     id: str
@@ -112,6 +165,8 @@ class StrangeLoop:
     measure and keep/revert.
     """
 
+    mutation_rules: list[MutationRule] = MUTATION_RULES
+
     def __init__(self, organism: Any, config: OrganismConfig | None = None) -> None:
         self._organism = organism
         self.config = config or OrganismConfig()
@@ -145,61 +200,88 @@ class StrangeLoop:
 
         return self._observe_diagnose_propose(pulse_history)
 
+    def _compute_success_rates(self) -> dict[str, float]:
+        """Compute per-parameter success rate from mutation history."""
+        counts: dict[str, list[bool]] = {}
+        for m in self._mutations:
+            if m.kept is not None:
+                counts.setdefault(m.parameter, []).append(m.kept)
+        return {
+            param: sum(outcomes) / len(outcomes)
+            for param, outcomes in counts.items()
+        }
+
+    def _eval_condition(
+        self, name: str, op: str, ref: Any, metrics: dict[str, float],
+    ) -> bool:
+        """Evaluate a single condition against metrics and config."""
+        if name in metrics:
+            val = metrics[name]
+        elif hasattr(self.config, name):
+            val = getattr(self.config, name)
+        else:
+            return False
+        if isinstance(ref, str) and hasattr(self.config, ref):
+            ref_val = getattr(self.config, ref)
+        else:
+            ref_val = ref
+        if op == ">":
+            return val > ref_val
+        if op == "<":
+            return val < ref_val
+        if op == ">=":
+            return val >= ref_val
+        if op == "<=":
+            return val <= ref_val
+        return False
+
     def _observe_diagnose_propose(self, pulse_history: list) -> str:
-        """Observe pulse history, diagnose problems, propose a mutation."""
+        """Observe pulse history, diagnose problems, propose a mutation.
+
+        Data-driven: evaluates mutation rules against current metrics, ranks
+        matching candidates by historical success rate (lowest first) so the
+        loop focuses on parameters that need the most tuning.
+        """
         if len(pulse_history) < 5:
-            return "idle"  # Not enough data
+            return "idle"
 
         recent = pulse_history[-10:]
+        metrics = {
+            "avg_health": sum(p.fleet_health for p in recent) / len(recent),
+            "avg_coherence": sum(p.identity_coherence for p in recent) / len(recent),
+            "avg_failure": sum(p.audit_failure_rate for p in recent) / len(recent),
+            "unhealthy_ratio": sum(1 for p in recent if not p.is_healthy) / len(recent),
+        }
 
-        # Compute summary metrics
-        avg_health = sum(p.fleet_health for p in recent) / len(recent)
-        avg_coherence = sum(p.identity_coherence for p in recent) / len(recent)
-        avg_failure = sum(p.audit_failure_rate for p in recent) / len(recent)
-        unhealthy_ratio = sum(1 for p in recent if not p.is_healthy) / len(recent)
-
-        # Diagnose: which parameter should change?
-        proposal = None
-
-        if avg_failure > self.config.algedonic_failure_threshold and self.config.routing_bias < 0.4:
-            # High failure rate → increase routing bias (use smarter models)
-            new_bias = min(self.config.routing_bias + 0.05, 0.5)
-            proposal = Mutation(
+        # Evaluate mutation rules — collect candidates whose conditions match
+        candidates: list[Mutation] = []
+        for rule in self.mutation_rules:
+            if not all(
+                self._eval_condition(name, op, ref, metrics)
+                for name, op, ref in rule.conditions
+            ):
+                continue
+            old_value = getattr(self.config, rule.parameter)
+            new_value = old_value + rule.direction * rule.step
+            new_value = max(rule.bounds[0], min(rule.bounds[1], new_value))
+            if new_value == old_value:
+                continue
+            fmt_ctx = {**metrics, **asdict(self.config)}
+            candidates.append(Mutation(
                 id=_make_id(),
-                parameter="routing_bias",
-                old_value=self.config.routing_bias,
-                new_value=new_bias,
-                reason=f"Avg failure rate {avg_failure:.2f} > threshold {self.config.algedonic_failure_threshold}",
+                parameter=rule.parameter,
+                old_value=old_value,
+                new_value=round(new_value, 4),
+                reason=rule.reason_template.format(**fmt_ctx),
                 proposed_at=datetime.now(timezone.utc),
-            )
-        elif unhealthy_ratio > 0.5 and self.config.scaling_health_threshold > 0.2:
-            # Frequently unhealthy → lower scaling threshold (trigger scaling sooner)
-            new_threshold = max(self.config.scaling_health_threshold - 0.05, 0.15)
-            proposal = Mutation(
-                id=_make_id(),
-                parameter="scaling_health_threshold",
-                old_value=self.config.scaling_health_threshold,
-                new_value=new_threshold,
-                reason=f"Unhealthy ratio {unhealthy_ratio:.2f} — lower scaling threshold",
-                proposed_at=datetime.now(timezone.utc),
-            )
-        elif avg_health > 0.8 and avg_failure < 0.1 and self.config.routing_bias > 0.05:
-            # Very healthy, low failure → decrease routing bias (save cost)
-            new_bias = max(self.config.routing_bias - 0.05, 0.0)
-            proposal = Mutation(
-                id=_make_id(),
-                parameter="routing_bias",
-                old_value=self.config.routing_bias,
-                new_value=new_bias,
-                reason=(
-                    f"Healthy (avg_health={avg_health:.2f}, avg_failure={avg_failure:.2f})"
-                    " — reduce routing bias to save cost"
-                ),
-                proposed_at=datetime.now(timezone.utc),
-            )
+            ))
 
-        if proposal is None:
+        if not candidates:
             return "idle"
+
+        # Rank by historical success rate — target the least successful parameter
+        success_rates = self._compute_success_rates()
+        proposal = min(candidates, key=lambda m: success_rates.get(m.parameter, 0.5))
 
         # Evaluate via Gnani checkpoint
         try:
@@ -215,15 +297,14 @@ class StrangeLoop:
                 )
                 proposal.gnani_verdict = verdict.proceed
                 if not verdict.proceed:
-                    # Gnani says HOLD — record and skip
                     self._mutations.append(proposal)
                     self._record_to_memory(proposal, "gnani_held")
                     self._save()
                     return "held_by_gnani"
             else:
-                proposal.gnani_verdict = True  # No Gnani → proceed
+                proposal.gnani_verdict = True
         except Exception:
-            proposal.gnani_verdict = True  # Gnani error → proceed
+            proposal.gnani_verdict = True
 
         # Apply the mutation
         self._apply_mutation(proposal)
