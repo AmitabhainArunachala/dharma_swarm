@@ -492,6 +492,18 @@ class SwarmManager:
         except Exception as e:
             logger.warning("ResearchBridge init failed (non-fatal): %s", e)
 
+        # Wire 1: Connect KnowledgeStore to evolution fitness + context compilation.
+        # Closes Loops 9 (Memory→Metabolism) and 2 (Evolution→Agent Improvement).
+        # These setters already exist but were never called.
+        try:
+            from dharma_swarm.engine.knowledge_store import create_knowledge_store
+            _ks = create_knowledge_store(prefer_qdrant=False)
+            if self._engine is not None:
+                self._engine.set_knowledge_store(_ks)
+            logger.info("KnowledgeStore wired to DarwinEngine")
+        except Exception as e:
+            logger.debug("KnowledgeStore wiring failed (non-fatal): %s", e)
+
         self._telos_substrate_seeded = False
         self._refresh_initialized_registry()
 

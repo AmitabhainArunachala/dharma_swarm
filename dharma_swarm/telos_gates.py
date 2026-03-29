@@ -664,26 +664,39 @@ class TelosGatekeeper:
                 gate_results=results,
             )
 
-        # Tier C failures produce review, not block
-        tier_c_fail = any(
-            results[g][0] in (GateResult.FAIL, GateResult.WARN)
+        # Tier C failures produce review, not block — UNLESS S4→S3 sensitivity
+        # boost has been applied by zeitgeist threat signals.
+        tier_c_fail_gates = [
+            g
             for g in self.GATES
             if self.GATES[g] == GateTier.C
-        )
-        if tier_c_fail:
-            advisory_gates = [
-                g
-                for g in self.GATES
-                if self.GATES[g] == GateTier.C
-                and results[g][0] in (GateResult.FAIL, GateResult.WARN)
-            ]
-            reasons = [
-                results[g][1]
-                for g in advisory_gates
-            ]
+            and results[g][0] in (GateResult.FAIL, GateResult.WARN)
+        ]
+        if tier_c_fail_gates:
+            # Wire 2: S4→S3 feedback — check sensitivity boost from VSM
+            boosted_gates = []
+            try:
+                from dharma_swarm.organism import get_organism
+                org = get_organism()
+                if org is not None and hasattr(org, "vsm") and org.vsm is not None:
+                    for g in tier_c_fail_gates:
+                        boost = org.vsm.gate_patterns.get_sensitivity_boost(g)
+                        if boost >= 0.15:  # Significant boost → escalate to block
+                            boosted_gates.append(g)
+            except Exception:
+                pass
+
+            reasons = [results[g][1] for g in tier_c_fail_gates]
+            if boosted_gates:
+                return GateCheckResult(
+                    decision=GateDecision.BLOCK,
+                    gate=boosted_gates[0],
+                    reason=f"S4→S3 escalated: {'; '.join(reasons)}",
+                    gate_results=results,
+                )
             return GateCheckResult(
                 decision=GateDecision.REVIEW,
-                gate=advisory_gates[0] if advisory_gates else "",
+                gate=tier_c_fail_gates[0] if tier_c_fail_gates else "",
                 reason=f"Advisory: {'; '.join(reasons)}",
                 gate_results=results,
             )
