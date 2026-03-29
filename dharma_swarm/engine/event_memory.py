@@ -9,6 +9,7 @@ from typing import Any
 
 import aiosqlite
 
+from dharma_swarm.db_utils import connect_async
 from dharma_swarm.engine.knowledge_store import _jaccard, _tokenize
 from dharma_swarm.runtime_contract import RuntimeEnvelope, validate_envelope
 
@@ -173,6 +174,7 @@ def ensure_memory_plane_schema_sync(db: Any) -> None:
     for idx in _INDEXES:
         db.execute(idx)
     _ensure_retrieval_log_columns_sync(db)
+    _ensure_source_documents_columns_sync(db)
     db.commit()
 
 
@@ -193,7 +195,28 @@ async def ensure_memory_plane_schema_async(db: aiosqlite.Connection) -> None:
     for idx in _INDEXES:
         await db.execute(idx)
     await _ensure_retrieval_log_columns_async(db)
+    await _ensure_source_documents_columns_async(db)
     await db.commit()
+
+
+def _ensure_source_documents_columns_sync(db: Any) -> None:
+    columns = {
+        row[1]
+        for row in db.execute("PRAGMA table_info(source_documents)").fetchall()
+    }
+    if "source_confidence" not in columns:
+        db.execute(
+            "ALTER TABLE source_documents ADD COLUMN source_confidence REAL NOT NULL DEFAULT 1.0"
+        )
+
+
+async def _ensure_source_documents_columns_async(db: aiosqlite.Connection) -> None:
+    rows = await (await db.execute("PRAGMA table_info(source_documents)")).fetchall()
+    columns = {row[1] for row in rows}
+    if "source_confidence" not in columns:
+        await db.execute(
+            "ALTER TABLE source_documents ADD COLUMN source_confidence REAL NOT NULL DEFAULT 1.0"
+        )
 
 
 def _ensure_retrieval_log_columns_sync(db: Any) -> None:
@@ -267,7 +290,7 @@ class EventMemoryStore:
 
     async def init_db(self) -> None:
         self.db_path.parent.mkdir(parents=True, exist_ok=True)
-        async with aiosqlite.connect(self.db_path) as db:
+        async with connect_async(self.db_path) as db:
             await ensure_memory_plane_schema_async(db)
 
     async def ingest_envelope(self, envelope: RuntimeEnvelope | dict[str, Any]) -> bool:
@@ -278,7 +301,7 @@ class EventMemoryStore:
             return False
 
         self.db_path.parent.mkdir(parents=True, exist_ok=True)
-        async with aiosqlite.connect(self.db_path) as db:
+        async with connect_async(self.db_path) as db:
             await ensure_memory_plane_schema_async(db)
             try:
                 await db.execute(
@@ -311,8 +334,7 @@ class EventMemoryStore:
 
     async def search_events(self, query: str, limit: int = 20) -> list[dict[str, Any]]:
         """Search events by simple lexical scoring across type, source, agent, and payload."""
-        async with aiosqlite.connect(self.db_path) as db:
-            db.row_factory = aiosqlite.Row
+        async with connect_async(self.db_path) as db:
             await ensure_memory_plane_schema_async(db)
             rows = await (
                 await db.execute(
@@ -342,8 +364,7 @@ class EventMemoryStore:
         return results[: max(1, limit)]
 
     async def _replay(self, column: str, value: str, limit: int) -> list[dict[str, Any]]:
-        async with aiosqlite.connect(self.db_path) as db:
-            db.row_factory = aiosqlite.Row
+        async with connect_async(self.db_path) as db:
             await ensure_memory_plane_schema_async(db)
             rows = await (
                 await db.execute(

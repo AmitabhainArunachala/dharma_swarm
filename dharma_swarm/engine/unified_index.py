@@ -10,6 +10,7 @@ from pathlib import Path
 from typing import Any
 from uuid import uuid4
 
+from dharma_swarm.db_utils import connect_sync
 from dharma_swarm.engine.chunker import Chunk, chunk_markdown
 from dharma_swarm.engine.event_memory import (
     DEFAULT_MEMORY_PLANE_DB,
@@ -156,7 +157,7 @@ class UnifiedIndex:
     def __init__(self, db_path: Path | str | None = None) -> None:
         self.db_path = Path(db_path or DEFAULT_MEMORY_PLANE_DB)
         self.db_path.parent.mkdir(parents=True, exist_ok=True)
-        with sqlite3.connect(str(self.db_path)) as db:
+        with connect_sync(self.db_path, row_factory=sqlite3.Row) as db:
             ensure_memory_plane_schema_sync(db)
 
     def index_document(
@@ -198,7 +199,7 @@ class UnifiedIndex:
         stats = {"indexed": 0, "skipped": 0, "errors": 0}
         started = _utc_now_iso()
 
-        with sqlite3.connect(str(self.db_path)) as db:
+        with connect_sync(self.db_path, row_factory=sqlite3.Row) as db:
             ensure_memory_plane_schema_sync(db)
             db.execute(
                 "INSERT INTO index_runs (run_id, source_kind, started_at, completed_at, status, stats_json)"
@@ -224,7 +225,7 @@ class UnifiedIndex:
                 status = "completed_with_errors"
 
         completed = _utc_now_iso()
-        with sqlite3.connect(str(self.db_path)) as db:
+        with connect_sync(self.db_path, row_factory=sqlite3.Row) as db:
             ensure_memory_plane_schema_sync(db)
             db.execute(
                 "UPDATE index_runs SET completed_at = ?, status = ?, stats_json = ? WHERE run_id = ?",
@@ -256,9 +257,8 @@ class UnifiedIndex:
     ) -> list[KnowledgeRecord]:
         """Return all indexed records with optional metadata filters."""
         filters = filters or {}
-        with sqlite3.connect(str(self.db_path)) as db:
+        with connect_sync(self.db_path, row_factory=sqlite3.Row) as db:
             ensure_memory_plane_schema_sync(db)
-            db.row_factory = sqlite3.Row
             chunk_rows = db.execute(
                 "SELECT c.chunk_id, c.text, c.metadata_json, d.source_kind, d.source_path,"
                 " d.source_ref, d.metadata_json AS doc_metadata_json, d.updated_at"
@@ -285,9 +285,8 @@ class UnifiedIndex:
 
     def recent_chunks(self, limit: int = 5) -> list[KnowledgeRecord]:
         """Return recent indexed chunks for context fallback."""
-        with sqlite3.connect(str(self.db_path)) as db:
+        with connect_sync(self.db_path, row_factory=sqlite3.Row) as db:
             ensure_memory_plane_schema_sync(db)
-            db.row_factory = sqlite3.Row
             rows = db.execute(
                 "SELECT c.chunk_id, c.text, c.metadata_json, d.source_kind, d.source_path,"
                 " d.updated_at, d.metadata_json AS doc_metadata_json"
@@ -317,7 +316,7 @@ class UnifiedIndex:
         return out
 
     def stats(self) -> dict[str, int]:
-        with sqlite3.connect(str(self.db_path)) as db:
+        with connect_sync(self.db_path, row_factory=sqlite3.Row) as db:
             ensure_memory_plane_schema_sync(db)
             docs = int(db.execute("SELECT COUNT(*) FROM source_documents").fetchone()[0])
             chunks = int(db.execute("SELECT COUNT(*) FROM source_chunks").fetchone()[0])
@@ -329,6 +328,48 @@ class UnifiedIndex:
             "event_log": events,
             "index_runs": runs,
         }
+
+    def decay_confidence(
+        self,
+        decay_rate: float = 0.95,
+        min_confidence: float = 0.01,
+    ) -> int:
+        """Apply age-based confidence decay to source_documents.
+
+        Formula: confidence *= decay_rate^age_days.
+        Documents below min_confidence get their chunks soft-deleted.
+        Returns count of rows updated.
+        """
+        now = datetime.now(timezone.utc).timestamp()
+        updated = 0
+        with connect_sync(self.db_path, row_factory=sqlite3.Row) as db:
+            ensure_memory_plane_schema_sync(db)
+            rows = db.execute(
+                "SELECT doc_id, source_confidence, updated_at FROM source_documents"
+            ).fetchall()
+            for row in rows:
+                try:
+                    updated_ts = datetime.fromisoformat(row["updated_at"]).timestamp()
+                    age_days = (now - updated_ts) / 86400.0
+                    if age_days <= 0:
+                        continue
+                    decayed = row["source_confidence"] * (decay_rate**age_days)
+                    decayed = max(0.0, min(1.0, decayed))
+                    if abs(decayed - row["source_confidence"]) > 1e-6:
+                        db.execute(
+                            "UPDATE source_documents SET source_confidence = ? WHERE doc_id = ?",
+                            (decayed, row["doc_id"]),
+                        )
+                        updated += 1
+                    if decayed < min_confidence:
+                        db.execute(
+                            "DELETE FROM source_chunks WHERE doc_id = ?",
+                            (row["doc_id"],),
+                        )
+                except Exception:
+                    pass
+            db.commit()
+        return updated
 
     def _index_document(
         self,
@@ -353,7 +394,7 @@ class UnifiedIndex:
                 )
             ]
 
-        with sqlite3.connect(str(self.db_path)) as db:
+        with connect_sync(self.db_path, row_factory=sqlite3.Row) as db:
             ensure_memory_plane_schema_sync(db)
             row = db.execute(
                 "SELECT source_hash FROM source_documents WHERE doc_id = ?",
