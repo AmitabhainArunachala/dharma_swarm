@@ -436,6 +436,114 @@ class TestOvernightDirector:
             stager_mod.DHARMA_SWARM_ROOT = orig_stager_root
 
 
+class TestLoadPreviousVerdict:
+    """Tests for _load_previous_verdict and _apply_previous_verdict."""
+
+    def _write_verdict(self, overnight_dir: Path, date: str, verdict: str) -> None:
+        run_dir = overnight_dir / date
+        run_dir.mkdir(parents=True, exist_ok=True)
+        (run_dir / "verdict.json").write_text(
+            json.dumps({"date": date, "verdict": verdict}), encoding="utf-8"
+        )
+
+    def test_no_previous_verdict_returns_none(self, tmp_path: Path) -> None:
+        import dharma_swarm.overnight_director as mod
+        orig = mod.STATE_DIR
+        mod.STATE_DIR = tmp_path / ".dharma"
+        try:
+            director = OvernightDirector(OvernightConfig())
+            assert director._load_previous_verdict() is None
+        finally:
+            mod.STATE_DIR = orig
+
+    def test_loads_most_recent_verdict(self, tmp_path: Path) -> None:
+        import dharma_swarm.overnight_director as mod
+        state_dir = tmp_path / ".dharma"
+        overnight_dir = state_dir / "overnight"
+        orig = mod.STATE_DIR
+        mod.STATE_DIR = state_dir
+        try:
+            self._write_verdict(overnight_dir, "2026-03-27", "hold")
+            self._write_verdict(overnight_dir, "2026-03-28", "advance")
+            config = OvernightConfig(run_date="2026-03-29")
+            director = OvernightDirector(config)
+            assert director._load_previous_verdict() == "advance"
+        finally:
+            mod.STATE_DIR = orig
+
+    def test_rollback_sets_autonomy_to_zero(self, tmp_path: Path) -> None:
+        import dharma_swarm.overnight_director as mod
+        state_dir = tmp_path / ".dharma"
+        overnight_dir = state_dir / "overnight"
+        orig = mod.STATE_DIR
+        mod.STATE_DIR = state_dir
+        try:
+            self._write_verdict(overnight_dir, "2026-03-28", "rollback")
+            config = OvernightConfig(run_date="2026-03-29", autonomy_level=2)
+            director = OvernightDirector(config)
+            assert director.config.autonomy_level == 0
+        finally:
+            mod.STATE_DIR = orig
+
+    def test_advance_increments_autonomy(self, tmp_path: Path) -> None:
+        import dharma_swarm.overnight_director as mod
+        state_dir = tmp_path / ".dharma"
+        overnight_dir = state_dir / "overnight"
+        orig = mod.STATE_DIR
+        mod.STATE_DIR = state_dir
+        try:
+            self._write_verdict(overnight_dir, "2026-03-28", "advance")
+            config = OvernightConfig(run_date="2026-03-29", autonomy_level=1)
+            director = OvernightDirector(config)
+            assert director.config.autonomy_level == 2
+        finally:
+            mod.STATE_DIR = orig
+
+    def test_advance_caps_autonomy_at_3(self, tmp_path: Path) -> None:
+        import dharma_swarm.overnight_director as mod
+        state_dir = tmp_path / ".dharma"
+        overnight_dir = state_dir / "overnight"
+        orig = mod.STATE_DIR
+        mod.STATE_DIR = state_dir
+        try:
+            self._write_verdict(overnight_dir, "2026-03-28", "advance")
+            config = OvernightConfig(run_date="2026-03-29", autonomy_level=3)
+            director = OvernightDirector(config)
+            assert director.config.autonomy_level == 3
+        finally:
+            mod.STATE_DIR = orig
+
+    def test_hold_leaves_autonomy_unchanged(self, tmp_path: Path) -> None:
+        import dharma_swarm.overnight_director as mod
+        state_dir = tmp_path / ".dharma"
+        overnight_dir = state_dir / "overnight"
+        orig = mod.STATE_DIR
+        mod.STATE_DIR = state_dir
+        try:
+            self._write_verdict(overnight_dir, "2026-03-28", "hold")
+            config = OvernightConfig(run_date="2026-03-29", autonomy_level=2)
+            director = OvernightDirector(config)
+            assert director.config.autonomy_level == 2
+        finally:
+            mod.STATE_DIR = orig
+
+    def test_skips_current_date_directory(self, tmp_path: Path) -> None:
+        import dharma_swarm.overnight_director as mod
+        state_dir = tmp_path / ".dharma"
+        overnight_dir = state_dir / "overnight"
+        orig = mod.STATE_DIR
+        mod.STATE_DIR = state_dir
+        try:
+            # Only a verdict for today — should not be loaded as "previous"
+            self._write_verdict(overnight_dir, "2026-03-29", "rollback")
+            config = OvernightConfig(run_date="2026-03-29", autonomy_level=2)
+            director = OvernightDirector(config)
+            # rollback for current date should not affect autonomy_level
+            assert director.config.autonomy_level == 2
+        finally:
+            mod.STATE_DIR = orig
+
+
 class TestSelfEvolution72H:
     @pytest.mark.asyncio
     async def test_helper_uses_self_evolution_profile(self, monkeypatch) -> None:
