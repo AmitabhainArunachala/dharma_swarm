@@ -387,6 +387,59 @@ class DarwinEngine:
         except Exception:
             return self._diversity_status
 
+    # -- C14: Failure blacklist -----------------------------------------------
+
+    _BLACKLIST_FILE = Path.home() / ".dharma" / "evolution" / "blacklist.jsonl"
+
+    def _write_failure_blacklist(self, component: str, description: str) -> None:
+        """Record a failed proposal in the blacklist.
+
+        Called when correctness < 0.5. Appends one JSONL entry with
+        component, description hash, and timestamp.
+        """
+        import json as _bl_json
+        desc_hash = hashlib.sha256(description.encode()).hexdigest()[:16]
+        entry = {"component": component, "desc_hash": desc_hash, "ts": time.time()}
+        try:
+            path = self._BLACKLIST_FILE
+            path.parent.mkdir(parents=True, exist_ok=True)
+            with path.open("a", encoding="utf-8") as fh:
+                fh.write(_bl_json.dumps(entry) + "\n")
+        except Exception:
+            logger.debug("C14: Blacklist write failed", exc_info=True)
+
+    def _check_failure_blacklist(
+        self, component: str, threshold: int = 3, recent_n: int = 100
+    ) -> bool:
+        """Return True if component has >= threshold failures in recent entries.
+
+        Reads the blacklist file and counts failures for the component in the
+        most recent *recent_n* entries.
+        """
+        import json as _bl_json
+        path = self._BLACKLIST_FILE
+        if not path.exists():
+            return False
+        try:
+            lines = path.read_text(encoding="utf-8").splitlines()
+            recent = lines[-recent_n:] if len(lines) > recent_n else lines
+            count = sum(
+                1
+                for line in recent
+                if line.strip()
+                and _bl_json.loads(line).get("component") == component
+            )
+            if count >= threshold:
+                logger.info(
+                    "C14: Component '%s' blacklisted (%d recent failures >= %d)",
+                    component, count, threshold,
+                )
+                return True
+            return False
+        except Exception:
+            logger.debug("C14: Blacklist check failed", exc_info=True)
+            return False
+
     def agent_fitness_summary(self) -> dict[str, dict[str, float]]:
         """Summarize consumed agent fitness signals by agent name.
 
@@ -1736,6 +1789,10 @@ class DarwinEngine:
             except Exception:
                 logger.debug("L4 behavioral correlation failed", exc_info=True)
 
+            # C14: Record failure when correctness is below threshold
+            if correctness < 0.5:
+                self._write_failure_blacklist(proposal.component, proposal.description)
+
             proposal.actual_fitness = fitness
             proposal.status = EvolutionStatus.EVALUATED
             proposal.promotion_state = derive_promotion_state(
@@ -2836,6 +2893,11 @@ class DarwinEngine:
             source = source[:15_000] + "\n# ... truncated ..."
 
         component_key = self._component_key_for_source_file(source_file)
+
+        # C14: Skip components blacklisted due to repeated failures
+        if self._check_failure_blacklist(component_key):
+            return None
+
         target = self.resolve_execution_target(
             component_key,
             fallback_test_command=None,
