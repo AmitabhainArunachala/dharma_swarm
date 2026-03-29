@@ -17,15 +17,19 @@ RAG stack:
 
 from __future__ import annotations
 
+import asyncio
 import hashlib
 import json
 import logging
+import re
 import sqlite3
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
+from dharma_swarm.citation_index import Citation, CitationIndex
+from dharma_swarm.contradiction_registry import Contradiction
 from dharma_swarm.engine.hybrid_retriever import HybridRetriever
 from dharma_swarm.engine.unified_index import UnifiedIndex
 from dharma_swarm.engine.chunker import chunk_markdown
@@ -46,6 +50,7 @@ DEFAULT_STATE_DIR = Path.home() / ".dharma"
 DEFAULT_SUFFIXES = tuple(
     sorted(ALLOWED_MD_SUFFIXES | ALLOWED_PY_SUFFIXES | ALLOWED_TEXT_SUFFIXES | {".rst", ".tex"})
 )
+BOOTSTRAP_CONCEPT_SOURCE_NAME = "concept_graph"
 SKIP_DIRS = frozenset(
     {
         ".git",
@@ -63,6 +68,51 @@ SKIP_DIRS = frozenset(
     }
 )
 MAX_READ_BYTES = 256 * 1024
+_CONTRADICTION_TOKEN_RE = re.compile(r"[a-z0-9_]+")
+_CONTRADICTION_NEGATION_TOKENS = frozenset({"never", "not", "no", "cannot", "without"})
+_CONTRADICTION_SIGNATURE_STOPWORDS = frozenset(
+    {
+        "a",
+        "an",
+        "and",
+        "are",
+        "as",
+        "at",
+        "always",
+        "be",
+        "being",
+        "by",
+        "ensure",
+        "ensures",
+        "for",
+        "from",
+        "guarantee",
+        "guarantees",
+        "in",
+        "into",
+        "is",
+        "must",
+        "of",
+        "remain",
+        "remains",
+        "require",
+        "requires",
+        "shall",
+        "should",
+        "that",
+        "the",
+        "their",
+        "then",
+        "therefore",
+        "these",
+        "this",
+        "those",
+        "to",
+        "thus",
+        "will",
+        "with",
+    }
+)
 
 
 def _utc_now_iso() -> str:
@@ -135,6 +185,51 @@ def _coarse_tags(
         if node.recognition_type:
             tags.append(str(node.recognition_type))
     return _dedupe_keep_order(tags, limit=24)
+
+
+def _canonical_claim_token(token: str) -> str:
+    if token.endswith("ies") and len(token) > 4:
+        return token[:-3] + "y"
+    if token.endswith("s") and len(token) > 4 and not token.endswith(("ss", "us")):
+        return token[:-1]
+    return token
+
+
+@dataclass(slots=True)
+class _ClaimSurface:
+    source_name: str
+    source_path: str
+    claim: str
+    polarity: str
+    signature: str
+
+
+def _surface_claim(source_name: str, source_path: str, claim: str) -> _ClaimSurface | None:
+    normalized_claim = claim.strip()
+    if not normalized_claim:
+        return None
+
+    raw_tokens = _CONTRADICTION_TOKEN_RE.findall(normalized_claim.lower())
+    if len(raw_tokens) < 3:
+        return None
+
+    polarity = "negative" if any(token in _CONTRADICTION_NEGATION_TOKENS for token in raw_tokens) else "positive"
+    signature_tokens = [
+        _canonical_claim_token(token)
+        for token in raw_tokens
+        if token not in _CONTRADICTION_NEGATION_TOKENS and token not in _CONTRADICTION_SIGNATURE_STOPWORDS
+    ]
+    signature_tokens = _dedupe_keep_order(signature_tokens, limit=24)
+    if len(signature_tokens) < 3:
+        return None
+
+    return _ClaimSurface(
+        source_name=source_name,
+        source_path=source_path,
+        claim=normalized_claim,
+        polarity=polarity,
+        signature=" ".join(signature_tokens),
+    )
 
 
 @dataclass(slots=True)
@@ -225,6 +320,8 @@ class SemanticIngestionSpine:
         self.state_dir = Path(state_dir or DEFAULT_STATE_DIR)
         self.semantic_dir = self.state_dir / "semantic"
         self.archive_dir = self.semantic_dir / "ingestion_archive"
+        self.contradiction_registry_path = self.state_dir / "contradictions" / "registry.jsonl"
+        self.citations_path = self.state_dir / "citations" / "citations.jsonl"
         self.registry_path = self.semantic_dir / "ingestion_sources.json"
         self.db_path = self.semantic_dir / "ingestion_spine.db"
         self.graph_path = self.semantic_dir / "ingestion_concept_graph.json"
@@ -240,6 +337,8 @@ class SemanticIngestionSpine:
         self._retriever = HybridRetriever(self._index)
         self._vector_store = VectorStore(self.vector_dir)
         self._lineage = LineageGraph(self.lineage_db_path)
+        self._citation_index = CitationIndex(path=self.citations_path)
+        self._citation_index_loaded = False
 
         self._init_db()
 
@@ -390,6 +489,246 @@ class SemanticIngestionSpine:
                 added.append(spec)
         return added
 
+    def bootstrap_from_concept_graph(
+        self,
+        graph_path: Path | str | None = None,
+    ) -> IngestionRunReport:
+        """Index the canonical concept graph into the ingestion memory/vector lane.
+
+        The bootstrap path reuses the persisted ``semantic/concept_graph.json``
+        graph instead of regenerating it from source files.  Each concept is
+        recorded as a synthetic semantic document keyed by its concept id so
+        repeated runs against the same graph become no-ops.
+        """
+        resolved_path = Path(graph_path or (self.semantic_dir / "concept_graph.json")).expanduser()
+        run_id = _sha256(f"bootstrap:{_utc_now_iso()}:{resolved_path}")[:12]
+        report = IngestionRunReport(
+            run_id=run_id,
+            source_names=[BOOTSTRAP_CONCEPT_SOURCE_NAME],
+            graph_path=str(resolved_path),
+        )
+        started_at = _utc_now_iso()
+
+        with self._connect() as conn:
+            conn.execute(
+                "INSERT INTO runs (run_id, source_names_json, started_at, status, stats_json)"
+                " VALUES (?, ?, ?, ?, ?)",
+                (
+                    run_id,
+                    _canonical_json(report.source_names),
+                    started_at,
+                    "running",
+                    "{}",
+                ),
+            )
+            conn.commit()
+
+        try:
+            if not resolved_path.exists():
+                raise FileNotFoundError(f"concept graph not found: {resolved_path}")
+
+            raw_graph = resolved_path.read_text(encoding="utf-8")
+            graph_hash = _sha256(raw_graph)
+            graph = ConceptGraph.from_dict(json.loads(raw_graph))
+
+            for node in graph.all_nodes():
+                report.files_scanned += 1
+                outcome = self._bootstrap_concept_node(
+                    graph_path=resolved_path,
+                    graph_hash=graph_hash,
+                    node=node,
+                    run_id=run_id,
+                )
+                if outcome is None:
+                    report.files_skipped += 1
+                else:
+                    report.files_ingested += 1
+
+            report.concept_nodes = graph.node_count
+            report.concept_edges = graph.edge_count
+            report.indexed_concepts = report.files_ingested
+            self._finish_run(run_id, status="completed", report=report)
+            return report
+        except Exception as exc:
+            report.errors.append(str(exc))
+            self._finish_run(run_id, status="failed", report=report)
+            raise
+
+    def _bootstrap_concept_node(
+        self,
+        *,
+        graph_path: Path,
+        graph_hash: str,
+        node: ConceptNode,
+        run_id: str,
+    ) -> DistilledDocument | None:
+        source_name = BOOTSTRAP_CONCEPT_SOURCE_NAME
+        source_path = f"concept://{node.id}"
+        summary = _first_meaningful_paragraph(node.definition or node.name)
+        concepts = _dedupe_keep_order([node.name], limit=12)
+        claims = _dedupe_keep_order(list(node.claims), limit=24)
+        structures = _dedupe_keep_order(list(node.formal_structures), limit=20)
+        category_counts = _category_counts([node])
+        tags = _coarse_tags(
+            source_tags=[source_name, "bootstrap"],
+            nodes=[node],
+            category_counts=category_counts,
+        )
+        excerpt = node.definition.strip() or node.source_file or source_path
+        distilled_text = self._render_distilled_text(
+            title=node.name or source_path,
+            summary=summary,
+            concepts=concepts,
+            claims=claims,
+            structures=structures,
+            excerpt=excerpt,
+        )
+
+        content_hash = _sha256(
+            _canonical_json(
+                {
+                    "graph_hash": graph_hash,
+                    "graph_path": str(graph_path.resolve()),
+                    "node_id": node.id,
+                    "node_name": node.name,
+                    "definition": node.definition,
+                    "source_file": node.source_file,
+                    "source_line": node.source_line,
+                    "category": node.category,
+                    "claims": claims,
+                    "structures": structures,
+                    "tags": tags,
+                    "summary": summary,
+                    "excerpt": excerpt,
+                    "recognition_type": node.recognition_type,
+                    "salience": node.salience,
+                    "semantic_density": node.semantic_density,
+                    "text": distilled_text,
+                },
+            )
+        )
+
+        existing = self._document_for_path(source_path, source_name=source_name)
+        if existing and str(existing.get("content_hash", "")) == content_hash:
+            return None
+
+        if existing and int(existing.get("vector_doc_id", -1)) > 0:
+            self._vector_store.invalidate(
+                int(existing["vector_doc_id"]),
+                reason="semantic_bootstrap_superseded",
+            )
+
+        archive_path = self._snapshot_text(source_name, graph_path, content_hash, distilled_text)
+        doc_id = _sha256(f"{source_name}:{source_path}")[:16]
+        citation_id = self._record_source_artifact_citation(
+            source_name=source_name,
+            source_path=source_path,
+            content_hash=content_hash,
+            archive_path=archive_path,
+            passage_text=excerpt,
+        )
+        metadata = {
+            "source_kind": "semantic_concept",
+            "source_name": source_name,
+            "source_path": source_path,
+            "graph_path": str(graph_path.resolve()),
+            "graph_hash": graph_hash,
+            "concept_id": node.id,
+            "concept_name": node.name,
+            "source_file": node.source_file,
+            "source_line": node.source_line,
+            "category": node.category,
+            "claims": claims,
+            "structures": structures,
+            "category_counts": category_counts,
+            "tags": tags,
+            "summary": summary,
+            "excerpt": excerpt,
+            "recognition_type": node.recognition_type,
+            "salience": node.salience,
+            "semantic_density": node.semantic_density,
+            "bootstrap": True,
+            "citation_ids": [citation_id],
+            "citation_target_id": str(archive_path),
+        }
+        index_doc_id = self._index.index_document(
+            "semantic_concept",
+            source_path,
+            distilled_text,
+            metadata,
+        )
+        vector_doc_id = self._vector_store.upsert(
+            distilled_text,
+            source=source_path,
+            layer="semantic_concept",
+            metadata=metadata,
+        )
+        updated_at = _utc_now_iso()
+
+        with self._connect() as conn:
+            conn.execute(
+                """
+                INSERT OR REPLACE INTO documents (
+                    doc_id, source_name, source_path, content_hash, archive_path, title, summary,
+                    concepts_json, claims_json, structures_json, categories_json, tags_json,
+                    metadata_json, index_doc_id, vector_doc_id, updated_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    doc_id,
+                    source_name,
+                    source_path,
+                    content_hash,
+                    str(archive_path),
+                    node.name,
+                    summary,
+                    _canonical_json(concepts),
+                    _canonical_json(claims),
+                    _canonical_json(structures),
+                    _canonical_json(category_counts),
+                    _canonical_json(tags),
+                    _canonical_json(metadata),
+                    index_doc_id,
+                    vector_doc_id,
+                    updated_at,
+                ),
+            )
+            conn.commit()
+
+        self._lineage.record_transformation(
+            task_id=run_id,
+            inputs=[str(graph_path.resolve())],
+            outputs=[f"semantic_concept:{doc_id}"],
+            agent="semantic_ingestion",
+            operation="concept_graph_bootstrap",
+            metadata={
+                "source_name": source_name,
+                "source_path": source_path,
+                "graph_hash": graph_hash,
+                "concept_id": node.id,
+                "index_doc_id": index_doc_id,
+                "vector_doc_id": vector_doc_id,
+            },
+        )
+
+        return DistilledDocument(
+            doc_id=doc_id,
+            source_name=source_name,
+            source_path=source_path,
+            content_hash=content_hash,
+            archive_path=str(archive_path),
+            title=node.name,
+            summary=summary,
+            concepts=concepts,
+            claims=claims,
+            structures=structures,
+            category_counts=category_counts,
+            tags=tags,
+            index_doc_id=index_doc_id,
+            vector_doc_id=vector_doc_id,
+            updated_at=updated_at,
+        )
+
     def run(
         self,
         *,
@@ -450,17 +789,34 @@ class SemanticIngestionSpine:
             self._finish_run(run_id, status="failed", report=report)
             raise
 
+    def run_incremental(
+        self,
+        *,
+        source_names: list[str] | None = None,
+        max_files: int = 200,
+    ) -> IngestionRunReport:
+        """Run a bounded incremental pass over enabled sources.
+
+        Repeated executions are incremental because unchanged source paths are
+        detected by content hash and skipped inside :meth:`run`.
+        """
+        return self.run(source_names=source_names, max_files=max_files)
+
     def search(self, query: str, *, limit: int = 10) -> list[dict[str, Any]]:
         normalized = query.strip()
         if not normalized:
             return []
 
-        lexical_hits = self._retriever.search(
-            normalized,
-            limit=limit * 2,
-            filters={"source_kind": "ingested_source"},
-            consumer="semantic_ingestion",
-        )
+        lexical_hits: list[Any] = []
+        for source_kind in ("ingested_source", "semantic_concept"):
+            lexical_hits.extend(
+                self._retriever.search(
+                    normalized,
+                    limit=limit * 2,
+                    filters={"source_kind": source_kind},
+                    consumer="semantic_ingestion",
+                ),
+            )
         vector_hits = self._vector_store.search_hybrid(normalized, top_k=limit * 2)
 
         merged: dict[str, dict[str, Any]] = {}
@@ -601,6 +957,14 @@ class SemanticIngestionSpine:
         tags = _coarse_tags(source_tags=spec.tags, nodes=nodes, category_counts=category_counts)
         summary = _first_meaningful_paragraph(text)
         title = path.stem.replace("_", " ").strip() or path.name
+        doc_id = _sha256(f"{spec.name}:{source_path}")[:16]
+        citation_id = self._record_source_artifact_citation(
+            source_name=spec.name,
+            source_path=source_path,
+            content_hash=content_hash,
+            archive_path=archive_path,
+            passage_text=summary or text[:480],
+        )
 
         metadata = {
             "source_kind": "ingested_source",
@@ -613,6 +977,8 @@ class SemanticIngestionSpine:
             "structures": structures,
             "category_counts": category_counts,
             "run_id": run_id,
+            "citation_ids": [citation_id],
+            "citation_target_id": str(archive_path),
         }
         distilled_text = self._render_distilled_text(
             title=title,
@@ -634,7 +1000,6 @@ class SemanticIngestionSpine:
             layer="reference",
             metadata=metadata,
         )
-        doc_id = _sha256(f"{spec.name}:{source_path}")[:16]
         updated_at = _utc_now_iso()
 
         with self._connect() as conn:
@@ -681,7 +1046,7 @@ class SemanticIngestionSpine:
             },
         )
 
-        return DistilledDocument(
+        document = DistilledDocument(
             doc_id=doc_id,
             source_name=spec.name,
             source_path=source_path,
@@ -698,6 +1063,8 @@ class SemanticIngestionSpine:
             vector_doc_id=vector_doc_id,
             updated_at=updated_at,
         )
+        self._surface_document_contradictions(document, run_id=run_id)
+        return document
 
     def _snapshot_text(self, source_name: str, path: Path, content_hash: str, text: str) -> Path:
         target_dir = self.archive_dir / source_name
@@ -714,6 +1081,54 @@ class SemanticIngestionSpine:
                 encoding="utf-8",
             )
         return target
+
+    def _ensure_citation_index_loaded(self) -> None:
+        if not self._citation_index_loaded:
+            asyncio.run(self._citation_index.load())
+            self._citation_index_loaded = True
+
+    def _record_source_artifact_citation(
+        self,
+        *,
+        source_name: str,
+        source_path: str,
+        content_hash: str,
+        archive_path: Path,
+        passage_text: str,
+    ) -> str:
+        target_id = str(archive_path)
+        citation_id = "ingestcite-" + _sha256(
+            _canonical_json(
+                {
+                    "source_name": source_name,
+                    "source_path": source_path,
+                    "content_hash": content_hash,
+                    "target_id": target_id,
+                    "relationship": "grounds",
+                }
+            )
+        )[:16]
+        citation = Citation(
+            id=citation_id,
+            passage_text=passage_text.strip()[:480] or source_path,
+            source_work=source_name,
+            source_location=source_path,
+            target_type="artifact",
+            target_id=target_id,
+            relationship="grounds",
+            evidence=(
+                f"semantic_ingestion archived {source_path} into {target_id} "
+                f"(content_hash={content_hash})"
+            ),
+            verified=archive_path.exists(),
+            verification_test=f"Path({target_id!r}).exists()",
+            created_by="semantic_ingestion",
+        )
+
+        self._ensure_citation_index_loaded()
+        if asyncio.run(self._citation_index.get(citation.id)) is None:
+            asyncio.run(self._citation_index.add(citation))
+        return citation.id
 
     def _document_for_path(
         self,
@@ -749,6 +1164,134 @@ class SemanticIngestionSpine:
             "vector_doc_id": int(row["vector_doc_id"] or -1),
             "updated_at": str(row["updated_at"]),
         }
+
+    def _surface_document_contradictions(self, document: DistilledDocument, *, run_id: str) -> None:
+        current_claims = [
+            surface
+            for surface in (
+                _surface_claim(document.source_name, document.source_path, claim)
+                for claim in document.claims
+            )
+            if surface is not None
+        ]
+        if not current_claims:
+            return
+
+        other_claims = self._list_existing_claim_surfaces(exclude_source_path=document.source_path)
+        if not other_claims:
+            return
+
+        known_ids = self._load_contradiction_ids()
+        pending: list[Contradiction] = []
+
+        for current in current_claims:
+            for other in other_claims:
+                if current.signature != other.signature:
+                    continue
+                if current.polarity == other.polarity:
+                    continue
+                contradiction = self._build_claim_contradiction(current, other, run_id=run_id)
+                if contradiction.id in known_ids:
+                    continue
+                known_ids.add(contradiction.id)
+                pending.append(contradiction)
+
+        if pending:
+            self._append_contradictions(pending)
+
+    def _list_existing_claim_surfaces(self, *, exclude_source_path: str) -> list[_ClaimSurface]:
+        with self._connect() as conn:
+            rows = conn.execute(
+                "SELECT source_name, source_path, claims_json, metadata_json FROM documents"
+                " WHERE source_path != ?",
+                (exclude_source_path,),
+            ).fetchall()
+
+        surfaces: list[_ClaimSurface] = []
+        for row in rows:
+            metadata = json.loads(row["metadata_json"] or "{}")
+            if str(metadata.get("source_kind") or "") != "ingested_source":
+                continue
+            source_name = str(row["source_name"])
+            source_path = str(row["source_path"])
+            for claim in json.loads(row["claims_json"] or "[]"):
+                surface = _surface_claim(source_name, source_path, str(claim))
+                if surface is not None:
+                    surfaces.append(surface)
+        return surfaces
+
+    def _build_claim_contradiction(
+        self,
+        first: _ClaimSurface,
+        second: _ClaimSurface,
+        *,
+        run_id: str,
+    ) -> Contradiction:
+        ordered = sorted(
+            [first, second],
+            key=lambda item: (item.source_path, item.claim.lower()),
+        )
+        claim_key = "||".join(f"{item.source_path}::{item.claim.lower()}" for item in ordered)
+        signature_slug = "_".join(ordered[0].signature.split()[:6]) or "claim_conflict"
+
+        return Contradiction(
+            id=f"ingest-ctr-{_sha256(claim_key)[:16]}",
+            name=f"semantic_ingestion_{signature_slug}",
+            tradition_a=ordered[0].source_path,
+            claim_a=ordered[0].claim,
+            tradition_b=ordered[1].source_path,
+            claim_b=ordered[1].claim,
+            tension=(
+                "Ingested claims normalize to the same assertion signature but carry opposite polarity."
+            ),
+            resolution_path=(
+                f"Review source_path:{ordered[0].source_path} against source_path:{ordered[1].source_path}"
+                " and decide which invariant should govern downstream reasoning."
+            ),
+            severity=0.55,
+            domain="architectural",
+            created_by="semantic_ingestion",
+            tags=_dedupe_keep_order(
+                [
+                    "semantic_ingestion",
+                    f"run_id:{run_id}",
+                    f"signature:{ordered[0].signature}",
+                    f"source_name:{ordered[0].source_name}",
+                    f"source_name:{ordered[1].source_name}",
+                    f"source_path:{ordered[0].source_path}",
+                    f"source_path:{ordered[1].source_path}",
+                ],
+                limit=24,
+            ),
+        )
+
+    def _load_contradiction_ids(self) -> set[str]:
+        if not self.contradiction_registry_path.exists():
+            return set()
+
+        known_ids: set[str] = set()
+        try:
+            with self.contradiction_registry_path.open("r", encoding="utf-8") as handle:
+                for line in handle:
+                    stripped = line.strip()
+                    if not stripped:
+                        continue
+                    try:
+                        payload = json.loads(stripped)
+                    except json.JSONDecodeError:
+                        continue
+                    contradiction_id = str(payload.get("id") or "").strip()
+                    if contradiction_id:
+                        known_ids.add(contradiction_id)
+        except OSError:
+            return set()
+        return known_ids
+
+    def _append_contradictions(self, contradictions: list[Contradiction]) -> None:
+        self.contradiction_registry_path.parent.mkdir(parents=True, exist_ok=True)
+        with self.contradiction_registry_path.open("a", encoding="utf-8") as handle:
+            for contradiction in contradictions:
+                handle.write(contradiction.model_dump_json() + "\n")
 
     def _render_distilled_text(
         self,
