@@ -9,7 +9,8 @@ import os
 import subprocess
 import sys
 from pathlib import Path
-from unittest.mock import AsyncMock, patch
+from types import SimpleNamespace
+from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
@@ -28,6 +29,47 @@ def test_dgc_cli_module_imports():
     assert hasattr(dgc_cli, "cmd_gates")
     assert hasattr(dgc_cli, "cmd_health")
     assert hasattr(dgc_cli, "cmd_swarm")
+
+
+def test_dgc_main_module_imports():
+    """The modular dgc package exposes a main entrypoint."""
+    from dharma_swarm.dgc import main as dgc_main
+
+    assert callable(dgc_main)
+
+
+def test_dgc_package_module_entrypoint_imports():
+    """The modular dgc package exposes a python -m entrypoint module."""
+    from dharma_swarm.dgc.__main__ import main as package_main
+
+    assert callable(package_main)
+
+
+def test_dgc_context_builder_resolves_paths_and_env(tmp_path, monkeypatch):
+    """The modular dgc context resolves runtime paths and env without import-time mutation."""
+    repo_root = tmp_path / "dharma_swarm"
+    repo_root.mkdir()
+    (repo_root / ".env").write_text("DGC_ALPHA=repo\n", encoding="utf-8")
+    env_dir = tmp_path / ".dharma" / "env"
+    env_dir.mkdir(parents=True)
+    (env_dir / "nvidia_remote.env").write_text("DGC_BETA=state\n", encoding="utf-8")
+
+    monkeypatch.delenv("DGC_ALPHA", raising=False)
+    monkeypatch.delenv("DGC_BETA", raising=False)
+
+    from dharma_swarm.dgc.context import build_context
+
+    ctx = build_context(home=tmp_path, env={"DGC_GAMMA": "explicit"})
+
+    assert ctx.home == tmp_path
+    assert ctx.repo_root == repo_root
+    assert ctx.state_root == tmp_path / ".dharma"
+    assert ctx.legacy_core_root == tmp_path / "dgc-core"
+    assert ctx.env["DGC_ALPHA"] == "repo"
+    assert ctx.env["DGC_BETA"] == "state"
+    assert ctx.env["DGC_GAMMA"] == "explicit"
+    assert "DGC_ALPHA" not in os.environ
+    assert "DGC_BETA" not in os.environ
 
 
 def test_dgc_cli_main_no_args_tries_tui():
@@ -57,9 +99,15 @@ def test_dgc_cli_chat_command_dispatch():
     from dharma_swarm.dgc_cli import main
 
     with patch("sys.argv", ["dgc", "chat", "--continue", "--offline"]):
-        with patch("dharma_swarm.dgc_cli.cmd_chat") as mock_chat:
+        with patch("dharma_swarm.dgc.commands.ux.cmd_chat") as mock_chat:
             main()
-            mock_chat.assert_called_once()
+            mock_chat.assert_called_once_with(
+                continue_last=True,
+                offline=True,
+                model=None,
+                effort=None,
+                include_context=True,
+            )
 
 
 def test_dgc_cli_dashboard_command_dispatch():
@@ -67,7 +115,7 @@ def test_dgc_cli_dashboard_command_dispatch():
     from dharma_swarm.dgc_cli import main
 
     with patch("sys.argv", ["dgc", "dashboard"]):
-        with patch("dharma_swarm.dgc_cli.cmd_tui") as mock_tui:
+        with patch("dharma_swarm.dgc.commands.ux.cmd_tui") as mock_tui:
             main()
             mock_tui.assert_called_once()
 
@@ -77,9 +125,20 @@ def test_dgc_cli_ui_command_dispatch():
     from dharma_swarm.dgc_cli import main
 
     with patch("sys.argv", ["dgc", "ui", "lens"]):
-        with patch("dharma_swarm.dgc_cli.cmd_ui") as mock_ui:
+        with patch("dharma_swarm.dgc.commands.ux.cmd_ui") as mock_ui:
             main()
             mock_ui.assert_called_once_with("lens")
+
+
+def test_dgc_cli_main_uses_modular_dispatch_for_extracted_commands():
+    """The legacy entrypoint should hand extracted commands to the modular dispatcher."""
+    from dharma_swarm.dgc_cli import main
+
+    with patch("sys.argv", ["dgc", "status"]):
+        with patch("dharma_swarm.dgc.main._dispatch_known_command", return_value=True) as mock_dispatch:
+            main()
+
+    mock_dispatch.assert_called_once_with(["status"])
 
 
 def test_dgc_cli_legacy_tui_arg_routes_to_tui():
@@ -100,6 +159,142 @@ def test_dgc_cli_status_command():
         with patch("dharma_swarm.dgc_cli.cmd_status") as mock:
             main()
             mock.assert_called_once()
+
+
+def test_dgc_cli_semantic_ingest_status_dispatch():
+    """main() dispatches `dgc semantic ingest status` to cmd_semantic_ingest."""
+    from dharma_swarm.dgc_cli import main
+
+    with patch("sys.argv", ["dgc", "semantic", "ingest", "status", "--state-dir", "/tmp/dharma"]):
+        with patch("dharma_swarm.dgc_cli.cmd_semantic_ingest") as mock:
+            main()
+            mock.assert_called_once()
+            assert mock.call_args.args[0] == "status"
+            assert mock.call_args.kwargs["state_dir"] == "/tmp/dharma"
+
+
+def test_dgc_cli_semantic_ingest_search_dispatch():
+    """main() joins search terms for `dgc semantic ingest search`."""
+    from dharma_swarm.dgc_cli import main
+
+    with patch("sys.argv", ["dgc", "semantic", "ingest", "search", "strange", "loops", "--limit", "4"]):
+        with patch("dharma_swarm.dgc_cli.cmd_semantic_ingest") as mock:
+            main()
+            mock.assert_called_once()
+            assert mock.call_args.args[0] == "search"
+            assert mock.call_args.kwargs["query"] == "strange loops"
+            assert mock.call_args.kwargs["limit"] == 4
+
+
+def test_dgc_cli_semantic_ingest_register_defaults_dispatch():
+    """main() dispatches `dgc semantic ingest register-defaults` to cmd_semantic_ingest."""
+    from dharma_swarm.dgc_cli import main
+
+    with patch("sys.argv", ["dgc", "semantic", "ingest", "register-defaults", "--state-dir", "/tmp/dharma"]):
+        with patch("dharma_swarm.dgc_cli.cmd_semantic_ingest") as mock:
+            main()
+            mock.assert_called_once()
+            assert mock.call_args.args[0] == "register-defaults"
+            assert mock.call_args.kwargs["state_dir"] == "/tmp/dharma"
+
+
+def test_dgc_cli_semantic_ingest_bootstrap_dispatch():
+    """main() dispatches `dgc semantic ingest bootstrap` to cmd_semantic_ingest."""
+    from dharma_swarm.dgc_cli import main
+
+    with patch("sys.argv", ["dgc", "semantic", "ingest", "bootstrap", "--state-dir", "/tmp/dharma"]):
+        with patch("dharma_swarm.dgc_cli.cmd_semantic_ingest") as mock:
+            main()
+            mock.assert_called_once()
+            assert mock.call_args.args[0] == "bootstrap"
+            assert mock.call_args.kwargs["state_dir"] == "/tmp/dharma"
+
+
+def test_cmd_semantic_ingest_register_defaults_reports_added_sources(tmp_path, capsys):
+    """cmd_semantic_ingest should seed the canonical source registry from the operator surface."""
+    from dharma_swarm import dgc_cli
+
+    mock_spine = MagicMock()
+    mock_spine.register_default_sources.return_value = [
+        SimpleNamespace(name="shared_notes", roots=["/tmp/shared"]),
+        SimpleNamespace(name="stigmergy", roots=["/tmp/stigmergy"]),
+    ]
+
+    with patch("dharma_swarm.semantic_ingestion.SemanticIngestionSpine", return_value=mock_spine):
+        dgc_cli.cmd_semantic_ingest("register-defaults", state_dir=str(tmp_path))
+
+    mock_spine.register_default_sources.assert_called_once_with()
+    out = capsys.readouterr().out
+    assert "[semantic ingest] registered default sources: 2" in out
+    assert "shared_notes" in out
+    assert "/tmp/shared" in out
+    assert "stigmergy" in out
+
+
+def test_cmd_semantic_ingest_bootstrap_reports_counts(tmp_path, capsys):
+    """cmd_semantic_ingest should expose concept-graph bootstrap counts to operators."""
+    from dharma_swarm import dgc_cli
+
+    mock_spine = MagicMock()
+    mock_spine.bootstrap_from_concept_graph.return_value = SimpleNamespace(
+        run_id="boot-123",
+        concept_nodes=3,
+        concept_edges=5,
+        indexed_concepts=2,
+        files_ingested=2,
+        files_skipped=1,
+        graph_path=str(tmp_path / ".dharma" / "semantic" / "concept_graph.json"),
+    )
+
+    with patch("dharma_swarm.semantic_ingestion.SemanticIngestionSpine", return_value=mock_spine):
+        dgc_cli.cmd_semantic_ingest("bootstrap", state_dir=str(tmp_path))
+
+    mock_spine.bootstrap_from_concept_graph.assert_called_once_with()
+    out = capsys.readouterr().out
+    assert "[semantic ingest] bootstrap run_id: boot-123" in out
+    assert "concept graph: 3 nodes / 5 edges" in out
+    assert "concepts indexed: 2" in out
+    assert "files ingested: 2" in out
+    assert "files skipped: 1" in out
+
+
+def test_cmd_semantic_ingest_bootstrap_status_reports_last_bootstrap_counts(tmp_path, capsys):
+    """cmd_semantic_ingest status should surface the last bootstrap concept counts."""
+    from dharma_swarm import dgc_cli
+
+    mock_spine = MagicMock()
+    mock_spine.status.return_value = {
+        "sources_enabled": 1,
+        "sources_total": 1,
+        "documents": 2,
+        "registry_path": str(tmp_path / ".dharma" / "semantic" / "ingestion_sources.json"),
+        "graph_path": str(tmp_path / ".dharma" / "semantic" / "ingestion_concept_graph.json"),
+        "vector_store": {"total_documents": 2},
+        "last_run": {
+            "run_id": "boot-123",
+            "status": "completed",
+            "started_at": "2026-03-29T01:00:00+00:00",
+            "completed_at": "2026-03-29T01:00:02+00:00",
+            "stats": {
+                "source_names": ["concept_graph"],
+                "concept_nodes": 3,
+                "concept_edges": 5,
+                "indexed_concepts": 2,
+                "files_ingested": 2,
+                "files_skipped": 1,
+            },
+        },
+        "index": {},
+    }
+
+    with patch("dharma_swarm.semantic_ingestion.SemanticIngestionSpine", return_value=mock_spine):
+        dgc_cli.cmd_semantic_ingest("status", state_dir=str(tmp_path))
+
+    out = capsys.readouterr().out
+    assert "last run: boot-123 [completed]" in out
+    assert "last run sources: concept_graph" in out
+    assert "last run concepts: 2 indexed / 3 nodes / 5 edges" in out
+    assert "last run files: 2 ingested / 1 skipped" in out
 
 
 def test_cmd_status_reports_canonical_pulse_artifacts(monkeypatch, tmp_path, capsys):
@@ -166,6 +361,82 @@ def test_cmd_status_uses_canonical_dharma_state(monkeypatch, tmp_path, capsys):
     assert "Pulse: not yet run" not in out
     assert "2026-03-26T01:23:45+00:00" in out
     assert "Gates today: 2 checks" in out
+
+
+def test_cmd_status_reports_resident_seats(monkeypatch, tmp_path, capsys):
+    """cmd_status should expose stable resident seat identities from runtime telemetry."""
+    import subprocess
+    from datetime import datetime, timezone
+
+    from dharma_swarm import dgc_cli as cli
+    from dharma_swarm.telemetry_plane import (
+        AgentIdentityRecord,
+        TeamRosterRecord,
+        TelemetryPlaneStore,
+    )
+
+    dharma = tmp_path / ".dharma"
+    runtime_db = dharma / "state" / "runtime.db"
+
+    async def _seed() -> None:
+        telemetry = TelemetryPlaneStore(runtime_db)
+        await telemetry.init_db()
+        now = datetime(2026, 3, 29, 1, 2, 3, tzinfo=timezone.utc)
+        await telemetry.upsert_agent_identity(
+            AgentIdentityRecord(
+                agent_id="resident.frontier.indra_anekanta",
+                codename="Indra_Anekanta",
+                status="online",
+                metadata={
+                    "agent_display_name": "Indra Anekanta Synthesist",
+                    "seat_id": "frontier_synthesist",
+                    "current_binding": "qwen/qwen3-coder-next",
+                    "runtime_agent_name": "Indra_Anekanta_Synthesist",
+                },
+                created_at=now,
+                updated_at=now,
+            )
+        )
+        await telemetry.record_team_roster(
+            TeamRosterRecord(
+                roster_id="roster-frontier-indra",
+                team_id="dharma_swarm",
+                agent_id="resident.frontier.indra_anekanta",
+                role="surgeon",
+                active=True,
+                metadata={
+                    "agent_display_name": "Indra Anekanta Synthesist",
+                    "seat_id": "frontier_synthesist",
+                },
+                created_at=now,
+                updated_at=now,
+            )
+        )
+
+    asyncio.run(_seed())
+
+    monkeypatch.setattr(cli, "HOME", tmp_path)
+    monkeypatch.setattr(cli, "DHARMA_STATE", dharma)
+    monkeypatch.setattr(cli, "DGC_CORE", tmp_path / "dgc-core")
+
+    def _fake_run(coro):
+        coro.close()
+        return 0
+
+    monkeypatch.setattr(cli, "_run", _fake_run)
+    monkeypatch.setattr(
+        cli.subprocess,
+        "run",
+        lambda *args, **kwargs: subprocess.CompletedProcess(args[0], 0, "2.1.84 (Claude Code)\n", ""),
+    )
+
+    cli.cmd_status()
+
+    out = capsys.readouterr().out
+    assert "Resident seats:" in out
+    assert "Indra Anekanta Synthesist [frontier_synthesist]" in out
+    assert "qwen/qwen3-coder-next" in out
+    assert "resident.frontier.indra_anekanta" in out
 
 
 def test_dgc_cli_runtime_status_command():
@@ -481,7 +752,7 @@ def test_dgc_cli_pulse_command():
     from dharma_swarm.dgc_cli import main
 
     with patch("sys.argv", ["dgc", "pulse"]):
-        with patch("dharma_swarm.dgc_cli.cmd_pulse") as mock:
+        with patch("dharma_swarm.dgc.commands.runtime.cmd_pulse") as mock:
             main()
             mock.assert_called_once()
 
@@ -2085,6 +2356,26 @@ def test_dgc_cli_provider_matrix_dispatch():
             assert kwargs["max_targets"] == 12
             assert kwargs["budget_units"] == 7
             assert kwargs["as_json"] is True
+
+
+def test_dgc_cli_provider_matrix_accepts_certified_fast_profile():
+    """main() accepts certified_fast provider-matrix profile values."""
+    from dharma_swarm.dgc_cli import main
+
+    with patch(
+        "sys.argv",
+        [
+            "dgc",
+            "provider-matrix",
+            "--profile",
+            "certified_fast",
+        ],
+    ):
+        with patch("dharma_swarm.dgc_cli.cmd_provider_matrix", return_value=0) as mock_cmd:
+            main()
+            mock_cmd.assert_called_once()
+            kwargs = mock_cmd.call_args.kwargs
+            assert kwargs["profile"] == "certified_fast"
 
 
 def test_dgc_cli_full_power_probe_dispatch():
