@@ -84,7 +84,7 @@ def build_agent_identity_properties(agent: Any) -> dict[str, Any]:
         "model_key": canonical_model_key(provider, model),
         "current_task": str(getattr(agent, "current_task", "") or ""),
         "started_at": _stringify_timestamp(getattr(agent, "started_at", None)),
-        "last_heartbeat": _stringify_timestamp(getattr(agent, "last_heartbeat", None)),
+        "last_active": _stringify_timestamp(getattr(agent, "last_heartbeat", None)),
         "capabilities": [],
         "tasks_completed": int(getattr(agent, "tasks_completed", 0) or 0),
         "fitness_average": float(getattr(agent, "fitness_average", 0.0) or 0.0),

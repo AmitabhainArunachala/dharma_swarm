@@ -1,0 +1,35 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>com.dhyana.dharma-daemon</string>
+
+    <key>ProgramArguments</key>
+    <array>
+        <string>/bin/sh</string>
+        <string>-c</string>
+        <string>[ -f "$HOME/.dharma/.env" ] &amp;&amp; . "$HOME/.dharma/.env"; exec /opt/homebrew/bin/python3 -m dharma_swarm.orchestrate_live</string>
+    </array>
+
+    <key>KeepAlive</key>
+    <true/>
+
+    <key>WorkingDirectory</key>
+    <string>/Users/dhyana/dharma_swarm</string>
+
+    <key>StandardOutPath</key>
+    <string>/Users/dhyana/.dharma/logs/daemon_stdout.log</string>
+
+    <key>StandardErrorPath</key>
+    <string>/Users/dhyana/.dharma/logs/daemon_stderr.log</string>
+
+    <key>EnvironmentVariables</key>
+    <dict>
+        <key>PATH</key>
+        <string>/Users/dhyana/.npm-global/bin:/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin</string>
+        <key>HOME</key>
+        <string>/Users/dhyana</string>
+    </dict>
+</dict>
+</plist>

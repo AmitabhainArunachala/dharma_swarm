@@ -276,6 +276,51 @@ class OvernightDirector:
         self._profile = None
         self._temporal_store: TemporalRunStore | None = None
         self._wait_handoff: dict[str, Any] | None = None
+        self._apply_previous_verdict()
+
+    def _load_previous_verdict(self) -> str | None:
+        """Find and return the most recent overnight verdict from a prior run.
+
+        Scans STATE_DIR/overnight/ for dated subdirectories with verdict.json,
+        picks the most recent one that is not the current run's date.
+
+        Returns:
+            Verdict string ("advance", "hold", "rollback") or None if no prior
+            verdict exists.
+        """
+        overnight_dir = STATE_DIR / "overnight"
+        if not overnight_dir.is_dir():
+            return None
+        candidates = sorted(
+            (d for d in overnight_dir.iterdir()
+             if d.is_dir() and d.name != self.date and (d / "verdict.json").exists()),
+            key=lambda d: d.name,
+            reverse=True,
+        )
+        if not candidates:
+            return None
+        try:
+            data = json.loads(candidates[0].read_text(encoding="utf-8") if False
+                              else (candidates[0] / "verdict.json").read_text(encoding="utf-8"))
+            return str(data.get("verdict", "")).lower() or None
+        except Exception:
+            return None
+
+    def _apply_previous_verdict(self) -> None:
+        """Adjust autonomy_level based on the most recent prior verdict.
+
+        ROLLBACK → autonomy_level = 0 (analysis only, no mutations)
+        ADVANCE  → keep or increment autonomy_level (cap at 3)
+        HOLD     → no change (maintain current level)
+        """
+        verdict = self._load_previous_verdict()
+        if verdict is None:
+            return
+        if verdict == "rollback":
+            self.config.autonomy_level = 0
+        elif verdict == "advance":
+            self.config.autonomy_level = min(3, self.config.autonomy_level + 1)
+        # "hold" → no change
 
     def _init_temporal_runtime(self) -> None:
         """Initialize the REA-style temporal state for this run."""

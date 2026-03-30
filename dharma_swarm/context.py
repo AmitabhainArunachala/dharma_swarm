@@ -14,6 +14,7 @@ Context budget: ~30K chars max (fits in system prompt alongside v7 rules).
 
 from __future__ import annotations
 
+import concurrent.futures
 import json
 import logging
 import sqlite3
@@ -35,15 +36,17 @@ from dharma_swarm.orientation_packet import (
     OrientationPacketBuilder,
     RuntimeStateSummary,
 )
+from dharma_swarm.runtime_paths import resolve_runtime_paths
 
-HOME = Path.home()
+RUNTIME_PATHS = resolve_runtime_paths()
+HOME = RUNTIME_PATHS.home
 AGNI_WORKSPACE = HOME / "agni-workspace"
 TRISHULA_INBOX = HOME / "trishula" / "inbox"
-STATE_DIR = HOME / ".dharma"
+STATE_DIR = RUNTIME_PATHS.state_root
 SHARED_DIR = STATE_DIR / "shared"
 PSMV = HOME / "Persistent-Semantic-Memory-Vault"
-FOUNDATIONS_DIR = HOME / "dharma_swarm" / "foundations"
-ARCHITECTURE_DIR = HOME / "dharma_swarm" / "architecture"
+FOUNDATIONS_DIR = RUNTIME_PATHS.repo_root / "foundations"
+ARCHITECTURE_DIR = RUNTIME_PATHS.repo_root / "architecture"
 TRANSMISSION_DIR = FOUNDATIONS_DIR / "transmissions"
 
 # ── Types ────────────────────────────────────────────────────────────
@@ -1205,12 +1208,78 @@ _DEFAULT_POSITIONS = {
     "research": 5,
     "engineering": 6,
     "ops": 7,
+    "ingested_knowledge": 7,
     "consolidation": 8,
     "recent_memories": 8,
     "swarm_notes": 9,
     "hot_signals": 10,
     "vision": 11,
 }
+
+
+def read_ingested_knowledge(
+    query: str = "",
+    *,
+    state_dir: Path | None = None,
+    limit: int = 5,
+    max_chars: int = 2000,
+) -> str:
+    """Query SemanticIngestionSpine for knowledge relevant to *query*.
+
+    Returns empty string when no documents have been ingested, the query is
+    empty, or any error occurs during retrieval. Uses a 5s wall-clock timeout
+    so a locked/busy database never blocks the context build.
+    """
+    if not query.strip():
+        return ""
+    try:
+        # Fast guard: skip if the ingestion spine DB doesn't exist yet.
+        _sdir = Path(state_dir or Path.home() / ".dharma")
+        _spine_db = _sdir / "semantic" / "ingestion_spine.db"
+        if not _spine_db.exists():
+            return ""
+        try:
+            with sqlite3.connect(str(_spine_db), timeout=1.0) as _chk:
+                _count = _chk.execute("SELECT COUNT(*) FROM documents").fetchone()
+            if not _count or _count[0] == 0:
+                return ""
+        except Exception:
+            return ""
+
+        # Move init + search into a thread so any DB lock doesn't block caller.
+        def _search() -> list[dict]:
+            from dharma_swarm.semantic_ingestion import SemanticIngestionSpine
+            spine = SemanticIngestionSpine(state_dir=state_dir)
+            return spine.search(query, limit=limit)
+
+        _pool = concurrent.futures.ThreadPoolExecutor(max_workers=1)
+        fut = _pool.submit(_search)
+        try:
+            results: list[dict] = fut.result(timeout=5.0)
+        except (concurrent.futures.TimeoutError, Exception):
+            _pool.shutdown(wait=False)
+            return ""
+        finally:
+            _pool.shutdown(wait=False)
+
+        if not results:
+            return ""
+        lines = ["## Ingested Knowledge"]
+        for hit in results:
+            path = str(hit.get("source_path", ""))
+            text = str(hit.get("matched_text", "")).strip()
+            score = float(hit.get("score", 0.0))
+            if text:
+                name = Path(path).name if path else "unknown"
+                lines.append(f"- [{name} score={score:.2f}] {text}")
+        if len(lines) <= 1:
+            return ""
+        content = "\n".join(lines)
+        if len(content) > max_chars:
+            content = content[:max_chars] + "\n... [truncated]"
+        return content
+    except Exception:
+        return ""
 
 
 def build_agent_context(
@@ -1301,6 +1370,12 @@ def build_agent_context(
         if ops and len(ops) > ops_budget:
             ops = ops[:ops_budget] + "\n... [ops truncated]"
         _add("ops", ops)
+
+    # L7: Ingested knowledge from SemanticIngestionSpine
+    ingested_query = thread or role or ""
+    if ingested_query:
+        ingested = read_ingested_knowledge(ingested_query, state_dir=state_dir)
+        _add("ingested_knowledge", ingested)
 
     # L6: Consolidation — dreams & corrections from sleep cycle
     consolidation = read_consolidation_context(

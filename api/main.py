@@ -3,7 +3,7 @@
 FastAPI app with lifespan, CORS, WebSocket, and routers.
 
 Usage:
-    cd ~/dharma_swarm
+    cd "${DHARMA_REPO_ROOT:-$HOME/dharma_swarm}"
     uvicorn api.main:app --port 8000 --reload
 """
 
@@ -24,13 +24,16 @@ from starlette.middleware.base import BaseHTTPMiddleware
 from starlette.requests import Request
 
 from dharma_swarm.api_keys import DASHBOARD_API_KEY_ENV
+from dharma_swarm.runtime_artifacts import build_runtime_health_payload
+from dharma_swarm.runtime_paths import resolve_runtime_paths
 
 logger = logging.getLogger(__name__)
 
 # ── Singleton State ───────────────────────────────────────────────
 
 _state: dict[str, Any] = {}
-_OPERATOR_STATE_DIR = Path.home() / ".dharma"
+_RUNTIME_PATHS = resolve_runtime_paths()
+_OPERATOR_STATE_DIR = _RUNTIME_PATHS.state_root
 _OPERATOR_PID_FILE = _OPERATOR_STATE_DIR / "operator.pid"
 
 
@@ -151,6 +154,7 @@ def _get_api_key() -> str | None:
 # Routes that never require authentication (method, path).
 _PUBLIC_ROUTES: set[tuple[str, str]] = {
     ("GET", "/"),
+    ("GET", "/health"),
     ("GET", "/api/health"),
     ("GET", "/api/verify/health"),
     ("GET", "/docs"),
@@ -290,4 +294,33 @@ async def root():
         "version": "0.1.0",
         "docs": "/docs",
         "health": "/api/health",
+    }
+
+
+# ── Process Supervision Health ────────────────────────────────────
+
+@app.get("/health")
+async def daemon_health():
+    """Process supervision health — daemon PID, uptime, and last tick timestamp."""
+    import time
+
+    state_dir = _RUNTIME_PATHS.state_root
+    pid_file = state_dir / "daemon.pid"
+
+    pid_started_at: float | None = None
+    try:
+        pid_started_at = pid_file.stat().st_mtime
+    except OSError:
+        pass
+
+    uptime_seconds: float | None = None
+    if pid_started_at is not None:
+        uptime_seconds = round(time.time() - pid_started_at, 1)
+
+    runtime_payload = build_runtime_health_payload(state_dir)
+
+    return {
+        **runtime_payload,
+        "uptime_seconds": uptime_seconds,
+        "dgc_health_status": runtime_payload.get("source", "unknown") or "unknown",
     }

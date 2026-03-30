@@ -1106,6 +1106,42 @@ async def _inject_stigmergy_context(
     )
 
 
+async def _inject_recent_traces(
+    request: LLMRequest,
+    task: Task,
+    config: AgentConfig,
+) -> None:
+    """Append the 3 most recent trace consequences for this agent to the prompt."""
+    prompt_state_dir = _resolve_prompt_state_dir(task, config)
+    if prompt_state_dir is None or not request.messages:
+        return
+
+    try:
+        from dharma_swarm.traces import TraceStore
+
+        store = TraceStore(base_path=prompt_state_dir / "traces")
+        all_recent = await store.get_recent(limit=20)
+        agent_traces = [e for e in all_recent if e.agent == config.name][:3]
+    except Exception:
+        logger.debug("Trace prompt injection failed", exc_info=True)
+        return
+
+    if not agent_traces:
+        return
+
+    lines = ["## Recent Consequences"]
+    for entry in agent_traces:
+        ts = entry.timestamp.strftime("%Y-%m-%dT%H:%M")
+        detail = entry.metadata.get("step_name") or entry.action
+        lines.append(f"- [{ts}] {entry.action}: {detail} (state={entry.state})")
+
+    request.messages[0]["content"] = (
+        str(request.messages[0]["content"]).rstrip()
+        + "\n\n"
+        + "\n".join(lines)
+    )
+
+
 def _looks_like_provider_failure(content: str) -> bool:
     """Heuristic guard against error strings being marked as completed work."""
     normalized = (content or "").strip().lower()
@@ -1267,6 +1303,23 @@ def _tool_result_text(result: Any) -> str:
             parts.append(f"stderr:\n{stderr}")
         return "\n".join(parts)
     return str(result)
+
+
+def _guard_local_tool_side_effect(*, action: str, content: str) -> str | None:
+    """Run a direct telos gate before a local side effect executes."""
+    try:
+        from dharma_swarm.telos_gates import check_action
+
+        gate = check_action(action=action, content=content)
+    except Exception as exc:
+        logger.warning("Gate evaluation failed for local tool action %s", action, exc_info=True)
+        return f"ERROR: Gate evaluation failed: {exc}"
+
+    if gate.decision == GateDecision.BLOCK:
+        return f"ERROR: Gate blocked action: {gate.reason}"
+    if gate.decision == GateDecision.REVIEW:
+        return f"ERROR: Gate review required: {gate.reason}"
+    return None
 
 
 def _normalized_tool_call_payload(tool_call: dict[str, Any], *, ordinal: int) -> dict[str, Any]:
@@ -1551,6 +1604,12 @@ class AgentRunner:
         if tool_name == "write_file":
             path = _resolve_local_tool_path(str(parameters.get("path", "")), workdir=workdir)
             content = str(parameters.get("content", ""))
+            gate_error = _guard_local_tool_side_effect(
+                action=f"write_file: {parameters.get('path', '')}",
+                content=content,
+            )
+            if gate_error:
+                return gate_error
             path.parent.mkdir(parents=True, exist_ok=True)
             path.write_text(content, encoding="utf-8")
             return f"OK: wrote {len(content)} chars to {path}"
@@ -1561,6 +1620,12 @@ class AgentRunner:
                 return f"ERROR: File not found: {path}"
             old = str(parameters.get("old_string", ""))
             new = str(parameters.get("new_string", ""))
+            gate_error = _guard_local_tool_side_effect(
+                action=f"edit_file: {parameters.get('path', '')}",
+                content=f"{old}\n{new}",
+            )
+            if gate_error:
+                return gate_error
             content = path.read_text(encoding="utf-8", errors="replace")
             count = content.count(old)
             if count == 0:
@@ -1574,6 +1639,12 @@ class AgentRunner:
             if self._sandbox is None:
                 raise RuntimeError("Local tool sandbox unavailable")
             command = str(parameters.get("command", "")).strip()
+            gate_error = _guard_local_tool_side_effect(
+                action=f"{tool_name}: {command[:200]}",
+                content=command,
+            )
+            if gate_error:
+                return gate_error
             try:
                 timeout = float(parameters.get("timeout", 30) or 30)
             except (TypeError, ValueError):
@@ -1874,6 +1945,7 @@ class AgentRunner:
                 )
             request = _build_prompt(task, self._config, plan_context=plan_context)
             await _inject_stigmergy_context(request, task, self._config)
+            await _inject_recent_traces(request, task, self._config)
             self._record_conversation_turn(
                 task,
                 role="user",
@@ -2562,6 +2634,10 @@ class AgentRunner:
             from dharma_swarm.signal_bus import SignalBus
 
             sig = MetricsAnalyzer().analyze(result)
+            # W4: Include quality_score so DarwinEngine can consume real-task fitness
+            quality = _feedback_quality_score(
+                task, self._config, success=True, result_text=result,
+            )
             payload = {
                 "agent": self._config.name,
                 "task_id": task.id,
@@ -2569,6 +2645,7 @@ class AgentRunner:
                 "entropy": sig.entropy,
                 "recognition_type": sig.recognition_type.value,
                 "word_count": sig.word_count,
+                "quality_score": quality,
             }
             # In-memory signal (same-process consumers)
             bus = SignalBus.get()
@@ -2909,7 +2986,10 @@ class AgentPool:
         # Auto-create advanced memory if not provided
         if advanced_memory is None:
             try:
-                advanced_memory = AgentMemoryManager(config.name)
+                memory_namespace = str(
+                    config.metadata.get("memory_namespace") or config.name
+                ).strip() or config.name
+                advanced_memory = AgentMemoryManager(memory_namespace)
             except Exception:
                 logger.debug("Auto-create advanced memory failed", exc_info=True)
 

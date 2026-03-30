@@ -9,14 +9,20 @@ from fastapi import APIRouter
 from api.models import (
     AgentHealthOut,
     AnomalyOut,
-    ApiResponse,
+    AnomalyListResponse,
     HealthOut,
+    HealthResponse,
+    RuntimeHealthOut,
     SwarmOverview,
+    SwarmOverviewResponse,
 )
+from dharma_swarm.runtime_artifacts import build_runtime_health_payload
+from dharma_swarm.runtime_paths import resolve_runtime_paths
 
 logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/api", tags=["health"])
+_RUNTIME_PATHS = resolve_runtime_paths()
 
 
 def _get_deps():
@@ -25,12 +31,13 @@ def _get_deps():
     return get_swarm(), get_trace_store(), get_monitor()
 
 
-@router.get("/health")
-async def health_check() -> ApiResponse:
+@router.get("/health", response_model=HealthResponse)
+async def health_check() -> HealthResponse:
     _, trace_store, monitor = _get_deps()
+    runtime_payload = build_runtime_health_payload(_RUNTIME_PATHS.state_root)
     try:
         report = await monitor.check_health()
-        return ApiResponse(data=HealthOut(
+        return HealthResponse(data=HealthOut(
             overall_status=report.overall_status.value if hasattr(report.overall_status, 'value') else str(report.overall_status),
             agent_health=[
                 AgentHealthOut(
@@ -58,16 +65,23 @@ async def health_check() -> ApiResponse:
             traces_last_hour=report.traces_last_hour,
             failure_rate=report.failure_rate,
             mean_fitness=report.mean_fitness,
+            runtime=RuntimeHealthOut(**runtime_payload),
         ).model_dump())
     except Exception as e:
-        return ApiResponse(data=HealthOut(overall_status="unknown").model_dump(), error=str(e))
+        return HealthResponse(
+            data=HealthOut(
+                overall_status="unknown",
+                runtime=RuntimeHealthOut(**runtime_payload),
+            ).model_dump(),
+            error=str(e),
+        )
 
 
-@router.get("/health/anomalies")
-async def get_anomalies(window_hours: float = 1) -> ApiResponse:
+@router.get("/health/anomalies", response_model=AnomalyListResponse)
+async def get_anomalies(window_hours: float = 1) -> AnomalyListResponse:
     _, _, monitor = _get_deps()
     anomalies = await monitor.detect_anomalies(window_hours=window_hours)
-    return ApiResponse(data=[
+    return AnomalyListResponse(data=[
         AnomalyOut(
             id=a.id,
             detected_at=str(a.detected_at),
@@ -80,8 +94,8 @@ async def get_anomalies(window_hours: float = 1) -> ApiResponse:
     ])
 
 
-@router.get("/overview")
-async def overview() -> ApiResponse:
+@router.get("/overview", response_model=SwarmOverviewResponse)
+async def overview() -> SwarmOverviewResponse:
     """Combined swarm overview for the dashboard L1."""
     swarm, trace_store, monitor = _get_deps()
 
@@ -132,7 +146,7 @@ async def overview() -> ApiResponse:
     except Exception:
         logger.debug("Failed to read stigmergy density for overview", exc_info=True)
 
-    return ApiResponse(data=SwarmOverview(
+    return SwarmOverviewResponse(data=SwarmOverview(
         agent_count=agent_count,
         task_count=tasks_pending + tasks_running + tasks_completed + tasks_failed,
         tasks_pending=tasks_pending,

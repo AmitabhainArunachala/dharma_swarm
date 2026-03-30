@@ -10,13 +10,15 @@ set -euo pipefail
 export PATH="/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin:${PATH:-}"
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-STATE_DIR="${HOME}/.dharma"
+export DHARMA_REPO_ROOT="${DHARMA_REPO_ROOT:-$SCRIPT_DIR}"
+export DHARMA_HOME="${DHARMA_HOME:-${HOME}/.dharma}"
+STATE_DIR="${DHARMA_HOME}"
 PID_FILE="${STATE_DIR}/operator.pid"
 LOG_FILE="${STATE_DIR}/logs/operator.log"
 PORT="${OPERATOR_PORT:-8420}"
 HOST="${OPERATOR_HOST:-127.0.0.1}"
 PYTHON_BIN="${PYTHON_BIN:-python3}"
-RUNTIME_ENV_HELPER="${SCRIPT_DIR}/scripts/load_runtime_env.sh"
+RUNTIME_ENV_HELPER="${DHARMA_REPO_ROOT}/scripts/load_runtime_env.sh"
 
 mkdir -p "${STATE_DIR}/logs" "${STATE_DIR}/db"
 
@@ -88,7 +90,7 @@ if [[ -n "$existing_pid" ]]; then
     exit 1
 fi
 
-cd "$SCRIPT_DIR"
+cd "$DHARMA_REPO_ROOT"
 
 if [[ "${1:-}" == "--background" ]]; then
     nohup "$PYTHON_BIN" -m uvicorn api.main:app --host "$HOST" --port "$PORT" --log-level info --no-access-log \

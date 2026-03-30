@@ -109,6 +109,7 @@ class TestBuildProperties:
         assert props["status"] == "busy"
         assert props["provider"] == "anthropic"
         assert props["model"] == "claude-sonnet-4-20250514"
+        assert props["last_active"] == ""
         assert props["tasks_completed"] == 5
         assert props["fitness_average"] == 0.85
 

@@ -300,6 +300,11 @@ class DarwinEngine:
         self._file_hashes: dict[str, str] = {}
         # Phase 4 velocity: pending background trace tasks
         self._trace_tasks: set[asyncio.Task[None]] = set()
+        # W4: Agent fitness from real task execution (via SignalBus)
+        self._agent_fitness_signals: list[dict[str, Any]] = []
+        # C11: Diversity health from SignalBus — drives mutation pressure
+        self._diversity_status: str = "unknown"
+        self._diversity_boost_active: bool = False
 
     # -- Phase 4: fire-and-forget trace helper --------------------------------
 
@@ -308,6 +313,161 @@ class DarwinEngine:
         task = asyncio.create_task(self.traces.log_entry(entry))
         self._trace_tasks.add(task)
         task.add_done_callback(self._trace_tasks.discard)
+
+    # -- W4: Real-task fitness from SignalBus ---------------------------------
+
+    def consume_agent_fitness_signals(self) -> int:
+        """Drain AGENT_FITNESS signals from the bus and store them.
+
+        Returns the number of signals consumed. Call this before
+        select_next_parent() so real-world quality scores influence
+        parent selection and mutation pressure.
+        """
+        try:
+            from dharma_swarm.signal_bus import SignalBus, SIGNAL_AGENT_FITNESS
+
+            bus = SignalBus.get()
+            signals = bus.drain([SIGNAL_AGENT_FITNESS])
+            self._agent_fitness_signals.extend(signals)
+            if signals:
+                logger.debug("W4: Consumed %d agent fitness signals", len(signals))
+            return len(signals)
+        except Exception:
+            return 0
+
+    def drain_diversity_signals(self) -> str:
+        """Drain SIGNAL_DIVERSITY_HEALTH from the bus and adjust mutation pressure.
+
+        When diversity_status is 'critical' (behavioral_div < 0.2):
+          - Increase mutation_rate by 1.5x to encourage exploration
+          - Set flag for cross-family parent selection
+        When 'healthy':
+          - Allow normal convergence (clear boost flag)
+
+        Returns the last observed diversity status ('critical', 'healthy',
+        'warning', or 'unknown' if no signal was present).
+        """
+        try:
+            from dharma_swarm.signal_bus import SignalBus, SIGNAL_DIVERSITY_HEALTH
+
+            bus = SignalBus.get()
+            signals = bus.drain([SIGNAL_DIVERSITY_HEALTH])
+            if not signals:
+                return self._diversity_status
+
+            # Use the most recent signal
+            latest = signals[-1]
+            status = latest.get("diversity_status", "unknown")
+            behavioral_div = latest.get("behavioral_div", 1.0)
+
+            self._diversity_status = status
+
+            if status == "critical" or (
+                isinstance(behavioral_div, (int, float)) and behavioral_div < 0.2
+            ):
+                if not self._diversity_boost_active:
+                    self._base_mutation_rate = min(
+                        1.0, self._base_mutation_rate * 1.5
+                    )
+                    self._diversity_boost_active = True
+                    logger.info(
+                        "C11: Diversity CRITICAL (%.2f) — mutation_rate boosted to %.3f, "
+                        "cross-family selection enabled",
+                        behavioral_div,
+                        self._base_mutation_rate,
+                    )
+            else:
+                if self._diversity_boost_active:
+                    logger.info(
+                        "C11: Diversity recovered to '%s' — clearing boost", status
+                    )
+                self._diversity_boost_active = False
+
+            return self._diversity_status
+        except Exception:
+            return self._diversity_status
+
+    # -- C14: Failure blacklist -----------------------------------------------
+
+    _BLACKLIST_FILE = Path.home() / ".dharma" / "evolution" / "blacklist.jsonl"
+
+    def _write_failure_blacklist(self, component: str, description: str) -> None:
+        """Record a failed proposal in the blacklist.
+
+        Called when correctness < 0.5. Appends one JSONL entry with
+        component, description hash, and timestamp.
+        """
+        import json as _bl_json
+        desc_hash = hashlib.sha256(description.encode()).hexdigest()[:16]
+        entry = {"component": component, "desc_hash": desc_hash, "ts": time.time()}
+        try:
+            path = self._BLACKLIST_FILE
+            path.parent.mkdir(parents=True, exist_ok=True)
+            with path.open("a", encoding="utf-8") as fh:
+                fh.write(_bl_json.dumps(entry) + "\n")
+        except Exception:
+            logger.debug("C14: Blacklist write failed", exc_info=True)
+
+    def _check_failure_blacklist(
+        self, component: str, threshold: int = 3, recent_n: int = 100
+    ) -> bool:
+        """Return True if component has >= threshold failures in recent entries.
+
+        Reads the blacklist file and counts failures for the component in the
+        most recent *recent_n* entries.
+        """
+        import json as _bl_json
+        path = self._BLACKLIST_FILE
+        if not path.exists():
+            return False
+        try:
+            lines = path.read_text(encoding="utf-8").splitlines()
+            recent = lines[-recent_n:] if len(lines) > recent_n else lines
+            count = sum(
+                1
+                for line in recent
+                if line.strip()
+                and _bl_json.loads(line).get("component") == component
+            )
+            if count >= threshold:
+                logger.info(
+                    "C14: Component '%s' blacklisted (%d recent failures >= %d)",
+                    component, count, threshold,
+                )
+                return True
+            return False
+        except Exception:
+            logger.debug("C14: Blacklist check failed", exc_info=True)
+            return False
+
+    def agent_fitness_summary(self) -> dict[str, dict[str, float]]:
+        """Summarize consumed agent fitness signals by agent name.
+
+        Returns dict mapping agent_name → {mean_quality, count, mean_swabhaav}.
+        Useful for biasing parent selection toward agents whose real-world
+        task quality is high.
+        """
+        from collections import defaultdict
+        accum: dict[str, list[float]] = defaultdict(list)
+        swab: dict[str, list[float]] = defaultdict(list)
+        for sig in self._agent_fitness_signals:
+            agent = sig.get("agent", "unknown")
+            q = sig.get("quality_score")
+            if isinstance(q, (int, float)):
+                accum[agent].append(float(q))
+            s = sig.get("swabhaav_ratio")
+            if isinstance(s, (int, float)):
+                swab[agent].append(float(s))
+        result: dict[str, dict[str, float]] = {}
+        for agent, scores in accum.items():
+            result[agent] = {
+                "mean_quality": sum(scores) / len(scores),
+                "count": float(len(scores)),
+                "mean_swabhaav": (
+                    sum(swab.get(agent, [0.5])) / len(swab.get(agent, [0.5]))
+                ),
+            }
+        return result
 
     def get_fitness_weights(self) -> dict[str, float]:
         """Return the active normalized fitness weights."""
@@ -342,24 +502,27 @@ class DarwinEngine:
         self._correction_engine = engine
 
     def compute_extended_fitness(self, agent_id: str, base_fitness: float) -> float:
-        """Extend base fitness with Sprint 1-3 signals.
+        """Extend base fitness with Sprint 1-3 signals + verification.
 
-        Three new dimensions (each 0.0-1.0, weighted):
+        Four dimensions (each 0.0-1.0, weighted):
         1. Memory quality: proportion of tasks that produced useful knowledge
         2. Economic efficiency: quality per token (normalized)
         3. Correction health: inverse of correction frequency
+        4. Verification survival: how often output survives cross-model verification
 
-        Final = base_fitness * 0.6 + memory * 0.15 + econ * 0.15 + health * 0.10
+        Final = base * 0.50 + memory * 0.12 + econ * 0.12 + health * 0.08 + verify * 0.18
         """
         memory_signal = self._memory_quality_signal(agent_id)
         econ_signal = self._economic_efficiency_signal(agent_id)
         health_signal = self._correction_health_signal(agent_id)
+        verify_signal = self._verification_survival_signal(agent_id)
 
         return (
-            base_fitness * 0.6
-            + memory_signal * 0.15
-            + econ_signal * 0.15
-            + health_signal * 0.10
+            base_fitness * 0.50
+            + memory_signal * 0.12
+            + econ_signal * 0.12
+            + health_signal * 0.08
+            + verify_signal * 0.18
         )
 
     def _memory_quality_signal(self, agent_id: str) -> float:
@@ -413,6 +576,36 @@ class DarwinEngine:
             correction_count = len(history)
             # 10+ corrections in window = 0.0, 0 = 1.0
             return max(1.0 - (correction_count / 10.0), 0.0)
+        except Exception:
+            return 0.5
+
+    def _verification_survival_signal(self, agent_id: str) -> float:
+        """How often does this agent's output survive cross-model verification?
+
+        Reads from ~/.dharma/transcendence/verification.jsonl.
+        Returns 0.5 (neutral) if no verification data exists.
+        """
+        import json as _json
+        from pathlib import Path as _Path
+
+        log_path = _Path.home() / ".dharma" / "transcendence" / "verification.jsonl"
+        if not log_path.exists():
+            return 0.5
+
+        try:
+            total = 0
+            passed = 0
+            for line in log_path.read_text(encoding="utf-8").strip().split("\n"):
+                if not line.strip():
+                    continue
+                entry = _json.loads(line)
+                if entry.get("agent") == agent_id:
+                    total += 1
+                    if entry.get("issues_found", 0) == 0:
+                        passed += 1
+            if total == 0:
+                return 0.5
+            return passed / total
         except Exception:
             return 0.5
 
@@ -1596,6 +1789,10 @@ class DarwinEngine:
             except Exception:
                 logger.debug("L4 behavioral correlation failed", exc_info=True)
 
+            # C14: Record failure when correctness is below threshold
+            if correctness < 0.5:
+                self._write_failure_blacklist(proposal.component, proposal.description)
+
             proposal.actual_fitness = fitness
             proposal.status = EvolutionStatus.EVALUATED
             proposal.promotion_state = derive_promotion_state(
@@ -2423,6 +2620,22 @@ class DarwinEngine:
         if all(candidate.id != selected.id for candidate in candidates):
             candidates.append(selected)
 
+        # C11: When diversity is critical, prefer cross-family candidates
+        if self._diversity_boost_active and selected.model:
+            selected_family = selected.model.split("/")[0]
+            cross = [
+                c for c in candidates
+                if c.model and c.model.split("/")[0] != selected_family
+            ]
+            if cross:
+                best_cross = max(cross, key=self._parent_memory_score)
+                logger.debug(
+                    "C11: Cross-family parent override: %s → %s",
+                    selected.model,
+                    best_cross.model,
+                )
+                return best_cross
+
         best = max(candidates, key=self._parent_memory_score)
         if self._parent_memory_score(best) > (self._parent_memory_score(selected) * 1.05):
             return best
@@ -2680,6 +2893,11 @@ class DarwinEngine:
             source = source[:15_000] + "\n# ... truncated ..."
 
         component_key = self._component_key_for_source_file(source_file)
+
+        # C14: Skip components blacklisted due to repeated failures
+        if self._check_failure_blacklist(component_key):
+            return None
+
         target = self.resolve_execution_target(
             component_key,
             fallback_test_command=None,
@@ -2888,6 +3106,9 @@ class DarwinEngine:
             model = _dm(_PT.OPENROUTER)
 
         await self.refresh_experiment_memory()
+        # C11: Drain diversity signals before each cycle — adjusts mutation
+        # pressure and parent selection when diversity is critical.
+        self.drain_diversity_signals()
         _emit("cycle_start", {
             "files": [str(sf) for sf in source_files],
             "shadow": shadow,

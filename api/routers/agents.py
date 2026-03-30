@@ -7,7 +7,18 @@ import logging
 
 from fastapi import APIRouter, Query, WebSocket, WebSocketDisconnect
 
-from api.models import AgentOut, ApiResponse, SpawnAgentRequest
+from api.models import (
+    AgentDetailOut,
+    AgentDetailResponse,
+    AgentListResponse,
+    AgentOut,
+    AgentResponse,
+    AgentsSyncOut,
+    AgentsSyncResponse,
+    AgentStopOut,
+    AgentStopResponse,
+    SpawnAgentRequest,
+)
 from api.routers._agent_aliases import alias_candidates, matches_agent_alias
 from api.ws import manager
 from dharma_swarm.ontology_agents import (
@@ -63,7 +74,7 @@ def _identity_to_out(identity_obj) -> dict:
         status=str(props.get("status") or "unknown"),
         current_task=str(props.get("current_task") or "") or None,
         started_at=str(props.get("started_at") or "") or None,
-        last_heartbeat=str(props.get("last_heartbeat") or props.get("last_active") or "") or None,
+        last_heartbeat=str(props.get("last_active") or props.get("last_heartbeat") or "") or None,
         turns_used=int(props.get("turns_used", 0) or 0),
         tasks_completed=int(props.get("tasks_completed", 0) or 0),
         provider=provider,
@@ -293,42 +304,42 @@ def _agent_to_out(agent) -> dict:
     ).model_dump()
 
 
-@router.get("/agents")
-async def list_agents() -> ApiResponse:
+@router.get("/agents", response_model=AgentListResponse)
+async def list_agents() -> AgentListResponse:
     swarm = _get_swarm()
     try:
         agents = await swarm.list_agents()
         for agent in agents:
             upsert_agent_identity(agent)
-        return ApiResponse(data=[_agent_to_out(a) for a in agents])
+        return AgentListResponse(data=[AgentOut(**_agent_to_out(a)) for a in agents])
     except Exception as e:
-        return ApiResponse(data=[], error=str(e))
+        return AgentListResponse(data=[], error=str(e))
 
 
-@router.get("/agents/{agent_id}")
-async def get_agent(agent_id: str) -> ApiResponse:
+@router.get("/agents/{agent_id}", response_model=AgentResponse)
+async def get_agent(agent_id: str) -> AgentResponse:
     try:
         payload = await _resolve_agent_payload(agent_id)
         if payload is not None:
-            return ApiResponse(data=payload["agent"])
-        return ApiResponse(status="error", error=f"Agent not found: {agent_id}")
+            return AgentResponse(data=AgentOut(**payload["agent"]))
+        return AgentResponse(status="error", error=f"Agent not found: {agent_id}")
     except Exception as e:
-        return ApiResponse(status="error", error=str(e))
+        return AgentResponse(status="error", error=str(e))
 
 
-@router.get("/agents/{agent_id}/detail")
-async def get_agent_detail(agent_id: str) -> ApiResponse:
+@router.get("/agents/{agent_id}/detail", response_model=AgentDetailResponse)
+async def get_agent_detail(agent_id: str) -> AgentDetailResponse:
     try:
         payload = await _resolve_agent_payload(agent_id)
         if payload is None:
-            return ApiResponse(status="error", error=f"Agent not found: {agent_id}")
-        return ApiResponse(data=payload)
+            return AgentDetailResponse(status="error", error=f"Agent not found: {agent_id}")
+        return AgentDetailResponse(data=AgentDetailOut.model_validate(payload))
     except Exception as e:
-        return ApiResponse(status="error", error=str(e))
+        return AgentDetailResponse(status="error", error=str(e))
 
 
-@router.post("/agents/spawn")
-async def spawn_agent(req: SpawnAgentRequest) -> ApiResponse:
+@router.post("/agents/spawn", response_model=AgentResponse)
+async def spawn_agent(req: SpawnAgentRequest) -> AgentResponse:
     swarm = _get_swarm()
     try:
         from dharma_swarm.models import AgentRole, ProviderType
@@ -353,36 +364,36 @@ async def spawn_agent(req: SpawnAgentRequest) -> ApiResponse:
         upsert_agent_identity(agent)
         out = _agent_to_out(agent)
         await manager.broadcast("agents", {"event": "agent_spawned", "agent": out})
-        return ApiResponse(data=out)
+        return AgentResponse(data=AgentOut(**out))
     except Exception as e:
-        return ApiResponse(status="error", error=str(e))
+        return AgentResponse(status="error", error=str(e))
 
 
-@router.post("/agents/{agent_id}/stop")
-async def stop_agent(agent_id: str) -> ApiResponse:
+@router.post("/agents/{agent_id}/stop", response_model=AgentStopResponse)
+async def stop_agent(agent_id: str) -> AgentStopResponse:
     swarm = _get_swarm()
     try:
         await swarm.stop_agent(agent_id)
         mark_agent_retiring(agent_id, name=agent_id)
         await manager.broadcast("agents", {"event": "agent_stopped", "agent_id": agent_id})
-        return ApiResponse(data={"stopped": agent_id})
+        return AgentStopResponse(data=AgentStopOut(stopped=agent_id))
     except Exception as e:
-        return ApiResponse(status="error", error=str(e))
+        return AgentStopResponse(status="error", error=str(e))
 
 
-@router.post("/agents/sync")
+@router.post("/agents/sync", response_model=AgentsSyncResponse)
 async def sync_agents(
     include_kaizenops: bool = Query(
         False,
         description="Attempt live KaizenOps registration while syncing agent contracts.",
     ),
-) -> ApiResponse:
+) -> AgentsSyncResponse:
     swarm = _get_swarm()
     try:
         results = await swarm.sync_agents(include_kaizenops=include_kaizenops)
-        return ApiResponse(data={"count": len(results), "results": results})
+        return AgentsSyncResponse(data=AgentsSyncOut(count=len(results), results=results))
     except Exception as e:
-        return ApiResponse(status="error", error=str(e))
+        return AgentsSyncResponse(status="error", error=str(e))
 
 
 @router.websocket("/ws/agents")

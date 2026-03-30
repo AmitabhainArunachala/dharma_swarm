@@ -973,7 +973,7 @@ _AGENT_IDENTITY = ObjectType(
         "model_key": PropertyDef(name="model_key", property_type=PropertyType.STRING),
         "current_task": PropertyDef(name="current_task", property_type=PropertyType.STRING),
         "started_at": PropertyDef(name="started_at", property_type=PropertyType.STRING),
-        "last_heartbeat": PropertyDef(name="last_heartbeat", property_type=PropertyType.STRING),
+        "last_active": PropertyDef(name="last_active", property_type=PropertyType.STRING),
         "capabilities": PropertyDef(name="capabilities", property_type=PropertyType.LIST),
         "swabhaav_capacity": PropertyDef(name="swabhaav_capacity",
                                         property_type=PropertyType.FLOAT,

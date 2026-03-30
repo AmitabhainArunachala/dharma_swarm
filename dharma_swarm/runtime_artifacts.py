@@ -125,6 +125,62 @@ def dgc_health_snapshot_summary(
     return summary
 
 
+def _read_pid_file(path: Path) -> int | None:
+    try:
+        return int(path.read_text(encoding="utf-8").strip())
+    except (OSError, ValueError):
+        return None
+
+
+def build_runtime_health_payload(
+    state_dir: Path,
+    *,
+    stale_after_seconds: float = 3600.0,
+) -> dict[str, Any]:
+    """Build the canonical runtime-health payload shared by API surfaces."""
+    snapshot = dgc_health_snapshot_summary(
+        state_dir,
+        stale_after_seconds=stale_after_seconds,
+    )
+    raw_payload = snapshot.get("payload")
+    payload = raw_payload if isinstance(raw_payload, dict) else {}
+    operator_pid = _read_pid_file(state_dir / "operator.pid")
+    runtime_warnings: list[str] = []
+
+    snapshot_status = str(snapshot.get("status", "missing"))
+    if snapshot_status != "fresh":
+        runtime_warnings.append(f"daemon snapshot {snapshot_status}")
+    if snapshot.get("daemon_pid_mismatch"):
+        runtime_warnings.append("daemon PID file disagrees with latest health snapshot")
+    if operator_pid is None:
+        runtime_warnings.append("operator PID file missing")
+    error = snapshot.get("error")
+    if error:
+        runtime_warnings.append(f"runtime snapshot error: {error}")
+
+    source = payload.get("source")
+    if source:
+        maintenance_summary = f"{source} snapshot {snapshot_status}"
+    else:
+        maintenance_summary = f"runtime snapshot {snapshot_status}"
+
+    return {
+        "status": "healthy" if not runtime_warnings else "degraded",
+        "snapshot_status": snapshot_status,
+        "daemon_pid": snapshot.get("daemon_pid"),
+        "live_daemon_pid": snapshot.get("live_pid"),
+        "daemon_pid_mismatch": bool(snapshot.get("daemon_pid_mismatch")),
+        "operator_pid": operator_pid,
+        "last_tick": payload.get("timestamp"),
+        "agent_count": payload.get("agent_count"),
+        "task_count": payload.get("task_count"),
+        "anomaly_count": payload.get("anomaly_count"),
+        "source": source,
+        "maintenance_summary": maintenance_summary,
+        "runtime_warnings": runtime_warnings,
+    }
+
+
 def write_dgc_health_snapshot(
     state_dir: Path,
     *,

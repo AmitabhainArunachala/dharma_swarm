@@ -52,6 +52,7 @@ EVOLUTION_INTERVAL = _ll.evolution_interval_seconds
 HEALTH_INTERVAL = _ll.health_interval_seconds
 LIVING_INTERVAL = _ll.living_interval_seconds
 MAX_DAILY = _ll.max_daily_tasks
+SEMANTIC_INGESTION_INTERVAL = EVOLUTION_INTERVAL
 _RUNTIME_HEALTH_STATE: dict[str, int] = {
     "agent_count": 0,
     "task_count": 0,
@@ -118,6 +119,67 @@ async def _wait_or_shutdown(shutdown_event: asyncio.Event, delay: float) -> bool
         return True
     except asyncio.TimeoutError:
         return shutdown_event.is_set()
+
+
+async def _run_semantic_ingestion_loop(shutdown_event: asyncio.Event) -> None:
+    """Periodically refresh the semantic ingestion spine with bounded work."""
+    from dharma_swarm.semantic_ingestion import SemanticIngestionSpine
+    from dharma_swarm.sleep_cycle import _SEMANTIC_INGESTION_MAX_FILES
+
+    spine = SemanticIngestionSpine(state_dir=STATE_DIR)
+
+    while not shutdown_event.is_set():
+        try:
+            spine.register_default_sources()
+            enabled_sources = spine.list_sources(enabled_only=True)
+            if not enabled_sources:
+                _log("semantic-ingestion", "No enabled ingestion sources configured; sleeping")
+            else:
+                report = await asyncio.to_thread(
+                    spine.run_incremental,
+                    max_files=_SEMANTIC_INGESTION_MAX_FILES,
+                )
+                _log(
+                    "semantic-ingestion",
+                    "Ingestion pass complete: "
+                    f"{report.files_ingested}/{report.files_scanned} files ingested",
+                )
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:
+            _log("semantic-ingestion", f"Ingestion pass failed: {exc}")
+
+        if await _wait_or_shutdown(shutdown_event, SEMANTIC_INGESTION_INTERVAL):
+            break
+
+
+_MAINTENANCE_INTERVAL = 86400  # daily
+
+
+async def _run_maintenance_loop(shutdown_event: asyncio.Event) -> None:
+    """Daily WAL checkpoint + JSONL rotation to keep ~/.dharma/ lean."""
+    # Stagger first run by 1 hour so it doesn't compete with startup
+    if await _wait_or_shutdown(shutdown_event, 3600):
+        return
+
+    while not shutdown_event.is_set():
+        try:
+            from dharma_swarm.maintenance import run_maintenance
+
+            result = await run_maintenance()
+            wal_count = len(result.get("wal_checkpointed", {}))
+            rotated = result.get("jsonl_rotated", [])
+            _log(
+                "maintenance",
+                f"WAL checkpointed {wal_count} DBs; rotated {len(rotated)} JSONL files",
+            )
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:
+            _log("maintenance", f"Maintenance run failed: {exc}")
+
+        if await _wait_or_shutdown(shutdown_event, _MAINTENANCE_INTERVAL):
+            break
 
 
 async def run_swarm_loop(
@@ -1452,6 +1514,7 @@ async def orchestrate(background: bool = False) -> None:
         "consolidation": CONSOLIDATION_INTERVAL, "recognition": 7200,
         "replication": 3600, "self-improve": 3600, "free-grind": 600,
         "flywheel": 300, "conductors": 120, "context-agent": 60,
+        "semantic-ingestion": SEMANTIC_INGESTION_INTERVAL,
     }
     for loop_name, interval in _loop_intervals.items():
         _supervisor.register_loop(loop_name, expected_interval=float(interval))
@@ -1469,9 +1532,11 @@ async def orchestrate(background: bool = False) -> None:
         "flywheel": lambda: run_training_flywheel_loop(shutdown_event),
         "health": lambda: run_health_loop(shutdown_event),
         "self-improve": lambda: run_self_improvement_loop(shutdown_event, interval=3600),
+        "semantic-ingestion": lambda: _run_semantic_ingestion_loop(shutdown_event),
         "free-grind": lambda: run_free_evolution_grind(shutdown_event),
     }
     optional_clean_exit = {"pulse"}
+    required_loops = {"swarm", "health", "conductors"}
     tasks = {
         name: asyncio.create_task(factory(), name=name)
         for name, factory in task_factories.items()
@@ -1527,6 +1592,10 @@ async def orchestrate(background: bool = False) -> None:
                         break
                     tasks[name] = asyncio.create_task(task_factories[name](), name=name)
                 else:
+                    message = f"required loop {name} exceeded max restarts"
+                    if name in required_loops:
+                        _log("orchestrator", f"System {name} exceeded max restarts, failing daemon")
+                        raise RuntimeError(message)
                     _log("orchestrator", f"System {name} exceeded max restarts, abandoning")
 
     except asyncio.CancelledError:
