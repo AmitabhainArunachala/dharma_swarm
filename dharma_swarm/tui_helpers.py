@@ -29,6 +29,19 @@ def _read_json(path: Path) -> dict | None:
         return None
 
 
+def _read_json_object(raw: object) -> dict[str, object]:
+    """Parse a JSON object payload, returning an empty dict on failure."""
+    if isinstance(raw, dict):
+        return dict(raw)
+    if not isinstance(raw, str) or not raw.strip():
+        return {}
+    try:
+        payload = json.loads(raw)
+    except Exception:
+        return {}
+    return payload if isinstance(payload, dict) else {}
+
+
 def _load_jsonl_tail(path: Path, *, limit: int) -> list[dict]:
     """Load up to *limit* JSONL objects from the tail of *path*."""
     if not path.exists():
@@ -95,6 +108,120 @@ def _mean(values: list[float]) -> float | None:
     if not values:
         return None
     return sum(values) / len(values)
+
+
+def load_resident_seat_summary(
+    *,
+    runtime_db_path: Path | None = None,
+    limit: int = 6,
+) -> list[dict[str, str]]:
+    """Return resident-seat identities from the canonical runtime telemetry DB."""
+    db_path = runtime_db_path or _runtime_db_path()
+    if not db_path.exists():
+        return []
+
+    try:
+        with sqlite3.connect(str(db_path)) as db:
+            db.row_factory = sqlite3.Row
+            rows = db.execute(
+                "SELECT tr.agent_id, tr.role, tr.active, tr.updated_at, tr.metadata_json,"
+                " ai.status AS identity_status, ai.metadata_json AS identity_metadata"
+                " FROM team_roster tr"
+                " LEFT JOIN agent_identity ai ON ai.agent_id = tr.agent_id"
+                " WHERE tr.active = 1"
+                " ORDER BY tr.updated_at DESC"
+                " LIMIT ?",
+                (max(1, limit * 4),),
+            ).fetchall()
+    except sqlite3.Error:
+        return []
+
+    summary: list[dict[str, str]] = []
+    for row in rows:
+        roster_meta = _read_json_object(row["metadata_json"])
+        identity_meta = _read_json_object(row["identity_metadata"])
+        seat_id = str(
+            roster_meta.get("seat_id")
+            or identity_meta.get("seat_id")
+            or ""
+        ).strip()
+        agent_id = str(row["agent_id"] or "").strip()
+        if not seat_id and not agent_id.startswith("resident."):
+            continue
+        display_name = str(
+            roster_meta.get("agent_display_name")
+            or roster_meta.get("display_name")
+            or identity_meta.get("agent_display_name")
+            or identity_meta.get("display_name")
+            or identity_meta.get("codename")
+            or agent_id
+        ).strip()
+        runtime_name = str(
+            identity_meta.get("runtime_agent_name")
+            or roster_meta.get("runtime_agent_name")
+            or identity_meta.get("bus_agent_id")
+            or agent_id
+        ).strip()
+        current_binding = str(
+            identity_meta.get("current_binding")
+            or roster_meta.get("current_binding")
+            or identity_meta.get("selected_model_hint")
+            or ""
+        ).strip()
+        status = str(
+            row["identity_status"]
+            or identity_meta.get("bus_status")
+            or "active"
+        ).strip()
+        summary.append(
+            {
+                "agent_id": agent_id,
+                "display_name": display_name,
+                "seat_id": seat_id,
+                "runtime_name": runtime_name,
+                "current_binding": current_binding,
+                "status": status,
+                "role": str(row["role"] or "").strip(),
+            }
+        )
+        if len(summary) >= max(1, limit):
+            break
+
+    try:
+        from dharma_swarm.startup_crew import FRONTIER_MODEL_CREW
+    except Exception:
+        FRONTIER_MODEL_CREW = []
+
+    known_agent_ids = {seat["agent_id"] for seat in summary}
+    for spec in FRONTIER_MODEL_CREW:
+        metadata = spec.get("metadata", {})
+        agent_id = str(metadata.get("agent_id") or "").strip()
+        if not agent_id or agent_id in known_agent_ids:
+            continue
+        summary.append(
+            {
+                "agent_id": agent_id,
+                "display_name": str(
+                    metadata.get("display_name")
+                    or spec.get("name")
+                    or agent_id
+                ).strip(),
+                "seat_id": str(metadata.get("seat_id") or "").strip(),
+                "runtime_name": str(spec.get("name") or agent_id).strip(),
+                "current_binding": str(
+                    metadata.get("current_binding")
+                    or spec.get("model")
+                    or ""
+                ).strip(),
+                "status": "configured",
+                "role": str(spec.get("role") or "").strip(),
+            }
+        )
+        known_agent_ids.add(agent_id)
+        if len(summary) >= max(1, limit):
+            break
+
+    return summary
 
 
 def build_status_text() -> str:

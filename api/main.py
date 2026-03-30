@@ -3,7 +3,7 @@
 FastAPI app with lifespan, CORS, WebSocket, and routers.
 
 Usage:
-    cd ~/dharma_swarm
+    cd "${DHARMA_REPO_ROOT:-$HOME/dharma_swarm}"
     uvicorn api.main:app --port 8000 --reload
 """
 
@@ -24,13 +24,16 @@ from starlette.middleware.base import BaseHTTPMiddleware
 from starlette.requests import Request
 
 from dharma_swarm.api_keys import DASHBOARD_API_KEY_ENV
+from dharma_swarm.runtime_artifacts import build_runtime_health_payload
+from dharma_swarm.runtime_paths import resolve_runtime_paths
 
 logger = logging.getLogger(__name__)
 
 # ── Singleton State ───────────────────────────────────────────────
 
 _state: dict[str, Any] = {}
-_OPERATOR_STATE_DIR = Path.home() / ".dharma"
+_RUNTIME_PATHS = resolve_runtime_paths()
+_OPERATOR_STATE_DIR = _RUNTIME_PATHS.state_root
 _OPERATOR_PID_FILE = _OPERATOR_STATE_DIR / "operator.pid"
 
 
@@ -299,36 +302,25 @@ async def root():
 @app.get("/health")
 async def daemon_health():
     """Process supervision health — daemon PID, uptime, and last tick timestamp."""
-    import json
     import time
 
-    state_dir = Path.home() / ".dharma"
+    state_dir = _RUNTIME_PATHS.state_root
     pid_file = state_dir / "daemon.pid"
-    health_file = state_dir / "stigmergy" / "dgc_health.json"
 
-    daemon_pid: int | None = None
     pid_started_at: float | None = None
     try:
-        daemon_pid = int(pid_file.read_text(encoding="utf-8").strip())
         pid_started_at = pid_file.stat().st_mtime
-    except (OSError, ValueError):
-        pass
-
-    dgc_health: dict = {}
-    try:
-        dgc_health = json.loads(health_file.read_text(encoding="utf-8"))
-    except (OSError, ValueError):
+    except OSError:
         pass
 
     uptime_seconds: float | None = None
     if pid_started_at is not None:
         uptime_seconds = round(time.time() - pid_started_at, 1)
 
+    runtime_payload = build_runtime_health_payload(state_dir)
+
     return {
-        "daemon_pid": daemon_pid,
+        **runtime_payload,
         "uptime_seconds": uptime_seconds,
-        "dgc_health_status": dgc_health.get("source", "unknown"),
-        "last_tick": dgc_health.get("timestamp"),
-        "agent_count": dgc_health.get("agent_count"),
-        "task_count": dgc_health.get("task_count"),
+        "dgc_health_status": runtime_payload.get("source", "unknown") or "unknown",
     }

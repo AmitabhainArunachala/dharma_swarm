@@ -82,7 +82,7 @@ def test_router_get_object_resolves_agent_identity_alias(
             "model": "z-ai/glm-5",
             "tasks_completed": 7,
             "fitness_average": 0.82,
-            "last_heartbeat": "2026-03-20T00:00:00Z",
+            "last_active": "2026-03-20T00:00:00Z",
         },
         created_by="tester",
     )

@@ -12,7 +12,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        python-version: ["3.11", "3.12"]
+        python-version: ["3.11"]
 
     steps:
       - name: Checkout
@@ -28,19 +28,24 @@ jobs:
           python -m pip install --upgrade pip
           pip install -e .[dev]
 
-      - name: Run tests
-        run: |
-          python -m pytest tests/ -q --tb=short
+      - name: Run full pytest suite
+        run: python -m pytest -q --tb=short
 
-  dashboard:
+  verify-humming:
     runs-on: ubuntu-latest
-    defaults:
-      run:
-        working-directory: dashboard
+    strategy:
+      fail-fast: false
+      matrix:
+        python-version: ["3.11", "3.12"]
 
     steps:
       - name: Checkout
         uses: actions/checkout@v4
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
 
       - name: Setup Node
         uses: actions/setup-node@v4
@@ -49,11 +54,14 @@ jobs:
           cache: npm
           cache-dependency-path: dashboard/package-lock.json
 
+      - name: Install package + test deps
+        run: |
+          python -m pip install --upgrade pip
+          pip install -e .[dev]
+
       - name: Install dashboard deps
-        run: npm ci
+        run: npm ci --legacy-peer-deps
+        working-directory: dashboard
 
-      - name: Lint dashboard
-        run: npm run lint -- --quiet
-
-      - name: Build dashboard
-        run: npm run build
+      - name: Run humming verification
+        run: python scripts/verify_humming.py

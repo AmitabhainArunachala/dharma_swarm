@@ -34,6 +34,13 @@ make dashboard-lint
 make dashboard-build
 ```
 
+## Source Vs State
+
+- Source belongs in the repo: code, tests, docs, small intentional fixtures, and specs meant for review.
+- Runtime state belongs under `~/.dharma`: PID files, live logs, runtime databases, stigmergy marks, and other machine-local operator artifacts.
+- Generated formal-state dumps under `specs/states/` are treated as local working state unless they are deliberately reduced into a reviewed source artifact.
+- `python3 scripts/verify_humming.py` reports repo-boundary drift as a warning so runtime state leaking back into source stays visible.
+
 ## What The Inventory Says
 
 Use the built-in static inventory pass to get a current snapshot:

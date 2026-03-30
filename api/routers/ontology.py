@@ -7,10 +7,22 @@ from fastapi import APIRouter
 from api.routers._agent_aliases import alias_candidates, matches_agent_alias
 from api.models import (
     ActionDefOut,
-    ApiResponse,
     LinkDefOut,
     OntologyDetailOut,
+    OntologyDetailResponse,
+    OntologyGraphEdgeDataOut,
+    OntologyGraphEdgeOut,
+    OntologyGraphNodeDataOut,
+    OntologyGraphNodeOut,
+    OntologyGraphOut,
+    OntologyGraphResponse,
+    OntologyObjectListResponse,
+    OntologyObjectOut,
+    OntologyObjectResponse,
+    OntologyStatsOut,
+    OntologyStatsResponse,
     OntologyTypeOut,
+    OntologyTypeListResponse,
     PropertyOut,
 )
 
@@ -101,7 +113,7 @@ def _serialize_object(reg, obj) -> dict:
                 "name": str(props.get("name") or ""),
                 "display_name": str(props.get("display_name") or props.get("name") or ""),
                 "agent_slug": str(props.get("agent_slug") or ""),
-                "runtime_agent_id": str(props.get("agent_id") or ""),
+                "runtime_agent_id": str(props.get("agent_id") or obj.id),
                 "kaizenops_id": str(props.get("kaizenops_id") or props.get("agent_id") or obj.id),
                 "roles": roles,
                 "status": str(props.get("status") or "unknown"),
@@ -121,8 +133,8 @@ def _serialize_object(reg, obj) -> dict:
     return payload
 
 
-@router.get("/ontology/types")
-async def list_types() -> ApiResponse:
+@router.get("/ontology/types", response_model=OntologyTypeListResponse)
+async def list_types() -> OntologyTypeListResponse:
     reg = _get_registry()
     types = [
         OntologyTypeOut(
@@ -137,15 +149,15 @@ async def list_types() -> ApiResponse:
         ).model_dump()
         for t in reg.get_types()
     ]
-    return ApiResponse(data=types)
+    return OntologyTypeListResponse(data=[OntologyTypeOut(**item) for item in types])
 
 
-@router.get("/ontology/types/{type_name}")
-async def describe_type(type_name: str) -> ApiResponse:
+@router.get("/ontology/types/{type_name}", response_model=OntologyDetailResponse)
+async def describe_type(type_name: str) -> OntologyDetailResponse:
     reg = _get_registry()
     obj_type = reg.get_type(type_name)
     if obj_type is None:
-        return ApiResponse(status="error", error=f"Type not found: {type_name}")
+        return OntologyDetailResponse(status="error", error=f"Type not found: {type_name}")
 
     detail = OntologyDetailOut(
         name=obj_type.name,
@@ -184,11 +196,11 @@ async def describe_type(type_name: str) -> ApiResponse:
         telos_alignment=obj_type.telos_alignment,
         shakti=obj_type.shakti_energy.value if hasattr(obj_type.shakti_energy, 'value') else str(obj_type.shakti_energy),
     )
-    return ApiResponse(data=detail.model_dump())
+    return OntologyDetailResponse(data=detail)
 
 
-@router.get("/ontology/graph")
-async def ontology_graph() -> ApiResponse:
+@router.get("/ontology/graph", response_model=OntologyGraphResponse)
+async def ontology_graph() -> OntologyGraphResponse:
     """Return nodes and edges for ReactFlow graph visualization."""
     reg = _get_registry()
     nodes = []
@@ -201,26 +213,28 @@ async def ontology_graph() -> ApiResponse:
         count_in_category = category_counts.get(category, 0)
         category_counts[category] = count_in_category + 1
         base_x, base_y = _CATEGORY_LAYOUT.get(category, (0, 0))
-        nodes.append({
-            "id": t.name,
-            "type": category,
-            "data": {
-                "label": t.name,
-                "description": t.description,
-                "propertyCount": len(t.properties),
-                "actionCount": len(t.actions),
-                "linkCount": len(reg.get_all_links_involving(t.name)),
-                "runtimeCount": len(reg.get_objects_by_type(t.name)),
-                "shakti": t.shakti_energy.value if hasattr(t.shakti_energy, 'value') else str(t.shakti_energy),
-                "telos": t.telos_alignment,
-                "icon": t.icon,
-                "zone": zone,
-            },
-            "position": {
-                "x": base_x + (count_in_category % 2) * 120,
-                "y": base_y + (count_in_category // 2) * 180,
-            },
-        })
+        nodes.append(
+            OntologyGraphNodeOut(
+                id=t.name,
+                type=category,
+                data=OntologyGraphNodeDataOut(
+                    label=t.name,
+                    description=t.description,
+                    propertyCount=len(t.properties),
+                actionCount=len(t.actions),
+                linkCount=len(reg.get_all_links_involving(t.name)),
+                runtimeCount=len(reg.get_objects_by_type(t.name)),
+                shakti=t.shakti_energy.value if hasattr(t.shakti_energy, 'value') else str(t.shakti_energy),
+                telos=t.telos_alignment,
+                icon=t.icon,
+                zone=zone,
+                ),
+                position={
+                    "x": base_x + (count_in_category % 2) * 120,
+                    "y": base_y + (count_in_category // 2) * 180,
+                },
+            )
+        )
 
     # Collect all unique links
     seen_edges = set()
@@ -229,30 +243,32 @@ async def ontology_graph() -> ApiResponse:
             edge_key = f"{ld.source_type}-{ld.name}-{ld.target_type}"
             if edge_key not in seen_edges:
                 seen_edges.add(edge_key)
-                edges.append({
-                    "id": edge_key,
-                    "source": ld.source_type,
-                    "target": ld.target_type,
-                    "label": ld.name,
-                    "data": {
-                        "cardinality": ld.cardinality.value if hasattr(ld.cardinality, 'value') else str(ld.cardinality),
-                    },
-                })
+                edges.append(
+                    OntologyGraphEdgeOut(
+                        id=edge_key,
+                        source=ld.source_type,
+                        target=ld.target_type,
+                        label=ld.name,
+                        data=OntologyGraphEdgeDataOut(
+                            cardinality=ld.cardinality.value if hasattr(ld.cardinality, 'value') else str(ld.cardinality),
+                        ),
+                    )
+                )
 
-    return ApiResponse(data={"nodes": nodes, "edges": edges})
+    return OntologyGraphResponse(data=OntologyGraphOut(nodes=nodes, edges=edges))
 
 
-@router.get("/ontology/stats")
-async def ontology_stats() -> ApiResponse:
+@router.get("/ontology/stats", response_model=OntologyStatsResponse)
+async def ontology_stats() -> OntologyStatsResponse:
     reg = _get_registry()
-    return ApiResponse(data=reg.stats())
+    return OntologyStatsResponse(data=OntologyStatsOut(**reg.stats()))
 
 
-@router.get("/ontology/objects")
+@router.get("/ontology/objects", response_model=OntologyObjectListResponse)
 async def list_objects(
     type_name: str | None = None,
     type: str | None = None,
-) -> ApiResponse:
+) -> OntologyObjectListResponse:
     reg = _get_registry()
     requested_type = type_name or type
     resolved_type = _resolve_type_name(reg, requested_type)
@@ -262,11 +278,13 @@ async def list_objects(
         objs = reg.get_objects_by_type(resolved_type)
     else:
         objs = list(reg._objects.values())
-    return ApiResponse(data=[_serialize_object(reg, o) for o in objs])
+    return OntologyObjectListResponse(
+        data=[OntologyObjectOut(**_serialize_object(reg, o)) for o in objs]
+    )
 
 
-@router.get("/ontology/objects/{obj_id}")
-async def get_object(obj_id: str) -> ApiResponse:
+@router.get("/ontology/objects/{obj_id}", response_model=OntologyObjectResponse)
+async def get_object(obj_id: str) -> OntologyObjectResponse:
     reg = _get_registry()
     obj = reg.get_object(obj_id)
     if obj is None:
@@ -275,8 +293,8 @@ async def get_object(obj_id: str) -> ApiResponse:
             if obj is not None:
                 break
     if obj is None:
-        return ApiResponse(status="error", error=f"Object not found: {obj_id}")
+        return OntologyObjectResponse(status="error", error=f"Object not found: {obj_id}")
 
     payload = _serialize_object(reg, obj)
     payload["context"] = reg.object_context_for_llm(obj.id)
-    return ApiResponse(data=payload)
+    return OntologyObjectResponse(data=OntologyObjectOut(**payload))

@@ -74,9 +74,12 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
-HOME = Path.home()
-DHARMA_STATE = HOME / ".dharma"
-DHARMA_SWARM = HOME / "dharma_swarm"
+from dharma_swarm.runtime_paths import resolve_runtime_paths
+
+RUNTIME_PATHS = resolve_runtime_paths()
+HOME = RUNTIME_PATHS.home
+DHARMA_STATE = RUNTIME_PATHS.state_root
+DHARMA_SWARM = RUNTIME_PATHS.repo_root
 DGC_CORE = HOME / "dgc-core"
 DEFAULT_SPRINT_LLM_TIMEOUT_SEC = 12.0
 
@@ -133,8 +136,8 @@ def _load_env_file(path: Path) -> None:
 
 def _bootstrap_env() -> None:
     # Load dharma_swarm defaults and optional local runtime overrides.
-    _load_env_file(HOME / "dharma_swarm" / ".env")
-    _load_env_file(HOME / ".dharma" / "env" / "nvidia_remote.env")
+    for env_file in RUNTIME_PATHS.bootstrap_env_files:
+        _load_env_file(env_file)
 
 
 _bootstrap_env()

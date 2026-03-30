@@ -173,3 +173,40 @@ def test_graphql_connection_graph_falls_back_to_stigmergy(
     assert "left_by" in edge_types
     assert "touches" in edge_types
     assert "references" in edge_types
+
+
+def test_graphql_agent_fallback_uses_runtime_state_root_and_derives_contract_fields(
+    isolated_shared_ontology,
+    tmp_path,
+    monkeypatch,
+) -> None:
+    home_dir = tmp_path / "home"
+    state_root = tmp_path / "custom-state"
+    identity_dir = state_root / "ginko" / "agents" / "agent-dharma-home"
+    identity_dir.mkdir(parents=True, exist_ok=True)
+    (identity_dir / "identity.json").write_text(
+        json.dumps(
+            {
+                "id": "agent-dharma-home",
+                "name": "Dharma Home Agent",
+                "agent_id": "agent-dharma-home",
+                "provider": "openrouter",
+                "model": "z-ai/glm-5",
+                "status": "idle",
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    monkeypatch.setenv("HOME", str(home_dir))
+    monkeypatch.setenv("DHARMA_HOME", str(state_root))
+
+    client = _client()
+    resp = client.get("/graphql/agent/agent-dharma-home")
+
+    assert resp.status_code == 200
+    payload = resp.json()
+    assert payload["id"] == "agent-dharma-home"
+    assert payload["runtime_agent_id"] == "agent-dharma-home"
+    assert payload["kaizenops_id"] == "agent-dharma-home"
+    assert payload["model_key"] == "openrouter::z-ai/glm-5"

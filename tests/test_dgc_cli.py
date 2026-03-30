@@ -161,6 +161,16 @@ def test_dgc_cli_status_command():
             mock.assert_called_once()
 
 
+def test_dgc_cli_status_command_uses_modular_status_pack():
+    """main() should route status through the modular status pack."""
+    from dharma_swarm.dgc_cli import main
+
+    with patch("sys.argv", ["dgc", "status"]):
+        with patch("dharma_swarm.dgc.commands.status.cmd_status") as mock:
+            main()
+            mock.assert_called_once_with()
+
+
 def test_dgc_cli_semantic_ingest_status_dispatch():
     """main() dispatches `dgc semantic ingest status` to cmd_semantic_ingest."""
     from dharma_swarm.dgc_cli import main
@@ -454,6 +464,19 @@ def test_dgc_cli_runtime_status_command():
             assert mock.call_args.kwargs["db_path"] == "/tmp/runtime.db"
 
 
+def test_dgc_cli_runtime_status_command_uses_modular_status_pack():
+    """main() should route runtime-status through the modular status pack."""
+    from dharma_swarm.dgc_cli import main
+
+    with patch(
+        "sys.argv",
+        ["dgc", "runtime-status", "--limit", "7", "--db-path", "/tmp/runtime.db"],
+    ):
+        with patch("dharma_swarm.dgc.commands.status.cmd_runtime_status") as mock:
+            main()
+            mock.assert_called_once_with(limit=7, db_path="/tmp/runtime.db")
+
+
 def test_dgc_cli_ledger_search_dispatch():
     """main() dispatches `ledger search` options to cmd_ledger."""
     from dharma_swarm.dgc_cli import main
@@ -558,6 +581,26 @@ def test_dgc_cli_health_command():
         with patch("dharma_swarm.dgc_cli.cmd_health") as mock:
             main()
             mock.assert_called_once()
+
+
+def test_dgc_cli_health_command_uses_modular_ops_pack():
+    """main() should route health through the modular ops pack."""
+    from dharma_swarm.dgc_cli import main
+
+    with patch("sys.argv", ["dgc", "health"]):
+        with patch("dharma_swarm.dgc.commands.ops.cmd_health") as mock:
+            main()
+            mock.assert_called_once_with()
+
+
+def test_dgc_cli_maintenance_command_uses_modular_ops_pack():
+    """main() should route maintenance through the modular ops pack."""
+    from dharma_swarm.dgc_cli import main
+
+    with patch("sys.argv", ["dgc", "maintenance", "--dry-run", "--max-mb", "12.5"]):
+        with patch("dharma_swarm.dgc.commands.ops.cmd_maintenance") as mock:
+            main()
+            mock.assert_called_once_with(dry_run=True, max_mb=12.5)
 
 
 def test_cmd_orchestrate_live_checks_daemon_pid(monkeypatch, tmp_path, capsys):

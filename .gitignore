@@ -7,6 +7,9 @@ build/
 *.egg
 .pytest_cache/
 .dharma/
+.dharma*/
+.dharma_psmv_hyperfile_branch/
+.dharma_psmv_hyperfile_branch_v2/
 *.db
 .venv/
 .env

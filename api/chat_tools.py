@@ -15,15 +15,20 @@ import re
 import subprocess
 from pathlib import Path
 
+from dharma_swarm.runtime_paths import resolve_runtime_paths
+
 logger = logging.getLogger(__name__)
+
+RUNTIME_PATHS = resolve_runtime_paths()
 
 # Safety: scope filesystem operations to these roots
 ALLOWED_ROOTS = [
-    Path.home() / "dharma_swarm",
-    Path.home() / ".dharma",
+    RUNTIME_PATHS.repo_root,
+    RUNTIME_PATHS.state_root,
 ]
 
-PROJECT_ROOT = Path.home() / "dharma_swarm"
+PROJECT_ROOT = RUNTIME_PATHS.repo_root
+STATE_ROOT = RUNTIME_PATHS.state_root
 
 
 def _path_allowed(path_str: str) -> bool:
@@ -49,14 +54,14 @@ TOOL_DEFINITIONS = [
             "name": "read_file",
             "description": (
                 "Read the contents of a file. Returns the file content with line numbers. "
-                "Scoped to ~/dharma_swarm/ and ~/.dharma/."
+                f"Scoped to {PROJECT_ROOT}/ and {STATE_ROOT}/."
             ),
             "parameters": {
                 "type": "object",
                 "properties": {
                     "path": {
                         "type": "string",
-                        "description": "Absolute or relative path to the file (relative to ~/dharma_swarm/)",
+                        "description": f"Absolute or relative path to the file (relative to {PROJECT_ROOT}/)",
                     },
                     "offset": {
                         "type": "integer",
@@ -77,7 +82,7 @@ TOOL_DEFINITIONS = [
             "name": "write_file",
             "description": (
                 "Write content to a file. Creates the file if it doesn't exist, "
-                "overwrites if it does. Scoped to ~/dharma_swarm/ and ~/.dharma/."
+                f"overwrites if it does. Scoped to {PROJECT_ROOT}/ and {STATE_ROOT}/."
             ),
             "parameters": {
                 "type": "object",
@@ -129,7 +134,7 @@ TOOL_DEFINITIONS = [
             "name": "shell_exec",
             "description": (
                 "Execute a shell command and return stdout/stderr. "
-                "Working directory is ~/dharma_swarm/. "
+                f"Working directory is {PROJECT_ROOT}/. "
                 "Timeout: 30 seconds. Use for: running tests, git commands, "
                 "restarting agents, checking processes, viewing logs."
             ),
@@ -166,7 +171,7 @@ TOOL_DEFINITIONS = [
                     },
                     "path": {
                         "type": "string",
-                        "description": "Directory or file to search in. Default: ~/dharma_swarm/",
+                        "description": f"Directory or file to search in. Default: {PROJECT_ROOT}/",
                     },
                     "glob": {
                         "type": "string",
@@ -198,7 +203,7 @@ TOOL_DEFINITIONS = [
                     },
                     "path": {
                         "type": "string",
-                        "description": "Base directory. Default: ~/dharma_swarm/",
+                        "description": f"Base directory. Default: {PROJECT_ROOT}/",
                     },
                 },
                 "required": ["pattern"],
@@ -695,7 +700,7 @@ async def exec_stigmergy_query(args: dict) -> str:
             marks = await stig.read_marks(limit=limit) if hasattr(stig, "read_marks") else []
             if not marks:
                 # Fallback: read the JSONL file directly
-                marks_file = Path.home() / ".dharma" / "stigmergy" / "marks.jsonl"
+                marks_file = STATE_ROOT / "stigmergy" / "marks.jsonl"
                 if marks_file.exists():
                     lines = marks_file.read_text().strip().splitlines()[-limit:]
                     parsed = []
@@ -722,7 +727,7 @@ async def exec_stigmergy_query(args: dict) -> str:
 
         elif action == "search":
             query = args.get("query", "")
-            marks_file = Path.home() / ".dharma" / "stigmergy" / "marks.jsonl"
+            marks_file = STATE_ROOT / "stigmergy" / "marks.jsonl"
             if not marks_file.exists():
                 return "Stigmergy marks file not found"
             results = []

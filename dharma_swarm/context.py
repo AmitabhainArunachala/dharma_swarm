@@ -36,15 +36,17 @@ from dharma_swarm.orientation_packet import (
     OrientationPacketBuilder,
     RuntimeStateSummary,
 )
+from dharma_swarm.runtime_paths import resolve_runtime_paths
 
-HOME = Path.home()
+RUNTIME_PATHS = resolve_runtime_paths()
+HOME = RUNTIME_PATHS.home
 AGNI_WORKSPACE = HOME / "agni-workspace"
 TRISHULA_INBOX = HOME / "trishula" / "inbox"
-STATE_DIR = HOME / ".dharma"
+STATE_DIR = RUNTIME_PATHS.state_root
 SHARED_DIR = STATE_DIR / "shared"
 PSMV = HOME / "Persistent-Semantic-Memory-Vault"
-FOUNDATIONS_DIR = HOME / "dharma_swarm" / "foundations"
-ARCHITECTURE_DIR = HOME / "dharma_swarm" / "architecture"
+FOUNDATIONS_DIR = RUNTIME_PATHS.repo_root / "foundations"
+ARCHITECTURE_DIR = RUNTIME_PATHS.repo_root / "architecture"
 TRANSMISSION_DIR = FOUNDATIONS_DIR / "transmissions"
 
 # ── Types ────────────────────────────────────────────────────────────

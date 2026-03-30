@@ -34,17 +34,42 @@ class AnomalyOut(BaseModel):
     anomaly_type: str
     severity: str
     description: str
-    related_traces: list[str] = []
+    related_traces: list[str] = Field(default_factory=list)
+
+
+class RuntimeHealthOut(BaseModel):
+    status: str = "unknown"
+    snapshot_status: str = "missing"
+    daemon_pid: int | None = None
+    live_daemon_pid: int | None = None
+    daemon_pid_mismatch: bool = False
+    operator_pid: int | None = None
+    last_tick: str | None = None
+    agent_count: int | None = None
+    task_count: int | None = None
+    anomaly_count: int | None = None
+    source: str | None = None
+    maintenance_summary: str = "runtime snapshot missing"
+    runtime_warnings: list[str] = Field(default_factory=list)
 
 
 class HealthOut(BaseModel):
     overall_status: str = "unknown"
-    agent_health: list[AgentHealthOut] = []
-    anomalies: list[AnomalyOut] = []
+    agent_health: list[AgentHealthOut] = Field(default_factory=list)
+    anomalies: list[AnomalyOut] = Field(default_factory=list)
     total_traces: int = 0
     traces_last_hour: int = 0
     failure_rate: float = 0.0
     mean_fitness: float | None = None
+    runtime: RuntimeHealthOut | None = None
+
+
+class HealthResponse(ApiResponse):
+    data: HealthOut | None = None
+
+
+class AnomalyListResponse(ApiResponse):
+    data: list[AnomalyOut] = Field(default_factory=list)
 
 
 # ── Agents ────────────────────────────────────────────────────────
@@ -73,6 +98,108 @@ class SpawnAgentRequest(BaseModel):
     role: str = "general"
     provider: str | None = None
     model: str | None = None
+
+
+class AgentConfigOut(BaseModel):
+    display_name: str | None = None
+    role: str | None = None
+    provider: str | None = None
+    model: str | None = None
+    thread: str | None = None
+    tier: str | None = None
+    strengths: list[str] = Field(default_factory=list)
+
+
+class AgentTraceOut(BaseModel):
+    id: str
+    timestamp: str
+    action: str
+    state: str
+    metadata: dict[str, Any] = Field(default_factory=dict)
+
+
+class AgentHealthStatsOut(BaseModel):
+    total_actions: int = 0
+    failures: int = 0
+    success_rate: float = 1.0
+    last_seen: str | None = None
+
+
+class AssignedTaskOut(BaseModel):
+    id: str
+    title: str
+    status: str = "pending"
+    priority: str = "normal"
+    created_at: str = ""
+    result: str | None = None
+
+
+class AgentCostOut(BaseModel):
+    daily_spent: float = 0.0
+    weekly_spent: float = 0.0
+    budget_status: str = "OK"
+
+
+class CoreFileOut(BaseModel):
+    file_path: str
+    salience: float = 0.0
+    count: int = 0
+    last_touch: str | None = None
+
+
+class AvailableModelOut(BaseModel):
+    model_id: str
+    label: str
+    tier: str | None = None
+
+
+class AgentProviderStatusOut(BaseModel):
+    provider: str
+    available: bool = False
+
+
+class AgentDetailOut(BaseModel):
+    agent: AgentOut
+    config: AgentConfigOut = Field(default_factory=AgentConfigOut)
+    recent_traces: list[AgentTraceOut] = Field(default_factory=list)
+    health_stats: AgentHealthStatsOut = Field(default_factory=AgentHealthStatsOut)
+    assigned_tasks: list[AssignedTaskOut] = Field(default_factory=list)
+    fitness_history: list[dict[str, Any]] = Field(default_factory=list)
+    cost: AgentCostOut = Field(default_factory=AgentCostOut)
+    core_files: list[CoreFileOut] = Field(default_factory=list)
+    available_models: list[AvailableModelOut] = Field(default_factory=list)
+    available_roles: list[str] = Field(default_factory=list)
+    provider_status: list[AgentProviderStatusOut] = Field(default_factory=list)
+    task_history: list[dict[str, Any]] = Field(default_factory=list)
+
+
+class AgentResponse(ApiResponse):
+    data: AgentOut | None = None
+
+
+class AgentListResponse(ApiResponse):
+    data: list[AgentOut] = Field(default_factory=list)
+
+
+class AgentDetailResponse(ApiResponse):
+    data: AgentDetailOut | None = None
+
+
+class AgentStopOut(BaseModel):
+    stopped: str
+
+
+class AgentStopResponse(ApiResponse):
+    data: AgentStopOut | None = None
+
+
+class AgentsSyncOut(BaseModel):
+    count: int = 0
+    results: list[dict[str, Any]] = Field(default_factory=list)
+
+
+class AgentsSyncResponse(ApiResponse):
+    data: AgentsSyncOut | None = None
 
 
 # ── Tasks ─────────────────────────────────────────────────────────
@@ -179,12 +306,108 @@ class ActionDefOut(BaseModel):
 class OntologyDetailOut(BaseModel):
     name: str
     description: str = ""
-    properties: list[PropertyOut] = []
-    links: list[LinkDefOut] = []
-    actions: list[ActionDefOut] = []
+    properties: list[PropertyOut] = Field(default_factory=list)
+    links: list[LinkDefOut] = Field(default_factory=list)
+    actions: list[ActionDefOut] = Field(default_factory=list)
     security_level: str = "internal"
     telos_alignment: float = 0.0
     shakti: str = ""
+
+
+class OntologyGraphNodeDataOut(BaseModel):
+    label: str
+    description: str = ""
+    propertyCount: int = 0
+    actionCount: int = 0
+    linkCount: int = 0
+    runtimeCount: int = 0
+    shakti: str = ""
+    telos: float = 0.0
+    icon: str = ""
+    zone: str = ""
+
+
+class OntologyGraphNodeOut(BaseModel):
+    id: str
+    type: str
+    data: OntologyGraphNodeDataOut
+    position: dict[str, int]
+
+
+class OntologyGraphEdgeDataOut(BaseModel):
+    cardinality: str = ""
+
+
+class OntologyGraphEdgeOut(BaseModel):
+    id: str
+    source: str
+    target: str
+    label: str
+    data: OntologyGraphEdgeDataOut
+
+
+class OntologyGraphOut(BaseModel):
+    nodes: list[OntologyGraphNodeOut] = Field(default_factory=list)
+    edges: list[OntologyGraphEdgeOut] = Field(default_factory=list)
+
+
+class OntologyStatsOut(BaseModel):
+    registered_types: int = 0
+    registered_links: int = 0
+    registered_actions: int = 0
+    total_objects: int = 0
+    total_links: int = 0
+    action_log_entries: int = 0
+    objects_by_type: dict[str, int] = Field(default_factory=dict)
+    type_names: list[str] = Field(default_factory=list)
+
+
+class OntologyObjectOut(BaseModel):
+    id: str
+    type: str
+    properties: dict[str, Any] = Field(default_factory=dict)
+    created_by: str = ""
+    created_at: str
+    updated_at: str
+    version: int = 1
+    name: str | None = None
+    display_name: str | None = None
+    agent_slug: str | None = None
+    runtime_agent_id: str | None = None
+    kaizenops_id: str | None = None
+    roles: list[str] = Field(default_factory=list)
+    status: str | None = None
+    telos_alignment: float | None = None
+    witness_quality: float | None = None
+    shakti_energy: float | None = None
+    tasks_completed: int | None = None
+    avg_quality: float | None = None
+    last_active: str | None = None
+    context: str | None = None
+
+
+class OntologyTypeListResponse(ApiResponse):
+    data: list[OntologyTypeOut] = Field(default_factory=list)
+
+
+class OntologyDetailResponse(ApiResponse):
+    data: OntologyDetailOut | None = None
+
+
+class OntologyGraphResponse(ApiResponse):
+    data: OntologyGraphOut | None = None
+
+
+class OntologyStatsResponse(ApiResponse):
+    data: OntologyStatsOut | None = None
+
+
+class OntologyObjectListResponse(ApiResponse):
+    data: list[OntologyObjectOut] = Field(default_factory=list)
+
+
+class OntologyObjectResponse(ApiResponse):
+    data: OntologyObjectOut | None = None
 
 
 # ── Lineage ───────────────────────────────────────────────────────
@@ -192,8 +415,8 @@ class OntologyDetailOut(BaseModel):
 class LineageEdgeOut(BaseModel):
     edge_id: str
     task_id: str
-    input_artifacts: list[str] = []
-    output_artifacts: list[str] = []
+    input_artifacts: list[str] = Field(default_factory=list)
+    output_artifacts: list[str] = Field(default_factory=list)
     agent: str = ""
     operation: str = ""
     timestamp: str = ""
@@ -201,15 +424,15 @@ class LineageEdgeOut(BaseModel):
 
 class ProvenanceOut(BaseModel):
     artifact_id: str
-    chain: list[LineageEdgeOut] = []
-    root_sources: list[str] = []
+    chain: list[LineageEdgeOut] = Field(default_factory=list)
+    root_sources: list[str] = Field(default_factory=list)
     depth: int = 0
 
 
 class ImpactOut(BaseModel):
     root_artifact: str
-    affected_artifacts: list[str] = []
-    affected_tasks: list[str] = []
+    affected_artifacts: list[str] = Field(default_factory=list)
+    affected_tasks: list[str] = Field(default_factory=list)
     depth: int = 0
     total_descendants: int = 0
 
@@ -224,9 +447,9 @@ class StigmergyMarkOut(BaseModel):
     action: str
     observation: str = ""
     salience: float = 0.5
-    connections: list[str] = []
+    connections: list[str] = Field(default_factory=list)
     semantic_type: str = ""
-    pillar_refs: list[str] = []
+    pillar_refs: list[str] = Field(default_factory=list)
     confidence: float = 0.0
     impact_score: float = 0.0
 
@@ -264,6 +487,10 @@ class SwarmOverview(BaseModel):
     health_status: str = "unknown"
     stigmergy_density: int = 0
     evolution_entries: int = 0
+
+
+class SwarmOverviewResponse(ApiResponse):
+    data: SwarmOverview | None = None
 
 
 # ── Truth Modules ────────────────────────────────────────────────

@@ -4,7 +4,6 @@ GraphQL Router for Palantir-Style Ontology Interface
 
 import json
 import logging
-import os
 from datetime import datetime
 from pathlib import Path
 from typing import List, Optional
@@ -12,12 +11,31 @@ from typing import List, Optional
 from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel
 
+from dharma_swarm.ontology_agents import (
+    agent_display_name,
+    agent_slug,
+    canonical_model_key,
+)
+from dharma_swarm.runtime_paths import resolve_runtime_paths
+
 logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/graphql", tags=["graphql"])
 
 
 # Models
+class GraphQLSurfaceContract(BaseModel):
+    enabled: bool
+    mounted: bool
+    mode: str
+    reason: str
+    feature_flag: str
+    feature_enabled: bool
+    dependency_ready: bool
+    query_fields: List[str]
+    rest_routes: List[str]
+
+
 class OntologyObject(BaseModel):
     id: str
     type: str
@@ -82,14 +100,29 @@ class ConnectionGraph(BaseModel):
     edges: List[GraphEdge]
 
 
-DHARMA_HOME = Path(os.getenv("DHARMA_HOME", Path.home() / ".dharma"))
-GINKO_AGENTS_DIR = DHARMA_HOME / "ginko" / "agents"
-STIGMERGY_MARKS_PATH = DHARMA_HOME / "stigmergy" / "marks.jsonl"
+GINKO_AGENTS_DIR: Path | None = None
+STIGMERGY_MARKS_PATH: Path | None = None
 GRAPH_ROOT_ALIASES = {
     "ecosystem-synthesizer": "glm5-researcher",
     "ecosystem_synthesizer": "glm5-researcher",
     "agent_identity_ecosystem_synthesizer": "glm5-researcher",
 }
+
+
+def _runtime_state_root() -> Path:
+    return resolve_runtime_paths().state_root
+
+
+def _ginko_agents_dir() -> Path:
+    if GINKO_AGENTS_DIR is not None:
+        return GINKO_AGENTS_DIR
+    return _runtime_state_root() / "ginko" / "agents"
+
+
+def _stigmergy_marks_path() -> Path:
+    if STIGMERGY_MARKS_PATH is not None:
+        return STIGMERGY_MARKS_PATH
+    return _runtime_state_root() / "stigmergy" / "marks.jsonl"
 
 
 def _path_tail(path: str, parts: int = 2) -> str:
@@ -100,11 +133,12 @@ def _path_tail(path: str, parts: int = 2) -> str:
 
 
 def _load_marks(agent: str, limit: int = 20) -> list[dict]:
-    if not STIGMERGY_MARKS_PATH.exists():
+    marks_path = _stigmergy_marks_path()
+    if not marks_path.exists():
         return []
 
     marks: list[dict] = []
-    with STIGMERGY_MARKS_PATH.open("r", encoding="utf-8") as f:
+    with marks_path.open("r", encoding="utf-8") as f:
         for line in f:
             try:
                 data = json.loads(line.strip())
@@ -120,7 +154,7 @@ def _load_marks(agent: str, limit: int = 20) -> list[dict]:
 
 def _graph_from_stigmergy(agent_id: str, limit: int = 20) -> ConnectionGraph:
     marks = _load_marks(agent_id, limit=limit)
-    identity_path = GINKO_AGENTS_DIR / agent_id / "identity.json"
+    identity_path = _ginko_agents_dir() / agent_id / "identity.json"
 
     agent_label = agent_id
     agent_props: dict = {}
@@ -227,10 +261,18 @@ def _graph_label(properties: dict, fallback_id: str) -> str:
 
 
 # Endpoints
+@router.get("", response_model=GraphQLSurfaceContract)
+@router.get("/", response_model=GraphQLSurfaceContract, include_in_schema=False)
+async def get_graphql_surface_contract():
+    """Report the truthful state of the public GraphQL surface."""
+    from api.graphql.schema import graphql_surface_contract
+
+    return GraphQLSurfaceContract(**graphql_surface_contract())
+
+
 @router.get("/agent/{agent_id}", response_model=AgentIdentity)
 async def get_agent_identity(agent_id: str):
     """Get agent identity by ID."""
-    from dharma_swarm.ontology import OntologyRegistry
     from dharma_swarm.ontology_agents import find_agent_identity
     from dharma_swarm.ontology_runtime import get_shared_registry
 
@@ -242,14 +284,23 @@ async def get_agent_identity(agent_id: str):
         return AgentIdentity(
             id=ontology_obj.id,
             name=str(props.get("name") or agent_id),
-            display_name=str(props.get("display_name") or props.get("name") or agent_id),
-            agent_slug=str(props.get("agent_slug") or agent_id),
-            runtime_agent_id=str(props.get("agent_id") or agent_id),
-            kaizenops_id=str(props.get("kaizenops_id") or ""),
+            display_name=str(
+                props.get("display_name")
+                or agent_display_name(str(props.get("name") or agent_id))
+            ),
+            agent_slug=str(props.get("agent_slug") or agent_slug(str(props.get("name") or agent_id))),
+            runtime_agent_id=str(props.get("agent_id") or ontology_obj.id),
+            kaizenops_id=str(props.get("kaizenops_id") or props.get("agent_id") or ontology_obj.id),
             roles=[str(props.get("role") or "general")],
             provider=str(props.get("provider") or ""),
             model=str(props.get("model") or ""),
-            model_key=str(props.get("model_key") or ""),
+            model_key=str(
+                props.get("model_key")
+                or canonical_model_key(
+                    str(props.get("provider") or ""),
+                    str(props.get("model") or ""),
+                )
+            ),
             status=str(props.get("status") or "unknown"),
             telos_alignment=float(obj_type.telos_alignment if obj_type else 0.0),
             witness_quality=float(props.get("swabhaav_capacity") or 0.0),
@@ -260,26 +311,29 @@ async def get_agent_identity(agent_id: str):
             updated_at=ontology_obj.updated_at,
         )
 
-    # Read from ~/.dharma/ginko/agents/{agent_id}/identity.json
-    identity_path = os.path.expanduser(f"~/.dharma/ginko/agents/{agent_id}/identity.json")
-    
-    if not os.path.exists(identity_path):
+    identity_path = _ginko_agents_dir() / agent_id / "identity.json"
+
+    if not identity_path.exists():
         raise HTTPException(status_code=404, detail="Agent not found")
-    
-    with open(identity_path, 'r') as f:
+
+    with identity_path.open("r", encoding="utf-8") as f:
         data = json.load(f)
-    
+
+    provider = str(data.get("provider", "") or "")
+    model = str(data.get("model", "") or "")
+    runtime_agent_id = str(data.get("agent_id") or data.get("id") or agent_id)
+
     return AgentIdentity(
         id=data.get("id", agent_id),
         name=data.get("name", agent_id),
-        display_name=data.get("display_name", data.get("name", agent_id)),
-        agent_slug=data.get("agent_slug", agent_id),
-        runtime_agent_id=data.get("agent_id", agent_id),
-        kaizenops_id=data.get("kaizenops_id", "000"),
-        roles=data.get("roles", []),
-        provider=data.get("provider", ""),
-        model=data.get("model", ""),
-        model_key=data.get("model_key", ""),
+        display_name=data.get("display_name", agent_display_name(str(data.get("name", agent_id)))),
+        agent_slug=data.get("agent_slug", agent_slug(str(data.get("name", agent_id)))),
+        runtime_agent_id=runtime_agent_id,
+        kaizenops_id=str(data.get("kaizenops_id") or runtime_agent_id),
+        roles=data.get("roles") or [str(data.get("role") or "general")],
+        provider=provider,
+        model=model,
+        model_key=str(data.get("model_key") or canonical_model_key(provider, model)),
         status=data.get("status", "unknown"),
         telos_alignment=data.get("telos_alignment", 0.0),
         witness_quality=data.get("witness_quality", 0.0),

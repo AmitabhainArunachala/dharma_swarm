@@ -5,6 +5,7 @@
 - Repo root: `/Users/dhyana/dharma_swarm`
 - Target count: `24`
 - Source pack: `/Users/dhyana/dharma_swarm/docs/research/PSMV_AGENTIC_SOURCE_PACK_2026-03-13.json`
+- Historical runtime snapshots from the same run live under `./state_snapshots/`.
 
 ## Hyperfiles
 
