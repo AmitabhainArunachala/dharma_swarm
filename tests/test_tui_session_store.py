@@ -6,7 +6,7 @@ import json
 from pathlib import Path
 
 from dharma_swarm.runtime_contract import validate_envelope
-from dharma_swarm.tui.engine.events import TextComplete
+from dharma_swarm.tui.engine.events import PermissionDecisionEvent, PermissionResolutionEvent, TextComplete
 from dharma_swarm.tui.engine.session_store import SessionStore
 
 
@@ -188,3 +188,50 @@ def test_session_store_load_transcript_round_trips_events(tmp_path):
     assert isinstance(events[0], TextComplete)
     assert events[0].role == "user"
     assert events[1].content == "hi there"
+
+
+def test_session_store_round_trips_permission_events(tmp_path):
+    store = SessionStore(root=tmp_path)
+    store.create_session(
+        session_id="s1",
+        provider_id="codex",
+        model_id="gpt-5.4",
+        cwd="/repo/a",
+    )
+    store.append_event(
+        "s1",
+        PermissionDecisionEvent(
+            provider_id="codex",
+            session_id="s1",
+            action_id="perm-1",
+            tool_name="Bash",
+            risk="shell_or_network",
+            decision="require_approval",
+            rationale="gated",
+            policy_source="legacy-governance",
+            requires_confirmation=True,
+            metadata={"session_id": "s1"},
+        ),
+    )
+    store.append_event(
+        "s1",
+        PermissionResolutionEvent(
+            provider_id="codex",
+            session_id="s1",
+            action_id="perm-1",
+            resolution="approved",
+            resolved_at="2026-04-02T00:10:00Z",
+            actor="operator",
+            summary="approved perm-1",
+            enforcement_state="recorded_only",
+            metadata={"session_id": "s1"},
+        ),
+    )
+
+    events = store.load_transcript("s1", include_types={"permission_decision", "permission_resolution"})
+
+    assert len(events) == 2
+    assert isinstance(events[0], PermissionDecisionEvent)
+    assert events[0].action_id == "perm-1"
+    assert isinstance(events[1], PermissionResolutionEvent)
+    assert events[1].resolution == "approved"

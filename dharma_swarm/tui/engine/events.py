@@ -168,6 +168,44 @@ class RateLimitEvent(CanonicalEvent):
     resets_at: float | None = None
 
 
+@dataclass(slots=True)
+class PermissionDecisionEvent(CanonicalEvent):
+    type: str = "permission_decision"
+    action_id: str = ""
+    tool_name: str = ""
+    risk: str = ""
+    decision: str = ""
+    rationale: str = ""
+    policy_source: str = ""
+    requires_confirmation: bool = False
+    command_prefix: str | None = None
+    metadata: dict[str, Any] = field(default_factory=dict)
+
+
+@dataclass(slots=True)
+class PermissionResolutionEvent(CanonicalEvent):
+    type: str = "permission_resolution"
+    action_id: str = ""
+    resolution: str = ""
+    resolved_at: str = ""
+    actor: str = ""
+    summary: str = ""
+    note: str | None = None
+    enforcement_state: str = "recorded_only"
+    metadata: dict[str, Any] = field(default_factory=dict)
+
+
+@dataclass(slots=True)
+class PermissionOutcomeEvent(CanonicalEvent):
+    type: str = "permission_outcome"
+    action_id: str = ""
+    outcome: str = ""
+    outcome_at: str = ""
+    source: str = ""
+    summary: str = ""
+    metadata: dict[str, Any] = field(default_factory=dict)
+
+
 EVENT_TYPES: dict[str, type[CanonicalEvent]] = {
     "session_start": SessionStart,
     "session_end": SessionEnd,
@@ -186,6 +224,9 @@ EVENT_TYPES: dict[str, type[CanonicalEvent]] = {
     "usage": UsageReport,
     "error": ErrorEvent,
     "rate_limit": RateLimitEvent,
+    "permission_decision": PermissionDecisionEvent,
+    "permission_resolution": PermissionResolutionEvent,
+    "permission_outcome": PermissionOutcomeEvent,
 }
 
 
@@ -207,4 +248,7 @@ CanonicalEventType = (
     | UsageReport
     | ErrorEvent
     | RateLimitEvent
+    | PermissionDecisionEvent
+    | PermissionResolutionEvent
+    | PermissionOutcomeEvent
 )

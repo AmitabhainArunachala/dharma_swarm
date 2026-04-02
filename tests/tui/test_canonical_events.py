@@ -6,6 +6,8 @@ from dharma_swarm.tui.engine.events import (
     EVENT_TYPES,
     CanonicalEvent,
     ErrorEvent,
+    PermissionDecisionEvent,
+    PermissionResolutionEvent,
     RateLimitEvent,
     SCHEMA_VERSION,
     SessionEnd,
@@ -55,6 +57,8 @@ def test_all_event_types_instantiable() -> None:
         UsageReport(),
         ErrorEvent(),
         RateLimitEvent(),
+        PermissionDecisionEvent(),
+        PermissionResolutionEvent(),
     ]
     assert all(ev.schema_version == 1 for ev in events)
     assert all(isinstance(ev.type, str) and ev.type for ev in events)
@@ -79,5 +83,8 @@ def test_event_registry_complete() -> None:
         "usage",
         "error",
         "rate_limit",
+        "permission_decision",
+        "permission_resolution",
+        "permission_outcome",
     }
     assert set(EVENT_TYPES) == expected
