@@ -1,3 +1,92 @@
+---
+title: NVIDIA Infra Self-Heal Runbook
+path: docs/NVIDIA_INFRA_SELF_HEAL.md
+slug: nvidia-infra-self-heal-runbook
+doc_type: documentation
+status: active
+summary: 'Purpose: make the allout loop recover NVIDIA RAG + Data Flywheel endpoints automatically.'
+source:
+  provenance: repo_local
+  kind: documentation
+  origin_signals:
+  - scripts/thinkodynamic_director.py
+  - scripts/wire_nvidia_remote.sh
+  - scripts/mission_preflight.sh
+  cited_urls:
+  - http://127.0.0.1:8081/v1
+  - http://127.0.0.1:8082/v1
+  - http://127.0.0.1:8000/api
+  - https://<rag-host
+  - https://<ingest-host
+  generated_hint: human_or_agent_authored_repo_doc
+disciplines:
+- software_architecture
+- research_methodology
+- verification
+- product_strategy
+- operations
+inspiration:
+- verification
+- operator_runtime
+- research_synthesis
+connected_python_files:
+- scripts/thinkodynamic_director.py
+connected_python_modules:
+- scripts.thinkodynamic_director
+connected_relevant_files:
+- scripts/thinkodynamic_director.py
+- scripts/wire_nvidia_remote.sh
+- scripts/mission_preflight.sh
+- docs/plans/ALLOUT_6H_MODE.md
+- docs/plans/ALL_NIGHT_BUILD_CONCLAVE_2026-03-20.md
+improvement:
+  room_for_improvement:
+  - Strengthen cross-links to adjacent docs and implementing modules.
+  - Separate durable knowledge from transient session context.
+  - Add a tighter summary for first-pass retrieval.
+  - Review whether this file should stay in `docs` or be consolidated elsewhere.
+  next_review_at: '2026-04-01T00:43:19+09:00'
+pkm:
+  note_class: documentation
+  vault_path: docs/NVIDIA_INFRA_SELF_HEAL.md
+  retrieval_terms:
+  - nvidia
+  - infra
+  - self
+  - heal
+  - runbook
+  - purpose
+  - make
+  - allout
+  - loop
+  - recover
+  - rag
+  - data
+  evergreen_potential: medium
+stigmergy:
+  meaning: This file is a shared environmental trace in the DHARMA corpus. Its path, recency, and linked surfaces guide future agent attention; its frontmatter now adds machine-readable coordination cues.
+  state: working
+  semantic_weight: 0.6
+  coordination_comment: 'Purpose: make the allout loop recover NVIDIA RAG + Data Flywheel endpoints automatically.'
+  levels:
+    sematectonic:
+      what_it_is: The document itself is the mark. Its existence, filename, location, and revision history attract or repel future work.
+      access_mark: Opening, linking, and revising docs/NVIDIA_INFRA_SELF_HEAL.md reinforces its salience without needing a separate message.
+    marker_based:
+      what_it_is: The frontmatter is an explicit annotation layer on top of the document.
+      semantic_mark: Semantic weight, improvement prompts, related files, and provenance comments tell later agents how to use this document.
+  trace_role: coordination_trace
+curation:
+  last_frontmatter_refresh: '2026-04-01T00:43:19+09:00'
+  curated_by_model: Codex (GPT-5)
+  source_model_in_file: 
+  future_model_handoffs:
+  - GPT-5 Codex
+  - Claude
+  - Gemini
+  - Local evaluator
+  schema_version: pkm-phd-stigmergy-v1
+---
 # NVIDIA Infra Self-Heal Runbook
 
 Purpose: make the allout loop recover NVIDIA RAG + Data Flywheel endpoints automatically.

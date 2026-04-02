@@ -1524,16 +1524,29 @@ function nestedCommandString(value: unknown): string {
   return "";
 }
 
-function nestedTargetPane(event: Record<string, unknown>): string {
-  const candidates = [
-    event.target_pane,
-    asRecord(event.payload).target_pane,
-    asRecord(event.request).target_pane,
-    asRecord(event.action).target_pane,
-    asRecord(event.arguments).target_pane,
-  ];
+function nestedEnvelopeRecords(value: unknown): Record<string, unknown>[] {
+  const record = asRecord(value);
+  if (Object.keys(record).length === 0) {
+    return [];
+  }
 
-  for (const candidate of candidates) {
+  return [
+    record,
+    asRecord(record.payload),
+    asRecord(record.request),
+    asRecord(record.action),
+    asRecord(record.arguments),
+    asRecord(asRecord(record.payload).request),
+    asRecord(asRecord(record.payload).action),
+    asRecord(asRecord(record.payload).arguments),
+    asRecord(asRecord(record.request).arguments),
+    asRecord(asRecord(record.action).arguments),
+  ].filter((entry, index, entries) => Object.keys(entry).length > 0 && entries.indexOf(entry) === index);
+}
+
+function nestedTargetPane(event: Record<string, unknown>): string {
+  for (const entry of nestedEnvelopeRecords(event)) {
+    const candidate = entry.target_pane;
     const normalized = normalizeTargetPaneId(String(candidate ?? ""));
     if (normalized) {
       return normalized;
@@ -1544,34 +1557,16 @@ function nestedTargetPane(event: Record<string, unknown>): string {
 }
 
 export function resolveEventCommand(event: Record<string, unknown>): string {
-  const explicitCommand = String(event.command ?? "").trim();
-  if (explicitCommand) {
-    return explicitCommand;
-  }
+  for (const entry of nestedEnvelopeRecords(event)) {
+    const explicitCommand = String(entry.command ?? "").trim();
+    if (explicitCommand) {
+      return explicitCommand;
+    }
 
-  const directCommand = nestedCommandString(event.command);
-  if (directCommand) {
-    return directCommand;
-  }
-
-  const payloadCommand = nestedCommandString(event.payload);
-  if (payloadCommand) {
-    return payloadCommand;
-  }
-
-  const requestCommand = nestedCommandString(event.request);
-  if (requestCommand) {
-    return requestCommand;
-  }
-
-  const actionCommand = nestedCommandString(event.action);
-  if (actionCommand) {
-    return actionCommand;
-  }
-
-  const argumentsCommand = nestedCommandString(event.arguments);
-  if (argumentsCommand) {
-    return argumentsCommand;
+    const nestedCommand = nestedCommandString(entry.command);
+    if (nestedCommand) {
+      return nestedCommand;
+    }
   }
 
   return inferSlashCommand(String(event.summary ?? ""));
@@ -2760,7 +2755,7 @@ export function modelPolicyToLines(payload: Record<string, unknown>): Transcript
       }
     }
     lines.push("", "## Targets");
-    for (const entry of routingPayload.targets.slice(0, 10)) {
+    for (const entry of routingPayload.targets) {
       lines.push(`- ${stringField(entry, "alias", "?")} -> ${stringField(entry, "label", "?")} (${stringField(entry, "provider", "?")}:${stringField(entry, "model", "?")})`);
     }
     return toLines("system", lines.join("\n"));
@@ -2787,7 +2782,7 @@ export function modelPolicyToLines(payload: Record<string, unknown>): Transcript
   }
   lines.push("", "## Targets");
   const targets = Array.isArray(policy.targets) ? policy.targets : [];
-  for (const entry of targets.slice(0, 10)) {
+  for (const entry of targets) {
     const record = typeof entry === "object" && entry !== null ? (entry as Record<string, unknown>) : {};
     lines.push(
       `- ${String(record.alias ?? "?")} -> ${String(record.label ?? "?")} (${String(record.provider ?? "?")}:${String(record.model ?? "?")})`,

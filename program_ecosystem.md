@@ -1,3 +1,86 @@
+---
+title: Ecosystem Autoresearch — Full Dhyana System
+path: program_ecosystem.md
+slug: ecosystem-autoresearch-full-dhyana-system
+doc_type: note
+status: active
+summary: Multi-repo variant of program.md. Fires across the entire ecosystem, not just dharma swarm. Use this when you want broader improvement across all active repos.
+source:
+  provenance: repo_local
+  kind: note
+  origin_signals:
+  - program.md
+  - dharma_swarm/rv.py
+  - program_ecosystem.md
+  cited_urls: []
+  generated_hint: human_or_agent_authored_repo_doc
+disciplines:
+- multi_agent_systems
+- software_architecture
+- knowledge_management
+- verification
+- frontend_engineering
+inspiration:
+- verification
+- operator_runtime
+connected_python_files:
+- dharma_swarm/rv.py
+connected_python_modules:
+- dharma_swarm.rv
+connected_relevant_files:
+- program.md
+- dharma_swarm/rv.py
+- docs/archive/AGENT_SWARM_SYNTHESIS.md
+- CLAUDE.md
+- reports/historical/CONSTITUTIONAL_HARDENING_SPRINT_REPORT.md
+improvement:
+  room_for_improvement:
+  - Strengthen cross-links to adjacent docs and implementing modules.
+  - Separate durable knowledge from transient session context.
+  - Add a tighter summary for first-pass retrieval.
+  - Review whether this file should stay in `.` or be consolidated elsewhere.
+  next_review_at: '2026-04-01T00:43:19+09:00'
+pkm:
+  note_class: note
+  vault_path: program_ecosystem.md
+  retrieval_terms:
+  - program
+  - ecosystem
+  - autoresearch
+  - full
+  - dhyana
+  - system
+  - multi
+  - repo
+  - variant
+  - fires
+  - across
+  - entire
+  evergreen_potential: medium
+stigmergy:
+  meaning: This file is a shared environmental trace in the DHARMA corpus. Its path, recency, and linked surfaces guide future agent attention; its frontmatter now adds machine-readable coordination cues.
+  state: active
+  semantic_weight: 0.6
+  coordination_comment: Multi-repo variant of program.md. Fires across the entire ecosystem, not just dharma swarm. Use this when you want broader improvement across all active repos.
+  levels:
+    sematectonic:
+      what_it_is: The document itself is the mark. Its existence, filename, location, and revision history attract or repel future work.
+      access_mark: Opening, linking, and revising program_ecosystem.md reinforces its salience without needing a separate message.
+    marker_based:
+      what_it_is: The frontmatter is an explicit annotation layer on top of the document.
+      semantic_mark: Semantic weight, improvement prompts, related files, and provenance comments tell later agents how to use this document.
+  trace_role: coordination_trace
+curation:
+  last_frontmatter_refresh: '2026-04-01T00:43:19+09:00'
+  curated_by_model: Codex (GPT-5)
+  source_model_in_file:
+  future_model_handoffs:
+  - GPT-5 Codex
+  - Claude
+  - Gemini
+  - Local evaluator
+  schema_version: pkm-phd-stigmergy-v1
+---
 # Ecosystem Autoresearch — Full Dhyana System
 
 Multi-repo variant of [program.md](program.md). Fires across the entire ecosystem,

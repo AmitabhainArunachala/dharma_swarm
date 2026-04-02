@@ -651,10 +651,8 @@ describe("snapshotActionsForBridgeEvent", () => {
         "Decision continue required | Add an app-level bootstrap/refresh snapshot test.",
         "Loop",
         "State cycle 4 running",
-        "Verification",
-        "Status 1 failing, 3/4 passing",
-        "Failing cycle_acceptance",
-        "Summary tsc=ok | py_compile_bridge=ok | bridge_snapshots=ok | cycle_acceptance=fail",
+        "Runtime DB /Users/dhyana/.dharma/state/runtime.db",
+        "Sessions 18 sessions",
       ]) {
         expect(normalized).toContain(normalizeTerminalText(row));
       }
@@ -1943,6 +1941,40 @@ Toolchain
       "Repo dirty: 517 unstaged, 47 untracked",
     );
     expect(nextState.tabs.find((tab) => tab.id === "control")?.lines.map((line) => line.text)).not.toContain(
+      "Repo dirty: 517 unstaged, 47 untracked",
+    );
+    expect(nextState.tabs.find((tab) => tab.id === "chat")?.lines.map((line) => line.text)).toEqual([
+      "existing conversation",
+    ]);
+  });
+
+  test("routes payload-wrapped slash command action results into the inferred pane without mutating chat", () => {
+    const baseState: AppState = {
+      ...initialState,
+      activeTabId: "commands",
+      tabs: initialState.tabs.map((tab) =>
+        tab.id === "chat"
+          ? {...tab, lines: [{id: "chat-1", kind: "assistant", text: "existing conversation"}]}
+          : tab.id === "repo"
+            ? {...tab, lines: []}
+            : tab,
+      ),
+    };
+
+    const nextState = applyBridgeEvent(baseState, {
+      type: "action.result",
+      action_type: "command.run",
+      payload: {
+        request: {
+          command: "/git status",
+          target_pane: "workspace",
+        },
+      },
+      output: "Repo dirty: 517 unstaged, 47 untracked",
+    });
+
+    expect(nextState.activeTabId).toBe("repo");
+    expect(nextState.tabs.find((tab) => tab.id === "repo")?.lines.map((line) => line.text)).toContain(
       "Repo dirty: 517 unstaged, 47 untracked",
     );
     expect(nextState.tabs.find((tab) => tab.id === "chat")?.lines.map((line) => line.text)).toEqual([
@@ -3905,6 +3937,19 @@ describe("model picker state", () => {
     const moved = reduceApp(baseState, {type: "tab.activate", tabId: "repo"});
     expect(moved.activeTabId).toBe("repo");
     expect(moved.modelPickerVisible).toBe(false);
+  });
+
+  test("scrolls panes within bounded offsets", () => {
+    const baseState: AppState = {
+      ...initialState,
+      paneScrollOffsets: {repo: 2},
+    };
+
+    const scrolled = reduceApp(baseState, {type: "pane.scroll", tabId: "repo", delta: 10, maxOffset: 6});
+    expect(scrolled.paneScrollOffsets.repo).toBe(6);
+
+    const rewound = reduceApp(scrolled, {type: "pane.scroll", tabId: "repo", delta: -20, maxOffset: 6});
+    expect(rewound.paneScrollOffsets.repo).toBe(0);
   });
 });
 

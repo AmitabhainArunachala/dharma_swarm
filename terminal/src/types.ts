@@ -370,6 +370,7 @@ export type AppState = {
   prompt: string;
   activeTabId: string;
   tabs: TabSpec[];
+  paneScrollOffsets: Record<string, number>;
   liveRepoPreview?: TabPreview;
   liveControlPreview?: TabPreview;
   authoritativeSurfaces: SurfaceAuthorityState;
@@ -397,6 +398,8 @@ export type AppAction =
   | {type: "sidebar.mode"; mode: SidebarMode}
   | {type: "tab.activate"; tabId: string}
   | {type: "tab.cycle"; direction: 1 | -1}
+  | {type: "pane.scroll"; tabId: string; delta: number; maxOffset: number}
+  | {type: "pane.scroll.reset"; tabId: string}
   | {type: "tab.ensure"; tab: TabSpec}
   | {type: "tab.close"; tabId: string}
   | {type: "tab.append"; tabId: string; lines: TranscriptLine[]}

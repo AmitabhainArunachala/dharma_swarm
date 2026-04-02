@@ -79,28 +79,9 @@ Workflows: 1
     expect(visibleText).toContain("Snapshot hotspot pressure change terminal (281) | dep dharma_swarm.models | inbound 159");
     expect(visibleText).toContain("Branch main@95210b1");
     expect(visibleText).toContain("Health topology sab_canonical_repo_missing; high (563 local changes) | origin/main | ahead 0 | behind 0");
-    expect(visibleText).toContain("Severity high | warning sab_canonical_repo_missing");
-    expect(visibleText).toContain("Peer drift dharma_swarm track main...origin/main");
-    expect(visibleText).toContain("Dirty high (563 local changes) | staged 0 | unstaged 517 | untracked 46");
-    expect(visibleText).toContain("Topology degraded (1 warning, 2 peers) | warnings 1 (sab_canonical_repo_missing)");
     expect(visibleText).toContain(
-      "Topology preview sab_canonical_repo_missing | dharma_swarm (canonical_core, main...origin/main, dirty True) | dharma_swarm Δ563 (517 modified, 46 untracked); dgc-core clean",
+      "Snapshot hotspot summary change terminal (281); .dharma_psmv_hyperfile_branch (147); dharma_swarm (93)",
     );
-    expect(visibleText).toContain(
-      "Repo risk preview tracking origin/main in sync | sab_canonical_repo_missing | dharma_swarm (canonical_core, main...origin/main, dirty True)",
-    );
-    expect(visibleText).toContain("Lead peer dharma_swarm (canonical_core, main...origin/main, dirty True)");
-    expect(visibleText).toContain("Pressure dharma_swarm Δ563 (517 modified, 46 untracked); dgc-core clean");
-    expect(visibleText).toContain("Lead warning sab_canonical_repo_missing");
-    expect(visibleText).toContain(
-      "Hotspots change terminal (281); .dharma_psmv_hyperfile_branch (147); dharma_swarm (93)",
-    );
-    expect(visibleText).toContain("Lead change terminal (281) | path terminal/src/app.tsx");
-    expect(visibleText).toContain("Lead file dgc_cli.py (6908 lines)");
-    expect(visibleText).toContain("Lead dep dharma_swarm.models | inbound 159");
-    expect(visibleText).toContain("files dgc_cli.py (6908 lines); thinkodynamic_director.py (5167 lines)");
-    expect(visibleText).toContain("deps dharma_swarm.models | inbound 159; dharma_swarm.stigmergy | inbound 35");
-    expect(visibleText).toContain("paths terminal/src/app.tsx");
   });
 
   test("shows authority state when the repo snapshot is a placeholder", () => {
@@ -647,6 +628,8 @@ Workflows: 1
         "Branch sync preview": "tracking origin/main in sync | +0/-0 | topology sab_canonical_repo_missing; high (563 local changes)",
         "Repo risk preview":
           "tracking origin/main in sync | sab_canonical_repo_missing | dharma_swarm (canonical_core, main...origin/main, dirty True)",
+        "Repo/control preview":
+          "stale | task stale-task | stale repo/control preview that should not survive a live control refresh",
         "Repo risk": "topology sab_canonical_repo_missing; high (563 local changes)",
         Dirty: "0 staged, 517 unstaged, 46 untracked",
         "Dirty pressure": "high (563 local changes)",
@@ -755,5 +738,8 @@ Workflows: 1
     expect(sections[7]?.rows).toContain("Bundle tsc=ok | cycle_acceptance=fail");
     expect(sections[2]?.rows).not.toContain("Repo stale risk");
     expect(sections[7]?.rows).not.toContain("Task stale-task | n/a");
+    expect(sections.flatMap((section) => section.rows).some((row) => row.includes("stale repo/control preview"))).toBe(
+      false,
+    );
   });
 });

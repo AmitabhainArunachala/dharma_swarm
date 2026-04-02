@@ -15,6 +15,8 @@ type Props = {
   controlPreview?: TabPreview;
   lines: TranscriptLine[];
   controlLines?: TranscriptLine[];
+  scrollOffset?: number;
+  windowSize?: number;
 };
 
 function previewValue(preview: TabPreview | undefined, lines: TranscriptLine[], label: string): string {
@@ -260,6 +262,15 @@ function buildRepoControlCorrelationDetails(
   ].join(" | ");
 }
 
+function hasControlSnapshotSignal(controlPreview?: TabPreview, controlLines: TranscriptLine[] = []): boolean {
+  if (controlPreview) {
+    return true;
+  }
+  return controlLines.some((line) =>
+    /^(Active task|Loop state|Runtime freshness|Updated|Verification bundle):\s+/.test(line.text),
+  );
+}
+
 function buildRepoControlCorrelationLabel(
   preview: TabPreview | undefined,
   lines: TranscriptLine[],
@@ -268,7 +279,7 @@ function buildRepoControlCorrelationLabel(
   now: Date = new Date(),
 ): string {
   const explicit = preview?.["Repo/control preview"];
-  if (typeof explicit === "string" && explicit.length > 0) {
+  if (!hasControlSnapshotSignal(controlPreview, controlLines) && typeof explicit === "string" && explicit.length > 0) {
     return explicit;
   }
   return buildRepoControlCorrelationDetails(preview, lines, controlPreview, controlLines, now);
@@ -577,22 +588,31 @@ export function buildRepoPaneSections(
   return sections;
 }
 
-export function RepoPane({title, preview, controlPreview, lines, controlLines = []}: Props): React.ReactElement {
+export function RepoPane({
+  title,
+  preview,
+  controlPreview,
+  lines,
+  controlLines = [],
+  scrollOffset = 0,
+  windowSize = 24,
+}: Props): React.ReactElement {
   const sections = buildRepoPaneSections(preview, lines, controlPreview, controlLines);
+  const flattened = sections.flatMap((section) => [
+    {kind: "section" as const, id: section.title, text: section.title},
+    ...section.rows.map((row, index) => ({kind: "row" as const, id: `${section.title}-${index}`, text: row})),
+    {kind: "spacer" as const, id: `${section.title}-spacer`, text: ""},
+  ]);
+  const visible = flattened.slice(scrollOffset, scrollOffset + windowSize);
 
   return (
     <Box flexGrow={1} flexDirection="column" borderStyle="single" borderColor="gray" paddingX={1}>
       <Text color="cyan">{title}</Text>
       <Text color="gray"> </Text>
-      {sections.map((section) => (
-        <Box key={section.title} flexDirection="column" marginBottom={1}>
-          <Text color="white">{section.title}</Text>
-          {section.rows.map((row, index) => (
-            <Text key={`${section.title}-${index}`} color="gray">
-              {row}
-            </Text>
-          ))}
-        </Box>
+      {visible.map((entry) => (
+        <Text key={entry.id} color={entry.kind === "section" ? "white" : "gray"}>
+          {entry.text}
+        </Text>
       ))}
     </Box>
   );

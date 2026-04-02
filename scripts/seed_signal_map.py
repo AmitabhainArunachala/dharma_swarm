@@ -170,7 +170,7 @@ SCAN_1_RESULTS: list[dict[str, Any]] = [
         "Publication roadmap 70-80% done",
     ),
     _build_result(
-        "~/dharma_swarm/GODEL_CLAW_V1_REPORT.md", 8.8, "engineering",
+        "~/dharma_swarm/reports/historical/GODEL_CLAW_V1_REPORT.md", 8.8, "engineering",
         "What was built vs spec",
     ),
     _build_result(

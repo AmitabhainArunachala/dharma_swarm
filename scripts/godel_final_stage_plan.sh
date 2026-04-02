@@ -75,7 +75,7 @@ cat <<'EOF'
 
 # Commit C: Wave 3 docs + e2e validation
 # git add \
-#   GODEL_CLAW_V1_REPORT.md \
+#   reports/historical/GODEL_CLAW_V1_REPORT.md \
 #   LIVING_LAYERS.md \
 #   tests/test_godel_claw_e2e.py \
 #   specs/GODEL_CLAW_V1_SPEC.md \
@@ -92,7 +92,7 @@ cat <<'EOF'
 #   PUBLISH_TOMORROW.md \
 #   scripts/publish_canonical.sh \
 #   OVERNIGHT_AUTOPILOT.md \
-#   VERIFICATION_LANE.md \
+#   docs/architecture/VERIFICATION_LANE.md \
 #   cron_jobs.json \
 #   scripts/ecosystem_synthesis.sh \
 #   scripts/overnight_autopilot.py \

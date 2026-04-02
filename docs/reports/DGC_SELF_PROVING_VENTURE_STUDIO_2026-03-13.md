@@ -1,3 +1,97 @@
+---
+title: DGC Self-Proving Venture Studio
+path: docs/reports/DGC_SELF_PROVING_VENTURE_STUDIO_2026-03-13.md
+slug: dgc-self-proving-venture-studio
+doc_type: report
+status: active
+summary: 'Date: 2026-03-13 Purpose: define the first business DGC should run on itself before making larger mission-intelligence claims to the market Status: operating thesis / 30-day plan / first revenue architecture Primary r...'
+source:
+  provenance: repo_local
+  kind: report
+  origin_signals:
+  - docs/reports/DGC_SHAKTI_REVENUE_ARCHITECTURE_2026-03-13.md
+  - docs/missions/DGC_REVENUE_SWARM_2026-03-13.md
+  - docs/archive/DGC_100X_LEAN_ESSENCE_2026-03-08.md
+  cited_urls: []
+  generated_hint: human_or_agent_authored_repo_doc
+disciplines:
+- multi_agent_systems
+- software_architecture
+- knowledge_management
+- research_methodology
+- verification
+- product_strategy
+inspiration:
+- verification
+- operator_runtime
+- product_surface
+- research_synthesis
+connected_python_files:
+- scripts/experiments/test_full_loop.py
+- tests/test_semantic_memory_bridge.py
+- tools/agent_canvas/generate_data.py
+- dharma_swarm/semantic_memory_bridge.py
+- scripts/self_optimization/run_production_self_optimization.py
+connected_python_modules:
+- scripts.experiments.test_full_loop
+- tests.test_semantic_memory_bridge
+- tools.agent_canvas.generate_data
+- dharma_swarm.semantic_memory_bridge
+- scripts.self_optimization.run_production_self_optimization
+connected_relevant_files:
+- docs/reports/DGC_SHAKTI_REVENUE_ARCHITECTURE_2026-03-13.md
+- docs/missions/DGC_REVENUE_SWARM_2026-03-13.md
+- docs/archive/DGC_100X_LEAN_ESSENCE_2026-03-08.md
+- scripts/experiments/test_full_loop.py
+- tests/test_semantic_memory_bridge.py
+improvement:
+  room_for_improvement:
+  - 'Surface the decision delta: what should change now because this report exists.'
+  - Link findings to exact code, tests, or commits where possible.
+  - Distinguish measured facts from operator interpretation.
+  - Review whether this file should stay in `docs/reports` or be consolidated elsewhere.
+  next_review_at: '2026-04-01T00:43:19+09:00'
+pkm:
+  note_class: report
+  vault_path: docs/reports/DGC_SELF_PROVING_VENTURE_STUDIO_2026-03-13.md
+  retrieval_terms:
+  - reports
+  - dgc
+  - self
+  - proving
+  - venture
+  - studio
+  - '2026'
+  - date
+  - purpose
+  - define
+  - first
+  - business
+  evergreen_potential: medium
+stigmergy:
+  meaning: This file is a shared environmental trace in the DHARMA corpus. Its path, recency, and linked surfaces guide future agent attention; its frontmatter now adds machine-readable coordination cues.
+  state: working
+  semantic_weight: 0.6
+  coordination_comment: 'Date: 2026-03-13 Purpose: define the first business DGC should run on itself before making larger mission-intelligence claims to the market Status: operating thesis / 30-day plan / first revenue architecture Primary r...'
+  levels:
+    sematectonic:
+      what_it_is: The document itself is the mark. Its existence, filename, location, and revision history attract or repel future work.
+      access_mark: Opening, linking, and revising docs/reports/DGC_SELF_PROVING_VENTURE_STUDIO_2026-03-13.md reinforces its salience without needing a separate message.
+    marker_based:
+      what_it_is: The frontmatter is an explicit annotation layer on top of the document.
+      semantic_mark: Semantic weight, improvement prompts, related files, and provenance comments tell later agents how to use this document.
+  trace_role: diagnostic_or_evidence_trace
+curation:
+  last_frontmatter_refresh: '2026-04-01T00:43:19+09:00'
+  curated_by_model: Codex (GPT-5)
+  source_model_in_file: 
+  future_model_handoffs:
+  - GPT-5 Codex
+  - Claude
+  - Gemini
+  - Local evaluator
+  schema_version: pkm-phd-stigmergy-v1
+---
 # DGC Self-Proving Venture Studio
 
 Date: 2026-03-13
@@ -6,7 +100,7 @@ Status: operating thesis / 30-day plan / first revenue architecture
 Primary references:
 - `docs/reports/DGC_SHAKTI_REVENUE_ARCHITECTURE_2026-03-13.md`
 - `docs/missions/DGC_REVENUE_SWARM_2026-03-13.md`
-- `docs/DGC_100X_LEAN_ESSENCE_2026-03-08.md`
+- `docs/archive/DGC_100X_LEAN_ESSENCE_2026-03-08.md`
 
 ## Plain Thesis
 

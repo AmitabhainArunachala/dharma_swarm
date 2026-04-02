@@ -1,3 +1,88 @@
+---
+title: Dharmic Quant — Enhancement Wave (Post-Build)
+path: docs/GINKO_ENHANCEMENT_WAVE.md
+slug: dharmic-quant-enhancement-wave-post-build
+doc_type: documentation
+status: active
+summary: 'Created : 2026-03-17 Purpose : Execute after 25-agent build completes. Each enhancement is a self-contained agent spec. Runner : python3 -m dharma swarm.ginko audit --enhancements for latest ranked list.'
+source:
+  provenance: repo_local
+  kind: documentation
+  origin_signals:
+  - pyproject.toml
+  cited_urls: []
+  generated_hint: human_or_agent_authored_repo_doc
+disciplines:
+- multi_agent_systems
+- software_architecture
+- research_methodology
+- verification
+- frontend_engineering
+- machine_learning
+inspiration:
+- verification
+- product_surface
+- research_synthesis
+connected_python_files:
+- dharma_swarm/ginko_audit.py
+- dharma_swarm/ginko_backtest.py
+connected_python_modules:
+- dharma_swarm.ginko_audit
+- dharma_swarm.ginko_backtest
+connected_relevant_files:
+- pyproject.toml
+- dharma_swarm/ginko_audit.py
+- dharma_swarm/ginko_backtest.py
+- docs/plans/ALLOUT_6H_MODE.md
+- docs/plans/ALL_NIGHT_BUILD_CONCLAVE_2026-03-20.md
+improvement:
+  room_for_improvement:
+  - Strengthen cross-links to adjacent docs and implementing modules.
+  - Separate durable knowledge from transient session context.
+  - Add a tighter summary for first-pass retrieval.
+  - Review whether this file should stay in `docs` or be consolidated elsewhere.
+  next_review_at: '2026-04-01T00:43:19+09:00'
+pkm:
+  note_class: documentation
+  vault_path: docs/GINKO_ENHANCEMENT_WAVE.md
+  retrieval_terms:
+  - ginko
+  - enhancement
+  - wave
+  - dharmic
+  - quant
+  - post
+  - build
+  - created
+  - '2026'
+  - purpose
+  - execute
+  - after
+  evergreen_potential: medium
+stigmergy:
+  meaning: This file is a shared environmental trace in the DHARMA corpus. Its path, recency, and linked surfaces guide future agent attention; its frontmatter now adds machine-readable coordination cues.
+  state: working
+  semantic_weight: 0.55
+  coordination_comment: 'Created : 2026-03-17 Purpose : Execute after 25-agent build completes. Each enhancement is a self-contained agent spec. Runner : python3 -m dharma swarm.ginko audit --enhancements for latest ranked list.'
+  levels:
+    sematectonic:
+      what_it_is: The document itself is the mark. Its existence, filename, location, and revision history attract or repel future work.
+      access_mark: Opening, linking, and revising docs/GINKO_ENHANCEMENT_WAVE.md reinforces its salience without needing a separate message.
+    marker_based:
+      what_it_is: The frontmatter is an explicit annotation layer on top of the document.
+      semantic_mark: Semantic weight, improvement prompts, related files, and provenance comments tell later agents how to use this document.
+  trace_role: coordination_trace
+curation:
+  last_frontmatter_refresh: '2026-04-01T00:43:19+09:00'
+  curated_by_model: Codex (GPT-5)
+  source_model_in_file: 
+  future_model_handoffs:
+  - GPT-5 Codex
+  - Claude
+  - Gemini
+  - Local evaluator
+  schema_version: pkm-phd-stigmergy-v1
+---
 # Dharmic Quant — Enhancement Wave (Post-Build)
 
 **Created**: 2026-03-17

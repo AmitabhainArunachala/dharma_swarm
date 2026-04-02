@@ -35,7 +35,9 @@ from dharma_swarm.operator_core import (
     build_workspace_snapshot_payload,
 )
 from dharma_swarm.orientation_packet import DirectiveSummary, RuntimeStateSummary
+from dharma_swarm.provider_matrix import build_default_matrix_targets
 from dharma_swarm.runtime_state import DEFAULT_RUNTIME_DB, OperatorAction, RuntimeStateStore, SessionEventRecord
+from dharma_swarm.models import ProviderType
 from dharma_swarm.tui import model_routing
 from dharma_swarm.tui.commands import system_commands as system_commands_module
 from dharma_swarm.tui.commands.system_commands import SystemCommandHandler
@@ -54,6 +56,22 @@ def _json_default(value: object) -> object:
     if isinstance(value, set):
         return sorted(value)
     return str(value)
+
+
+def _bridge_provider_id(provider: ProviderType) -> str | None:
+    if provider == ProviderType.CODEX:
+        return "codex"
+    if provider in {ProviderType.ANTHROPIC, ProviderType.CLAUDE_CODE}:
+        return "claude"
+    if provider in {ProviderType.OPENROUTER, ProviderType.OPENROUTER_FREE}:
+        return "openrouter"
+    return None
+
+
+def _target_alias(model: str) -> str:
+    normalized = model.split("/")[-1].split(":")[0].strip().lower()
+    normalized = re.sub(r"[^a-z0-9.+-]+", "-", normalized)
+    return normalized.strip("-") or "model"
 
 
 class TerminalBridge:
@@ -1500,37 +1518,63 @@ class TerminalBridge:
         }
 
     def _build_model_policy_summary(self, *, selected_provider: str, selected_model: str, strategy: str) -> dict[str, Any]:
-        available_providers = self._available_provider_ids()
-        available_targets = [
-            target for target in model_routing.all_targets() if target.provider_id in available_providers
-        ]
-        selected_available = any(
-            target.provider_id == selected_provider and target.model_id == selected_model
-            for target in available_targets
-        )
-        if not selected_available and available_targets:
-            fallback_target = next(
-                (
-                    target
-                    for target in available_targets
-                    if target.provider_id == model_routing.default_target().provider_id
-                ),
-                available_targets[0],
-            )
-            selected_provider = fallback_target.provider_id
-            selected_model = fallback_target.model_id
-
-        targets = []
-        active_target = model_routing.target_for_route(selected_provider, selected_model)
-        for target in available_targets:
+        strategy = model_routing.resolve_strategy(strategy) or "responsive"
+        raw_targets = build_default_matrix_targets(profile="live25", include_unavailable=True)
+        seen_routes: set[tuple[str, str]] = set()
+        targets: list[dict[str, Any]] = []
+        for target in raw_targets:
+            provider_id = _bridge_provider_id(target.provider)
+            if provider_id is None:
+                continue
+            route = (provider_id, target.model)
+            if route in seen_routes:
+                continue
+            seen_routes.add(route)
+            alias = _target_alias(target.model)
+            lane_role = str(target.lane_role.value).replace("_", " ")
+            tier = str(target.tier)
+            availability = "ready" if bool(target.available) else "unavailable"
             targets.append(
                 {
-                    "alias": target.alias,
-                    "provider": target.provider_id,
-                    "model": target.model_id,
-                    "label": target.label,
+                    "alias": alias,
+                    "provider": provider_id,
+                    "model": target.model,
+                    "label": f"{target.model} [{provider_id} | {lane_role} | {tier} | {availability}]",
+                    "lane_role": target.lane_role.value,
+                    "tier": tier,
+                    "available": bool(target.available),
+                    "availability_reason": target.availability_reason,
+                    "config_source": target.config_source,
                 }
             )
+
+        selected_available = any(
+            target["provider"] == selected_provider and target["model"] == selected_model
+            for target in targets
+        )
+        if not selected_available and targets:
+            fallback_target = next((target for target in targets if target["provider"] == "codex"), targets[0])
+            selected_provider = str(fallback_target["provider"])
+            selected_model = str(fallback_target["model"])
+
+        active_target = next(
+            (
+                target
+                for target in targets
+                if target["provider"] == selected_provider and target["model"] == selected_model
+            ),
+            None,
+        )
+        fallback_chain = [
+            {
+                "alias": str(target["alias"]),
+                "provider": str(target["provider"]),
+                "model": str(target["model"]),
+                "label": str(target["label"]),
+            }
+            for target in targets
+            if not (target["provider"] == selected_provider and target["model"] == selected_model)
+        ][:6]
         return {
             "selected_provider": selected_provider,
             "selected_model": selected_model,
@@ -1538,16 +1582,12 @@ class TerminalBridge:
             "strategy": strategy,
             "strategies": list(model_routing.ROUTING_STRATEGIES),
             "default_route": (
-                f"{available_targets[0].provider_id}:{available_targets[0].model_id}"
-                if available_targets
+                f"{targets[0]['provider']}:{targets[0]['model']}"
+                if targets
                 else f"{model_routing.default_target().provider_id}:{model_routing.default_target().model_id}"
             ),
-            "active_label": active_target.label if active_target else selected_model,
-            "fallback_chain": [
-                {"alias": target.alias, "provider": target.provider_id, "model": target.model_id, "label": target.label}
-                for target in model_routing.fallback_chain(selected_provider, selected_model, strategy=strategy)
-                if target.provider_id in available_providers
-            ],
+            "active_label": str(active_target["label"]) if active_target else selected_model,
+            "fallback_chain": fallback_chain,
             "targets": targets,
         }
 
@@ -1805,7 +1845,7 @@ class TerminalBridge:
         lines.extend(["", "## Targets"])
         targets = policy.get("targets", [])
         if isinstance(targets, list):
-            for item in targets[:10]:
+            for item in targets:
                 if not isinstance(item, dict):
                     continue
                 lines.append(f"- {item.get('alias', '?')} -> {item.get('label', '?')}")

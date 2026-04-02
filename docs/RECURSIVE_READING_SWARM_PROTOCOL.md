@@ -1,3 +1,82 @@
+---
+title: RECURSIVE READING SWARM PROTOCOL
+path: docs/RECURSIVE_READING_SWARM_PROTOCOL.md
+slug: recursive-reading-swarm-protocol
+doc_type: documentation
+status: active
+summary: RECURSIVE READING SWARM PROTOCOL Teaching the Entire Swarm to Read with Awareness, Nonstop
+source:
+  provenance: repo_local
+  kind: documentation
+  origin_signals:
+  - dharma_swarm/agent_runner.py
+  cited_urls: []
+  generated_hint: human_or_agent_authored_repo_doc
+disciplines:
+- swarm_intelligence
+- multi_agent_systems
+- software_architecture
+- knowledge_management
+- research_methodology
+- verification
+inspiration:
+- stigmergy
+- product_surface
+- research_synthesis
+connected_python_files:
+- dharma_swarm/agent_runner.py
+connected_python_modules:
+- dharma_swarm.agent_runner
+connected_relevant_files:
+- dharma_swarm/agent_runner.py
+- docs/plans/ALLOUT_6H_MODE.md
+- docs/plans/ALL_NIGHT_BUILD_CONCLAVE_2026-03-20.md
+- docs/ASCII_STUDIO_SETUP.md
+- docs/plans/CODEX_ALLNIGHT_YOLO.md
+improvement:
+  room_for_improvement:
+  - Strengthen cross-links to adjacent docs and implementing modules.
+  - Separate durable knowledge from transient session context.
+  - Add a tighter summary for first-pass retrieval.
+  - Review whether this file should stay in `docs` or be consolidated elsewhere.
+  next_review_at: '2026-04-01T00:43:19+09:00'
+pkm:
+  note_class: documentation
+  vault_path: docs/RECURSIVE_READING_SWARM_PROTOCOL.md
+  retrieval_terms:
+  - recursive
+  - reading
+  - protocol
+  - teaching
+  - entire
+  - read
+  - awareness
+  - nonstop
+  evergreen_potential: medium
+stigmergy:
+  meaning: This file is a shared environmental trace in the DHARMA corpus. Its path, recency, and linked surfaces guide future agent attention; its frontmatter now adds machine-readable coordination cues.
+  state: working
+  semantic_weight: 0.55
+  coordination_comment: RECURSIVE READING SWARM PROTOCOL Teaching the Entire Swarm to Read with Awareness, Nonstop
+  levels:
+    sematectonic:
+      what_it_is: The document itself is the mark. Its existence, filename, location, and revision history attract or repel future work.
+      access_mark: Opening, linking, and revising docs/RECURSIVE_READING_SWARM_PROTOCOL.md reinforces its salience without needing a separate message.
+    marker_based:
+      what_it_is: The frontmatter is an explicit annotation layer on top of the document.
+      semantic_mark: Semantic weight, improvement prompts, related files, and provenance comments tell later agents how to use this document.
+  trace_role: coordination_trace
+curation:
+  last_frontmatter_refresh: '2026-04-01T00:43:19+09:00'
+  curated_by_model: Codex (GPT-5)
+  source_model_in_file: 
+  future_model_handoffs:
+  - GPT-5 Codex
+  - Claude
+  - Gemini
+  - Local evaluator
+  schema_version: pkm-phd-stigmergy-v1
+---
 # RECURSIVE READING SWARM PROTOCOL
 ## Teaching the Entire Swarm to Read with Awareness, Nonstop
 

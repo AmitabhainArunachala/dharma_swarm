@@ -12,9 +12,9 @@ import {
   saveSupervisorControlSummary,
 } from "./persistence.js";
 import {Composer} from "./components/Composer.js";
-import {ControlPane} from "./components/ControlPane.js";
+import {ControlPane, buildControlPaneSections, buildRuntimePaneSections} from "./components/ControlPane.js";
 import {ModelPicker} from "./components/ModelPicker.js";
-import {RepoPane} from "./components/RepoPane.js";
+import {RepoPane, buildRepoPaneSections} from "./components/RepoPane.js";
 import {ShellHeader} from "./components/ShellHeader.js";
 import {Sidebar} from "./components/Sidebar.js";
 import {StatusFooter} from "./components/StatusFooter.js";
@@ -68,6 +68,7 @@ import type {AppAction, AppState, ApprovalQueueEntry, ApprovalQueueState, Canoni
 const SNAPSHOT_REFRESH_INTERVAL_MS = 15000;
 const SESSION_CATALOG_LIMIT = 12;
 const SESSION_TRANSCRIPT_LIMIT = 40;
+const SCROLL_WINDOW_SIZE = 24;
 
 type PaneAction = {
   label: string;
@@ -359,27 +360,6 @@ export function handshakeBackoffDelayMs(attempt: number): number {
   return 60_000;
 }
 
-function modelChoicesFromTab(tab: TabSpec | undefined): ModelChoice[] {
-  if (!tab) {
-    return [];
-  }
-  return tab.lines
-    .map((line) => line.text)
-    .filter((line) => line.startsWith("- ") && line.includes(" -> ") && line.includes("(") && line.includes(":"))
-    .map((line) => {
-      const cleaned = line.replace(/^- /, "").trim();
-      const [aliasPart, rest = ""] = cleaned.split(" -> ");
-      const match = rest.match(/^(.*?)\s+\(([^:]+):(.+)\)$/);
-      return {
-        alias: aliasPart.trim(),
-        label: (match?.[1] ?? rest).trim(),
-        provider: (match?.[2] ?? "").trim(),
-        model: (match?.[3] ?? "").trim(),
-      };
-    })
-    .filter((choice) => choice.alias.length > 0 && choice.provider.length > 0 && choice.model.length > 0);
-}
-
 function modelChoicesFromPolicy(value: unknown): ModelChoice[] {
   if (typeof value !== "object" || value === null) {
     return [];
@@ -401,6 +381,38 @@ function modelChoicesFromPolicy(value: unknown): ModelChoice[] {
       model: String(item.model ?? "").trim(),
     }))
     .filter((choice) => choice.alias.length > 0 && choice.provider.length > 0 && choice.model.length > 0);
+}
+
+function flattenedSectionRowCount(sections: Array<{title: string; rows: string[]}>): number {
+  return sections.reduce((total, section) => total + section.rows.length + 2, 0);
+}
+
+function scrollMaxOffsetForTab(activeTab: TabSpec | undefined, state: AppState): number {
+  if (!activeTab) {
+    return 0;
+  }
+  if (activeTab.kind === "repo") {
+    const sections = buildRepoPaneSections(
+      state.liveRepoPreview ?? activeTab.preview,
+      activeTab.lines,
+      state.liveControlPreview ?? state.tabs.find((tab) => tab.id === "control")?.preview,
+      state.tabs.find((tab) => tab.id === "control")?.lines ?? [],
+    );
+    return Math.max(flattenedSectionRowCount(sections) - SCROLL_WINDOW_SIZE, 0);
+  }
+  if (activeTab.kind === "control") {
+    const preview = state.liveControlPreview ?? activeTab.preview ?? state.tabs.find((tab) => tab.id === "control")?.preview;
+    const sections = buildControlPaneSections(preview, activeTab.lines);
+    return Math.max(flattenedSectionRowCount(sections) - SCROLL_WINDOW_SIZE, 0);
+  }
+  if (activeTab.kind === "runtime") {
+    const runtimeLines =
+      activeTab.lines.length === 0 ? (state.tabs.find((tab) => tab.id === "control")?.lines ?? []) : activeTab.lines;
+    const preview = state.liveControlPreview ?? activeTab.preview ?? state.tabs.find((tab) => tab.id === "control")?.preview;
+    const sections = buildRuntimePaneSections(preview, runtimeLines);
+    return Math.max(flattenedSectionRowCount(sections) - SCROLL_WINDOW_SIZE, 0);
+  }
+  return Math.max((activeTab.lines.length || 0) - SCROLL_WINDOW_SIZE, 0);
 }
 
 function isBareModelCommand(prompt: string): boolean {
@@ -513,7 +525,7 @@ function paneActionsFor(tabId: string, state: AppState): {refresh: PaneAction; p
 
 function footerHintFor(tabId: string, state: AppState): string {
   const actions = paneActionsFor(tabId, state);
-  const parts = [state.footerHint, `^L ${actions.refresh.label}`];
+  const parts = [state.footerHint, "↑/↓ scroll", `^L ${actions.refresh.label}`];
   if (actions.primary) {
     parts.push(`^X ${actions.primary.label}`);
   }
@@ -1472,7 +1484,11 @@ export function App(): React.ReactElement {
 
   const activeTab = state.tabs.find((tab) => tab.id === state.activeTabId) ?? state.tabs[0];
   const outline = useMemo(() => outlineFromTabs(state.tabs), [state.tabs]);
-  const modelChoices = state.modelTargets.length > 0 ? state.modelTargets : modelChoicesFromTab(state.tabs.find((tab) => tab.id === "models"));
+  const modelChoices = state.modelTargets;
+  const activeScrollOffset = Math.min(
+    state.paneScrollOffsets[activeTab?.id ?? ""] ?? 0,
+    scrollMaxOffsetForTab(activeTab, state),
+  );
   const stateRef = useRef(state);
   const pendingBootstraps = useRef<Record<string, {prompt: string; provider: string; model: string}>>({});
   const bridgeRef = useRef<DharmaBridge | null>(null);
@@ -1629,8 +1645,7 @@ export function App(): React.ReactElement {
   }
 
   function applyModelChoice(index: number): void {
-    const modelsTab = stateRef.current.tabs.find((tab) => tab.id === "models");
-    const choices = modelChoicesFromTab(modelsTab);
+    const choices = stateRef.current.modelTargets;
     const clampedIndex = Math.min(Math.max(index, 0), Math.max(choices.length - 1, 0));
     const choice = choices[clampedIndex];
     if (!choice) {
@@ -1662,8 +1677,7 @@ export function App(): React.ReactElement {
       return;
     }
     if (state.modelPickerVisible) {
-      const modelsTab = state.tabs.find((tab) => tab.id === "models");
-      const choices = modelChoicesFromTab(modelsTab);
+      const choices = state.modelTargets;
       const maxIndex = Math.max(choices.length - 1, 0);
       if (key.escape) {
         dispatch({type: "modelPicker.close"});
@@ -1689,6 +1703,15 @@ export function App(): React.ReactElement {
         }
         return;
       }
+    }
+    if ((key.upArrow || key.downArrow) && activeTab) {
+      dispatch({
+        type: "pane.scroll",
+        tabId: activeTab.id,
+        delta: key.upArrow ? -1 : 1,
+        maxOffset: scrollMaxOffsetForTab(activeTab, stateRef.current),
+      });
+      return;
     }
     if (key.ctrl && input === "b") {
       dispatch({type: "sidebar.toggle"});
@@ -1835,6 +1858,8 @@ export function App(): React.ReactElement {
             controlPreview={decorateSurfacePreview(state.liveControlPreview ?? state.tabs.find((tab) => tab.id === "control")?.preview, "control", state.bridgeStatus, state.authoritativeSurfaces)}
             controlLines={state.tabs.find((tab) => tab.id === "control")?.lines ?? []}
             lines={activeTab.lines}
+            scrollOffset={activeScrollOffset}
+            windowSize={SCROLL_WINDOW_SIZE}
           />
         ) : activeTab?.kind === "control" || activeTab?.kind === "runtime" ? (
           <ControlPane
@@ -1855,9 +1880,16 @@ export function App(): React.ReactElement {
                 ? (state.tabs.find((tab) => tab.id === "control")?.lines ?? [])
                 : activeTab.lines
             }
+            scrollOffset={activeScrollOffset}
+            windowSize={SCROLL_WINDOW_SIZE}
           />
         ) : (
-          <TranscriptPane title={activeTab?.title ?? "Workspace"} lines={activeTab?.lines ?? []} />
+          <TranscriptPane
+            title={activeTab?.title ?? "Workspace"}
+            lines={activeTab?.lines ?? []}
+            scrollOffset={activeScrollOffset}
+            windowSize={SCROLL_WINDOW_SIZE}
+          />
         )}
       </Box>
       <Composer prompt={state.prompt} />
@@ -1898,6 +1930,7 @@ export function createInitialAppState(baseState: AppState): AppState {
     sidebarVisible: restored?.sidebarVisible ?? baseState.sidebarVisible,
     sidebarMode: restored?.sidebarMode ?? baseState.sidebarMode,
     activeTabId: baseState.activeTabId,
+    paneScrollOffsets: baseState.paneScrollOffsets,
     tabs: hydratedTabs,
     liveRepoPreview: mergePreview(baseState.liveRepoPreview, restoredRepoPreview),
     liveControlPreview: mergePreview(baseState.liveControlPreview, restoredControlPreview),

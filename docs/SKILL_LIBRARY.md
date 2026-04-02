@@ -1,3 +1,89 @@
+---
+title: Skill Library — awesome-claude-skills Audit
+path: docs/SKILL_LIBRARY.md
+slug: skill-library-awesome-claude-skills-audit
+doc_type: documentation
+status: active
+summary: 'Date : 2026-03-24 Source : https://github.com/ComposioHQ/awesome-claude-skills Repo Status : Accessible (HTTP 200) Action : Audit only. No skills installed.'
+source:
+  provenance: repo_local
+  kind: documentation
+  origin_signals:
+  - garden_daemon.py
+  cited_urls:
+  - https://github.com/ComposioHQ/awesome-claude-skills
+  - https://github.com/ComposioHQ/awesome-claude-skills.git
+  generated_hint: human_or_agent_authored_repo_doc
+disciplines:
+- multi_agent_systems
+- software_architecture
+- knowledge_management
+- research_methodology
+- verification
+- frontend_engineering
+inspiration:
+- verification
+- operator_runtime
+- product_surface
+- research_synthesis
+connected_python_files:
+- garden_daemon.py
+connected_python_modules:
+- garden_daemon
+connected_relevant_files:
+- garden_daemon.py
+- docs/plans/ALLOUT_6H_MODE.md
+- docs/plans/ALL_NIGHT_BUILD_CONCLAVE_2026-03-20.md
+- docs/ASCII_STUDIO_SETUP.md
+- docs/plans/CODEX_ALLNIGHT_YOLO.md
+improvement:
+  room_for_improvement:
+  - Strengthen cross-links to adjacent docs and implementing modules.
+  - Separate durable knowledge from transient session context.
+  - Add a tighter summary for first-pass retrieval.
+  - Review whether this file should stay in `docs` or be consolidated elsewhere.
+  next_review_at: '2026-04-01T00:43:19+09:00'
+pkm:
+  note_class: documentation
+  vault_path: docs/SKILL_LIBRARY.md
+  retrieval_terms:
+  - skill
+  - library
+  - awesome
+  - claude
+  - skills
+  - audit
+  - date
+  - '2026'
+  - source
+  - https
+  - github
+  - com
+  evergreen_potential: medium
+stigmergy:
+  meaning: This file is a shared environmental trace in the DHARMA corpus. Its path, recency, and linked surfaces guide future agent attention; its frontmatter now adds machine-readable coordination cues.
+  state: working
+  semantic_weight: 0.55
+  coordination_comment: 'Date : 2026-03-24 Source : https://github.com/ComposioHQ/awesome-claude-skills Repo Status : Accessible (HTTP 200) Action : Audit only. No skills installed.'
+  levels:
+    sematectonic:
+      what_it_is: The document itself is the mark. Its existence, filename, location, and revision history attract or repel future work.
+      access_mark: Opening, linking, and revising docs/SKILL_LIBRARY.md reinforces its salience without needing a separate message.
+    marker_based:
+      what_it_is: The frontmatter is an explicit annotation layer on top of the document.
+      semantic_mark: Semantic weight, improvement prompts, related files, and provenance comments tell later agents how to use this document.
+  trace_role: coordination_trace
+curation:
+  last_frontmatter_refresh: '2026-04-01T00:43:19+09:00'
+  curated_by_model: Codex (GPT-5)
+  source_model_in_file: 
+  future_model_handoffs:
+  - GPT-5 Codex
+  - Claude
+  - Gemini
+  - Local evaluator
+  schema_version: pkm-phd-stigmergy-v1
+---
 # Skill Library — awesome-claude-skills Audit
 
 **Date**: 2026-03-24

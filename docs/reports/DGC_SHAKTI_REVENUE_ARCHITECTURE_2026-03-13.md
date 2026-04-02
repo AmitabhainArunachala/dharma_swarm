@@ -1,3 +1,103 @@
+---
+title: DGC Shakti Revenue Architecture
+path: docs/reports/DGC_SHAKTI_REVENUE_ARCHITECTURE_2026-03-13.md
+slug: dgc-shakti-revenue-architecture
+doc_type: report
+status: active
+summary: 'Date: 2026-03-13 Purpose: turn DGC''s commercial side into a coherent money engine without losing the deeper dharmic or world-benefiting arc Status: strategic operating thesis / offer architecture / monetization plan'
+source:
+  provenance: repo_local
+  kind: report
+  origin_signals:
+  - docs/reports/DGC_DUAL_ENGINE_REALITY_MAP_2026-03-13.md
+  - docs/missions/DUAL_ENGINE_MASSIVE_SWARM_2026-03-13.md
+  - docs/archive/DGC_100X_LEAN_ESSENCE_2026-03-08.md
+  - docs/reports/session_2026-03-08/ARCHITECTURAL_VISION.md
+  cited_urls:
+  - https://openai.com/index/introducing-codex/
+  - https://openai.com/index/introducing-the-codex-app/
+  - https://openai.com/index/new-tools-and-features-in-the-responses-api/
+  - https://www.anthropic.com/engineering/built-multi-agent-research-system
+  - https://www.anthropic.com/economic-futures
+  generated_hint: human_or_agent_authored_repo_doc
+disciplines:
+- swarm_intelligence
+- multi_agent_systems
+- software_architecture
+- knowledge_management
+- research_methodology
+- verification
+inspiration:
+- verification
+- operator_runtime
+- product_surface
+- research_synthesis
+connected_python_files:
+- tools/loop_templates/rv_pipeline_optimization.py
+- dharma_swarm/auto_research/claim_graph.py
+- dharma_swarm/contracts/intelligence_agents.py
+- dharma_swarm/contracts/intelligence_evaluation_services.py
+- dharma_swarm/contracts/intelligence_stack.py
+connected_python_modules:
+- tools.loop_templates.rv_pipeline_optimization
+- dharma_swarm.auto_research.claim_graph
+- dharma_swarm.contracts.intelligence_agents
+- dharma_swarm.contracts.intelligence_evaluation_services
+- dharma_swarm.contracts.intelligence_stack
+connected_relevant_files:
+- docs/reports/DGC_DUAL_ENGINE_REALITY_MAP_2026-03-13.md
+- docs/missions/DUAL_ENGINE_MASSIVE_SWARM_2026-03-13.md
+- docs/archive/DGC_100X_LEAN_ESSENCE_2026-03-08.md
+- docs/reports/session_2026-03-08/ARCHITECTURAL_VISION.md
+- tools/loop_templates/rv_pipeline_optimization.py
+improvement:
+  room_for_improvement:
+  - 'Surface the decision delta: what should change now because this report exists.'
+  - Link findings to exact code, tests, or commits where possible.
+  - Distinguish measured facts from operator interpretation.
+  - Review whether this file should stay in `docs/reports` or be consolidated elsewhere.
+  next_review_at: '2026-04-01T00:43:19+09:00'
+pkm:
+  note_class: report
+  vault_path: docs/reports/DGC_SHAKTI_REVENUE_ARCHITECTURE_2026-03-13.md
+  retrieval_terms:
+  - reports
+  - dgc
+  - shakti
+  - revenue
+  - architecture
+  - '2026'
+  - date
+  - purpose
+  - turn
+  - commercial
+  - side
+  - coherent
+  evergreen_potential: medium
+stigmergy:
+  meaning: This file is a shared environmental trace in the DHARMA corpus. Its path, recency, and linked surfaces guide future agent attention; its frontmatter now adds machine-readable coordination cues.
+  state: working
+  semantic_weight: 0.6
+  coordination_comment: 'Date: 2026-03-13 Purpose: turn DGC''s commercial side into a coherent money engine without losing the deeper dharmic or world-benefiting arc Status: strategic operating thesis / offer architecture / monetization plan'
+  levels:
+    sematectonic:
+      what_it_is: The document itself is the mark. Its existence, filename, location, and revision history attract or repel future work.
+      access_mark: Opening, linking, and revising docs/reports/DGC_SHAKTI_REVENUE_ARCHITECTURE_2026-03-13.md reinforces its salience without needing a separate message.
+    marker_based:
+      what_it_is: The frontmatter is an explicit annotation layer on top of the document.
+      semantic_mark: Semantic weight, improvement prompts, related files, and provenance comments tell later agents how to use this document.
+  trace_role: diagnostic_or_evidence_trace
+curation:
+  last_frontmatter_refresh: '2026-04-01T00:43:19+09:00'
+  curated_by_model: Codex (GPT-5)
+  source_model_in_file: 
+  future_model_handoffs:
+  - GPT-5 Codex
+  - Claude
+  - Gemini
+  - Local evaluator
+  schema_version: pkm-phd-stigmergy-v1
+---
 # DGC Shakti Revenue Architecture
 
 Date: 2026-03-13
@@ -619,5 +719,5 @@ Internal source spine:
 
 - `docs/reports/DGC_DUAL_ENGINE_REALITY_MAP_2026-03-13.md`
 - `docs/missions/DUAL_ENGINE_MASSIVE_SWARM_2026-03-13.md`
-- `docs/DGC_100X_LEAN_ESSENCE_2026-03-08.md`
+- `docs/archive/DGC_100X_LEAN_ESSENCE_2026-03-08.md`
 - `docs/reports/session_2026-03-08/ARCHITECTURAL_VISION.md`

@@ -187,6 +187,22 @@ def test_build_model_policy_summary_filters_unavailable_providers() -> None:
     assert summary["selected_provider"] in {"codex", "claude", "openrouter"}
 
 
+def test_build_model_policy_summary_uses_expanded_core_targets() -> None:
+    bridge = TerminalBridge()
+    summary = bridge._build_model_policy_summary(
+        selected_provider="openrouter",
+        selected_model="deepseek/deepseek-r1",
+        strategy="responsive",
+    )
+
+    target_models = {target["model"] for target in summary["targets"]}
+
+    assert "deepseek/deepseek-r1" in target_models
+    assert "openai/gpt-5-codex" in target_models
+    assert any("qwen" in model for model in target_models)
+    assert any("kimi" in model for model in target_models)
+
+
 def test_handle_runtime_snapshot_emits_typed_payload_without_legacy_content(monkeypatch) -> None:
     bridge = TerminalBridge()
     captured: list[dict[str, object]] = []

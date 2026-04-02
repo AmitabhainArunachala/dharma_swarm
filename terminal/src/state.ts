@@ -37,6 +37,7 @@ export const initialState: AppState = {
   prompt: "",
   activeTabId: "chat",
   tabs: initialTabs,
+  paneScrollOffsets: {},
   liveRepoPreview: initialTabs.find((tab) => tab.id === "repo")?.preview,
   liveControlPreview: initialTabs.find((tab) => tab.id === "control")?.preview,
   authoritativeSurfaces: {
@@ -132,6 +133,32 @@ export function reduceApp(state: AppState, action: AppAction): AppState {
       }
       const nextIndex = (index + action.direction + state.tabs.length) % state.tabs.length;
       return {...state, activeTabId: state.tabs[nextIndex].id};
+    }
+    case "pane.scroll": {
+      const current = state.paneScrollOffsets[action.tabId] ?? 0;
+      const next = Math.min(Math.max(current + action.delta, 0), Math.max(action.maxOffset, 0));
+      if (next === current) {
+        return state;
+      }
+      return {
+        ...state,
+        paneScrollOffsets: {
+          ...state.paneScrollOffsets,
+          [action.tabId]: next,
+        },
+      };
+    }
+    case "pane.scroll.reset": {
+      if ((state.paneScrollOffsets[action.tabId] ?? 0) === 0) {
+        return state;
+      }
+      return {
+        ...state,
+        paneScrollOffsets: {
+          ...state.paneScrollOffsets,
+          [action.tabId]: 0,
+        },
+      };
     }
     case "tab.ensure": {
       const existing = state.tabs.find((tab) => tab.id === action.tab.id);

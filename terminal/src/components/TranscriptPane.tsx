@@ -7,10 +7,19 @@ import {formatTranscriptLine} from "../transcriptFormatting.js";
 type Props = {
   title: string;
   lines: TranscriptLine[];
+  scrollOffset?: number;
+  windowSize?: number;
 };
 
-export function TranscriptPane({title, lines}: Props): React.ReactElement {
-  const visible = lines.slice(-24);
+function visibleWindow<T>(items: T[], scrollOffset: number, windowSize: number): T[] {
+  const total = items.length;
+  const end = Math.max(total - scrollOffset, 0);
+  const start = Math.max(end - windowSize, 0);
+  return items.slice(start, end);
+}
+
+export function TranscriptPane({title, lines, scrollOffset = 0, windowSize = 24}: Props): React.ReactElement {
+  const visible = visibleWindow(lines, scrollOffset, windowSize);
   return (
     <Box flexGrow={1} flexDirection="column" borderStyle="single" borderColor="gray" paddingX={1}>
       <Text color="cyan">{title}</Text>

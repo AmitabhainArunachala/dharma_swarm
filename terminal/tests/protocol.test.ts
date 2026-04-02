@@ -822,6 +822,21 @@ describe("resolveCommandTargetPane", () => {
     ).toBe("sessions");
   });
 
+  test("derives the command and target pane from nested payload request envelopes", () => {
+    expect(
+      resolveCommandTargetPane({
+        type: "action.result",
+        action_type: "command.run",
+        payload: {
+          request: {
+            command: "/git status",
+            target_pane: "workspace",
+          },
+        },
+      }),
+    ).toBe("repo");
+  });
+
   test("derives the target pane from an inline-code slash command in the summary", () => {
     expect(
       resolveCommandTargetPane({
@@ -1098,6 +1113,24 @@ Git: main@95210b1 | staged 0 | unstaged 517 | untracked 46`,
     expect(patches[0]?.lines[0]?.text).toBe("Repo dirty: 517 unstaged, 47 untracked");
   });
 
+  test("routes payload-wrapped slash command action results through the inferred pane patch logic", () => {
+    const patches = eventToTabPatch({
+      type: "action.result",
+      action_type: "command.run",
+      payload: {
+        request: {
+          command: "/git status",
+          target_pane: "workspace",
+        },
+      },
+      output: "Repo dirty: 517 unstaged, 47 untracked",
+    });
+
+    expect(patches).toHaveLength(1);
+    expect(patches[0]?.tabId).toBe("repo");
+    expect(patches[0]?.lines[0]?.text).toBe("Repo dirty: 517 unstaged, 47 untracked");
+  });
+
   test("suppresses structured runtime transcript patches for slash command action results", () => {
     const patches = eventToTabPatch({
       type: "action.result",
@@ -1312,6 +1345,41 @@ describe("modelPolicy helpers", () => {
     expect(lines.some((line) => line.includes("Claude Sonnet 4.6"))).toBe(true);
     expect(preview.Route).toBe("codex:gpt-5.4");
     expect(preview.Targets).toBe("1");
+  });
+
+  test("does not truncate expanded target rosters", () => {
+    const event = {
+      type: "model.policy.result",
+      payload: {
+        version: "v1",
+        domain: "routing_decision",
+        decision: {
+          route_id: "openrouter:deepseek/deepseek-r1",
+          provider_id: "openrouter",
+          model_id: "deepseek/deepseek-r1",
+          strategy: "responsive",
+          reason: "expanded target roster",
+          fallback_chain: [],
+          degraded: false,
+          metadata: {
+            active_label: "deepseek/deepseek-r1",
+            default_route: "codex:gpt-5.4",
+          },
+        },
+        strategies: ["responsive", "genius"],
+        fallback_targets: [],
+        targets: Array.from({length: 12}, (_, index) => ({
+          alias: `lane-${index + 1}`,
+          label: `Lane ${index + 1}`,
+          provider: index % 2 === 0 ? "openrouter" : "codex",
+          model: `model-${index + 1}`,
+        })),
+      },
+    };
+
+    const lines = modelPolicyToLines(event).map((line) => line.text);
+
+    expect(lines.some((line) => line.includes("lane-12 -> Lane 12 (codex:model-12)"))).toBe(true);
   });
 });
 

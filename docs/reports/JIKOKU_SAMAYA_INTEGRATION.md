@@ -1,12 +1,104 @@
+---
+title: JIKOKU SAMAYA Integration Guide
+path: docs/reports/JIKOKU_SAMAYA_INTEGRATION.md
+slug: jikoku-samaya-integration-guide
+doc_type: report
+status: active
+summary: 'NOTE : This is the original integration guide with manual span wrapping examples.'
+source:
+  provenance: repo_local
+  kind: report
+  origin_signals:
+  - docs/architecture/JIKOKU_SAMAYA_EXECUTIVE_SUMMARY.md
+  - docs/architecture/JIKOKU_SAMAYA_ARCHITECTURE.md
+  - docs/architecture/JIKOKU_SAMAYA_SYSTEM_DIAGRAM.md
+  - docs/architecture/JIKOKU_SAMAYA_IMPLEMENTATION_ROADMAP.md
+  - dharma_swarm/swarm.py
+  cited_urls: []
+  generated_hint: human_or_agent_authored_repo_doc
+disciplines:
+- multi_agent_systems
+- software_architecture
+- research_methodology
+- verification
+- product_strategy
+- frontend_engineering
+inspiration:
+- product_surface
+- research_synthesis
+connected_python_files:
+- dharma_swarm/swarm.py
+- dharma_swarm/providers.py
+- dharma_swarm/evolution.py
+- dharma_swarm/archive.py
+- dharma_swarm/dgc_cli.py
+connected_python_modules:
+- dharma_swarm.swarm
+- dharma_swarm.providers
+- dharma_swarm.evolution
+- dharma_swarm.archive
+- dharma_swarm.dgc_cli
+connected_relevant_files:
+  - docs/architecture/JIKOKU_SAMAYA_EXECUTIVE_SUMMARY.md
+  - docs/architecture/JIKOKU_SAMAYA_ARCHITECTURE.md
+  - docs/architecture/JIKOKU_SAMAYA_SYSTEM_DIAGRAM.md
+  - docs/architecture/JIKOKU_SAMAYA_IMPLEMENTATION_ROADMAP.md
+  - dharma_swarm/swarm.py
+improvement:
+  room_for_improvement:
+  - 'Surface the decision delta: what should change now because this report exists.'
+  - Link findings to exact code, tests, or commits where possible.
+  - Distinguish measured facts from operator interpretation.
+  - Review whether this file should stay in `docs/reports` or be consolidated elsewhere.
+  next_review_at: '2026-04-01T00:43:19+09:00'
+pkm:
+  note_class: report
+  vault_path: docs/reports/JIKOKU_SAMAYA_INTEGRATION.md
+  retrieval_terms:
+  - reports
+  - jikoku
+  - samaya
+  - integration
+  - guide
+  - original
+  - manual
+  - span
+  - wrapping
+  - examples
+  evergreen_potential: medium
+stigmergy:
+  meaning: This file is a shared environmental trace in the DHARMA corpus. Its path, recency, and linked surfaces guide future agent attention; its frontmatter now adds machine-readable coordination cues.
+  state: working
+  semantic_weight: 0.6
+  coordination_comment: 'NOTE : This is the original integration guide with manual span wrapping examples.'
+  levels:
+    sematectonic:
+      what_it_is: The document itself is the mark. Its existence, filename, location, and revision history attract or repel future work.
+      access_mark: Opening, linking, and revising docs/reports/JIKOKU_SAMAYA_INTEGRATION.md reinforces its salience without needing a separate message.
+    marker_based:
+      what_it_is: The frontmatter is an explicit annotation layer on top of the document.
+      semantic_mark: Semantic weight, improvement prompts, related files, and provenance comments tell later agents how to use this document.
+  trace_role: diagnostic_or_evidence_trace
+curation:
+  last_frontmatter_refresh: '2026-04-01T00:43:19+09:00'
+  curated_by_model: Codex (GPT-5)
+  source_model_in_file: 
+  future_model_handoffs:
+  - GPT-5 Codex
+  - Claude
+  - Gemini
+  - Local evaluator
+  schema_version: pkm-phd-stigmergy-v1
+---
 # JIKOKU SAMAYA Integration Guide
 
 **NOTE**: This is the original integration guide with manual span wrapping examples.
 
 **For deep OS integration** (automatic instrumentation), see:
-- `docs/JIKOKU_SAMAYA_EXECUTIVE_SUMMARY.md` — Start here (high-level overview)
-- `docs/JIKOKU_SAMAYA_ARCHITECTURE.md` — Complete technical architecture
-- `docs/JIKOKU_SAMAYA_SYSTEM_DIAGRAM.md` — Visual diagrams
-- `docs/JIKOKU_SAMAYA_IMPLEMENTATION_ROADMAP.md` — Day-by-day implementation guide
+- `docs/architecture/JIKOKU_SAMAYA_EXECUTIVE_SUMMARY.md` — Start here (high-level overview)
+- `docs/architecture/JIKOKU_SAMAYA_ARCHITECTURE.md` — Complete technical architecture
+- `docs/architecture/JIKOKU_SAMAYA_SYSTEM_DIAGRAM.md` — Visual diagrams
+- `docs/architecture/JIKOKU_SAMAYA_IMPLEMENTATION_ROADMAP.md` — Day-by-day implementation guide
 
 ---
 

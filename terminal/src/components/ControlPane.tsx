@@ -43,6 +43,8 @@ type Props = {
   mode?: "control" | "runtime";
   preview?: TabPreview;
   lines: TranscriptLine[];
+  scrollOffset?: number;
+  windowSize?: number;
 };
 
 function previewValue(preview: TabPreview | undefined, lines: TranscriptLine[], label: string): string {
@@ -518,22 +520,30 @@ export function buildRuntimePaneSections(preview?: TabPreview, lines: Transcript
   ].filter((section) => section.rows.length > 0);
 }
 
-export function ControlPane({title, mode = "control", preview, lines}: Props): React.ReactElement {
+export function ControlPane({
+  title,
+  mode = "control",
+  preview,
+  lines,
+  scrollOffset = 0,
+  windowSize = 24,
+}: Props): React.ReactElement {
   const sections = mode === "runtime" ? buildRuntimePaneSections(preview, lines) : buildControlPaneSections(preview, lines);
+  const flattened = sections.flatMap((section) => [
+    {kind: "section" as const, id: section.title, text: section.title},
+    ...section.rows.map((row, index) => ({kind: "row" as const, id: `${section.title}-${index}`, text: row})),
+    {kind: "spacer" as const, id: `${section.title}-spacer`, text: ""},
+  ]);
+  const visible = flattened.slice(scrollOffset, scrollOffset + windowSize);
 
   return (
     <Box flexGrow={1} flexDirection="column" borderStyle="single" borderColor="gray" paddingX={1}>
       <Text color="cyan">{title}</Text>
       <Text color="gray"> </Text>
-      {sections.map((section) => (
-        <Box key={section.title} flexDirection="column" marginBottom={1}>
-          <Text color="white">{section.title}</Text>
-          {section.rows.map((row) => (
-            <Text key={`${section.title}-${row}`} color="gray">
-              {row}
-            </Text>
-          ))}
-        </Box>
+      {visible.map((entry) => (
+        <Text key={entry.id} color={entry.kind === "section" ? "white" : "gray"}>
+          {entry.text}
+        </Text>
       ))}
     </Box>
   );
