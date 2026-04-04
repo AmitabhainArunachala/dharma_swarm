@@ -787,6 +787,8 @@ class SwarmManager:
             # Route through the shared ModelRouter so live agent tasks contribute
             # to routing memory, retries, and audit trails while staying pinned
             # to config.provider unless task metadata widens the lane set.
+            if self._agent_pool is None:
+                raise RuntimeError("AgentPool not initialized — cannot spawn agents")
             spawner = self._worker_spawners.get(name)
             runner = await self._agent_pool.spawn(
                 config,
