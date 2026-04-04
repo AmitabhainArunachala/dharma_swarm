@@ -492,7 +492,10 @@ def _canonicalize_previous_outcome(previous_outcome: str | None) -> str:
 
 
 def _load_tiny_router_artifacts(*, allow_download: bool) -> _TinyRouterCheckpointArtifacts | None:
-    from huggingface_hub import snapshot_download
+    try:
+        from huggingface_hub import snapshot_download
+    except ImportError:
+        return None
 
     try:
         repo_dir = Path(
