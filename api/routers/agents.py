@@ -3,12 +3,23 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
+from datetime import datetime, timezone
+from typing import Any
 
 from fastapi import APIRouter, Query, WebSocket, WebSocketDisconnect
+from fastapi.responses import StreamingResponse
+from pydantic import BaseModel
 
 from api.models import AgentOut, ApiResponse, SpawnAgentRequest
 from api.routers._agent_aliases import alias_candidates, matches_agent_alias
+from api.routers.chat import (
+    ChatMessage,
+    _agentic_stream,
+    _get_chat_settings,
+    _sse_data,
+)
 from api.ws import manager
 from dharma_swarm.ontology_agents import (
     agent_display_name,
@@ -383,6 +394,183 @@ async def sync_agents(
         return ApiResponse(data={"count": len(results), "results": results})
     except Exception as e:
         return ApiResponse(status="error", error=str(e))
+
+
+# ── Provider → chat-profile mapping ───────────────────────────────────
+
+_PROVIDER_PROFILE_MAP: dict[str, str] = {
+    "claude_code": "claude_opus",
+    "claude": "claude_opus",
+    "openai": "codex_operator",
+    "codex": "codex_operator",
+    "groq": "qwen35_surgeon",
+    "qwen": "qwen35_surgeon",
+    "glm": "glm5_researcher",
+    "kimi": "kimi_k25_scout",
+}
+
+
+def _profile_id_for_provider(provider: str) -> str:
+    """Map an agent's provider string to a chat profile ID."""
+    provider_lower = provider.lower()
+    for key, profile_id in _PROVIDER_PROFILE_MAP.items():
+        if key in provider_lower:
+            return profile_id
+    return "claude_opus"
+
+
+def _build_agent_system_prompt(payload: dict[str, Any]) -> str:
+    """Build a contextual system prompt from the resolved agent payload."""
+    agent = payload["agent"]
+    config = payload["config"]
+
+    display_name = agent.get("display_name") or agent.get("name") or "Agent"
+    role = config.get("role") or agent.get("role") or "general"
+    status = agent.get("status") or "unknown"
+    current_task = agent.get("current_task") or "none"
+    provider = config.get("provider") or agent.get("provider") or "unknown"
+    model = config.get("model") or agent.get("model") or "unknown"
+    strengths = config.get("strengths") or []
+
+    parts = [
+        f"You are {display_name}, a {role} agent running on {provider}/{model}.",
+        f"Status: {status}. Current task: {current_task}.",
+    ]
+
+    if strengths:
+        parts.append(f"Strengths: {', '.join(strengths)}.")
+
+    # Last 5 assigned tasks
+    tasks = payload.get("assigned_tasks", [])[:5]
+    if tasks:
+        task_lines = [f"  - {t.get('title', '?')} [{t.get('status', '?')}]" for t in tasks]
+        parts.append("Recent assigned tasks:\n" + "\n".join(task_lines))
+
+    # Last 5 traces
+    traces = payload.get("recent_traces", [])[:5]
+    if traces:
+        trace_lines = [f"  - {t.get('action', '?')} [{t.get('state', '?')}]" for t in traces]
+        parts.append("Recent traces:\n" + "\n".join(trace_lines))
+
+    parts.append(
+        "Your active context: answer questions about your role, current work, "
+        "and the swarm system. Use tools when available to gather live data."
+    )
+
+    return "\n\n".join(parts)
+
+
+# ── Agent chat request model ──────────────────────────────────────────
+
+class AgentChatRequest(BaseModel):
+    messages: list[ChatMessage]
+    context: str | None = None
+
+
+# ── Agent config update request model ─────────────────────────────────
+
+class AgentConfigRequest(BaseModel):
+    role: str | None = None
+    model: str | None = None
+    display_name: str | None = None
+    strengths: list[str] | None = None
+
+
+@router.post("/agents/{agent_id}/chat")
+async def agent_chat(agent_id: str, req: AgentChatRequest):
+    """Per-agent SSE chat endpoint.
+
+    Resolves the agent's identity, builds an agent-specific system prompt,
+    maps the agent's provider to a chat profile, and streams an agentic
+    response in the same SSE format as ``/api/chat``.
+    """
+    payload = await _resolve_agent_payload(agent_id)
+    if payload is None:
+        return StreamingResponse(
+            iter([_sse_data({"error": f"Agent not found: {agent_id}"}),
+                  "data: [DONE]\n\n"]),
+            media_type="text/event-stream",
+        )
+
+    agent = payload["agent"]
+    config = payload["config"]
+    provider_str = config.get("provider") or agent.get("provider") or ""
+
+    # Resolve chat profile from agent's provider
+    profile_id = _profile_id_for_provider(provider_str)
+    settings = _get_chat_settings(profile_id)
+
+    if not settings.available:
+        return StreamingResponse(
+            iter([_sse_data({"error": f"Chat profile '{profile_id}' is not available. "
+                            f"Configure the required API key or CLI."}),
+                  "data: [DONE]\n\n"]),
+            media_type="text/event-stream",
+        )
+
+    # Build agent-contextual system prompt
+    system_prompt = _build_agent_system_prompt(payload)
+    if req.context:
+        system_prompt += f"\n\nAdditional context: {req.context}"
+
+    # Build messages for API
+    api_messages: list[dict] = [{"role": "system", "content": system_prompt}]
+    for m in req.messages:
+        api_messages.append({"role": m.role, "content": m.content})
+
+    timestamp = datetime.now(timezone.utc).strftime("%Y%m%d-%H%M%S")
+    session_id = f"agent-{agent_id}-{timestamp}"
+
+    async def stream():
+        yield _sse_data({"session_id": session_id})
+        async for chunk in _agentic_stream(
+            api_messages,
+            settings,
+            session_id=session_id,
+            profile_id=profile_id,
+        ):
+            yield chunk
+
+    return StreamingResponse(
+        stream(),
+        media_type="text/event-stream",
+        headers={
+            "Cache-Control": "no-cache",
+            "Connection": "keep-alive",
+            "X-Accel-Buffering": "no",
+        },
+    )
+
+
+@router.post("/agents/{agent_id}/config")
+async def update_agent_config(agent_id: str, req: AgentConfigRequest) -> ApiResponse:
+    """Update an agent's configuration (role, model, display_name, strengths)."""
+    payload = await _resolve_agent_payload(agent_id)
+    if payload is None:
+        return ApiResponse(status="error", error=f"Agent not found: {agent_id}")
+
+    agent_name = payload["agent"].get("name") or agent_id
+    registry = _get_agent_registry()
+
+    updated_props: dict[str, Any] = {}
+    if req.role is not None:
+        updated_props["role"] = req.role
+    if req.model is not None:
+        updated_props["model"] = req.model
+    if req.display_name is not None:
+        updated_props["display_name"] = req.display_name
+    if req.strengths is not None:
+        updated_props["strengths"] = req.strengths
+
+    if not updated_props:
+        return ApiResponse(data={"agent_id": agent_id, "updated": []})
+
+    try:
+        registry.save_agent(agent_name, updated_props)
+    except ValueError as exc:
+        return ApiResponse(status="error", error=str(exc))
+
+    return ApiResponse(data={"agent_id": agent_id, "updated": list(updated_props.keys())})
 
 
 @router.websocket("/ws/agents")
