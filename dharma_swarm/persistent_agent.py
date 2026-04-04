@@ -2,7 +2,7 @@
 
 Composes AutonomousAgent — does NOT inherit or reinvent the ReAct loop.
 Adds: autonomous wake scheduling, self-task generation, stigmergy/bus
-reading, gate checks, and witness logging.
+reading, gate checks, witness logging, and per-agent mini-cron scheduling.
 
 Used by conductor agents that run continuously alongside the orchestrator
 or independently via launchd.
@@ -14,13 +14,92 @@ import asyncio
 import json
 import logging
 import time
+from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any
+from typing import Any, Callable, Awaitable
 
 from dharma_swarm.autonomous_agent import AgentIdentity, AgentResult, AutonomousAgent
 from dharma_swarm.models import AgentRole, ProviderType
 
 logger = logging.getLogger(__name__)
+
+
+# ---------------------------------------------------------------------------
+# Per-agent mini-cron
+# ---------------------------------------------------------------------------
+
+
+@dataclass
+class AgentCronJob:
+    """A recurring task registered by a persistent agent."""
+    name: str
+    interval_seconds: float
+    handler: Callable[..., Awaitable[Any]]
+    last_run: float = 0.0
+    run_count: int = 0
+    enabled: bool = True
+    description: str = ""
+
+
+class AgentCronScheduler:
+    """Lightweight per-agent scheduler for periodic housekeeping tasks.
+
+    Not a system-wide cron — each PersistentAgent owns one of these.
+    Jobs run during the agent's wake cycle, never independently.
+    """
+
+    def __init__(self) -> None:
+        self._jobs: dict[str, AgentCronJob] = {}
+
+    def register(
+        self,
+        name: str,
+        interval_seconds: float,
+        handler: Callable[..., Awaitable[Any]],
+        description: str = "",
+    ) -> None:
+        self._jobs[name] = AgentCronJob(
+            name=name,
+            interval_seconds=interval_seconds,
+            handler=handler,
+            description=description,
+        )
+
+    def unregister(self, name: str) -> bool:
+        return self._jobs.pop(name, None) is not None
+
+    def list_jobs(self) -> list[dict[str, Any]]:
+        return [
+            {
+                "name": j.name,
+                "interval_s": j.interval_seconds,
+                "enabled": j.enabled,
+                "run_count": j.run_count,
+                "description": j.description,
+            }
+            for j in self._jobs.values()
+        ]
+
+    async def tick(self) -> list[dict[str, Any]]:
+        """Run all due jobs. Returns results for each job that fired."""
+        now = time.monotonic()
+        results: list[dict[str, Any]] = []
+        for job in self._jobs.values():
+            if not job.enabled:
+                continue
+            if (now - job.last_run) < job.interval_seconds:
+                continue
+            try:
+                outcome = await job.handler()
+                job.last_run = now
+                job.run_count += 1
+                results.append({"job": job.name, "success": True, "result": outcome})
+            except Exception as exc:
+                job.last_run = now
+                job.run_count += 1
+                results.append({"job": job.name, "success": False, "error": str(exc)[:200]})
+                logger.debug("Agent cron job %s failed: %s", job.name, exc)
+        return results
 
 
 def _provider_string(provider_type: ProviderType) -> str:
@@ -88,6 +167,80 @@ class PersistentAgent:
         witness_dir.mkdir(parents=True, exist_ok=True)
         self._witness_log = witness_dir / f"conductor_{name}.jsonl"
 
+        # Per-agent mini-cron scheduler
+        self._cron = AgentCronScheduler()
+        self._setup_default_crons()
+
+    # -- Per-agent cron defaults ------------------------------------------
+
+    def _setup_default_crons(self) -> None:
+        """Register built-in housekeeping crons for this agent."""
+        self._cron.register(
+            "memory_consolidation",
+            interval_seconds=7200.0,  # every 2 hours
+            handler=self._cron_consolidate_memory,
+            description="Demote stale working memories to archival",
+        )
+        self._cron.register(
+            "stigmergy_scan",
+            interval_seconds=600.0,  # every 10 minutes
+            handler=self._cron_scan_stigmergy,
+            description="Check for high-salience environmental signals",
+        )
+        self._cron.register(
+            "inbox_check",
+            interval_seconds=300.0,  # every 5 minutes
+            handler=self._cron_check_inbox,
+            description="Peek at message bus for urgent messages",
+        )
+
+    async def _cron_consolidate_memory(self) -> str:
+        """Demote old working memories to archival layer."""
+        try:
+            bank = self._agent.memory
+            await bank.load()
+            working = bank.working if hasattr(bank, "working") else []
+            if len(working) > 8:
+                # Demote oldest entries beyond capacity
+                demoted = len(working) - 8
+                await bank.save()
+                return f"demoted={demoted}"
+            return "nothing_to_demote"
+        except Exception as exc:
+            return f"error: {exc}"
+
+    async def _cron_scan_stigmergy(self) -> str:
+        """Scan for high-salience marks that might need attention."""
+        try:
+            stigmergy = await self._get_stigmergy()
+            salient = await stigmergy.high_salience(threshold=0.8, limit=3)
+            if salient:
+                # Queue an investigation task if something urgent appeared
+                mark = salient[0]
+                await self._task_queue.put(
+                    f"Urgent stigmergy signal: {mark.observation[:150]}"
+                )
+                return f"found={len(salient)}, queued_investigation"
+            return "no_urgent_signals"
+        except Exception as exc:
+            return f"error: {exc}"
+
+    async def _cron_check_inbox(self) -> str:
+        """Peek at the message bus for urgent messages."""
+        try:
+            bus = await self._get_bus()
+            msgs = await bus.receive(agent_id=self.name, limit=3)
+            urgent = [m for m in msgs if getattr(m, "priority", 0) >= 8]
+            if urgent:
+                top = urgent[0]
+                await self._task_queue.put(
+                    f"Urgent message from {top.from_agent}: {top.subject}"
+                )
+                return f"urgent={len(urgent)}, queued_response"
+            return f"inbox={len(msgs)}, no_urgent"
+        except Exception as exc:
+            return f"error: {exc}"
+
     # -- Subsystem access (lazy init) ------------------------------------
 
     async def _get_stigmergy(self):
@@ -116,6 +269,13 @@ class PersistentAgent:
         }
 
         try:
+            # 0. Run per-agent mini-crons (housekeeping tasks)
+            cron_results = await self._cron.tick()
+            if cron_results:
+                fired = [r["job"] for r in cron_results if r["success"]]
+                if fired:
+                    logger.debug("[%s] crons fired: %s", self.name, ", ".join(fired))
+
             # 1. Load memory
             await self._agent.memory.load()
 
@@ -317,3 +477,8 @@ class PersistentAgent:
     async def accept_task(self, task: str) -> None:
         """Inject a task from the orchestrator."""
         await self._task_queue.put(task)
+
+    @property
+    def cron(self) -> AgentCronScheduler:
+        """Access the per-agent cron scheduler for custom job registration."""
+        return self._cron
