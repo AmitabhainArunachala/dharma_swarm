@@ -39,6 +39,7 @@ from dharma_swarm.runtime_artifacts import (
     freshest_pulse_log_path,
     write_dgc_health_snapshot,
 )
+from dharma_swarm.signal_bus import SIGNAL_ECC_INSTINCT
 
 HOME = Path.home()
 STATE_DIR = HOME / ".dharma"
@@ -189,7 +190,6 @@ async def run_swarm_loop(
 
                 # Drain instinct signals — negative patterns inform task quality
                 try:
-                    from dharma_swarm.signal_bus import SIGNAL_ECC_INSTINCT
                     instinct_events = await _instinct_bus.consume_events(
                         SIGNAL_ECC_INSTINCT, limit=10,
                     )
