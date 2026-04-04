@@ -439,9 +439,16 @@ class SwarmManager:
         try:
             from dharma_swarm.witness import WitnessAuditor
 
+            # Use a cost-controlled free provider for witness audits instead
+            # of the full ModelRouter which may route to expensive models.
+            try:
+                from dharma_swarm.providers import OpenRouterFreeProvider
+                _witness_provider = OpenRouterFreeProvider()
+            except Exception:
+                _witness_provider = None
             self._witness = WitnessAuditor(
                 cycle_seconds=3600.0,
-                provider=self._router,
+                provider=_witness_provider,
             )
             logger.info("WitnessAuditor initialized — S3* sporadic audit active")
         except Exception as e:
