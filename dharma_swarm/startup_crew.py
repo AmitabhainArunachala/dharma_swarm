@@ -74,32 +74,42 @@ def _has_ollama_key() -> bool:
 
 
 def _resolve_default_crew() -> list[dict]:
-    """Build crew preferring free providers.  Ollama Cloud > OpenRouter > Claude Code."""
+    """Build crew preferring free providers.  Ollama Cloud > OpenRouter > Claude Code.
+
+    When Ollama Cloud is available, each agent gets a DIFFERENT frontier model
+    to maximize behavioral diversity (the Transcendence Principle requires
+    decorrelated errors — same model prompted differently does NOT suffice).
+    """
     if _has_ollama_key():
-        # Ollama Cloud — free frontier (GLM-5 744B, DeepSeek-v3.2)
-        _model = DEFAULT_MODELS.get(ProviderType.OLLAMA, "glm-5:cloud")
+        # Ollama Cloud — diverse frontier models for error decorrelation
+        from dharma_swarm.ollama_config import OLLAMA_CLOUD_FRONTIER_MODELS
+        _models = OLLAMA_CLOUD_FRONTIER_MODELS  # glm-5, deepseek-v3.2, kimi-k2.5, minimax-m2.7, qwen3-coder
         return [
             {"name": "cartographer", "role": AgentRole.CARTOGRAPHER,
-             "thread": "mechanistic", "provider": ProviderType.OLLAMA, "model": _model},
+             "thread": "mechanistic", "provider": ProviderType.OLLAMA, "model": _models[0]},  # glm-5
             {"name": "surgeon", "role": AgentRole.SURGEON,
-             "thread": "alignment", "provider": ProviderType.OLLAMA, "model": _model},
+             "thread": "alignment", "provider": ProviderType.OLLAMA, "model": _models[2]},    # kimi-k2.5
             {"name": "architect", "role": AgentRole.ARCHITECT,
-             "thread": "architectural", "provider": ProviderType.OLLAMA, "model": _model},
+             "thread": "architectural", "provider": ProviderType.OLLAMA, "model": _models[1]}, # deepseek-v3.2
             {"name": "validator", "role": AgentRole.VALIDATOR,
-             "thread": "scaling", "provider": ProviderType.OLLAMA, "model": _model},
+             "thread": "scaling", "provider": ProviderType.OLLAMA, "model": _models[4]},       # qwen3-coder
         ]
 
     if _has_openrouter_key():
-        _model = DEFAULT_MODELS.get(ProviderType.OPENROUTER_FREE, "meta-llama/llama-3.3-70b-instruct:free")
+        # OpenRouter Free — diverse free models for error decorrelation
         return [
             {"name": "cartographer", "role": AgentRole.CARTOGRAPHER,
-             "thread": "mechanistic", "provider": ProviderType.OPENROUTER_FREE, "model": _model},
+             "thread": "mechanistic", "provider": ProviderType.OPENROUTER_FREE,
+             "model": "meta-llama/llama-3.3-70b-instruct:free"},
             {"name": "surgeon", "role": AgentRole.SURGEON,
-             "thread": "alignment", "provider": ProviderType.OPENROUTER_FREE, "model": _model},
+             "thread": "alignment", "provider": ProviderType.OPENROUTER_FREE,
+             "model": "qwen/qwen3-32b:free"},
             {"name": "architect", "role": AgentRole.ARCHITECT,
-             "thread": "architectural", "provider": ProviderType.OPENROUTER_FREE, "model": _model},
+             "thread": "architectural", "provider": ProviderType.OPENROUTER_FREE,
+             "model": "deepseek/deepseek-chat-v3-0324:free"},
             {"name": "validator", "role": AgentRole.VALIDATOR,
-             "thread": "scaling", "provider": ProviderType.OPENROUTER_FREE, "model": _model},
+             "thread": "scaling", "provider": ProviderType.OPENROUTER_FREE,
+             "model": "mistralai/mistral-small-3.1-24b-instruct:free"},
         ]
 
     # No API keys — use Claude Code (authenticated via `claude` CLI)
