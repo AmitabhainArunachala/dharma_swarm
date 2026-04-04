@@ -356,16 +356,12 @@ async def run_evolution_loop(shutdown_event: asyncio.Event) -> None:
             # Drain lifecycle events — task completion throughput for fitness context
             completions = 0
             try:
-                lifecycle_msgs = await _bus.receive("evolution_loop", limit=20)
-                completions = sum(
-                    1 for m in lifecycle_msgs
-                    if m.metadata.get("event") == "task_completed"
+                lifecycle_events = await _bus.consume_events(
+                    "AGENT_LIFECYCLE_COMPLETED", limit=20,
                 )
+                completions = len(lifecycle_events)
                 if completions:
                     _log("evolution", f"Lifecycle: {completions} task completion(s) since last cycle")
-                # Mark consumed so they don't pile up
-                for m in lifecycle_msgs:
-                    await _bus.mark_read(m.id)
             except Exception:
                 logger.debug("Evolution: lifecycle drain failed", exc_info=True)
 
