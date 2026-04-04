@@ -2094,7 +2094,9 @@ class SwarmManager:
                 result["organism_verdict"] = hb.gnani_verdict.decision if hb.gnani_verdict else None
                 result["organism_power"] = (
                     self._organism.samvara.current_power.value
-                    if self._organism.samvara.active else None
+                    if (self._organism.samvara.active
+                        and self._organism.samvara.current_power is not None)
+                    else None
                 )
                 if hb.gnani_verdict and hb.gnani_verdict.decision == "HOLD":
                     gnani_holds = True
