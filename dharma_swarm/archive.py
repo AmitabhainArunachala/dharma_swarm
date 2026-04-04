@@ -23,14 +23,15 @@ from dharma_swarm.merkle_log import MerkleLog
 # ---------------------------------------------------------------------------
 
 _DEFAULT_WEIGHTS: dict[str, float] = {
-    "correctness": 0.20,         # -5% (still most important)
-    "dharmic_alignment": 0.15,   # -5%
-    "performance": 0.12,         # -3% - wall clock speedup (JIKOKU)
-    "utilization": 0.12,         # -3% - concurrent execution (JIKOKU)
-    "economic_value": 0.15,      # NEW - real $$ ROI measurement
-    "elegance": 0.10,            # -5% (was 15%)
-    "efficiency": 0.10,          # unchanged
-    "safety": 0.06,              # +1% (slightly more weight)
+    "correctness": 0.18,         # test pass rate
+    "dharmic_alignment": 0.13,   # gate outcomes
+    "swabhaav_alignment": 0.08,  # P9 Dada Bhagwan: self-nature fidelity
+    "performance": 0.11,         # wall clock speedup (JIKOKU)
+    "utilization": 0.11,         # concurrent execution (JIKOKU)
+    "economic_value": 0.13,      # real $$ ROI measurement
+    "elegance": 0.10,            # code quality
+    "efficiency": 0.10,          # diff size penalty
+    "safety": 0.06,              # security gate pass/fail
 }
 
 FITNESS_DIMENSIONS: tuple[str, ...] = tuple(_DEFAULT_WEIGHTS)
@@ -112,9 +113,10 @@ class FitnessScore(BaseModel):
 
     correctness: float = 0.0       # Test pass rate (0-1)
     dharmic_alignment: float = 0.0 # Gate outcomes (0-1)
+    swabhaav_alignment: float = 0.0  # P9: self-nature fidelity from agent behavioral signature (0-1)
     performance: float = 0.0       # Wall clock speedup (0-1) - JIKOKU
     utilization: float = 0.0       # Concurrent execution (0-1) - JIKOKU
-    economic_value: float = 0.0    # ROI-based fitness (0-1) - NEW - Economic fitness
+    economic_value: float = 0.0    # ROI-based fitness (0-1) - Economic fitness
     elegance: float = 0.0          # Code quality (0-1)
     efficiency: float = 0.0        # Diff size penalty (0-1)
     safety: float = 0.0            # Gate pass/fail (0-1)

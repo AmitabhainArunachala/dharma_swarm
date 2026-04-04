@@ -1436,6 +1436,27 @@ class DarwinEngine:
                     result.reason,
                 )
 
+            # P2 Kauffman: Check autocatalytic closure preservation.
+            # If the proposal targets a module in an autocatalytic set,
+            # warn (but don't block) if it might break the cycle.
+            if proposal.status == EvolutionStatus.GATED and proposal.component:
+                try:
+                    from dharma_swarm.catalytic_graph import CatalyticGraph
+                    cg = CatalyticGraph()
+                    cg.load(self._archive_path.parent / "catalytic_graph.json")
+                    sets = cg.detect_autocatalytic_sets()
+                    for aset in sets:
+                        if proposal.component in aset:
+                            proposal.think_notes = (
+                                (proposal.think_notes or "")
+                                + f"\n[KAUFFMAN] Component '{proposal.component}' is in "
+                                f"autocatalytic set {aset}. Verify mutation preserves "
+                                f"catalytic closure."
+                            )
+                            break
+                except Exception:
+                    pass  # Catalytic graph not available — skip check
+
             # Log trace for gate check (fire-and-forget)
             self._trace_bg(
                 TraceEntry(

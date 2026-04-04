@@ -27,6 +27,7 @@ def test_fitness_weighted_default_weights():
     f = FitnessScore(
         correctness=1.0,
         dharmic_alignment=1.0,
+        swabhaav_alignment=1.0,
         performance=1.0,
         utilization=1.0,
         economic_value=1.0,
