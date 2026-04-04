@@ -12,7 +12,10 @@ import os
 import subprocess
 import sys
 
-from .app import DGCApp
+try:
+    from .app import DGCApp
+except ImportError:
+    DGCApp = None  # type: ignore[assignment,misc]
 
 _TERMINAL_RESTORE_SEQ = (
     "\x1b[?1000l"  # mouse tracking off

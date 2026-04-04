@@ -39,15 +39,15 @@ from dharma_swarm.provider_matrix import build_default_matrix_targets
 from dharma_swarm.runtime_state import DEFAULT_RUNTIME_DB, OperatorAction, RuntimeStateStore, SessionEventRecord
 from dharma_swarm.models import ProviderType
 from dharma_swarm.tui import model_routing
-from dharma_swarm.tui.commands import system_commands as system_commands_module
-from dharma_swarm.tui.commands.system_commands import SystemCommandHandler
+from dharma_swarm.terminal_commands import system_commands as system_commands_module
+from dharma_swarm.terminal_commands.system_commands import SystemCommandHandler
 from dharma_swarm.tui_helpers import build_runtime_status_text
 from dharma_swarm.workspace_topology import build_workspace_topology
 from dharma_swarm.operator_core import build_session_catalog, build_session_detail
 from dharma_swarm.operator_core.session_store import SessionStore
 from dharma_swarm.terminal_control import load_terminal_control_state
-from dharma_swarm.tui.engine.events import ToolCallComplete
-from dharma_swarm.tui.engine.events import PermissionDecisionEvent, PermissionOutcomeEvent, PermissionResolutionEvent
+from dharma_swarm.terminal_engine.events import ToolCallComplete
+from dharma_swarm.terminal_engine.events import PermissionDecisionEvent, PermissionOutcomeEvent, PermissionResolutionEvent
 
 
 def _json_default(value: object) -> object:
@@ -229,7 +229,7 @@ class TerminalBridge:
         if self._adapters or self._adapter_boot_error is not None:
             return
         try:
-            from dharma_swarm.tui.engine.adapters import (
+            from dharma_swarm.terminal_adapters import (
                 ClaudeAdapter,
                 CodexAdapter,
                 CompletionRequest,
@@ -2471,7 +2471,7 @@ class TerminalBridge:
             return "runtime"
         if command == "git":
             return "repo"
-        if command == "model":
+        if command in {"model", "models"}:
             return "models"
         if command in {"swarm", "agni", "gates", "witness", "openclaw", "hum"}:
             return "agents"
@@ -2483,6 +2483,8 @@ class TerminalBridge:
             return "agents"
         if command in {"notes", "memory", "archive", "darwin", "logs", "truth", "stigmergy", "sessions", "session"}:
             return "sessions"
+        if command in {"approval", "approvals", "permission", "permissions"}:
+            return "approvals"
         return "control"
 
     def _load_repo_xray(self) -> Any | None:
