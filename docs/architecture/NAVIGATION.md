@@ -96,6 +96,8 @@ Generated: 2026-03-29 | 500 Python modules | 494 test files | 8,848 tests
 | Need to... | Go to... |
 |------------|----------|
 | Understand the system | `CLAUDE.md` (this repo root) |
+| Find all interface bugs | [`INTERFACE_MISMATCH_MAP.md`](INTERFACE_MISMATCH_MAP.md) — 55 module pairs verified, 13 with issues, 9 prioritized fixes |
+| Understand model routing | [`MODEL_ROUTING_MAP.md`](MODEL_ROUTING_MAP.md) — 18 providers, 3 calling surfaces, 5 inconsistencies, HuggingFace fix |
 | Run the live orchestrator | `dgc orchestrate-live` (or `--background`) |
 | Check system health | `dgc status` / `dgc health` |
 | Run all tests | `python3 -m pytest tests/ -q` (~6 min) |

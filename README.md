@@ -152,6 +152,13 @@ That report is the fastest way to answer:
 - The most coupled runtime surfaces currently sit in the Python core, especially `dharma_swarm/dgc_cli.py`, `dharma_swarm/swarm.py`, `dharma_swarm/agent_runner.py`, and `dharma_swarm/evolution.py`.
 - Dashboard and API development are active; expect local changes in `dashboard/`, `api/`, and resident-operator code during ongoing work.
 
+## Before Writing Any Code
+
+- **Read [`CLAUDE.md`](CLAUDE.md)** — system genome, key abstractions, behavioral rules, the Transcendence Principle.
+- **Read [`INTERFACE_MISMATCH_MAP.md`](INTERFACE_MISMATCH_MAP.md)** — every known interface mismatch between modules, with exact line numbers, root causes, and fixes. This is the primary source of runtime failures. Follow the Bootstrap Sequence to unblock the system.
+- **Read [`NAVIGATION.md`](NAVIGATION.md)** — full module map across 12 architectural layers with line counts and "When to Touch" guidance.
+- **Read [`MODEL_ROUTING_MAP.md`](MODEL_ROUTING_MAP.md)** — how every LLM call flows through the system. 18 providers, 3 calling surfaces, 5 inconsistencies, the HuggingFace fix, and the minimum viable path to first LLM call.
+
 ## First Places To Look
 
 - Start at [api/main.py](api/main.py) for the API lifecycle and router registration.

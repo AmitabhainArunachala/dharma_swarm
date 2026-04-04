@@ -146,3 +146,17 @@ bash run_operator.sh
 See `NAVIGATION.md` for the full module map (500 modules, 12 architectural layers).
 See `README.md` for repo map and common commands.
 See `foundations/` for the 10-pillar intellectual genome.
+
+## CRITICAL: Read Before Any Code Changes
+
+See [`INTERFACE_MISMATCH_MAP.md`](INTERFACE_MISMATCH_MAP.md) for the complete map of every interface mismatch between modules. **This is the #1 source of runtime failures.** The map documents:
+- 3 BLOCKER mismatches that prevent the system from executing any task
+- 9 DEGRADED mismatches that silently lose data or crash specific subsystems
+- 55 module pairs verified (42 correct, 13 with issues)
+- A prioritized **Bootstrap Sequence** of 9 fixes in the order they should be applied
+
+**Rule for all sessions:** Before fixing a bug or adding a feature, check the mismatch map first. If the module pair you're touching has a known mismatch, fix the mismatch as part of your change. Do not add new callers to broken interfaces.
+
+**Rule for all sessions:** After fixing a mismatch, update the map. Remove the entry or mark it RESOLVED with the commit hash.
+
+See [`MODEL_ROUTING_MAP.md`](MODEL_ROUTING_MAP.md) for the complete model routing architecture — all 18 providers, 3 calling surfaces (swarm/CLI/dashboard), 5 inconsistencies between them, the HuggingFace blocker fix, and the minimum viable path to getting one LLM call working. **Any change to how models are called must check this map first.**
