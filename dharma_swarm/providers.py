@@ -2550,6 +2550,10 @@ class ModelRouter:
             available_provider_types=available_provider_types,
         )
         if not chain:
+            # Routing filter found nothing — fall back to any registered provider
+            fallback_set = set(available_provider_types or self._providers.keys())
+            chain = [p for p in self._providers if p in fallback_set]
+        if not chain:
             raise RuntimeError("No available providers after routing filter")
         task_signature = build_task_signature(
             action_name=enriched_request.action_name,
