@@ -6,9 +6,9 @@
  * task pipeline, activity stream, cost tracking.
  */
 
-import { use } from "react";
+import { use, useState, useRef, useEffect, useCallback, type KeyboardEvent } from "react";
 import { useRouter } from "next/navigation";
-import { motion } from "framer-motion";
+import { motion, AnimatePresence } from "framer-motion";
 import { useQueryClient } from "@tanstack/react-query";
 import {
   Radar,
@@ -38,9 +38,14 @@ import {
   ChevronDown,
   Sparkles,
   Hash,
+  MessageSquare,
+  Send,
+  Square,
+  Loader2,
+  ChevronUp,
 } from "lucide-react";
 import { useAgent } from "@/hooks/useAgent";
-// apiFetch usage is handled by the useAgent hook mutations
+import { apiPath } from "@/lib/api";
 import { HPBar } from "@/components/game/HPBar";
 import { HealthBadge } from "@/components/dashboard/HealthBadge";
 import { timeAgo, formatDuration, clamp } from "@/lib/utils";
@@ -963,7 +968,15 @@ export default function AgentDetailPage({
         </div>
       </motion.div>
 
-      {/* ── 7. Footer ───────────────────────────────────────────── */}
+      {/* ── 7. Talk to Agent ─────────────────────────────────────── */}
+      <motion.div variants={stagger.item}>
+        <AgentChatPanel
+          agentId={id}
+          agentDisplayName={config?.display_name || agent.name}
+        />
+      </motion.div>
+
+      {/* ── 8. Footer ───────────────────────────────────────────── */}
       <motion.div variants={stagger.item} className="glass-panel-subtle px-5 py-4">
         <div className="flex flex-wrap items-center gap-x-6 gap-y-2 text-[10px] text-sumi-600">
           <span>
@@ -1136,5 +1149,359 @@ function TaskPriorityBadge({ priority }: { priority: string }) {
     >
       {priority}
     </span>
+  );
+}
+
+/* ─── Agent Chat Panel ────────────────────────────────────────── */
+
+interface ChatMsg {
+  id: string;
+  role: "user" | "assistant";
+  content: string;
+}
+
+let _chatMsgId = 0;
+function chatMsgId(): string {
+  return `acm-${Date.now()}-${++_chatMsgId}`;
+}
+
+function AgentChatPanel({
+  agentId,
+  agentDisplayName,
+}: {
+  agentId: string;
+  agentDisplayName: string;
+}) {
+  const [open, setOpen] = useState(false);
+  const [messages, setMessages] = useState<ChatMsg[]>([]);
+  const [input, setInput] = useState("");
+  const [isStreaming, setIsStreaming] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+
+  const messagesEndRef = useRef<HTMLDivElement>(null);
+  const inputRef = useRef<HTMLTextAreaElement>(null);
+  const abortRef = useRef<AbortController | null>(null);
+
+  // Auto-scroll on new content
+  useEffect(() => {
+    messagesEndRef.current?.scrollIntoView({ behavior: "smooth" });
+  }, [messages]);
+
+  // Focus input when panel opens
+  useEffect(() => {
+    if (open) inputRef.current?.focus();
+  }, [open]);
+
+  const sendMessage = useCallback(
+    async (content: string) => {
+      const trimmed = content.trim();
+      if (!trimmed || isStreaming) return;
+
+      setError(null);
+
+      const userMsg: ChatMsg = {
+        id: chatMsgId(),
+        role: "user",
+        content: trimmed,
+      };
+
+      const assistantMsg: ChatMsg = {
+        id: chatMsgId(),
+        role: "assistant",
+        content: "",
+      };
+
+      setMessages((prev) => [...prev, userMsg, assistantMsg]);
+      setIsStreaming(true);
+
+      const controller = new AbortController();
+      abortRef.current = controller;
+
+      try {
+        const allMessages = [...messages, userMsg];
+        const historyForApi = allMessages.map((m) => ({
+          role: m.role,
+          content: m.content,
+        }));
+
+        const res = await fetch(
+          apiPath(`/api/agents/${encodeURIComponent(agentId)}/chat`),
+          {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ messages: historyForApi }),
+            signal: controller.signal,
+          },
+        );
+
+        if (!res.ok) {
+          const body = await res.text().catch(() => "");
+          throw new Error(`Chat API error ${res.status}: ${body}`);
+        }
+
+        const reader = res.body?.getReader();
+        if (!reader) throw new Error("No response body");
+
+        const decoder = new TextDecoder();
+        let buffer = "";
+
+        while (true) {
+          const { done, value } = await reader.read();
+          if (done) break;
+
+          buffer += decoder.decode(value, { stream: true });
+          const lines = buffer.split("\n");
+          buffer = lines.pop() || "";
+
+          for (const line of lines) {
+            if (!line.startsWith("data: ")) continue;
+            const data = line.slice(6).trim();
+            if (data === "[DONE]") break;
+
+            try {
+              const parsed = JSON.parse(data);
+
+              if (parsed.error) {
+                setError(parsed.error);
+                break;
+              }
+
+              // Text content chunk
+              if (parsed.content) {
+                setMessages((prev) => {
+                  const updated = [...prev];
+                  const last = updated[updated.length - 1];
+                  if (last?.role === "assistant") {
+                    updated[updated.length - 1] = {
+                      ...last,
+                      content: last.content + parsed.content,
+                    };
+                  }
+                  return updated;
+                });
+              }
+
+              // OpenAI-style delta format
+              const delta = parsed.choices?.[0]?.delta?.content;
+              if (delta) {
+                setMessages((prev) => {
+                  const updated = [...prev];
+                  const last = updated[updated.length - 1];
+                  if (last?.role === "assistant") {
+                    updated[updated.length - 1] = {
+                      ...last,
+                      content: last.content + delta,
+                    };
+                  }
+                  return updated;
+                });
+              }
+            } catch {
+              // Skip malformed chunks
+            }
+          }
+        }
+      } catch (err) {
+        if (err instanceof Error && err.name === "AbortError") {
+          // User cancelled
+        } else {
+          setError(err instanceof Error ? err.message : String(err));
+        }
+      } finally {
+        setIsStreaming(false);
+        abortRef.current = null;
+      }
+    },
+    [isStreaming, messages, agentId],
+  );
+
+  const stopStreaming = useCallback(() => {
+    abortRef.current?.abort();
+    abortRef.current = null;
+    setIsStreaming(false);
+  }, []);
+
+  const handleKeyDown = (e: KeyboardEvent<HTMLTextAreaElement>) => {
+    if (e.key === "Enter" && !e.shiftKey) {
+      e.preventDefault();
+      const trimmed = input.trim();
+      if (trimmed && !isStreaming) {
+        setInput("");
+        sendMessage(trimmed);
+      }
+    }
+  };
+
+  const handleSend = () => {
+    const trimmed = input.trim();
+    if (!trimmed || isStreaming) return;
+    setInput("");
+    sendMessage(trimmed);
+  };
+
+  return (
+    <div className="glass-panel overflow-hidden">
+      {/* Toggle header */}
+      <button
+        onClick={() => setOpen((o) => !o)}
+        className="flex w-full items-center justify-between px-5 py-3 transition-colors hover:bg-sumi-850/30"
+      >
+        <div className="flex items-center gap-2">
+          <MessageSquare size={14} style={{ color: colors.aozora }} />
+          <h2 className="text-[10px] font-semibold uppercase tracking-[0.12em] text-kitsurubami">
+            Talk to Agent
+          </h2>
+        </div>
+        <ChevronUp
+          size={14}
+          className="text-sumi-600 transition-transform"
+          style={{ transform: open ? "rotate(0deg)" : "rotate(180deg)" }}
+        />
+      </button>
+
+      {/* Collapsible body */}
+      <AnimatePresence initial={false}>
+        {open && (
+          <motion.div
+            initial={{ height: 0, opacity: 0 }}
+            animate={{ height: "auto", opacity: 1 }}
+            exit={{ height: 0, opacity: 0 }}
+            transition={{ duration: 0.3, ease: [0.22, 1, 0.36, 1] }}
+            className="overflow-hidden"
+          >
+            <div className="border-t border-sumi-700/30">
+              {/* Message history */}
+              <div className="max-h-[400px] overflow-y-auto px-5 py-3">
+                {messages.length === 0 ? (
+                  <div className="py-8 text-center text-xs text-sumi-600">
+                    Start a conversation with {agentDisplayName}
+                  </div>
+                ) : (
+                  <div className="space-y-3">
+                    {messages.map((msg) => (
+                      <div key={msg.id} className="flex gap-3">
+                        <div className="mt-0.5 shrink-0">
+                          {msg.role === "user" ? (
+                            <div
+                              className="flex h-6 w-6 items-center justify-center rounded-md text-[10px] font-bold"
+                              style={{
+                                backgroundColor: `color-mix(in srgb, ${colors.fuji} 15%, transparent)`,
+                                color: colors.fuji,
+                              }}
+                            >
+                              OP
+                            </div>
+                          ) : (
+                            <div
+                              className="flex h-6 w-6 items-center justify-center rounded-md"
+                              style={{
+                                backgroundColor: `color-mix(in srgb, ${colors.aozora} 15%, transparent)`,
+                              }}
+                            >
+                              <Bot size={12} style={{ color: colors.aozora }} />
+                            </div>
+                          )}
+                        </div>
+                        <div className="min-w-0 flex-1">
+                          <p className="text-[9px] font-semibold uppercase tracking-widest text-sumi-600">
+                            {msg.role === "user" ? "Operator" : agentDisplayName}
+                          </p>
+                          <div className="mt-0.5 whitespace-pre-wrap text-sm text-torinoko">
+                            {msg.content || (
+                              msg.role === "assistant" && isStreaming ? (
+                                <span className="inline-flex items-center gap-1.5 text-sumi-600">
+                                  <Loader2
+                                    size={12}
+                                    className="animate-spin"
+                                    style={{ color: colors.aozora }}
+                                  />
+                                  Thinking...
+                                </span>
+                              ) : null
+                            )}
+                          </div>
+                        </div>
+                      </div>
+                    ))}
+                    <div ref={messagesEndRef} />
+                  </div>
+                )}
+              </div>
+
+              {/* Streaming indicator */}
+              {isStreaming && messages.length > 0 && messages[messages.length - 1]?.content && (
+                <div className="flex items-center gap-2 px-5 py-1">
+                  <Loader2
+                    size={10}
+                    className="animate-spin"
+                    style={{ color: colors.aozora }}
+                  />
+                  <span className="text-[10px]" style={{ color: colors.aozora }}>
+                    {agentDisplayName} is responding...
+                  </span>
+                </div>
+              )}
+
+              {/* Error banner */}
+              {error && (
+                <div className="px-5 py-2">
+                  <div className="rounded-lg border border-bengara/30 bg-bengara/10 px-3 py-2 text-xs text-bengara">
+                    {error}
+                  </div>
+                </div>
+              )}
+
+              {/* Input area */}
+              <div className="border-t border-sumi-700/30 px-5 py-3">
+                <div className="flex items-end gap-2">
+                  <textarea
+                    ref={inputRef}
+                    value={input}
+                    onChange={(e) => setInput(e.target.value)}
+                    onKeyDown={handleKeyDown}
+                    placeholder={`Message ${agentDisplayName}...`}
+                    rows={1}
+                    className="flex-1 resize-none rounded-lg border border-sumi-700/40 bg-sumi-900 px-3 py-2 text-sm text-torinoko placeholder-sumi-600 outline-none transition-colors focus:border-aozora/50"
+                    style={{ maxHeight: "100px", minHeight: "38px" }}
+                    onInput={(e) => {
+                      const el = e.currentTarget;
+                      el.style.height = "auto";
+                      el.style.height = Math.min(el.scrollHeight, 100) + "px";
+                    }}
+                  />
+                  {isStreaming ? (
+                    <button
+                      onClick={stopStreaming}
+                      className="flex shrink-0 items-center justify-center rounded-lg border border-bengara/30 bg-bengara/10 p-2 text-bengara transition-all hover:bg-bengara/20"
+                      title="Stop generating"
+                      aria-label="Stop generating"
+                    >
+                      <Square size={14} />
+                    </button>
+                  ) : (
+                    <button
+                      onClick={handleSend}
+                      disabled={!input.trim()}
+                      className="flex shrink-0 items-center justify-center rounded-lg p-2 transition-all disabled:opacity-30"
+                      style={{
+                        backgroundColor: `color-mix(in srgb, ${colors.aozora} 20%, transparent)`,
+                        color: colors.aozora,
+                      }}
+                      title="Send message (Enter)"
+                      aria-label="Send message"
+                    >
+                      <Send size={14} />
+                    </button>
+                  )}
+                </div>
+                <p className="mt-1 font-mono text-[9px] text-sumi-600">
+                  Enter to send · Shift+Enter for newline
+                </p>
+              </div>
+            </div>
+          </motion.div>
+        )}
+      </AnimatePresence>
+    </div>
   );
 }

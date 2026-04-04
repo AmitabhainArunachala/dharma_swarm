@@ -65,7 +65,7 @@ export function useAgent(id: string) {
   >({
     mutationFn: (body) =>
       apiFetch(`/api/agents/${encodeURIComponent(id)}/config`, {
-        method: "PATCH",
+        method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify(body),
       }),
