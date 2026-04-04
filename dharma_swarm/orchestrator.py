@@ -2011,6 +2011,19 @@ class Orchestrator:
                 agent_id=td.agent_id,
                 extra={"duration_sec": round(duration_sec, 4)},
             )
+            # Emit durable event for evolution loop consumption
+            if self._bus is not None:
+                emit = getattr(self._bus, "emit_event", None)
+                if emit:
+                    try:
+                        await emit(
+                            "AGENT_LIFECYCLE_COMPLETED",
+                            task_id=td.task_id,
+                            agent_id=td.agent_id,
+                            payload={"event": "task_completed", "duration_sec": round(duration_sec, 4)},
+                        )
+                    except Exception:
+                        logger.debug("Lifecycle event emit failed (non-critical)", exc_info=True)
 
             # Persist result to shared notes and stigmergy
             runner_cfg = getattr(runner, "_config", None)

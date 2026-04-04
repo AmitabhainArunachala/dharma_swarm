@@ -639,4 +639,20 @@ And use it everywhere.
 
 ---
 
+## Resolution Status
+
+| Fix | MISMATCH | Status | Commit |
+|-----|----------|--------|--------|
+| 1 | MISMATCH-01 | **RESOLVED** | `5ed4a3e` — guard huggingface_hub import |
+| 2 | MISMATCH-02/12 | **RESOLVED** | `98341b4` — coerce strings to enums for PersistentAgent |
+| 3 | MISMATCH-04 | **RESOLVED** | `d0ecc87` — AgentPool None guard before spawn |
+| 4 | MISMATCH-10 | **ALREADY GUARDED** | Guard already exists at auto_proposer.py:297 |
+| 5 | MISMATCH-06 | **RESOLVED** | `b56d208` — accept shared StigmergyStore in run_living_layers |
+| 6 | MISMATCH-03 | **RESOLVED** | `b7f5c3e` — replace receive/mark_read with consume_events |
+| 7 | MISMATCH-11 | **RESOLVED** | `d45a5e0` — use OpenRouterFreeProvider for WitnessAuditor |
+| 8 | MISMATCH-09 | **RESOLVED** | `3816065` — guard samvara.current_power for None |
+| 9 | MISMATCH-08 | **RESOLVED** | `38c5f61` — canonicalize ECC_INSTINCT_SIGNAL constant |
+
+---
+
 *End of Interface Mismatch Map*
