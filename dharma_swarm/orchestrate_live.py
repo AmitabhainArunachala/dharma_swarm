@@ -1244,10 +1244,10 @@ async def _run_replication_monitor_loop(shutdown_event: asyncio.Event) -> None:
 
                             child = PersistentAgent(
                                 name=outcome.child_agent_name,
-                                role=outcome.child_spec.get("role", "worker"),
-                                provider_type=outcome.child_spec.get(
+                                role=AgentRole(outcome.child_spec.get("role", "general")),
+                                provider_type=PT(outcome.child_spec.get(
                                     "default_provider", "openrouter_free"
-                                ),
+                                )),
                                 model=outcome.child_spec.get("default_model", ""),
                                 state_dir=STATE_DIR,
                                 wake_interval_seconds=float(
