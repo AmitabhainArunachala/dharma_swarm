@@ -582,12 +582,9 @@ export function CommandPostWorkspace({
           <span className="rounded-full bg-aozora/10 px-2 py-0.5 font-mono text-[10px] text-aozora">
             {`${shortProfileLabel(claudeProfile)} + ${shortProfileLabel(codexProfile)}`}
           </span>
-          <span className="rounded-full bg-kinpaku/10 px-2 py-0.5 font-mono text-[10px] text-kinpaku">
-            resident sessions
-          </span>
         </div>
         <p className="mt-1 text-[11px] text-sumi-600">
-          Two live orchestrator lanes, explicit relay control, and websocket telemetry from the resident sessions.
+          Two live orchestrator lanes, explicit relay control, and websocket telemetry.
         </p>
       </div>
       <div className="flex items-center gap-1">
