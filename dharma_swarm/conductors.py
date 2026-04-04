@@ -9,8 +9,17 @@ Both compose PersistentAgent which composes AutonomousAgent.
 
 from __future__ import annotations
 
+import os
+
 from dharma_swarm.daemon_config import V7_BASE_RULES
 from dharma_swarm.models import AgentRole, ProviderType
+
+
+def _resolve_conductor_provider() -> ProviderType:
+    """Pick the best available provider for conductors (Anthropic > Claude Code)."""
+    if os.environ.get("ANTHROPIC_API_KEY"):
+        return ProviderType.ANTHROPIC
+    return ProviderType.CLAUDE_CODE
 
 
 _CONDUCTOR_CLAUDE_PROMPT = V7_BASE_RULES + """
@@ -62,7 +71,7 @@ Your job is to keep the system healthy and catch problems early.
 CONDUCTOR_CLAUDE_CONFIG = {
     "name": "conductor_claude",
     "role": AgentRole.CONDUCTOR,
-    "provider_type": ProviderType.ANTHROPIC,
+    "provider_type": _resolve_conductor_provider(),
     "model": "claude-opus-4-6",
     "wake_interval_seconds": 3600.0,
     "system_prompt": _CONDUCTOR_CLAUDE_PROMPT,
@@ -72,7 +81,7 @@ CONDUCTOR_CLAUDE_CONFIG = {
 CONDUCTOR_CODEX_CONFIG = {
     "name": "conductor_codex",
     "role": AgentRole.CONDUCTOR,
-    "provider_type": ProviderType.ANTHROPIC,
+    "provider_type": _resolve_conductor_provider(),
     "model": "claude-sonnet-4-20250514",
     "wake_interval_seconds": 1800.0,
     "system_prompt": _CONDUCTOR_CODEX_PROMPT,
