@@ -379,14 +379,28 @@ async def run_evolution_loop(shutdown_event: asyncio.Event) -> None:
             # ── ACTIVE EVOLUTION: run cycle + meta-adaptation ──
             cycle_count += 1
 
-            # Extract live fitness from AGENT_FITNESS event payloads
+            # Extract live fitness from AGENT_FITNESS event payloads and persist
             live_fitness_scores: list[float] = []
             for ev in fitness_events:
                 payload = ev.get("payload") if isinstance(ev, dict) else {}
                 if isinstance(payload, dict):
-                    score = payload.get("fitness_score") or payload.get("composite")
+                    # agent_runner emits swabhaav_ratio as the primary score
+                    score = (
+                        payload.get("swabhaav_ratio")
+                        or payload.get("fitness_score")
+                        or payload.get("composite")
+                    )
                     if isinstance(score, (int, float)) and score > 0:
                         live_fitness_scores.append(float(score))
+                        # Persist to archive so get_fitness_trend() works
+                        try:
+                            await engine.record_fitness_observation(
+                                agent_name=payload.get("agent", "unknown"),
+                                fitness_score=float(score),
+                                task_id=payload.get("task_id"),
+                            )
+                        except Exception:
+                            logger.debug("Fitness archival failed", exc_info=True)
             if live_fitness_scores:
                 _log("evolution", f"Live fitness from {len(live_fitness_scores)} agents: "
                      f"avg={sum(live_fitness_scores)/len(live_fitness_scores):.3f} "
