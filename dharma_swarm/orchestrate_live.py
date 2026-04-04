@@ -680,7 +680,10 @@ async def run_health_loop(shutdown_event: asyncio.Event) -> None:
         await asyncio.sleep(HEALTH_INTERVAL)
 
 
-async def run_living_layers(shutdown_event: asyncio.Event) -> None:
+async def run_living_layers(
+    shutdown_event: asyncio.Event,
+    stigmergy_store: "StigmergyStore | None" = None,
+) -> None:
     """Living layers — stigmergy decay, shakti perception, subconscious dreams."""
     _log("living", f"Starting (interval={LIVING_INTERVAL}s)")
     await asyncio.sleep(45)  # Let other systems init first
@@ -690,7 +693,7 @@ async def run_living_layers(shutdown_event: asyncio.Event) -> None:
     from dharma_swarm.subconscious import SubconsciousStream
     from dharma_swarm.shakti import ShaktiLoop
 
-    store = StigmergyStore()
+    store = stigmergy_store or StigmergyStore()
     stream = SubconsciousStream(stigmergy=store)
     loop = ShaktiLoop(stigmergy=store)
 
