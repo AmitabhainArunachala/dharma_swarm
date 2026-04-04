@@ -11,7 +11,7 @@ from datetime import datetime, timezone
 from enum import Enum
 from typing import Any, Optional
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, model_validator
 
 
 # === Enums ===
@@ -132,6 +132,15 @@ class ProviderType(str, Enum):
     CHUTES = "chutes"
 
 
+class AutonomyLevel(str, Enum):
+    """How much freedom an agent has to act without confirmation."""
+    LOCKED = "locked"
+    CAUTIOUS = "cautious"
+    BALANCED = "balanced"
+    AGGRESSIVE = "aggressive"
+    FULL = "full"
+
+
 # === Utility ===
 
 def _utc_now() -> datetime:
@@ -162,7 +171,15 @@ class Task(BaseModel):
 
 
 class AgentConfig(BaseModel):
-    """Configuration for spawning an agent."""
+    """Configuration for spawning an agent.
+
+    This is the CANONICAL agent identity model. All code that creates,
+    stores, or references agent identity should use this class.
+    See AGENT_IDENTITY_UNIFICATION.md for the migration plan.
+
+    Legacy compatibility: bare strings for `provider` and `role` are
+    coerced to enums via the model_validator below.
+    """
     id: str = Field(default_factory=_new_id)
     name: str
     role: AgentRole = AgentRole.GENERAL
@@ -173,6 +190,38 @@ class AgentConfig(BaseModel):
     thread: Optional[str] = None
     tools: list[str] = Field(default_factory=list)
     metadata: dict[str, Any] = Field(default_factory=dict)
+    # Extended identity fields (Sprint 2)
+    autonomy: AutonomyLevel = AutonomyLevel.BALANCED
+    temperature: float = 0.7
+    max_tokens: int = 4096
+    context_budget: int = 30_000
+    timeout: int = 300
+    working_directory: str = ""
+    wake_interval: int = 3600
+    display_name: str = ""
+    tags: list[str] = Field(default_factory=list)
+
+    @model_validator(mode="before")
+    @classmethod
+    def _coerce_enums(cls, data: Any) -> Any:
+        """Coerce legacy bare strings to proper enums."""
+        if isinstance(data, dict):
+            # provider / provider_type normalization
+            for key in ("provider", "provider_type"):
+                val = data.get(key)
+                if isinstance(val, str) and not isinstance(val, ProviderType):
+                    try:
+                        data["provider"] = ProviderType(val.lower())
+                    except ValueError:
+                        pass
+            # role normalization
+            val = data.get("role")
+            if isinstance(val, str) and not isinstance(val, AgentRole):
+                try:
+                    data["role"] = AgentRole(val.lower())
+                except ValueError:
+                    pass
+        return data
 
 
 class AgentState(BaseModel):

@@ -18,8 +18,8 @@ class TestConductorConfigs:
         cfg = CONDUCTOR_CLAUDE_CONFIG
         assert cfg["name"] == "conductor_claude"
         assert cfg["role"] == AgentRole.CONDUCTOR
-        assert cfg["provider_type"] == ProviderType.ANTHROPIC
-        assert cfg["model"] == "claude-opus-4-6"
+        assert isinstance(cfg["provider_type"], ProviderType)
+        assert cfg["model"]  # non-empty model string
         assert cfg["wake_interval_seconds"] == 3600.0
         assert cfg["max_turns"] == 15
         assert "v7" in cfg["system_prompt"].lower() or "non-negotiable" in cfg["system_prompt"].lower()
@@ -28,8 +28,8 @@ class TestConductorConfigs:
         cfg = CONDUCTOR_CODEX_CONFIG
         assert cfg["name"] == "conductor_codex"
         assert cfg["role"] == AgentRole.CONDUCTOR
-        assert cfg["provider_type"] == ProviderType.ANTHROPIC
-        assert cfg["model"] == "claude-sonnet-4-20250514"
+        assert isinstance(cfg["provider_type"], ProviderType)
+        assert cfg["model"]  # non-empty model string
         assert cfg["wake_interval_seconds"] == 1800.0
         assert cfg["max_turns"] == 10
 

@@ -59,11 +59,32 @@ Your job is to keep the system healthy and catch problems early.
 """
 
 
+def _resolve_conductor_provider() -> tuple[ProviderType, str]:
+    """Resolve the best available provider for conductors.
+
+    Prefers Anthropic (Opus/Sonnet) if key is set, falls back through
+    the standard tier order: free → cheap → paid.
+    """
+    import os
+    if os.environ.get("ANTHROPIC_API_KEY", "").strip():
+        return ProviderType.ANTHROPIC, "claude-opus-4-6"
+    if os.environ.get("OPENROUTER_API_KEY", "").strip():
+        return ProviderType.OPENROUTER, "anthropic/claude-sonnet-4-20250514"
+    if os.environ.get("OLLAMA_API_KEY", "").strip():
+        return ProviderType.OLLAMA, "glm-5:cloud"
+    if os.environ.get("GROQ_API_KEY", "").strip():
+        return ProviderType.GROQ, "qwen/qwen3-32b"
+    # Last resort: Claude Code CLI (no API key needed, just the binary)
+    return ProviderType.CLAUDE_CODE, "sonnet"
+
+
+_conductor_provider, _conductor_model = _resolve_conductor_provider()
+
 CONDUCTOR_CLAUDE_CONFIG = {
     "name": "conductor_claude",
     "role": AgentRole.CONDUCTOR,
-    "provider_type": ProviderType.ANTHROPIC,
-    "model": "claude-opus-4-6",
+    "provider_type": _conductor_provider,
+    "model": _conductor_model,
     "wake_interval_seconds": 3600.0,
     "system_prompt": _CONDUCTOR_CLAUDE_PROMPT,
     "max_turns": 15,
@@ -72,8 +93,8 @@ CONDUCTOR_CLAUDE_CONFIG = {
 CONDUCTOR_CODEX_CONFIG = {
     "name": "conductor_codex",
     "role": AgentRole.CONDUCTOR,
-    "provider_type": ProviderType.ANTHROPIC,
-    "model": "claude-sonnet-4-20250514",
+    "provider_type": _conductor_provider,
+    "model": _conductor_model,
     "wake_interval_seconds": 1800.0,
     "system_prompt": _CONDUCTOR_CODEX_PROMPT,
     "max_turns": 10,
