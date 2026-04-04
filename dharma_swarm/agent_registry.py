@@ -689,6 +689,32 @@ class AgentRegistry:
         """
         return _read_jsonl(self._evolution_log_path(name))
 
+    # ── save / update ────────────────────────────────────────────────
+
+    def save_agent(self, name: str, updated_props: dict[str, Any]) -> dict[str, Any]:
+        """Merge *updated_props* into an agent's identity.json and persist.
+
+        Only non-None values in *updated_props* are written.  Unknown keys
+        are stored as-is so the identity dict remains extensible (e.g.
+        ``strengths``, ``display_name``).
+
+        Returns the full updated identity dict.
+
+        Raises ``ValueError`` if the agent does not exist on disk.
+        """
+        identity = self.load_agent(name)
+        if identity is None:
+            raise ValueError(f"Cannot update unregistered agent '{name}'.")
+
+        for key, value in updated_props.items():
+            if value is not None:
+                identity[key] = value
+
+        identity["last_active"] = _jikoku()
+        _write_json(self._identity_path(name), identity)
+        logger.info("Saved agent '%s' with updated props: %s", name, list(updated_props.keys()))
+        return identity
+
     # ── bulk operations ────────────────────────────────────────────────
 
     def migrate_all_legacy(self) -> list[str]:
