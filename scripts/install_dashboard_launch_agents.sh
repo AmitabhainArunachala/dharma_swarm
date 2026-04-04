@@ -47,6 +47,12 @@ ensure_dashboard_build() {
     if [[ -f "${REPO_ROOT}/dashboard/.next/BUILD_ID" ]]; then
         return 0
     fi
+
+    # Remove stale .next output (preserve cache for faster rebuilds)
+    rm -rf "${REPO_ROOT}/dashboard/.next/static" \
+           "${REPO_ROOT}/dashboard/.next/server" \
+           "${REPO_ROOT}/dashboard/.next/build-manifest.json"
+
     (
         cd "${REPO_ROOT}/dashboard"
         npm run build
