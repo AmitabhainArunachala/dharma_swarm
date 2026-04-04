@@ -171,6 +171,14 @@ class PersistentAgent:
         self._cron = AgentCronScheduler()
         self._setup_default_crons()
 
+        # Per-agent profile for identity evolution
+        from dharma_swarm.profiles import AgentProfile
+        self._profile = AgentProfile(
+            name=name,
+            model=model,
+            provider=provider_type.value,
+        )
+
     # -- Per-agent cron defaults ------------------------------------------
 
     def _setup_default_crons(self) -> None:
@@ -192,6 +200,12 @@ class PersistentAgent:
             interval_seconds=300.0,  # every 5 minutes
             handler=self._cron_check_inbox,
             description="Peek at message bus for urgent messages",
+        )
+        self._cron.register(
+            "identity_evolution",
+            interval_seconds=3600.0,  # every hour
+            handler=self._cron_adapt_identity,
+            description="Evolve profile based on accumulated performance",
         )
 
     async def _cron_consolidate_memory(self) -> str:
@@ -240,6 +254,27 @@ class PersistentAgent:
             return f"inbox={len(msgs)}, no_urgent"
         except Exception as exc:
             return f"error: {exc}"
+
+    async def _cron_adapt_identity(self) -> str:
+        """Evolve agent profile based on accumulated performance metrics."""
+        changes = self._profile.adapt()
+        if changes:
+            # Persist adapted profile
+            try:
+                from dharma_swarm.profiles import ProfileManager
+                mgr = ProfileManager(self.state_dir / "profiles")
+                mgr.save(self._profile)
+            except Exception:
+                logger.debug("Profile save failed", exc_info=True)
+            # Witness the evolution
+            await self._write_witness(
+                "ADAPT", f"Identity evolved: {changes}",
+                f"success_rate={self._profile.success_rate:.2f} "
+                f"gate_pass={self._profile.gate_pass_rate:.2f} "
+                f"autonomy={self._profile.autonomy.value}",
+            )
+            return f"adapted: {changes}"
+        return "no_adaptation_needed"
 
     # -- Subsystem access (lazy init) ------------------------------------
 
@@ -303,10 +338,13 @@ class PersistentAgent:
             # 6. Gate check
             gate_outcome = self._check_gate(task_text)
             if gate_outcome and gate_outcome.get("blocked"):
+                self._profile.record_gate(passed=False)
                 result_info["blocked"] = True
                 result_info["gate_reason"] = gate_outcome.get("reason", "")
                 await self._write_witness("BLOCKED", task_text, gate_outcome.get("reason", ""))
                 return result_info
+            if gate_outcome:
+                self._profile.record_gate(passed=True)
 
             # 7. (gate passed or warned)
 
@@ -337,6 +375,13 @@ class PersistentAgent:
                 f"tokens={agent_result.total_tokens} duration={duration:.1f}s",
             )
 
+            # Record success in profile for identity evolution
+            self._profile.record_task(
+                success=True,
+                tokens=agent_result.total_tokens,
+                duration_s=duration,
+            )
+
             result_info.update({
                 "success": True,
                 "task_source": task_source,
@@ -350,6 +395,7 @@ class PersistentAgent:
         except Exception as e:
             logger.error("[%s] wake error: %s", self.name, e)
             result_info["error"] = str(e)[:500]
+            self._profile.record_task(success=False)
             await self._write_witness("ERROR", str(e)[:200], "")
 
         return result_info
@@ -482,3 +528,8 @@ class PersistentAgent:
     def cron(self) -> AgentCronScheduler:
         """Access the per-agent cron scheduler for custom job registration."""
         return self._cron
+
+    @property
+    def profile(self):
+        """Access the evolving agent profile."""
+        return self._profile

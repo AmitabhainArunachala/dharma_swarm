@@ -46,7 +46,11 @@ _AUTONOMY_MAP = {
 
 
 class AgentProfile(BaseModel):
-    """Runtime configuration for a specific agent instance."""
+    """Runtime configuration for a specific agent instance.
+
+    Supports identity evolution: profiles track performance metrics and
+    adapt autonomy, temperature, and timeout based on observed outcomes.
+    """
 
     name: str
     skill_name: str = ""
@@ -63,17 +67,112 @@ class AgentProfile(BaseModel):
     system_prompt_extra: str = ""
     tags: list[str] = Field(default_factory=list)
 
+    # ── Performance tracking (identity evolution) ──
+    tasks_completed: int = 0
+    tasks_failed: int = 0
+    gates_passed: int = 0
+    gates_blocked: int = 0
+    total_tokens_used: int = 0
+    avg_task_duration_s: float = 0.0
+    specialization: str = ""  # learned focus area (e.g., "code_review", "research")
+    adapted_at: Optional[str] = None  # ISO timestamp of last adaptation
+
     def is_allowed(self, action: str) -> bool:
         """Check if an action is allowed by this profile's permissions."""
-        # Denied list takes precedence
         for deny in self.denied:
             if deny.lower() in action.lower():
                 return False
-        # If permissions list is empty, everything not denied is allowed
         if not self.permissions:
             return True
-        # Otherwise, must match a permission
         return any(p.lower() in action.lower() for p in self.permissions)
+
+    @property
+    def success_rate(self) -> float:
+        """Task success rate (0.0 to 1.0)."""
+        total = self.tasks_completed + self.tasks_failed
+        return self.tasks_completed / total if total > 0 else 0.0
+
+    @property
+    def gate_pass_rate(self) -> float:
+        """Gate pass rate (0.0 to 1.0)."""
+        total = self.gates_passed + self.gates_blocked
+        return self.gates_passed / total if total > 0 else 1.0
+
+    def record_task(self, *, success: bool, tokens: int = 0, duration_s: float = 0.0) -> None:
+        """Record a task outcome for performance tracking."""
+        if success:
+            self.tasks_completed += 1
+        else:
+            self.tasks_failed += 1
+        self.total_tokens_used += tokens
+        # Running average of task duration
+        total = self.tasks_completed + self.tasks_failed
+        self.avg_task_duration_s = (
+            (self.avg_task_duration_s * (total - 1) + duration_s) / total
+            if total > 0 else duration_s
+        )
+
+    def record_gate(self, *, passed: bool) -> None:
+        """Record a gate check outcome."""
+        if passed:
+            self.gates_passed += 1
+        else:
+            self.gates_blocked += 1
+
+    def adapt(self) -> dict[str, str]:
+        """Evolve profile parameters based on accumulated performance.
+
+        Returns a dict of changes made (empty if no adaptation needed).
+        """
+        from datetime import datetime, timezone
+        changes: dict[str, str] = {}
+        total_tasks = self.tasks_completed + self.tasks_failed
+
+        # Need minimum 10 tasks before adapting
+        if total_tasks < 10:
+            return changes
+
+        # ── Autonomy evolution ──
+        # High success + high gate pass → increase autonomy
+        # Low success or low gate pass → decrease autonomy
+        _LEVELS = list(AutonomyLevel)
+        current_idx = _LEVELS.index(self.autonomy)
+
+        if self.success_rate >= 0.85 and self.gate_pass_rate >= 0.90 and current_idx < len(_LEVELS) - 1:
+            old = self.autonomy
+            self.autonomy = _LEVELS[current_idx + 1]
+            changes["autonomy"] = f"{old.value} → {self.autonomy.value}"
+        elif self.success_rate < 0.50 and current_idx > 0:
+            old = self.autonomy
+            self.autonomy = _LEVELS[current_idx - 1]
+            changes["autonomy"] = f"{old.value} → {self.autonomy.value}"
+
+        # ── Temperature evolution ──
+        # High success → slightly lower temperature (more focused)
+        # Low success → slightly higher temperature (more exploratory)
+        if self.success_rate >= 0.80 and self.temperature > 0.3:
+            old_t = self.temperature
+            self.temperature = max(0.3, self.temperature - 0.05)
+            if self.temperature != old_t:
+                changes["temperature"] = f"{old_t:.2f} → {self.temperature:.2f}"
+        elif self.success_rate < 0.50 and self.temperature < 0.9:
+            old_t = self.temperature
+            self.temperature = min(0.9, self.temperature + 0.05)
+            if self.temperature != old_t:
+                changes["temperature"] = f"{old_t:.2f} → {self.temperature:.2f}"
+
+        # ── Timeout evolution ──
+        # If avg duration > 80% of timeout, increase timeout
+        if self.avg_task_duration_s > self.timeout * 0.8:
+            old_to = self.timeout
+            self.timeout = min(600, int(self.timeout * 1.25))
+            if self.timeout != old_to:
+                changes["timeout"] = f"{old_to}s → {self.timeout}s"
+
+        if changes:
+            self.adapted_at = datetime.now(timezone.utc).isoformat()
+
+        return changes
 
 
 class ProfileManager:
