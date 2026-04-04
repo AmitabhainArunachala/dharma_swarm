@@ -238,6 +238,7 @@ def test_preferred_runtime_provider_configs_skips_unavailable(monkeypatch) -> No
         ProviderType.OLLAMA,
         ProviderType.OPENROUTER_FREE,
         ProviderType.OPENROUTER,
+        ProviderType.CLAUDE_CODE,
     ]
 
 

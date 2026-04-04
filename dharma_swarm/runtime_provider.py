@@ -100,6 +100,7 @@ PREFERRED_LOW_COST_RUNTIME_PROVIDERS: tuple[ProviderType, ...] = (
     ProviderType.GOOGLE_AI,       # CHEAP
     ProviderType.CHUTES,          # CHEAP
     ProviderType.OPENROUTER,      # PAID (default: xiaomi/mimo-v2-pro)
+    ProviderType.CLAUDE_CODE,     # FALLBACK: always available if claude binary installed
 )
 
 PREFERRED_LOW_COST_WITH_ANTHROPIC_RUNTIME_PROVIDERS: tuple[ProviderType, ...] = (
@@ -112,6 +113,7 @@ PREFERRED_LOW_COST_WITH_ANTHROPIC_RUNTIME_PROVIDERS: tuple[ProviderType, ...] = 
     ProviderType.FIREWORKS,
     ProviderType.OPENROUTER,      # PAID (xiaomi/mimo-v2-pro)
     ProviderType.ANTHROPIC,
+    ProviderType.CLAUDE_CODE,     # FALLBACK: always available if claude binary installed
 )
 
 
