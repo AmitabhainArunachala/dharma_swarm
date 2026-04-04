@@ -1,6 +1,7 @@
 import {describe, expect, test} from "bun:test";
 
 import {
+  activityEntriesFromEvent,
   approvalPaneToLines,
   approvalPaneToPreview,
   agentRoutesToLines,
@@ -51,6 +52,72 @@ describe("normalizeCommandName", () => {
   test("strips the slash prefix and trailing arguments", () => {
     expect(normalizeCommandName("/swarm status")).toBe("swarm");
     expect(normalizeCommandName("git")).toBe("git");
+  });
+});
+
+describe("activityEntriesFromEvent", () => {
+  test("builds structured thinking activity entries", () => {
+    const entries = activityEntriesFromEvent({
+      type: "thinking_delta",
+      content: "Inspecting bridge flow and approval history shape",
+    });
+
+    expect(entries).toHaveLength(1);
+    expect(entries[0]?.kind).toBe("thinking");
+    expect(entries[0]?.title).toContain("Inspecting bridge flow");
+    expect(entries[0]?.detail?.[0]).toContain("Inspecting bridge flow");
+  });
+
+  test("builds structured tool activity entries", () => {
+    const entries = activityEntriesFromEvent({
+      type: "tool_call_complete",
+      tool_name: "exec_command",
+      tool_call_id: "tool-1",
+      arguments: JSON.stringify({command: "git status", description: "Check worktree"}),
+    });
+
+    expect(entries).toHaveLength(1);
+    expect(entries[0]?.kind).toBe("tool");
+    expect(entries[0]?.phase).toBe("running");
+    expect(entries[0]?.summary).toBe("exec_command");
+    expect(entries[0]?.correlationId).toBe("tool-1");
+    expect(entries[0]?.detail?.some((line) => line.includes("git status"))).toBe(true);
+  });
+
+  test("marks failed tool results as failed activity entries", () => {
+    const entries = activityEntriesFromEvent({
+      type: "tool_result",
+      tool_name: "exec_command",
+      tool_call_id: "tool-2",
+      success: false,
+      content: "permission denied",
+    });
+
+    expect(entries).toHaveLength(1);
+    expect(entries[0]?.kind).toBe("tool");
+    expect(entries[0]?.phase).toBe("failed");
+    expect(entries[0]?.correlationId).toBe("tool-2");
+  });
+
+  test("builds structured approval outcome entries", () => {
+    const entries = activityEntriesFromEvent({
+      type: "permission.outcome",
+      payload: {
+        version: "v1",
+        domain: "permission_outcome",
+        action_id: "act-1",
+        outcome: "runtime_applied",
+        outcome_at: "2026-04-03T00:00:00Z",
+        source: "runtime",
+        summary: "approved action recorded and applied",
+        metadata: {runtime_action_id: "ra-1"},
+      },
+    });
+
+    expect(entries).toHaveLength(1);
+    expect(entries[0]?.kind).toBe("approval");
+    expect(entries[0]?.title).toContain("runtime runtime_applied");
+    expect(entries[0]?.correlationId).toBe("act-1");
   });
 });
 
@@ -258,6 +325,23 @@ describe("typed runtime helpers", () => {
           context_bundle_count: 2,
           anomaly_count: 0,
           verification_status: "ok",
+          verification_summary: "tsc=ok | cycle_acceptance=ok",
+          verification_checks: "tsc ok; cycle_acceptance ok",
+          verification_bundle: "tsc=ok | cycle_acceptance=ok",
+          verification_passing: "tsc, cycle_acceptance",
+          verification_failing: "none",
+          verification_receipt: "/tmp/durable/verification.json",
+          verification_updated_at: "2026-04-01T00:05:00Z",
+          loop_state: "cycle 9 running",
+          loop_decision: "continue required",
+          task_progress: "0 done, 1 pending of 1",
+          result_status: "in_progress",
+          acceptance: "pass",
+          last_result: "in_progress / pass",
+          updated_at: "2026-04-01T00:04:00Z",
+          durable_state: "/tmp/durable",
+          runtime_summary: "/tmp/runtime.db | 3 sessions | 4 claims | 1 active claims | 1 acked claims | 1 active run | 3 runs total | 5 artifacts | 2 promoted facts | 2 context bundles | 6 operator actions",
+          runtime_freshness: "cycle 9 running | updated 2026-04-01T00:04:00Z | verify tsc=ok | cycle_acceptance=ok",
           next_task: "ship it",
           active_task: "wire runtime payloads",
           summary: "1 active runs, 2 context bundles, 5 artifacts",
@@ -272,14 +356,7 @@ describe("typed runtime helpers", () => {
           metadata: {
             overview: {runs: 3},
             supervisor_preview: {
-              "Loop state": "cycle 9 running",
-              "Loop decision": "continue required",
-              "Task progress": "0 done, 1 pending of 1",
-              "Result status": "in_progress",
-              Acceptance: "pass",
-              "Verification summary": "tsc=ok | cycle_acceptance=ok",
               "Verification checks": "tsc ok; cycle_acceptance ok",
-              "Durable state": "/tmp/durable",
             },
           },
         },
@@ -298,15 +375,198 @@ describe("typed runtime helpers", () => {
     expect(preview["Active task"]).toBe("wire runtime payloads");
     expect(preview["Next task"]).toBe("ship it");
     expect(preview["Loop decision"]).toBe("continue required");
+    expect(preview["Task progress"]).toBe("0 done, 1 pending of 1");
+    expect(preview["Result status"]).toBe("in_progress");
+    expect(preview.Acceptance).toBe("pass");
+    expect(preview["Last result"]).toBe("in_progress / pass");
     expect(preview["Verification summary"]).toBe("tsc=ok | cycle_acceptance=ok");
+    expect(preview["Verification checks"]).toBe("tsc ok; cycle_acceptance ok");
+    expect(preview["Verification bundle"]).toBe("tsc=ok | cycle_acceptance=ok");
     expect(preview["Verification status"]).toBe("all 2 checks passing");
     expect(preview["Verification passing"]).toBe("tsc, cycle_acceptance");
     expect(preview["Verification failing"]).toBe("none");
+    expect(preview["Verification receipt"]).toBe("/tmp/durable/verification.json");
+    expect(preview["Verification updated"]).toBe("2026-04-01T00:05:00Z");
+    expect(preview.Updated).toBe("2026-04-01T00:04:00Z");
+    expect(preview["Durable state"]).toBe("/tmp/durable");
+    expect(preview["Runtime summary"]).toBe(
+      "/tmp/runtime.db | 3 sessions | 4 claims | 1 active claims | 1 acked claims | 1 active run | 3 runs total | 5 artifacts | 2 promoted facts | 2 context bundles | 6 operator actions",
+    );
+    expect(preview["Runtime freshness"]).toBe(
+      "cycle 9 running | updated 2026-04-01T00:04:00Z | verify tsc=ok | cycle_acceptance=ok",
+    );
     expect(preview["Control pulse preview"]).toContain("cycle 9 running");
+  });
+
+  test("unwraps nested runtime snapshot payloads from refresh envelopes", () => {
+    const payload = runtimeSnapshotPayloadFromEvent({
+      type: "action.result",
+      action_type: "surface.refresh",
+      payload: {
+        request: {
+          action_type: "surface.refresh",
+          surface: "control",
+        },
+        payload: {
+          version: "v1",
+          domain: "runtime_snapshot",
+          snapshot: {
+            snapshot_id: "runtime-nested-1",
+            created_at: "2026-04-03T00:00:00Z",
+            repo_root: "/repo",
+            runtime_db: "/tmp/runtime.db",
+            health: "ok",
+            bridge_status: "connected",
+            active_session_count: 2,
+            active_run_count: 1,
+            artifact_count: 4,
+            context_bundle_count: 1,
+            anomaly_count: 0,
+            verification_status: "ok",
+            next_task: "ship it",
+            active_task: "unwrap refresh envelopes",
+            summary: "1 active run, 1 context bundle, 4 artifacts",
+            warnings: [],
+            metrics: {
+              claims: "2",
+              active_claims: "1",
+              acknowledged_claims: "1",
+              operator_actions: "3",
+              promoted_facts: "1",
+            },
+            metadata: {overview: {runs: 2}},
+          },
+        },
+      },
+    });
+
+    expect(payload?.snapshot.snapshot_id).toBe("runtime-nested-1");
+    expect(payload?.snapshot.active_session_count).toBe(2);
+  });
+
+  test("derives normalized verification detail from explicit runtime payload bundles when checks are absent", () => {
+    const preview = runtimePayloadToPreview(
+      {
+        version: "v1",
+        domain: "runtime_snapshot",
+        snapshot: {
+          snapshot_id: "runtime-bundle-only-1",
+          created_at: "2026-04-03T00:00:00Z",
+          repo_root: "/repo",
+          runtime_db: "/tmp/runtime.db",
+          health: "ok",
+          bridge_status: "connected",
+          active_session_count: 2,
+          active_run_count: 1,
+          artifact_count: 4,
+          context_bundle_count: 1,
+          anomaly_count: 0,
+          verification_status: "ok",
+          verification_summary: "ok",
+          verification_bundle: "tsc=ok | cycle_acceptance=fail",
+          loop_state: "cycle 9 running",
+          result_status: "in_progress",
+          acceptance: "fail",
+          last_result: "in_progress / fail",
+          updated_at: "2026-04-03T00:00:00Z",
+          summary: "1 active run, 1 context bundle, 4 artifacts",
+          warnings: [],
+          metrics: {},
+          metadata: {},
+        },
+      },
+      null,
+    );
+
+    expect(preview["Verification summary"]).toBe("tsc=ok | cycle_acceptance=fail");
+    expect(preview["Verification bundle"]).toBe("tsc=ok | cycle_acceptance=fail");
+    expect(preview["Verification checks"]).toBe("tsc ok; cycle_acceptance fail");
+    expect(preview["Verification status"]).toBe("1 failing, 1/2 passing");
+    expect(preview["Verification passing"]).toBe("tsc");
+    expect(preview["Verification failing"]).toBe("cycle_acceptance");
+  });
+
+  test("prefers authoritative runtime summaries from supervisor preview over synthesized runtime counts", () => {
+    const preview = runtimePayloadToPreview(
+      {
+        version: "v1",
+        domain: "runtime_snapshot",
+        snapshot: {
+          snapshot_id: "runtime-summary-authority-1",
+          created_at: "2026-04-03T00:00:00Z",
+          repo_root: "/repo",
+          runtime_db: "/tmp/runtime.db",
+          health: "ok",
+          bridge_status: "connected",
+          active_session_count: 2,
+          active_run_count: 1,
+          artifact_count: 4,
+          context_bundle_count: 1,
+          anomaly_count: 0,
+          runtime_summary: "stale synthesized fallback that should not win",
+          warnings: [],
+          metrics: {
+            claims: "2",
+            active_claims: "1",
+            acknowledged_claims: "1",
+            operator_actions: "3",
+            promoted_facts: "1",
+          },
+          metadata: {
+            overview: {runs: 2},
+            supervisor_preview: {
+              "Runtime summary":
+                "/tmp/runtime.db | 2 sessions | 2 claims | 1 active claims | 1 acked claims | repo/control summary authoritative",
+            },
+          },
+        },
+      },
+      null,
+    );
+
+    expect(preview["Runtime summary"]).toBe(
+      "/tmp/runtime.db | 2 sessions | 2 claims | 1 active claims | 1 acked claims | repo/control summary authoritative",
+    );
   });
 });
 
 describe("typed workspace helpers", () => {
+  test("unwraps nested workspace snapshot payloads from refresh envelopes", () => {
+    const payload = workspaceSnapshotPayloadFromEvent({
+      type: "action.result",
+      action_type: "surface.refresh",
+      payload: {
+        request: {
+          action_type: "surface.refresh",
+          surface: "repo",
+        },
+        payload: {
+          version: "v1",
+          domain: "workspace_snapshot",
+          repo_root: "/repo",
+          git: {
+            branch: "main",
+            head: "abc1234",
+            staged: 1,
+            unstaged: 2,
+            untracked: 3,
+            changed_hotspots: [{name: "terminal", count: 4}],
+            changed_paths: ["terminal/src/protocol.ts"],
+            sync: {summary: "origin/main | ahead 1 | behind 0", status: "tracking", upstream: "origin/main", ahead: 1, behind: 0},
+          },
+          topology: {warnings: [], repos: []},
+          inventory: {python_modules: 1, python_tests: 1, scripts: 1, docs: 1, workflows: 0},
+          language_mix: [],
+          largest_python_files: [],
+          most_imported_modules: [],
+        },
+      },
+    });
+
+    expect(payload?.git.branch).toBe("main");
+    expect(payload?.git.changed_paths).toEqual(["terminal/src/protocol.ts"]);
+  });
+
   test("suppresses raw repo transcript patches when typed workspace payloads are present", () => {
     expect(
       eventToTabPatch({
@@ -334,6 +594,239 @@ describe("typed workspace helpers", () => {
         },
       }),
     ).toEqual([]);
+  });
+
+  test("prefers the warning-bearing peer as the primary topology peer in typed workspace payloads", () => {
+    const preview = workspacePayloadToPreview({
+      version: "v1",
+      domain: "workspace_snapshot",
+      repo_root: "/repo",
+      git: {
+        branch: "main",
+        head: "abc1234",
+        staged: 1,
+        unstaged: 2,
+        untracked: 3,
+        changed_hotspots: [{name: "terminal", count: 4}],
+        changed_paths: ["terminal/src/protocol.ts"],
+        sync: {summary: "origin/main | ahead 2 | behind 1", status: "tracking", upstream: "origin/main", ahead: 2, behind: 1},
+      },
+      topology: {
+        warnings: ["peer_branch_diverged", "detached_peer"],
+        repos: [
+          {
+            name: "dharma_swarm",
+            role: "canonical_core",
+            path: "/repo",
+            domain: "workspace_repo",
+            canonical: true,
+            exists: true,
+            branch: "main...origin/main",
+            head: "abc1234",
+            dirty: true,
+            is_git: true,
+            modified_count: 3,
+            untracked_count: 2,
+          },
+          {
+            name: "dgc-core",
+            role: "operator_shell",
+            path: "/repo/dgc-core",
+            domain: "workspace_repo",
+            canonical: false,
+            exists: true,
+            branch: "detached",
+            head: "def5678",
+            dirty: true,
+            is_git: true,
+            modified_count: 1,
+            untracked_count: 0,
+          },
+        ],
+      },
+      inventory: {python_modules: 1, python_tests: 1, scripts: 1, docs: 1, workflows: 0},
+      language_mix: [],
+      largest_python_files: [],
+      most_imported_modules: [],
+    });
+
+    expect(preview["Primary topology peer"]).toBe("dgc-core (operator_shell, detached, dirty true)");
+    expect(preview["Primary peer drift"]).toBe("dgc-core detached");
+    expect(preview["Repo risk preview"]).toBe("diverged from origin/main (+2/-1) | peer_branch_diverged | dgc-core (operator_shell, detached, dirty true)");
+    expect(preview["Topology preview"]).toBe(
+      "peer_branch_diverged | dgc-core (operator_shell, detached, dirty true) | dharma_swarm Δ5 (3 modified, 2 untracked); dgc-core Δ1 (1 modified, 0 untracked)",
+    );
+  });
+
+  test("keeps full typed topology counts and later warning-bearing peers in workspace payload previews", () => {
+    const preview = workspacePayloadToPreview({
+      version: "v1",
+      domain: "workspace_snapshot",
+      repo_root: "/repo",
+      git: {
+        branch: "main",
+        head: "abc1234",
+        staged: 2,
+        unstaged: 3,
+        untracked: 1,
+        changed_hotspots: [{name: "terminal", count: 6}],
+        changed_paths: ["terminal/src/components/RepoPane.tsx"],
+        sync: {summary: "origin/main | ahead 2 | behind 0", status: "tracking", upstream: "origin/main", ahead: 2, behind: 0},
+      },
+      topology: {
+        warnings: ["peer_branch_diverged", "detached_peer"],
+        repos: [
+          {
+            name: "dharma_swarm",
+            role: "canonical_core",
+            path: "/repo",
+            domain: "workspace_repo",
+            canonical: true,
+            exists: true,
+            branch: "main...origin/main",
+            head: "abc1234",
+            dirty: true,
+            is_git: true,
+            modified_count: 3,
+            untracked_count: 1,
+          },
+          {
+            name: "ops-a",
+            role: "operator_shell",
+            path: "/repo/ops-a",
+            domain: "workspace_repo",
+            canonical: false,
+            exists: true,
+            branch: "main",
+            head: "def0001",
+            dirty: false,
+            is_git: true,
+            modified_count: 0,
+            untracked_count: 0,
+          },
+          {
+            name: "ops-b",
+            role: "operator_shell",
+            path: "/repo/ops-b",
+            domain: "workspace_repo",
+            canonical: false,
+            exists: true,
+            branch: "main",
+            head: "def0002",
+            dirty: false,
+            is_git: true,
+            modified_count: 0,
+            untracked_count: 0,
+          },
+          {
+            name: "ops-c",
+            role: "operator_shell",
+            path: "/repo/ops-c",
+            domain: "workspace_repo",
+            canonical: false,
+            exists: true,
+            branch: "main",
+            head: "def0003",
+            dirty: false,
+            is_git: true,
+            modified_count: 0,
+            untracked_count: 0,
+          },
+          {
+            name: "dgc-core",
+            role: "operator_shell",
+            path: "/repo/dgc-core",
+            domain: "workspace_repo",
+            canonical: false,
+            exists: true,
+            branch: "detached",
+            head: "def5678",
+            dirty: true,
+            is_git: true,
+            modified_count: 1,
+            untracked_count: 0,
+          },
+        ],
+      },
+      inventory: {python_modules: 1, python_tests: 1, scripts: 1, docs: 1, workflows: 0},
+      language_mix: [],
+      largest_python_files: [],
+      most_imported_modules: [],
+    });
+
+    expect(preview["Topology peer count"]).toBe("5");
+    expect(preview["Primary topology peer"]).toBe("dgc-core (operator_shell, detached, dirty true)");
+    expect(preview["Primary peer drift"]).toBe("dgc-core detached");
+    expect(preview["Topology pressure preview"]).toBe("2 warnings | dharma_swarm Δ4 (3 modified, 1 untracked)");
+    expect(preview["Topology pressure"]).toBe(
+      "dharma_swarm Δ4 (3 modified, 1 untracked); dgc-core Δ1 (1 modified, 0 untracked); ops-a clean",
+    );
+  });
+
+  test("prefers authoritative typed topology preview text over synthesized workspace fallback rows", () => {
+    const preview = workspacePayloadToPreview({
+      version: "v1",
+      domain: "workspace_snapshot",
+      repo_root: "/repo",
+      git: {
+        branch: "main",
+        head: "abc1234",
+        staged: 1,
+        unstaged: 2,
+        untracked: 3,
+        changed_hotspots: [{name: "terminal", count: 4}],
+        changed_paths: ["terminal/src/protocol.ts"],
+        sync: {summary: "origin/main | ahead 2 | behind 1", status: "tracking", upstream: "origin/main", ahead: 2, behind: 1},
+      },
+      topology: {
+        warnings: ["peer_branch_diverged", "detached_peer"],
+        preview: "authoritative topology preview | lead detached peer",
+        pressure_preview: "authoritative topology pressure | detached peer",
+        repos: [
+          {
+            name: "dharma_swarm",
+            role: "canonical_core",
+            path: "/repo",
+            domain: "workspace_repo",
+            canonical: true,
+            exists: true,
+            branch: "main...origin/main",
+            head: "abc1234",
+            dirty: true,
+            is_git: true,
+            modified_count: 3,
+            untracked_count: 2,
+          },
+          {
+            name: "dgc-core",
+            role: "operator_shell",
+            path: "/repo/dgc-core",
+            domain: "workspace_repo",
+            canonical: false,
+            exists: true,
+            branch: "detached",
+            head: "def5678",
+            dirty: true,
+            is_git: true,
+            modified_count: 1,
+            untracked_count: 0,
+          },
+        ],
+      },
+      inventory: {python_modules: 1, python_tests: 1, scripts: 1, docs: 1, workflows: 0},
+      language_mix: [],
+      largest_python_files: [],
+      most_imported_modules: [],
+    });
+
+    expect(preview["Topology preview"]).toBe(
+      "authoritative topology preview | lead detached peer",
+    );
+    expect(preview["Topology pressure preview"]).toBe(
+      "authoritative topology pressure | detached peer",
+    );
+    expect(preview["Primary topology peer"]).toBe("dgc-core (operator_shell, detached, dirty true)");
+    expect(preview["Topology pressure"]).toBe("dharma_swarm Δ5 (3 modified, 2 untracked); dgc-core Δ1 (1 modified, 0 untracked)");
   });
 });
 
@@ -398,10 +891,10 @@ describe("approval helpers", () => {
     const lines = approvalPaneToLines(pane);
     const preview = approvalPaneToPreview(pane);
 
-    expect(lines.some((line) => line.text.includes("perm_1 | Bash | shell_or_network | require_approval"))).toBe(true);
-    expect(lines.some((line) => line.text.includes("Authority: history"))).toBe(true);
-    expect(lines.some((line) => line.text.includes("Status: pending"))).toBe(true);
-    expect(lines.some((line) => line.text.includes("Rationale: Bash is not classified as safe"))).toBe(true);
+    expect(lines.some((line) => line.text.includes("Bash  |  shell_or_network  |  perm_1"))).toBe(true);
+    expect(lines.some((line) => line.text.includes("Authority: history-backed"))).toBe(true);
+    expect(lines.some((line) => line.text.includes("Decision: require_approval  |  Status: pending"))).toBe(true);
+    expect(lines.some((line) => line.text.includes("Bash is not classified as safe"))).toBe(true);
     expect(preview?.Authority).toBe("history");
     expect(preview?.Pending).toBe("1");
     expect(preview?.Status).toBe("pending");
@@ -548,7 +1041,7 @@ describe("approval helpers", () => {
     const lines = approvalPaneToLines(pane).map((line) => line.text);
     const preview = approvalPaneToPreview(pane);
 
-    expect(lines).toContain("Status: runtime applied");
+    expect(lines).toContain("Decision: require_approval  |  Status: runtime applied");
     expect(lines).toContain("Runtime outcome: runtime_applied");
     expect(lines).toContain("Outcome source: runtime");
     expect(lines).toContain("Runtime action id: runtime_1");
@@ -736,6 +1229,7 @@ describe("commandTargetTab", () => {
 
   test("routes model, agent, and evolution commands to their dedicated panes", () => {
     expect(commandTargetTab("/model set codex-5.4")).toBe("models");
+    expect(commandTargetTab("/models")).toBe("models");
     expect(commandTargetTab("/swarm status")).toBe("agents");
     expect(commandTargetTab("/hum")).toBe("agents");
     expect(commandTargetTab("/evolve status")).toBe("evolution");
@@ -756,6 +1250,13 @@ describe("commandTargetTab", () => {
     expect(commandTargetTab("/notes")).toBe("sessions");
     expect(commandTargetTab("/session")).toBe("sessions");
     expect(commandTargetTab("/darwin")).toBe("sessions");
+  });
+
+  test("routes approval commands to the approvals pane", () => {
+    expect(commandTargetTab("/approval")).toBe("approvals");
+    expect(commandTargetTab("/approvals")).toBe("approvals");
+    expect(commandTargetTab("/permission")).toBe("approvals");
+    expect(commandTargetTab("/permissions")).toBe("approvals");
   });
 
   test("routes operational and unknown commands away from chat", () => {
@@ -820,6 +1321,18 @@ describe("resolveCommandTargetPane", () => {
         },
       }),
     ).toBe("sessions");
+    expect(
+      resolveCommandTargetPane({
+        type: "action.result",
+        action_type: "command.run",
+        payload: {
+          request: {
+            command: "/git status",
+            pane: "workspace",
+          },
+        },
+      }),
+    ).toBe("repo");
   });
 
   test("derives the command and target pane from nested payload request envelopes", () => {
@@ -831,6 +1344,42 @@ describe("resolveCommandTargetPane", () => {
           request: {
             command: "/git status",
             target_pane: "workspace",
+          },
+        },
+      }),
+    ).toBe("repo");
+  });
+
+  test("derives target pane id aliases from nested command payloads", () => {
+    expect(
+      resolveCommandTargetPane({
+        type: "command.result",
+        command: "/git status",
+        targetPaneId: "approval",
+      }),
+    ).toBe("approvals");
+    expect(
+      resolveCommandTargetPane({
+        type: "action.result",
+        action_type: "command.run",
+        payload: {
+          request: {
+            command: "/memory recent",
+            target_pane_id: "notes",
+          },
+        },
+      }),
+    ).toBe("sessions");
+  });
+
+  test("derives the command and target pane from object-wrapped command envelopes", () => {
+    expect(
+      resolveCommandTargetPane({
+        type: "action.result",
+        action_type: "command.run",
+        command: {
+          arguments: {
+            command: "/git status",
           },
         },
       }),
@@ -873,6 +1422,22 @@ describe("resolveCommandTargetPane", () => {
         target_pane: "registry",
       }),
     ).toBe("runtime");
+  });
+
+  test("quarantines launcher-pane targets when sparse command results omit the command", () => {
+    expect(
+      resolveCommandTargetPane({
+        type: "command.result",
+        target_pane: "commands",
+      }),
+    ).toBe("control");
+    expect(
+      resolveCommandTargetPane({
+        type: "action.result",
+        action_type: "command.run",
+        target_pane: "registry",
+      }),
+    ).toBe("control");
   });
 
   test("honors explicit approvals targets for slash commands", () => {
@@ -923,19 +1488,17 @@ describe("resolveCommandTargetPane", () => {
 });
 
 describe("eventToTabPatch", () => {
-  test("routes chat control command output into chat", () => {
+  test("keeps chat control command output out of the transcript", () => {
     const patches = eventToTabPatch({
       type: "command.result",
       command: "reset",
       output: "Conversation memory reset.",
     });
 
-    expect(patches).toHaveLength(1);
-    expect(patches[0]?.tabId).toBe("chat");
-    expect(patches[0]?.lines[0]?.text).toBe("Conversation memory reset.");
+    expect(patches).toEqual([]);
   });
 
-  test("keeps chat control command output in chat when explicit non-chat targets arrive", () => {
+  test("keeps chat control command output out of the transcript when explicit non-chat targets arrive", () => {
     const patches = eventToTabPatch({
       type: "command.result",
       command: "/reset",
@@ -943,9 +1506,7 @@ describe("eventToTabPatch", () => {
       output: "Conversation memory reset.",
     });
 
-    expect(patches).toHaveLength(1);
-    expect(patches[0]?.tabId).toBe("chat");
-    expect(patches[0]?.lines[0]?.text).toBe("Conversation memory reset.");
+    expect(patches).toEqual([]);
   });
 
   test("prefers an explicit target pane on command results", () => {
@@ -1013,6 +1574,18 @@ describe("eventToTabPatch", () => {
     expect(patches[0]?.lines[0]?.text).toBe("Review pending: repo write requires approval");
   });
 
+  test("routes typed approval command output into the approvals pane", () => {
+    const patches = eventToTabPatch({
+      type: "command.result",
+      command: "/permissions pending",
+      output: "Review pending: repo write requires approval",
+    });
+
+    expect(patches).toHaveLength(1);
+    expect(patches[0]?.tabId).toBe("approvals");
+    expect(patches[0]?.lines[0]?.text).toBe("Review pending: repo write requires approval");
+  });
+
   test("ignores invalid explicit target panes and falls back to command inference", () => {
     const patches = eventToTabPatch({
       type: "command.result",
@@ -1024,6 +1597,23 @@ describe("eventToTabPatch", () => {
     expect(patches).toHaveLength(1);
     expect(patches[0]?.tabId).toBe("runtime");
     expect(patches[0]?.lines[0]?.text).toBe("Loop state: cycle 3 running");
+  });
+
+  test("prefers a nested operator target over wrapper chat targets on command results", () => {
+    const patches = eventToTabPatch({
+      type: "action.result",
+      action_type: "command.run",
+      target_pane: "chat",
+      request: {
+        command: "/runtime",
+        target_pane: "permissions",
+      },
+      output: "Approval review: runtime restart pending",
+    });
+
+    expect(patches).toHaveLength(1);
+    expect(patches[0]?.tabId).toBe("approvals");
+    expect(patches[0]?.lines[0]?.text).toBe("Approval review: runtime restart pending");
   });
 
   test("routes dashboard command output into control", () => {
@@ -1067,6 +1657,77 @@ describe("eventToTabPatch", () => {
       output: `# Workspace X-Ray
 Repo root: /Users/dhyana/dharma_swarm
 Git: main@95210b1 | staged 0 | unstaged 518 | untracked 48`,
+    });
+
+    expect(patches).toEqual([]);
+  });
+
+  test("suppresses raw repo transcript patches when command results carry typed workspace snapshots", () => {
+    const patches = eventToTabPatch({
+      type: "command.result",
+      command: "/git status",
+      output: "raw repo fallback should stay out of the transcript",
+      payload: {
+        version: "v1",
+        domain: "workspace_snapshot",
+        repo_root: "/Users/dhyana/dharma_swarm",
+        git: {
+          branch: "main",
+          head: "804d5d1",
+          staged: 1,
+          unstaged: 2,
+          untracked: 3,
+          changed_hotspots: [{name: "terminal", count: 4}],
+          changed_paths: ["terminal/src/app.tsx"],
+          sync: {summary: "origin/main ahead 2", status: "ahead", upstream: "origin/main", ahead: 2, behind: 0},
+        },
+        topology: {warnings: [], repos: []},
+        inventory: {python_modules: 10, python_tests: 20, scripts: 3, docs: 4, workflows: 1},
+        language_mix: [{suffix: ".ts", count: 12}],
+        largest_python_files: [],
+        most_imported_modules: [],
+      },
+    });
+
+    expect(patches).toEqual([]);
+  });
+
+  test("suppresses raw runtime transcript patches when command results carry typed runtime snapshots", () => {
+    const patches = eventToTabPatch({
+      type: "action.result",
+      action_type: "command.run",
+      request: {command: "/runtime", target_pane: "runtime"},
+      output: "raw runtime fallback should stay out of the transcript",
+      payload: {
+        version: "v1",
+        domain: "runtime_snapshot",
+        snapshot: {
+          snapshot_id: "snap-1",
+          created_at: "2026-04-04T00:00:00Z",
+          repo_root: "/Users/dhyana/dharma_swarm",
+          runtime_db: "/Users/dhyana/.dharma/state/runtime.db",
+          health: "ok",
+          bridge_status: "connected",
+          active_session_count: 2,
+          active_run_count: 1,
+          artifact_count: 3,
+          context_bundle_count: 1,
+          anomaly_count: 0,
+          verification_status: "ok",
+          verification_summary: "tsc=ok | cycle_acceptance=ok",
+          verification_bundle: "tsc=ok | cycle_acceptance=ok",
+          warnings: [],
+          metrics: {
+            claims: "1",
+            active_claims: "1",
+            acknowledged_claims: "0",
+            promoted_facts: "2",
+            operator_actions: "3",
+            runs: "1",
+          },
+          metadata: {},
+        },
+      },
     });
 
     expect(patches).toEqual([]);
@@ -1129,6 +1790,297 @@ Git: main@95210b1 | staged 0 | unstaged 517 | untracked 46`,
     expect(patches).toHaveLength(1);
     expect(patches[0]?.tabId).toBe("repo");
     expect(patches[0]?.lines[0]?.text).toBe("Repo dirty: 517 unstaged, 47 untracked");
+  });
+
+  test("routes request-payload-wrapped slash command action results through the inferred pane patch logic", () => {
+    const patches = eventToTabPatch({
+      type: "action.result",
+      action_type: "command.run",
+      payload: {
+        request: {
+          payload: {
+            command: "/git status",
+            target_pane: "workspace",
+          },
+        },
+      },
+      output: "Repo dirty: 517 unstaged, 47 untracked",
+    });
+
+    expect(patches).toHaveLength(1);
+    expect(patches[0]?.tabId).toBe("repo");
+    expect(patches[0]?.lines[0]?.text).toBe("Repo dirty: 517 unstaged, 47 untracked");
+  });
+
+  test("routes payload-wrapped slash command output when the bridge nests output beside the request envelope", () => {
+    const patches = eventToTabPatch({
+      type: "action.result",
+      action_type: "command.run",
+      payload: {
+        request: {
+          command: "/runtime status",
+          target_pane: "registry",
+        },
+        output: "Loop state: cycle 6 running",
+      },
+    });
+
+    expect(patches).toHaveLength(1);
+    expect(patches[0]?.tabId).toBe("runtime");
+    expect(patches[0]?.lines[0]?.text).toBe("Loop state: cycle 6 running");
+  });
+
+  test("routes stderr-only slash command output through the inferred pane patch logic", () => {
+    const patches = eventToTabPatch({
+      type: "action.result",
+      action_type: "command.run",
+      payload: {
+        request: {
+          command: "/runtime status",
+          target_pane: "registry",
+        },
+        stderr: "Runtime probe failed: supervisor socket unavailable",
+      },
+    });
+
+    expect(patches).toHaveLength(1);
+    expect(patches[0]?.tabId).toBe("runtime");
+    expect(patches[0]?.lines[0]?.text).toBe("Runtime probe failed: supervisor socket unavailable");
+  });
+
+  test("routes payload-only command.run action envelopes through the inferred pane patch logic", () => {
+    const patches = eventToTabPatch({
+      type: "action.result",
+      payload: {
+        action_type: "command.run",
+        request: {
+          command: "/git status",
+          target_pane: "workspace",
+        },
+        output: "Repo dirty: 517 unstaged, 47 untracked",
+      },
+    });
+
+    expect(patches).toHaveLength(1);
+    expect(patches[0]?.tabId).toBe("repo");
+    expect(patches[0]?.lines[0]?.text).toBe("Repo dirty: 517 unstaged, 47 untracked");
+  });
+
+  test("routes camelCase target panes and content aliases through the inferred pane patch logic", () => {
+    const patches = eventToTabPatch({
+      type: "action.result",
+      action_type: "command.run",
+      payload: {
+        request: {
+          command: "/git status",
+          targetPane: "workspace",
+        },
+        content: "Repo dirty: 517 unstaged, 47 untracked",
+      },
+    });
+
+    expect(patches).toHaveLength(1);
+    expect(patches[0]?.tabId).toBe("repo");
+    expect(patches[0]?.lines[0]?.text).toBe("Repo dirty: 517 unstaged, 47 untracked");
+  });
+
+  test("routes surface aliases through the inferred pane patch logic", () => {
+    const patches = eventToTabPatch({
+      type: "action.result",
+      action_type: "command.run",
+      payload: {
+        request: {
+          command: "/git status",
+          targetSurface: "workspace",
+        },
+        content: "Repo dirty: 517 unstaged, 47 untracked",
+      },
+    });
+
+    expect(patches).toHaveLength(1);
+    expect(patches[0]?.tabId).toBe("repo");
+    expect(patches[0]?.lines[0]?.text).toBe("Repo dirty: 517 unstaged, 47 untracked");
+  });
+
+  test("routes target-surface-id aliases through the inferred pane patch logic", () => {
+    const patches = eventToTabPatch({
+      type: "action.result",
+      action_type: "command.run",
+      payload: {
+        request: {
+          command: "/git status",
+          targetSurfaceId: "workspace",
+        },
+        output: "Repo dirty: 517 unstaged, 47 untracked",
+      },
+    });
+
+    expect(patches).toHaveLength(1);
+    expect(patches[0]?.tabId).toBe("repo");
+    expect(patches[0]?.lines[0]?.text).toBe("Repo dirty: 517 unstaged, 47 untracked");
+  });
+
+  test("routes pane and tab aliases through the inferred pane patch logic", () => {
+    const panePatches = eventToTabPatch({
+      type: "action.result",
+      action_type: "command.run",
+      payload: {
+        request: {
+          command: "/memory recent",
+          pane: "notes",
+        },
+        output: "Recent memory lane",
+      },
+    });
+
+    expect(panePatches).toHaveLength(1);
+    expect(panePatches[0]?.tabId).toBe("sessions");
+    expect(panePatches[0]?.lines[0]?.text).toBe("Recent memory lane");
+
+    const tabPatches = eventToTabPatch({
+      type: "action.result",
+      action_type: "command.run",
+      payload: {
+        request: {
+          command: "/git status",
+          tabId: "workspace",
+        },
+      },
+      output: "Repo dirty: 517 unstaged, 47 untracked",
+    });
+
+    expect(tabPatches).toHaveLength(1);
+    expect(tabPatches[0]?.tabId).toBe("repo");
+    expect(tabPatches[0]?.lines[0]?.text).toBe("Repo dirty: 517 unstaged, 47 untracked");
+  });
+
+  test("routes target-tab aliases through the inferred pane patch logic", () => {
+    const targetTabPatches = eventToTabPatch({
+      type: "action.result",
+      action_type: "command.run",
+      payload: {
+        request: {
+          command: "/memory recent",
+          target_tab: "notes",
+        },
+        output: "Recent memory lane",
+      },
+    });
+
+    expect(targetTabPatches).toHaveLength(1);
+    expect(targetTabPatches[0]?.tabId).toBe("sessions");
+    expect(targetTabPatches[0]?.lines[0]?.text).toBe("Recent memory lane");
+
+    const targetTabIdPatches = eventToTabPatch({
+      type: "action.result",
+      action_type: "command.run",
+      payload: {
+        request: {
+          command: "/git status",
+          targetTabId: "workspace",
+        },
+      },
+      output: "Repo dirty: 517 unstaged, 47 untracked",
+    });
+
+    expect(targetTabIdPatches).toHaveLength(1);
+    expect(targetTabIdPatches[0]?.tabId).toBe("repo");
+    expect(targetTabIdPatches[0]?.lines[0]?.text).toBe("Repo dirty: 517 unstaged, 47 untracked");
+  });
+
+  test("routes result-wrapped slash command payloads through the inferred pane patch logic", () => {
+    const patches = eventToTabPatch({
+      type: "action.result",
+      action_type: "command.run",
+      result: {
+        request: {
+          command: "/git status",
+          target_pane: "workspace",
+        },
+        output: "Repo dirty: 517 unstaged, 47 untracked",
+      },
+    });
+
+    expect(patches).toHaveLength(1);
+    expect(patches[0]?.tabId).toBe("repo");
+    expect(patches[0]?.lines[0]?.text).toBe("Repo dirty: 517 unstaged, 47 untracked");
+  });
+
+  test("routes result-payload-wrapped slash command payloads through the inferred pane patch logic", () => {
+    const patches = eventToTabPatch({
+      type: "action.result",
+      result: {
+        payload: {
+          action_type: "command.run",
+          request: {
+            command: "/git status",
+            target_pane: "workspace",
+          },
+          output: "Repo dirty: 517 unstaged, 47 untracked",
+        },
+      },
+    });
+
+    expect(patches).toHaveLength(1);
+    expect(patches[0]?.tabId).toBe("repo");
+    expect(patches[0]?.lines[0]?.text).toBe("Repo dirty: 517 unstaged, 47 untracked");
+  });
+
+  test("routes doubly wrapped request-result payloads through the inferred pane patch logic", () => {
+    const patches = eventToTabPatch({
+      type: "action.result",
+      result: {
+        request: {
+          result: {
+            payload: {
+              action_type: "command.run",
+              command: "/git status",
+              target_pane: "workspace",
+            },
+          },
+        },
+        output: "Repo dirty: 517 unstaged, 47 untracked",
+      },
+    });
+
+    expect(patches).toHaveLength(1);
+    expect(patches[0]?.tabId).toBe("repo");
+    expect(patches[0]?.lines[0]?.text).toBe("Repo dirty: 517 unstaged, 47 untracked");
+  });
+
+  test("routes object-wrapped command envelopes through the inferred pane patch logic", () => {
+    const patches = eventToTabPatch({
+      type: "action.result",
+      action_type: "command.run",
+      command: {
+        arguments: {
+          command: "/git status",
+        },
+      },
+      output: "Repo dirty: 517 unstaged, 47 untracked",
+    });
+
+    expect(patches).toHaveLength(1);
+    expect(patches[0]?.tabId).toBe("repo");
+    expect(patches[0]?.lines[0]?.text).toBe("Repo dirty: 517 unstaged, 47 untracked");
+  });
+
+  test("honors explicit target panes nested inside object-wrapped command arguments", () => {
+    const patches = eventToTabPatch({
+      type: "action.result",
+      action_type: "command.run",
+      command: {
+        arguments: {
+          command: "/git status",
+          target_pane: "dashboard",
+        },
+      },
+      output: "Command override landed in control",
+    });
+
+    expect(patches).toHaveLength(1);
+    expect(patches[0]?.tabId).toBe("control");
+    expect(patches[0]?.lines[0]?.text).toBe("Command override landed in control");
   });
 
   test("suppresses structured runtime transcript patches for slash command action results", () => {
@@ -1303,10 +2255,10 @@ describe("modelPolicy helpers", () => {
     const preview = modelPolicyToPreview(payload);
 
     expect(lines).toContain("# Model Policy");
-    expect(lines).toContain("Active: Codex 5.4");
+    expect(lines).toContain("Active: Codex 5.4 | fast operator lane");
     expect(lines.some((line) => line.includes("Claude Haiku 4.5"))).toBe(true);
     expect(lines.some((line) => line.includes("codex-5.4 -> Codex 5.4 (codex:gpt-5.4)"))).toBe(true);
-    expect(preview.Active).toBe("Codex 5.4");
+    expect(preview.Active).toBe("Codex 5.4 | fast operator lane");
     expect(preview.Fallbacks).toBe("1");
     expect(preview.Targets).toBe("1");
   });
@@ -1341,7 +2293,7 @@ describe("modelPolicy helpers", () => {
     const preview = modelPolicyToPreview(event);
 
     expect(payload?.decision.route_id).toBe("codex:gpt-5.4");
-    expect(lines).toContain("Active: Codex 5.4");
+    expect(lines).toContain("Active: Codex 5.4 | fast operator lane");
     expect(lines.some((line) => line.includes("Claude Sonnet 4.6"))).toBe(true);
     expect(preview.Route).toBe("codex:gpt-5.4");
     expect(preview.Targets).toBe("1");
@@ -1475,6 +2427,7 @@ Git sync: origin/main | ahead 0 | behind 0
       "Behind: 0",
       "Branch sync preview: tracking origin/main in sync | +0/-0 | topology sab_canonical_repo_missing; high (552 local changes)",
       "Repo risk preview: tracking origin/main in sync | sab_canonical_repo_missing | dharma_swarm (canonical_core, main...origin/main, dirty True)",
+      "Repo truth preview: branch main@95210b1 | dirty staged 0 | unstaged 510 | untracked 42 | warn sab_canonical_repo_missing | hotspot change terminal (274); .dharma_psmv_hyperfile_branch (142); dharma_swarm (91) | files dgc_cli.py (6908 lines); thinkodynamic_director.py (5167 lines) | paths terminal/src/protocol.ts",
       "Repo risk: topology sab_canonical_repo_missing; high (552 local changes)",
       "Dirty: 0 staged, 510 unstaged, 42 untracked",
       "Dirty pressure: high (552 local changes)",
@@ -1483,14 +2436,18 @@ Git sync: origin/main | ahead 0 | behind 0
       "Untracked: 42",
       "## Topology risk",
       "Topology warnings: 1 (sab_canonical_repo_missing)",
+      "Topology warning members: sab_canonical_repo_missing",
       "Topology warning severity: high",
       "Topology risk: sab_canonical_repo_missing",
       "Risk preview: sab_canonical_repo_missing | dharma_swarm (canonical_core, main...origin/main, dirty True)",
       "Topology preview: sab_canonical_repo_missing | dharma_swarm (canonical_core, main...origin/main, dirty True) | dharma_swarm Δ552 (510 modified, 42 untracked); dgc-core clean",
       "Topology pressure preview: 1 warning | dharma_swarm Δ552 (510 modified, 42 untracked)",
       "Topology status: degraded (1 warning, 2 peers)",
+      "Topology peer count: 2",
       "Primary warning: sab_canonical_repo_missing",
       "Primary peer drift: dharma_swarm track main...origin/main",
+      "Branch divergence: local +0/-0 | peer dharma_swarm track main...origin/main",
+      "Detached peers: none",
       "Primary topology peer: dharma_swarm (canonical_core, main...origin/main, dirty True)",
       "Peer drift markers: dharma_swarm track main...origin/main; dgc-core n/a",
       "Topology peers: dharma_swarm (canonical_core, main...origin/main, dirty True); dgc-core (operator_shell, n/a, dirty None)",
@@ -1511,7 +2468,7 @@ Git sync: origin/main | ahead 0 | behind 0
       "Inventory: n/a modules | n/a tests | n/a scripts | n/a docs | n/a workflows",
       "Language mix: none",
     ]);
-    expect(lines).toHaveLength(47);
+    expect(lines).toHaveLength(52);
     expect(lines.indexOf("## Topology risk")).toBeLessThan(lines.indexOf("## Hotspots"));
   });
 });
@@ -1536,6 +2493,7 @@ describe("workspacePreviewToLines", () => {
       Unstaged: "510",
       Untracked: "42",
       "Topology warnings": "1 (sab_canonical_repo_missing)",
+      "Topology warning members": "sab_canonical_repo_missing",
       "Topology warning severity": "high",
       "Topology risk": "sab_canonical_repo_missing",
       "Risk preview": "sab_canonical_repo_missing | dharma_swarm (canonical_core, main...origin/main, dirty True)",
@@ -1545,6 +2503,8 @@ describe("workspacePreviewToLines", () => {
       "Topology status": "degraded (1 warning, 2 peers)",
       "Primary warning": "sab_canonical_repo_missing",
       "Primary peer drift": "dharma_swarm track main...origin/main",
+      "Branch divergence": "local +0/-0 | peer dharma_swarm track main...origin/main",
+      "Detached peers": "none",
       "Primary topology peer": "dharma_swarm (canonical_core, main...origin/main, dirty True)",
       "Peer drift markers": "dharma_swarm track main...origin/main; dgc-core n/a",
       "Topology peers": "dharma_swarm (canonical_core, main...origin/main, dirty True); dgc-core (operator_shell, n/a, dirty None)",
@@ -1577,6 +2537,7 @@ describe("workspacePreviewToLines", () => {
       "Behind: 0",
       "Branch sync preview: tracking origin/main in sync | +0/-0 | topology sab_canonical_repo_missing; high (552 local changes)",
       "Repo risk preview: tracking origin/main in sync | sab_canonical_repo_missing | dharma_swarm (canonical_core, main...origin/main, dirty True)",
+      "Repo truth preview: none",
       "Repo risk: topology sab_canonical_repo_missing; high (552 local changes)",
       "Dirty: 0 staged, 510 unstaged, 42 untracked",
       "Dirty pressure: high (552 local changes)",
@@ -1585,14 +2546,18 @@ describe("workspacePreviewToLines", () => {
       "Untracked: 42",
       "## Topology risk",
       "Topology warnings: 1 (sab_canonical_repo_missing)",
+      "Topology warning members: sab_canonical_repo_missing",
       "Topology warning severity: high",
       "Topology risk: sab_canonical_repo_missing",
       "Risk preview: sab_canonical_repo_missing | dharma_swarm (canonical_core, main...origin/main, dirty True)",
       "Topology preview: sab_canonical_repo_missing | dharma_swarm (canonical_core, main...origin/main, dirty True) | dharma_swarm Δ552 (510 modified, 42 untracked); dgc-core clean",
       "Topology pressure preview: 1 warning | dharma_swarm Δ552 (510 modified, 42 untracked)",
       "Topology status: degraded (1 warning, 2 peers)",
+      "Topology peer count: none",
       "Primary warning: sab_canonical_repo_missing",
       "Primary peer drift: dharma_swarm track main...origin/main",
+      "Branch divergence: local +0/-0 | peer dharma_swarm track main...origin/main",
+      "Detached peers: none",
       "Primary topology peer: dharma_swarm (canonical_core, main...origin/main, dirty True)",
       "Peer drift markers: dharma_swarm track main...origin/main; dgc-core n/a",
       "Topology peers: dharma_swarm (canonical_core, main...origin/main, dirty True); dgc-core (operator_shell, n/a, dirty None)",
@@ -1712,7 +2677,122 @@ describe("workspaceSnapshotToPreview", () => {
     expect(preview["Primary changed path"]).toBe("terminal/src/protocol.ts");
     expect(preview["Topology risk"]).toBe("sab_canonical_repo_missing");
     expect(preview["Primary dependency hotspot"]).toBe("dharma_swarm.models | inbound 159");
+    expect(preview["Repo truth preview"]).toBe(
+      "branch main@95210b1 | dirty staged 0 | unstaged 510 | untracked 42 | warn sab_canonical_repo_missing | hotspot change terminal (274); .dharma_psmv_hyperfile_branch (142); dharma_swarm (91) | files dgc_cli.py (6908 lines); thinkodynamic_director.py (5167 lines) | deps dharma_swarm.models | inbound 159; dharma_swarm.stigmergy | inbound 35 | paths terminal/src/protocol.ts",
+    );
     expect(preview.Inventory).toBe("501 modules | 494 tests | 124 scripts | 239 docs | 1 workflows");
+  });
+
+  test("shortens full commit hashes in typed workspace previews for repo and context surfaces", () => {
+    const payload = workspaceSnapshotPayloadFromEvent({
+      type: "workspace.snapshot.result",
+      payload: {
+        version: "v1",
+        domain: "workspace_snapshot",
+        repo_root: "/Users/dhyana/dharma_swarm",
+        git: {
+          branch: "main",
+          head: "804d5d19675ddcd904153fa9642de47ce345d95d",
+          staged: 1,
+          unstaged: 2,
+          untracked: 3,
+          changed_hotspots: [{name: "terminal", count: 6}],
+          changed_paths: ["terminal/src/components/RepoPane.tsx"],
+          sync: {
+            summary: "origin/main | ahead 2 | behind 0",
+            status: "tracking",
+            upstream: "origin/main",
+            ahead: 2,
+            behind: 0,
+          },
+        },
+        topology: {warnings: [], repos: []},
+        inventory: {},
+        language_mix: [],
+        largest_python_files: [],
+        most_imported_modules: [],
+      },
+    });
+
+    const preview = workspacePayloadToPreview(payload!);
+
+    expect(preview.Head).toBe("804d5d1");
+    expect(preview["Branch sync preview"]).toContain("ahead of origin/main by 2");
+  });
+
+  test("preserves all topology warning members in compact repo truth previews from markdown workspace snapshots", () => {
+    const content = `# Workspace X-Ray
+Repo root: /Users/dhyana/dharma_swarm
+Git: main@95210b1 | staged 0 | unstaged 510 | untracked 42
+Git hotspots: terminal (274)
+Git changed paths: terminal/src/protocol.ts
+Git sync: origin/main | ahead 0 | behind 0
+
+## Topology
+- warning: peer_branch_diverged
+- warning: sab_canonical_repo_missing
+- dharma_swarm | role canonical_core | branch main...origin/main | dirty True | modified 510 | untracked 42
+- dgc-core | role operator_shell | branch detached | dirty False | modified 0 | untracked 0`;
+
+    const preview = workspaceSnapshotToPreview(content);
+
+    expect(preview["Topology warnings"]).toBe("2 (peer_branch_diverged, sab_canonical_repo_missing)");
+    expect(preview["Repo truth preview"]).toContain("warn peer_branch_diverged; sab_canonical_repo_missing");
+  });
+
+  test("preserves all topology warning members in compact repo truth previews from typed workspace snapshots", () => {
+    const payload = workspaceSnapshotPayloadFromEvent({
+      type: "workspace.snapshot.result",
+      payload: {
+        version: "v1",
+        domain: "workspace_snapshot",
+        repo_root: "/Users/dhyana/dharma_swarm",
+        git: {
+          branch: "main",
+          head: "95210b1",
+          staged: 0,
+          unstaged: 510,
+          untracked: 42,
+          changed_hotspots: [{name: "terminal", count: 274}],
+          changed_paths: ["terminal/src/protocol.ts"],
+          sync: {
+            summary: "origin/main | ahead 0 | behind 0",
+            status: "tracking",
+            upstream: "origin/main",
+            ahead: 0,
+            behind: 0,
+          },
+        },
+        topology: {
+          warnings: ["peer_branch_diverged", "sab_canonical_repo_missing"],
+          repos: [
+            {
+              domain: "dharma_swarm",
+              name: "dharma_swarm",
+              role: "canonical_core",
+              canonical: true,
+              path: "/Users/dhyana/dharma_swarm",
+              exists: true,
+              is_git: true,
+              branch: "main...origin/main",
+              head: "95210b1",
+              dirty: true,
+              modified_count: 510,
+              untracked_count: 42,
+            },
+          ],
+        },
+        inventory: {},
+        language_mix: [],
+        largest_python_files: [],
+        most_imported_modules: [],
+      },
+    });
+
+    const preview = workspacePayloadToPreview(payload!);
+
+    expect(preview["Topology warnings"]).toBe("2 (peer_branch_diverged, sab_canonical_repo_missing)");
+    expect(preview["Repo truth preview"]).toContain("warn peer_branch_diverged; sab_canonical_repo_missing");
   });
 
   test("extracts explicit repo preview fields for the context sidebar", () => {
@@ -1764,6 +2844,9 @@ Workflows: 1
       "tracking origin/main in sync | sab_canonical_repo_missing | dharma_swarm (canonical_core, main...origin/main, dirty True)",
     );
     expect(preview["Repo risk"]).toBe("topology sab_canonical_repo_missing; high (552 local changes)");
+    expect(preview["Repo truth preview"]).toBe(
+      "branch main@95210b1 | dirty staged 0 | unstaged 510 | untracked 42 | warn sab_canonical_repo_missing | hotspot change terminal (274); .dharma_psmv_hyperfile_branch (142); dharma_swarm (91) | files dgc_cli.py (6908 lines); thinkodynamic_director.py (5167 lines) | deps dharma_swarm.models | inbound 159; dharma_swarm.stigmergy | inbound 35 | paths terminal/src/protocol.ts",
+    );
     expect(preview.Dirty).toBe("0 staged, 510 unstaged, 42 untracked");
     expect(preview["Dirty pressure"]).toBe("high (552 local changes)");
     expect(preview.Staged).toBe("0");
@@ -1781,6 +2864,7 @@ Workflows: 1
     );
     expect(preview["Hotspot pressure preview"]).toBe("change terminal (274) | dep dharma_swarm.models | inbound 159");
     expect(preview["Topology warnings"]).toBe("1 (sab_canonical_repo_missing)");
+    expect(preview["Topology warning members"]).toBe("sab_canonical_repo_missing");
     expect(preview["Topology warning severity"]).toBe("high");
     expect(preview["Topology status"]).toBe("degraded (1 warning, 2 peers)");
     expect(preview["Topology risk"]).toBe("sab_canonical_repo_missing");
@@ -1793,6 +2877,8 @@ Workflows: 1
     expect(preview["Topology pressure preview"]).toBe("1 warning | dharma_swarm Δ552 (510 modified, 42 untracked)");
     expect(preview["Primary warning"]).toBe("sab_canonical_repo_missing");
     expect(preview["Primary peer drift"]).toBe("dharma_swarm track main...origin/main");
+    expect(preview["Branch divergence"]).toBe("local +0/-0 | peer dharma_swarm track main...origin/main");
+    expect(preview["Detached peers"]).toBe("none");
     expect(preview["Primary topology peer"]).toBe("dharma_swarm (canonical_core, main...origin/main, dirty True)");
     expect(preview["Topology peer count"]).toBe("2");
     expect(preview["Peer drift markers"]).toBe("dharma_swarm track main...origin/main; dgc-core n/a");
@@ -1807,6 +2893,20 @@ Workflows: 1
     expect(preview.Inventory).toBe("501 modules | 494 tests | 124 scripts | 239 docs | 1 workflows");
     expect(preview["Language mix"]).toBe(".py: 1125; .md: 511; .json: 91; .sh: 68");
     expect(preview["Inbound hotspots"]).toBe("dharma_swarm.models | inbound 159; dharma_swarm.stigmergy | inbound 35");
+  });
+
+  test("shortens full commit hashes parsed from workspace snapshot text", () => {
+    const content = `# Workspace X-Ray
+Repo root: /Users/dhyana/dharma_swarm
+Git: main@804d5d19675ddcd904153fa9642de47ce345d95d | staged 0 | unstaged 1 | untracked 0
+Git hotspots: terminal (1)
+Git changed paths: terminal/src/protocol.ts
+Git sync: origin/main | ahead 0 | behind 0`;
+
+    const preview = workspaceSnapshotToPreview(content);
+
+    expect(preview.Head).toBe("804d5d1");
+    expect(preview["Branch sync preview"]).toContain("tracking origin/main in sync");
   });
 
   test("keeps sync fields readable when upstream facts are unavailable", () => {
@@ -1834,6 +2934,7 @@ Git sync: detached HEAD
     expect(preview["Changed paths"]).toBe("terminal/src/protocol.ts");
     expect(preview["Topology status"]).toBe("connected (1 peer)");
     expect(preview["Topology peer count"]).toBe("1");
+    expect(preview["Topology warning members"]).toBe("none");
     expect(preview["Topology warning severity"]).toBe("stable");
     expect(preview["Primary peer drift"]).toBe("dharma_swarm detached");
     expect(preview["Primary topology peer"]).toBe("dharma_swarm (canonical_core, detached, dirty True)");
@@ -1845,9 +2946,82 @@ Git sync: detached HEAD
     );
     expect(preview["Topology pressure preview"]).toBe("stable | dharma_swarm Δ5 (2 modified, 3 untracked)");
     expect(preview["Primary warning"]).toBe("none");
+    expect(preview["Branch divergence"]).toBe("peer dharma_swarm detached");
+    expect(preview["Detached peers"]).toBe("dharma_swarm detached");
     expect(preview["Hotspot pressure preview"]).toBe("change terminal (3)");
     expect(preview["Primary changed hotspot"]).toBe("terminal (3)");
     expect(preview["Primary changed path"]).toBe("terminal/src/protocol.ts");
+  });
+
+  test("parses bracket-style git sync summaries from workspace snapshot text", () => {
+    const content = `# Workspace X-Ray
+Repo root: /Users/dhyana/dharma_swarm
+Git: main@804d5d19675ddcd904153fa9642de47ce345d95d | staged 112 | unstaged 545 | untracked 112
+Git hotspots: terminal (281); dharma_swarm (93)
+Git changed paths: terminal/src/components/RepoPane.tsx; terminal/src/components/Sidebar.tsx
+Git sync: main...origin/main [ahead 2]
+
+## Topology
+- warning: sab_canonical_repo_missing
+- dharma_swarm | role canonical_core | branch main...origin/main | dirty True | modified 545 | untracked 112`;
+
+    const preview = workspaceSnapshotToPreview(content);
+
+    expect(preview.Sync).toBe("main...origin/main [ahead 2]");
+    expect(preview.Upstream).toBe("origin/main");
+    expect(preview.Ahead).toBe("2");
+    expect(preview.Behind).toBe("0");
+    expect(preview["Branch status"]).toBe("ahead of origin/main by 2");
+    expect(preview["Branch sync preview"]).toBe(
+      "ahead of origin/main by 2 | +2/-0 | topology sab_canonical_repo_missing; ahead of upstream by 2; high (769 local changes)",
+    );
+  });
+
+  test("parses diverged bracket-style git sync summaries from workspace snapshot text", () => {
+    const content = `# Workspace X-Ray
+Repo root: /Users/dhyana/dharma_swarm
+Git: main@804d5d1 | staged 4 | unstaged 5 | untracked 1
+Git hotspots: terminal (6)
+Git changed paths: terminal/src/protocol.ts
+Git sync: feature/repo-pane...origin/main [ahead 2, behind 1]`;
+
+    const preview = workspaceSnapshotToPreview(content);
+
+    expect(preview.Upstream).toBe("origin/main");
+    expect(preview.Ahead).toBe("2");
+    expect(preview.Behind).toBe("1");
+    expect(preview["Branch status"]).toBe("diverged from origin/main (+2/-1)");
+    expect(preview["Branch sync preview"]).toBe(
+      "diverged from origin/main (+2/-1) | +2/-1 | behind upstream by 1; ahead of upstream by 2; contained (10 local changes)",
+    );
+  });
+
+  test("prefers the warning-bearing peer as the primary topology peer in text workspace snapshots", () => {
+    const content = `# Workspace X-Ray
+Repo root: /Users/dhyana/dharma_swarm
+Git: main@95210b1 | staged 1 | unstaged 2 | untracked 3
+Git hotspots: terminal (4)
+Git changed paths: terminal/src/protocol.ts
+Git sync: origin/main | ahead 2 | behind 1
+
+## Topology
+- warning: peer_branch_diverged
+- warning: detached_peer
+- dharma_swarm | role canonical_core | branch main...origin/main | dirty True | modified 3 | untracked 2
+- dgc-core | role operator_shell | branch detached | dirty True | modified 1 | untracked 0`;
+
+    const preview = workspaceSnapshotToPreview(content);
+
+    expect(preview["Primary topology peer"]).toBe("dgc-core (operator_shell, detached, dirty True)");
+    expect(preview["Primary peer drift"]).toBe("dgc-core detached");
+    expect(preview["Branch divergence"]).toBe("local +2/-1 | peer dgc-core detached");
+    expect(preview["Detached peers"]).toBe("dgc-core detached");
+    expect(preview["Repo risk preview"]).toBe(
+      "diverged from origin/main (+2/-1) | peer_branch_diverged | dgc-core (operator_shell, detached, dirty True)",
+    );
+    expect(preview["Topology preview"]).toBe(
+      "peer_branch_diverged | dgc-core (operator_shell, detached, dirty True) | dharma_swarm Δ5 (3 modified, 2 untracked); dgc-core Δ1 (1 modified, 0 untracked)",
+    );
   });
 });
 

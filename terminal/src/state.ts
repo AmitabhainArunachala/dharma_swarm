@@ -1,7 +1,12 @@
-import {buildInitialOutline, buildInitialTabs} from "./mockContent.js";
-import type {AppAction, AppState, ApprovalQueueState, TabSpec} from "./types.js";
+import {buildInitialOutline, buildInitialTabs} from "./mockContent";
+import type {ActivityEntry, AppAction, AppState, ApprovalQueueState, TabSpec} from "./types";
+import {mergeExecutionEvents, projectActivityEntries, projectChatTraceLines, projectPaneLines} from "./executionLog";
+import {defaultRoutePolicy, routePolicyWithConfig} from "./routePolicy";
 
 const initialTabs = buildInitialTabs();
+const initialRoutePolicy = defaultRoutePolicy();
+const ACTIVITY_ENTRY_RETENTION = 1000;
+const TAB_LINE_RETENTION = 2000;
 
 function activateFallbackTab(tabs: TabSpec[], preferred?: string): string {
   if (preferred && tabs.some((tab) => tab.id === preferred)) {
@@ -23,21 +28,83 @@ function nextSelectedApprovalActionId(approvalPane: ApprovalQueueState, preferre
   return approvalPane.order.find((actionId) => Boolean(approvalPane.entriesByActionId[actionId]));
 }
 
+function mergeActivityEntry(current: ActivityEntry, incoming: ActivityEntry): ActivityEntry {
+  const currentDetail = current.detail ?? [];
+  const incomingDetail = incoming.detail ?? [];
+  const mergedDetail = [...currentDetail];
+  for (const line of incomingDetail) {
+    if (!mergedDetail.includes(line)) {
+      mergedDetail.push(line);
+    }
+  }
+  return {
+    ...current,
+    ...incoming,
+    phase: incoming.phase,
+    summary: incoming.summary ?? current.summary,
+    detail: mergedDetail.length > 0 ? mergedDetail : undefined,
+    raw: incoming.raw ?? current.raw,
+    timestamp: incoming.timestamp ?? current.timestamp,
+  };
+}
+
+function mergeActivityEntries(current: ActivityEntry[], incoming: ActivityEntry[]): ActivityEntry[] {
+  let next = [...current];
+  for (const entry of incoming) {
+    if (entry.correlationId) {
+      const index = next.findIndex(
+        (candidate) => candidate.correlationId === entry.correlationId && candidate.kind === entry.kind,
+      );
+      if (index >= 0) {
+        const merged = mergeActivityEntry(next[index], entry);
+        next = [merged, ...next.filter((_, candidateIndex) => candidateIndex !== index)];
+        continue;
+      }
+    }
+    next = [entry, ...next];
+  }
+  return next.slice(0, ACTIVITY_ENTRY_RETENTION);
+}
+
+function activeTabId(state: AppState): string {
+  return state.uiMode.activeTabId;
+}
+
+function projectedChatTraceLines(state: AppState, executionEventLog: AppState["executionEventLog"]): AppState["chatTraceLines"] {
+  return projectChatTraceLines(executionEventLog, {
+    visibilityMode: state.activityFeed.visibilityMode,
+    showRaw: state.activityFeed.showRaw,
+  });
+}
+
 export const initialState: AppState = {
-  sidebarVisible: true,
-  sidebarMode: "toc",
+  uiMode: {
+    activeTabId: "chat",
+    activeOverlay: {kind: "none"},
+    sidebarVisible: true,
+    sidebarMode: "toc",
+    focusedPaneId: "chat",
+    compactMode: false,
+  },
   bridgeStatus: "booting",
-  provider: "codex",
-  model: "gpt-5.4",
-  strategy: "responsive",
-  modelTargets: [],
-  modelPickerVisible: false,
-  modelPickerIndex: 0,
-  modelPickerReturnTabId: "chat",
+  routePolicy: initialRoutePolicy,
+  executionEventLog: [],
+  chatTraceLines: [],
+  sessionContinuity: {
+    continuityMode: "fresh",
+    boundedHistory: [],
+    historyLimit: 24,
+    compactionPolicy: {
+      eventCount: 0,
+      compactableRatio: 0,
+      protectedEventTypes: [],
+      recentEventTypes: [],
+    },
+  },
   prompt: "",
-  activeTabId: "chat",
   tabs: initialTabs,
   paneScrollOffsets: {},
+  paneFocusIndices: {},
   liveRepoPreview: initialTabs.find((tab) => tab.id === "repo")?.preview,
   liveControlPreview: initialTabs.find((tab) => tab.id === "control")?.preview,
   authoritativeSurfaces: {
@@ -56,13 +123,20 @@ export const initialState: AppState = {
   sessionPane: {
     detailsBySessionId: {},
   },
+  activityFeed: {
+    entries: [],
+    visibilityMode: "expanded",
+    showRaw: false,
+  },
   outline: buildInitialOutline(),
   statusLine: "bridge booting",
-  footerHint: "Keys: Tab/Shift-Tab tabs | \u2190/\u2192 tabs | ^B sidebar | 1/2/3 sidebar | ^G ^R ^O ^M ^A ^P ^E ^T ^Y panes",
+  footerHint: "Keys: Tab/Shift-Tab tabs | \u2190/\u2192 tabs | ^K switch panes | ^B sidebar | 1/2/3 sidebar | ^G ^R ^O ^M ^A ^P ^E ^T ^Y panes | ^H ^J ^N transparency",
 };
 
 export function reduceApp(state: AppState, action: AppAction): AppState {
   switch (action.type) {
+    case "batch":
+      return action.actions.reduce(reduceApp, state);
     case "state.replace":
       return action.state;
     case "prompt.append":
@@ -73,40 +147,147 @@ export function reduceApp(state: AppState, action: AppAction): AppState {
       return {...state, prompt: ""};
     case "bridge.status":
       return {...state, bridgeStatus: action.status};
-    case "bridge.config":
-      return {...state, provider: action.provider, model: action.model, strategy: action.strategy ?? state.strategy};
+    case "bridge.config": {
+      const nextStrategy = action.strategy ?? state.routePolicy.strategy;
+      return {
+        ...state,
+        routePolicy: routePolicyWithConfig(state.routePolicy, action.provider, action.model, nextStrategy),
+      };
+    }
+    case "route.policy.set":
+      return {...state, routePolicy: action.policy};
+    case "execution.events.ingest": {
+      const executionEventLog = mergeExecutionEvents(state.executionEventLog, action.events);
+      const chatTraceLines = projectedChatTraceLines(state, executionEventLog);
+      const thinkingLines = projectPaneLines("thinking", executionEventLog);
+      const toolLines = projectPaneLines("tools", executionEventLog);
+      const timelineLines = projectPaneLines("timeline", executionEventLog);
+      return {
+        ...state,
+        executionEventLog,
+        chatTraceLines,
+        activityFeed: {
+          ...state.activityFeed,
+          entries: projectActivityEntries(executionEventLog),
+        },
+        tabs: state.tabs.map((tab) => {
+          if (tab.id === "thinking") {
+            return {...tab, lines: thinkingLines};
+          }
+          if (tab.id === "tools") {
+            return {...tab, lines: toolLines};
+          }
+          if (tab.id === "timeline") {
+            return {...tab, lines: timelineLines};
+          }
+          return tab;
+        }),
+      };
+    }
+    case "ui.compact.set":
+      return {
+        ...state,
+        uiMode:
+          state.uiMode.compactMode === action.compact
+            ? state.uiMode
+            : {
+                ...state.uiMode,
+                compactMode: action.compact,
+              },
+      };
     case "modelPicker.open":
       return {
         ...state,
-        modelPickerVisible: true,
-        modelPickerIndex: 0,
-        modelPickerReturnTabId: action.returnTabId ?? (state.activeTabId === "models" ? "chat" : state.activeTabId),
-        activeTabId: "models",
+        uiMode: {
+          ...state.uiMode,
+          activeOverlay: {
+            kind: "modelPicker",
+            selectedIndex: 0,
+            returnTabId: action.returnTabId ?? activeTabId(state),
+          },
+        },
       };
     case "modelPicker.close":
       return {
         ...state,
-        modelPickerVisible: false,
-        activeTabId: state.activeTabId === "models" ? state.modelPickerReturnTabId || "chat" : state.activeTabId,
+        uiMode: {
+          ...state.uiMode,
+          activeOverlay: {kind: "none"},
+        },
       };
     case "modelPicker.move": {
+      const currentIndex = state.uiMode.activeOverlay.kind === "modelPicker" ? state.uiMode.activeOverlay.selectedIndex : 0;
+      const returnTabId = state.uiMode.activeOverlay.kind === "modelPicker"
+        ? state.uiMode.activeOverlay.returnTabId
+        : activeTabId(state);
       return {
         ...state,
-        modelPickerVisible: true,
-        modelPickerIndex: Math.max(0, state.modelPickerIndex + action.direction),
+        uiMode: {
+          ...state.uiMode,
+          activeOverlay: {
+            kind: "modelPicker",
+            selectedIndex: Math.max(0, currentIndex + action.direction),
+            returnTabId,
+          },
+        },
       };
     }
     case "modelPicker.set":
-      return {...state, modelPickerVisible: true, modelPickerIndex: Math.max(0, action.index)};
+      return {
+        ...state,
+        uiMode: {
+          ...state.uiMode,
+          activeOverlay: {
+            kind: "modelPicker",
+            selectedIndex: Math.max(0, action.index),
+            returnTabId:
+              state.uiMode.activeOverlay.kind === "modelPicker"
+                ? state.uiMode.activeOverlay.returnTabId
+                : activeTabId(state),
+          },
+        },
+      };
+    case "paneSwitcher.open":
+      return {
+        ...state,
+        uiMode: {
+          ...state.uiMode,
+          activeOverlay: {
+            kind: "paneSwitcher",
+            selectedIndex: Math.max(
+              0,
+              state.tabs.findIndex((tab) => tab.id === activeTabId(state)),
+            ),
+          },
+        },
+      };
+    case "paneSwitcher.close":
+      return {
+        ...state,
+        uiMode: {
+          ...state.uiMode,
+          activeOverlay: {kind: "none"},
+        },
+      };
+    case "paneSwitcher.set":
+      return {
+        ...state,
+        uiMode: {
+          ...state.uiMode,
+          activeOverlay: {
+            kind: "paneSwitcher",
+            selectedIndex: Math.max(0, action.index),
+          },
+        },
+      };
     case "tab.replace":
       return {
         ...state,
-        modelTargets: action.tabId === "models" && Array.isArray(action.modelTargets) ? action.modelTargets : state.modelTargets,
         tabs: state.tabs.map((tab) =>
           tab.id === action.tabId
             ? {
                 ...tab,
-                lines: action.lines.slice(-200),
+                lines: action.lines.slice(-TAB_LINE_RETENTION),
                 preview: action.preview ?? tab.preview,
               }
             : tab,
@@ -117,22 +298,46 @@ export function reduceApp(state: AppState, action: AppAction): AppState {
     case "footer.set":
       return {...state, footerHint: action.value};
     case "sidebar.toggle":
-      return {...state, sidebarVisible: !state.sidebarVisible};
+      return {
+        ...state,
+        uiMode: {
+          ...state.uiMode,
+          sidebarVisible: !state.uiMode.sidebarVisible,
+        },
+      };
     case "sidebar.mode":
-      return {...state, sidebarMode: action.mode, sidebarVisible: true};
+      return {
+        ...state,
+        uiMode: {
+          ...state.uiMode,
+          sidebarMode: action.mode,
+          sidebarVisible: true,
+        },
+      };
     case "tab.activate":
       return {
         ...state,
-        activeTabId: action.tabId,
-        modelPickerVisible: action.tabId === "models" ? state.modelPickerVisible : false,
+        uiMode: {
+          ...state.uiMode,
+          activeTabId: action.tabId,
+          focusedPaneId: action.tabId,
+          activeOverlay: {kind: "none"},
+        },
       };
     case "tab.cycle": {
-      const index = state.tabs.findIndex((tab) => tab.id === state.activeTabId);
+      const index = state.tabs.findIndex((tab) => tab.id === activeTabId(state));
       if (index === -1) {
         return state;
       }
       const nextIndex = (index + action.direction + state.tabs.length) % state.tabs.length;
-      return {...state, activeTabId: state.tabs[nextIndex].id};
+      return {
+        ...state,
+        uiMode: {
+          ...state.uiMode,
+          activeTabId: state.tabs[nextIndex].id,
+          focusedPaneId: state.tabs[nextIndex].id,
+        },
+      };
     }
     case "pane.scroll": {
       const current = state.paneScrollOffsets[action.tabId] ?? 0;
@@ -160,6 +365,21 @@ export function reduceApp(state: AppState, action: AppAction): AppState {
         },
       };
     }
+    case "pane.focus.set":
+      if ((state.paneFocusIndices[action.tabId] ?? 0) === action.index) {
+        return state;
+      }
+      return {
+        ...state,
+        paneFocusIndices: {
+          ...state.paneFocusIndices,
+          [action.tabId]: Math.max(0, action.index),
+        },
+        paneScrollOffsets: {
+          ...state.paneScrollOffsets,
+          [action.tabId]: 0,
+        },
+      };
     case "tab.ensure": {
       const existing = state.tabs.find((tab) => tab.id === action.tab.id);
       if (existing) {
@@ -168,22 +388,34 @@ export function reduceApp(state: AppState, action: AppAction): AppState {
       return {
         ...state,
         tabs: [...state.tabs, action.tab],
-        activeTabId: action.tab.id,
+        uiMode: {
+          ...state.uiMode,
+          activeTabId: action.tab.id,
+          focusedPaneId: action.tab.id,
+        },
       };
     }
     case "tab.close": {
       const tabs = state.tabs.filter((tab) => tab.id !== action.tabId || !tab.closable);
+      const nextActiveTabId = activateFallbackTab(
+        tabs,
+        activeTabId(state) === action.tabId ? undefined : activeTabId(state),
+      );
       return {
         ...state,
         tabs,
-        activeTabId: activateFallbackTab(tabs, state.activeTabId === action.tabId ? undefined : state.activeTabId),
+        uiMode: {
+          ...state.uiMode,
+          activeTabId: nextActiveTabId,
+          focusedPaneId: nextActiveTabId,
+        },
       };
     }
     case "tab.append":
       return {
         ...state,
         tabs: state.tabs.map((tab) =>
-          tab.id === action.tabId ? {...tab, lines: [...tab.lines, ...action.lines].slice(-200)} : tab,
+          tab.id === action.tabId ? {...tab, lines: [...tab.lines, ...action.lines].slice(-TAB_LINE_RETENTION)} : tab,
         ),
       };
     case "live.repo.set":
@@ -359,6 +591,11 @@ export function reduceApp(state: AppState, action: AppAction): AppState {
           },
         },
       };
+    case "session.continuity.set":
+      return {
+        ...state,
+        sessionContinuity: action.continuity,
+      };
     case "session.select":
       return {
         ...state,
@@ -366,6 +603,50 @@ export function reduceApp(state: AppState, action: AppAction): AppState {
           ...state.sessionPane,
           selectedSessionId: action.sessionId,
         },
+      };
+    case "activity.ingest":
+      return {
+        ...state,
+        activityFeed: {
+          ...state.activityFeed,
+          entries: mergeActivityEntries(state.activityFeed.entries, action.entries),
+        },
+      };
+    case "activity.visibility.toggle":
+      return {
+        ...state,
+        activityFeed: {
+          ...state.activityFeed,
+          visibilityMode: state.activityFeed.visibilityMode === "compact" ? "expanded" : "compact",
+        },
+        chatTraceLines: projectedChatTraceLines(
+          {
+            ...state,
+            activityFeed: {
+              ...state.activityFeed,
+              visibilityMode: state.activityFeed.visibilityMode === "compact" ? "expanded" : "compact",
+            },
+          },
+          state.executionEventLog,
+        ),
+      };
+    case "activity.raw.toggle":
+      return {
+        ...state,
+        activityFeed: {
+          ...state.activityFeed,
+          showRaw: !state.activityFeed.showRaw,
+        },
+        chatTraceLines: projectedChatTraceLines(
+          {
+            ...state,
+            activityFeed: {
+              ...state.activityFeed,
+              showRaw: !state.activityFeed.showRaw,
+            },
+          },
+          state.executionEventLog,
+        ),
       };
     case "outline.set":
       return {...state, outline: action.outline};

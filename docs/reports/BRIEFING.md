@@ -1,8 +1,90 @@
-# DHARMA SWARM — Briefing for Parallel Agent
+---
+title: DHARMA SWARM — Briefing Redirect
+path: docs/reports/BRIEFING.md
+slug: dharma-swarm-briefing-redirect
+doc_type: documentation
+status: deprecated
+summary: Redirect note pointing to the archived briefing so duplicate authority does not persist in docs/reports.
+source:
+  provenance: repo_local
+  kind: documentation
+  origin_signals: []
+  cited_urls: []
+  generated_hint: human_or_agent_authored_repo_doc
+disciplines:
+- multi_agent_systems
+- software_architecture
+- knowledge_management
+- research_methodology
+- verification
+- operations
+inspiration:
+- verification
+- operator_runtime
+- research_synthesis
+connected_python_files:
+- dharma_swarm/cli.py
+- dharma_swarm/telos_gates.py
+connected_python_modules:
+- dharma_swarm.cli
+- dharma_swarm.telos_gates
+connected_relevant_files:
+- docs/archive/BRIEFING.md
+- dharma_swarm/cli.py
+- dharma_swarm/telos_gates.py
+improvement:
+  room_for_improvement:
+  - Remove this redirect once all operators treat the archive copy as canonical.
+  - Keep docs/reports focused on active-reference reports rather than duplicated historical packets.
+  next_review_at: '2026-04-01T00:43:19+09:00'
+pkm:
+  note_class: documentation
+  vault_path: docs/reports/BRIEFING.md
+  retrieval_terms:
+  - redirect
+  - briefing
+  - parallel
+  - agent
+  - date
+  - '2026'
+  - status
+  - phase
+  - complete
+  - committed
+  - '115'
+  - tests
+  evergreen_potential: medium
+stigmergy:
+  meaning: This file exists only to redirect readers to the archived canonical copy.
+  state: deprecated
+  semantic_weight: 0.2
+  coordination_comment: Use docs/archive/BRIEFING.md for the full retained briefing content.
+  levels:
+    sematectonic:
+      what_it_is: The document itself is the mark. Its existence, filename, location, and revision history attract or repel future work.
+      access_mark: Opening, linking, and revising docs/reports/BRIEFING.md reinforces its salience without needing a separate message.
+    marker_based:
+      what_it_is: The frontmatter is an explicit annotation layer on top of the document.
+      semantic_mark: Semantic weight, improvement prompts, related files, and provenance comments tell later agents how to use this document.
+  trace_role: coordination_trace
+curation:
+  last_frontmatter_refresh: '2026-04-01T00:43:19+09:00'
+  curated_by_model: Codex (GPT-5)
+  source_model_in_file: 
+  future_model_handoffs:
+  - GPT-5 Codex
+  - Claude
+  - Gemini
+  - Local evaluator
+  schema_version: pkm-phd-stigmergy-v1
+---
+# DHARMA SWARM — Briefing Redirect
 
-**Date**: 2026-03-04
-**Status**: Phase 1 complete, committed, 115/115 tests passing
-**Location**: `~/dharma_swarm/`
+The full retained briefing now lives at:
+
+- [BRIEFING.md](/Users/dhyana/dharma_swarm/docs/archive/BRIEFING.md)
+
+This placeholder remains only to prevent duplicate authority while the reports layer is still being normalized.
 
 ## What Is It
 

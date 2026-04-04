@@ -90,7 +90,7 @@ Keep top-level for now, but mark as support doctrine rather than core canon:
 
 - `docs/REPO_RECLASSIFICATION_MATRIX_2026-04-01.md`
 - `docs/GENERATED_ARTIFACT_BOUNDARY_MATRIX_2026-04-02.md`
-- `docs/CURRENT_META_TOPOLOGY_2026-04-02.md`
+- `docs/plans/2026-04-02-current-meta-topology-of-dharma-swarm.md`
 
 Reason:
 
@@ -110,12 +110,12 @@ These are clearly bounded execution packets, cleanup waves, or build-mode docs.
 - `docs/plans/ROOT_DRAIN_PASS_2026-04-01_WAVE3.md`
 - `docs/plans/ROOT_DRAIN_PASS_2026-04-01_WAVE4.md`
 - `docs/plans/ROOT_DRAIN_VALIDATION_2026-04-02.md`
-- `docs/SPRINT_GOTCHAS.md`
+- `docs/plans/SPRINT_GOTCHAS.md`
 - `docs/TERMINAL_ALPHA_FREEZE_2026-04-01.md`
 - `docs/TERMINAL_FEASIBILITY_DECISION_2026-04-01.md`
 - `docs/TERMINAL_OVERNIGHT_SUPERVISOR_2026-04-01.md`
 - `docs/TERMINAL_REBUILD_2026-04-01.md`
-- `docs/YOLO_4AM_TASKS.md`
+- `docs/plans/YOLO_4AM_TASKS.md`
 
 Reason:
 
@@ -125,7 +125,7 @@ Reason:
 
 These are architectural or system-structure docs rather than general top-level canon.
 
-- `docs/DHARMA_SWARM_THREE_PLANE_ARCHITECTURE_2026-03-16.md`
+- `docs/architecture/DHARMA_SWARM_THREE_PLANE_ARCHITECTURE_2026-03-16.md`
 - `docs/architecture/JIKOKU_SAMAYA_ARCHITECTURE.md`
 - `docs/architecture/JIKOKU_SAMAYA_SYSTEM_DIAGRAM.md`
 - `docs/architecture/ORCHESTRATOR_LEDGERS.md`
@@ -184,7 +184,7 @@ These are likely valuable but should not remain top-level authority signals.
 - `docs/archive/DGC_100X_LEAN_ESSENCE_2026-03-08.md`
 - `docs/archive/DGC_KEEP_CUT_ADD_MATRIX_2026-03-08.md`
 - `docs/archive/DHARMA_SWARM_1000X_MASTERPLAN_2026-03-16.md`
-- `docs/GINKO_ENHANCEMENT_WAVE.md`
+- `docs/plans/GINKO_ENHANCEMENT_WAVE.md`
 - `docs/archive/KAIZEN_IMPLEMENTATION_SUMMARY.md`
 - `docs/archive/VISION_COMPLETE_CIRCUIT.md`
 
@@ -199,13 +199,13 @@ These should likely move, but their destination depends on local subtree intent.
 - `docs/CODEX_TERMINAL_SUPERVISOR_LAUNCHD.md`
   Suggested home: `docs/architecture/` or `docs/plans/`
 
-- `docs/COMPLIANCE_MAPPING.md`
+- `docs/architecture/COMPLIANCE_MAPPING.md`
   Suggested home: `docs/research/` or `docs/architecture/`
 
 - `docs/DARWIN_ENGINE_P0_IMPLEMENTATION_SPEC.md`
   Suggested home: `docs/telos-engine/` or `docs/plans/`
 
-- `docs/DARWIN_ENGINE_QUICK_START_GUIDE.md`
+- `docs/architecture/DARWIN_ENGINE_QUICK_START_GUIDE.md`
   Suggested home: `docs/telos-engine/`
 
 - `docs/architecture/DGC_STRESS_HARNESS.md`
@@ -226,10 +226,10 @@ These should likely move, but their destination depends on local subtree intent.
 - `docs/NVIDIA_INFRA_SELF_HEAL.md`
   Suggested home: `docs/architecture/` or `docs/reports/`
 
-- `docs/PRODUCTION_DEPLOYMENT_GUIDE.md`
+- `docs/architecture/PRODUCTION_DEPLOYMENT_GUIDE.md`
   Suggested home: `docs/architecture/`
 
-- `docs/RECURSIVE_READING_PROTOCOL.md`
+- `docs/architecture/RECURSIVE_READING_PROTOCOL.md`
   Suggested home: `docs/prompts/` or `docs/architecture/`
 
 - `docs/RECURSIVE_READING_SWARM_PROTOCOL.md`

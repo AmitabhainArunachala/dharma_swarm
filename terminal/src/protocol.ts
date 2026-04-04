@@ -1,5 +1,7 @@
-import {freshnessToken} from "./freshness.js";
+import {freshnessToken, parseControlPulsePreview, parseRuntimeFreshness} from "./freshness";
+import {nonSelectableRouteTargets, routePolicyFromValue, selectableRouteTargets} from "./routePolicy";
 import type {
+  ActivityEntry,
   ApprovalEntryStatus,
   PermissionHistoryPayload,
   ApprovalQueueState,
@@ -24,8 +26,8 @@ import type {
   TabSpec,
   TranscriptLine,
   WorkspaceSnapshotPayload,
-} from "./types.js";
-import {buildVerificationSummaryRows, parseVerificationBundle, verificationBundleLabel} from "./verification.js";
+} from "./types";
+import {buildVerificationSummaryRows, parseVerificationBundle, verificationBundleLabel} from "./verification";
 
 const RUNTIME_SUPERVISOR_AUTHORITATIVE_FIELDS = new Set([
   "Loop state",
@@ -38,13 +40,74 @@ const RUNTIME_SUPERVISOR_AUTHORITATIVE_FIELDS = new Set([
   "Next task",
   "Updated",
   "Durable state",
+  "Verification summary",
+  "Verification checks",
+  "Verification bundle",
+  "Verification status",
+  "Verification passing",
+  "Verification failing",
+  "Verification receipt",
+  "Verification updated",
+  "Runtime summary",
+  "Runtime freshness",
 ]);
+
+const RUNTIME_AUTHORITATIVE_SNAPSHOT_FIELDS = [
+  "loop_state",
+  "task_progress",
+  "active_task",
+  "result_status",
+  "acceptance",
+  "last_result",
+  "loop_decision",
+  "next_task",
+  "updated_at",
+  "durable_state",
+  "verification_summary",
+  "verification_checks",
+  "verification_bundle",
+  "verification_status",
+  "verification_passing",
+  "verification_failing",
+  "verification_receipt",
+  "verification_updated_at",
+  "runtime_summary",
+  "runtime_freshness",
+] as const;
+
+function verificationBundleFromPreview(preview: TabPreview): string {
+  const explicitBundle = String(preview["Verification bundle"] ?? "").trim();
+  if (explicitBundle.length > 0 && explicitBundle !== "none" && explicitBundle !== "unknown" && explicitBundle !== "n/a") {
+    return explicitBundle;
+  }
+  return verificationBundleLabel(
+    parseVerificationBundle(preview["Verification checks"] ?? "none", preview["Verification summary"] ?? "none"),
+  );
+}
 
 function makeLine(kind: TranscriptLine["kind"], text: string): TranscriptLine {
   return {
     id: `${kind}-${Date.now()}-${Math.random().toString(16).slice(2, 8)}`,
     kind,
     text,
+  };
+}
+
+function makeActivityEntry(
+  kind: ActivityEntry["kind"],
+  title: string,
+  options: Partial<Omit<ActivityEntry, "id" | "kind" | "title">> = {},
+): ActivityEntry {
+  return {
+    id: `${kind}-${Date.now()}-${Math.random().toString(16).slice(2, 8)}`,
+    kind,
+    title,
+    phase: options.phase ?? "running",
+    summary: options.summary,
+    detail: options.detail,
+    raw: options.raw,
+    timestamp: options.timestamp,
+    correlationId: options.correlationId,
   };
 }
 
@@ -99,6 +162,14 @@ function basename(value: string): string {
   return parts[parts.length - 1] || value;
 }
 
+function normalizeGitHeadLabel(value: string): string {
+  const normalized = value.trim();
+  if (/^[0-9a-f]{8,40}$/i.test(normalized)) {
+    return normalized.slice(0, 7);
+  }
+  return normalized || "unavailable";
+}
+
 function asRecord(value: unknown): Record<string, unknown> {
   return typeof value === "object" && value !== null ? (value as Record<string, unknown>) : {};
 }
@@ -114,6 +185,22 @@ function asNumberRecord(value: unknown): Record<string, number> {
   return Object.fromEntries(
     Object.entries(value).map(([key, entry]) => [key, typeof entry === "number" ? entry : Number(entry ?? 0)]),
   );
+}
+
+function displayModelRouteLabel(value: string, provider?: string, model?: string): string {
+  const normalized = value.trim();
+  const providerId = (provider ?? "").trim().toLowerCase();
+  const modelId = (model ?? "").trim().toLowerCase();
+  if ((providerId === "claude" && modelId.includes("opus")) || normalized.toLowerCase().includes("opus")) {
+    return "Claude Opus 4.6 | high reasoning lane";
+  }
+  if ((providerId === "claude" && modelId.includes("sonnet")) || normalized.toLowerCase().includes("sonnet")) {
+    return "Claude Sonnet 4.6 | balanced lane";
+  }
+  if ((providerId === "codex" && modelId === "gpt-5.4") || normalized.toLowerCase().includes("codex 5.4")) {
+    return "Codex 5.4 | fast operator lane";
+  }
+  return normalized;
 }
 
 function parseGitLine(content: string): {
@@ -143,10 +230,10 @@ function parseGitLine(content: string): {
     };
   }
   const branchWithHead = git.split(" | ")[0]?.trim() || "unavailable";
-  const [branch = "unavailable", head = "unavailable"] = branchWithHead.split("@");
+  const [branch = "unavailable", rawHead = "unavailable"] = branchWithHead.split("@");
   return {
     branch,
-    head,
+    head: normalizeGitHeadLabel(rawHead),
     counts: {
       staged: Number.parseInt(match.groups.staged, 10),
       unstaged: Number.parseInt(match.groups.unstaged, 10),
@@ -168,20 +255,39 @@ function parseGitSyncSummary(content: string): {
   behind: string;
 } {
   const sync = parseGitSyncLine(content);
-  const match = sync.match(/^(?<upstream>.+?)\s+\|\s+ahead\s+(?<ahead>\d+)\s+\|\s+behind\s+(?<behind>\d+)$/);
-  if (!match?.groups) {
+  const delimitedMatch = sync.match(/^(?<upstream>.+?)\s+\|\s+ahead\s+(?<ahead>\d+)\s+\|\s+behind\s+(?<behind>\d+)$/);
+  if (delimitedMatch?.groups) {
     return {
       sync,
-      upstream: sync,
-      ahead: "n/a",
-      behind: "n/a",
+      upstream: delimitedMatch.groups.upstream.trim(),
+      ahead: delimitedMatch.groups.ahead,
+      behind: delimitedMatch.groups.behind,
     };
   }
+
+  const bracketMatch = sync.match(/^(?<relation>.+?)\s+\[(?<status>[^\]]+)\]$/);
+  if (bracketMatch?.groups) {
+    const relation = bracketMatch.groups.relation.trim();
+    const status = bracketMatch.groups.status.trim();
+    const upstream =
+      relation.includes("...")
+        ? relation.split("...")[1]?.trim() || relation
+        : relation;
+    const ahead = status.match(/\bahead\s+(\d+)\b/i)?.[1] ?? "0";
+    const behind = status.match(/\bbehind\s+(\d+)\b/i)?.[1] ?? "0";
+    return {
+      sync,
+      upstream,
+      ahead,
+      behind,
+    };
+  }
+
   return {
     sync,
-    upstream: match.groups.upstream.trim(),
-    ahead: match.groups.ahead,
-    behind: match.groups.behind,
+    upstream: sync,
+    ahead: "n/a",
+    behind: "n/a",
   };
 }
 
@@ -333,6 +439,37 @@ function summarizePeerPressure(peers: TopologyPeer[]): string {
     .join("; ");
 }
 
+function selectPrimaryTopologyPeerIndex(peers: TopologyPeer[], warnings: string[]): number {
+  if (peers.length === 0) {
+    return -1;
+  }
+
+  const normalizedWarnings = warnings.map((warning) => warning.toLowerCase());
+  if (normalizedWarnings.some((warning) => warning.includes("detached"))) {
+    const detachedIndex = peers.findIndex((peer) => /detached/i.test(peer.branch || ""));
+    if (detachedIndex >= 0) {
+      return detachedIndex;
+    }
+  }
+
+  if (normalizedWarnings.some((warning) => warning.includes("diverged"))) {
+    const divergedIndex = peers.findIndex((peer) => (peer.branch || "").includes("..."));
+    if (divergedIndex >= 0) {
+      return divergedIndex;
+    }
+  }
+
+  const dirtyIndex = peers.findIndex((peer) => {
+    const total = (peer.modified ?? 0) + (peer.untracked ?? 0);
+    return total > 0 || String(peer.dirty).toLowerCase() === "true";
+  });
+  if (dirtyIndex >= 0) {
+    return dirtyIndex;
+  }
+
+  return 0;
+}
+
 function summarizeTopologyFromPeers(
   warnings: string[],
   peerRecords: TopologyPeer[],
@@ -351,15 +488,23 @@ function summarizeTopologyFromPeers(
     .slice(0, 3)
     .map((peer) => summarizePeerDriftMarker(peer, warnings))
     .join("; ");
+  const primaryPeerIndex = selectPrimaryTopologyPeerIndex(peerRecords, warnings);
+  const primaryPeerRecord = primaryPeerIndex >= 0 ? peerRecords[primaryPeerIndex] : undefined;
+  const primaryPeer =
+    primaryPeerRecord !== undefined
+      ? `${primaryPeerRecord.name} (${primaryPeerRecord.role}, ${primaryPeerRecord.branch}, dirty ${primaryPeerRecord.dirty})`
+      : "none";
+  const primaryPeerDrift =
+    primaryPeerRecord !== undefined ? summarizePeerDriftMarker(primaryPeerRecord, warnings) : "none";
   return {
     warnings,
     peers,
     pressure: summarizePeerPressure(peerRecords),
     peerCount: peerRecords.length,
-    primaryPeer: peers[0] ?? "none",
+    primaryPeer,
     warningSeverity: classifyTopologyWarningSeverity(warnings),
     peerDriftMarkers: peerDriftMarkers || "none",
-    primaryPeerDrift: peerDriftMarkers.split(";")[0]?.trim() || "none",
+    primaryPeerDrift,
   };
 }
 
@@ -412,6 +557,10 @@ function summarizeTopologyStatus(topology: ReturnType<typeof summarizeTopology>)
     return `connected (${peerLabel})`;
   }
   return "isolated";
+}
+
+function summarizeTopologyWarningMembers(topology: ReturnType<typeof summarizeTopology>): string {
+  return topology.warnings.length > 0 ? topology.warnings.join(", ") : "none";
 }
 
 function summarizeHotspots(content: string): string[] {
@@ -514,6 +663,20 @@ function summarizeRepoRiskPreview(branchStatus: string, riskPreview: string): st
   return `${normalizedBranch} | ${normalizedRisk}`;
 }
 
+function summarizeRepoTruthPreview(
+  branchLabel: string,
+  dirtyCountsLabel: string,
+  warningSummary: string,
+  hotspotSummary: string,
+): string {
+  return [
+    `branch ${branchLabel}`,
+    `dirty ${dirtyCountsLabel}`,
+    `warn ${warningSummary}`,
+    `hotspot ${hotspotSummary}`,
+  ].join(" | ");
+}
+
 function summarizeTopologyPreview(
   warning: string,
   peer: string,
@@ -544,8 +707,38 @@ function summarizeTopologyPressurePreview(topology: ReturnType<typeof summarizeT
   return `${warningLabel} | ${leadPressure}`;
 }
 
+function summarizeBranchDivergence(
+  sync: ReturnType<typeof parseGitSyncSummary>,
+  topology: ReturnType<typeof summarizeTopology>,
+): string {
+  const parts: string[] = [];
+  if (sync.ahead !== "n/a" || sync.behind !== "n/a") {
+    parts.push(`local +${sync.ahead}/-${sync.behind}`);
+  }
+  if (topology.primaryPeerDrift !== "none" && topology.primaryPeerDrift !== "n/a") {
+    parts.push(`peer ${topology.primaryPeerDrift}`);
+  }
+  return parts.join(" | ") || "n/a";
+}
+
+function summarizeDetachedPeers(topology: ReturnType<typeof summarizeTopology>): string {
+  const detached = Array.from(
+    new Set(
+      topology.peers
+        .map((peer) => peer.match(/^(.+?)\s+\([^,]+,\s*([^,]+),\s*dirty\s+.+\)$/i))
+        .filter((match): match is RegExpMatchArray => Boolean(match))
+        .filter((match) => /detached/i.test(match[2] ?? ""))
+        .map((match) => `${match[1]?.trim() ?? "peer"} detached`),
+    ),
+  );
+  if (detached.length > 0) {
+    return detached.join("; ");
+  }
+  return /detached/i.test(topology.primaryPeerDrift) ? topology.primaryPeerDrift : "none";
+}
+
 function buildWorkspaceSnapshotPreludeFromPreview(preview: TabPreview): string[] {
-  return [
+  const rows = [
     "# Repo Snapshot",
     "## Git status",
     `Repo root: ${preview["Repo root"]}`,
@@ -558,6 +751,7 @@ function buildWorkspaceSnapshotPreludeFromPreview(preview: TabPreview): string[]
     `Behind: ${preview.Behind}`,
     `Branch sync preview: ${preview["Branch sync preview"]}`,
     `Repo risk preview: ${preview["Repo risk preview"]}`,
+    `Repo truth preview: ${previewField(preview, "Repo truth preview")}`,
     `Repo risk: ${preview["Repo risk"]}`,
     `Dirty: ${preview.Dirty}`,
     `Dirty pressure: ${preview["Dirty pressure"]}`,
@@ -566,14 +760,18 @@ function buildWorkspaceSnapshotPreludeFromPreview(preview: TabPreview): string[]
     `Untracked: ${preview.Untracked}`,
     "## Topology risk",
     `Topology warnings: ${preview["Topology warnings"]}`,
+    `Topology warning members: ${preview["Topology warning members"]}`,
     `Topology warning severity: ${preview["Topology warning severity"]}`,
     `Topology risk: ${preview["Topology risk"]}`,
     `Risk preview: ${preview["Risk preview"]}`,
     `Topology preview: ${preview["Topology preview"]}`,
     `Topology pressure preview: ${preview["Topology pressure preview"]}`,
     `Topology status: ${preview["Topology status"]}`,
+    `Topology peer count: ${previewField(preview, "Topology peer count")}`,
     `Primary warning: ${preview["Primary warning"]}`,
     `Primary peer drift: ${preview["Primary peer drift"]}`,
+    `Branch divergence: ${preview["Branch divergence"]}`,
+    `Detached peers: ${preview["Detached peers"]}`,
     `Primary topology peer: ${preview["Primary topology peer"]}`,
     `Peer drift markers: ${preview["Peer drift markers"]}`,
     `Topology peers: ${preview["Topology peers"]}`,
@@ -594,6 +792,10 @@ function buildWorkspaceSnapshotPreludeFromPreview(preview: TabPreview): string[]
     `Inventory: ${preview.Inventory}`,
     `Language mix: ${preview["Language mix"]}`,
   ];
+  if (previewField(preview, "Repo/control preview") !== "none") {
+    rows.splice(13, 0, `Repo/control preview: ${previewField(preview, "Repo/control preview")}`);
+  }
+  return rows;
 }
 
 function buildWorkspaceSnapshotPrelude(content: string): string[] {
@@ -642,7 +844,6 @@ function summarizeHotspotsFromPayload(files: WorkspaceSnapshotPayload["largest_p
 function workspaceTopologySummaryFromPayload(payload: WorkspaceSnapshotPayload): ReturnType<typeof summarizeTopology> {
   const peerRecords: TopologyPeer[] = payload.topology.repos
     .filter((repo) => repo.exists)
-    .slice(0, 4)
     .map((repo) => ({
       name: repo.name,
       role: repo.role,
@@ -659,100 +860,114 @@ function inventoryFieldLabel(value: number | null | undefined, suffix: string): 
 }
 
 export function workspaceSnapshotPayloadFromEvent(event: Record<string, unknown>): WorkspaceSnapshotPayload | undefined {
-  const payload = asRecord(event.payload);
-  if (stringField(payload, "domain") !== "workspace_snapshot" || stringField(payload, "version") !== "v1") {
-    return undefined;
-  }
-  const git = asRecord(payload.git);
-  const sync = asRecord(git.sync);
-  const topology = asRecord(payload.topology);
-  const inventory = asRecord(payload.inventory);
-  const changedHotspots = Array.isArray(git.changed_hotspots)
-    ? git.changed_hotspots
-        .filter((item): item is Record<string, unknown> => typeof item === "object" && item !== null)
-        .map((item) => ({name: stringField(item, "name"), count: numberField(item, "count") ?? 0}))
-        .filter((item) => item.name.length > 0)
-    : [];
-  const topologyRepos = Array.isArray(topology.repos)
-    ? topology.repos
-        .filter((item): item is Record<string, unknown> => typeof item === "object" && item !== null)
-        .map((item) => ({
-          domain: stringField(item, "domain"),
-          name: stringField(item, "name"),
-          role: stringField(item, "role", "unknown"),
-          canonical: boolField(item, "canonical"),
-          path: stringField(item, "path"),
-          exists: boolField(item, "exists"),
-          is_git: boolField(item, "is_git"),
-          branch: stringField(item, "branch") || undefined,
-          head: stringField(item, "head") || undefined,
-          dirty:
-            typeof item.dirty === "boolean"
-              ? item.dirty
-              : item.dirty === null || item.dirty === undefined
-                ? null
-                : String(item.dirty).toLowerCase() === "true",
-          modified_count: numberField(item, "modified_count") ?? 0,
-          untracked_count: numberField(item, "untracked_count") ?? 0,
-        }))
-        .filter((item) => item.name.length > 0)
-    : [];
-  return {
-    version: "v1",
-    domain: "workspace_snapshot",
-    repo_root: stringField(payload, "repo_root", "unavailable"),
-    git: {
-      branch: stringField(git, "branch", "unavailable"),
-      head: stringField(git, "head", "unavailable"),
-      staged: numberField(git, "staged"),
-      unstaged: numberField(git, "unstaged"),
-      untracked: numberField(git, "untracked"),
-      changed_hotspots: changedHotspots,
-      changed_paths: asStringArray(git.changed_paths),
-      sync: {
-        summary: stringField(sync, "summary", "unavailable"),
-        status: stringField(sync, "status", "unavailable"),
-        upstream: stringField(sync, "upstream") || undefined,
-        ahead: numberField(sync, "ahead"),
-        behind: numberField(sync, "behind"),
-      },
-    },
-    topology: {
-      warnings: asStringArray(topology.warnings),
-      repos: topologyRepos,
-    },
-    inventory: {
-      python_modules: numberField(inventory, "python_modules"),
-      python_tests: numberField(inventory, "python_tests"),
-      scripts: numberField(inventory, "scripts"),
-      docs: numberField(inventory, "docs"),
-      workflows: numberField(inventory, "workflows"),
-    },
-    language_mix: Array.isArray(payload.language_mix)
-      ? payload.language_mix
+  const parsePayload = (payload: Record<string, unknown> | undefined): WorkspaceSnapshotPayload | undefined => {
+    if (!payload) {
+      return undefined;
+    }
+    if (stringField(payload, "domain") !== "workspace_snapshot" || stringField(payload, "version") !== "v1") {
+      return undefined;
+    }
+    const git = asRecord(payload.git);
+    const sync = asRecord(git.sync);
+    const topology = asRecord(payload.topology);
+    const inventory = asRecord(payload.inventory);
+    const changedHotspots = Array.isArray(git.changed_hotspots)
+      ? git.changed_hotspots
           .filter((item): item is Record<string, unknown> => typeof item === "object" && item !== null)
-          .map((item) => ({suffix: stringField(item, "suffix"), count: numberField(item, "count") ?? 0}))
-          .filter((item) => item.suffix.length > 0)
-      : [],
-    largest_python_files: Array.isArray(payload.largest_python_files)
-      ? payload.largest_python_files
+          .map((item) => ({name: stringField(item, "name"), count: numberField(item, "count") ?? 0}))
+          .filter((item) => item.name.length > 0)
+      : [];
+    const topologyRepos = Array.isArray(topology.repos)
+      ? topology.repos
           .filter((item): item is Record<string, unknown> => typeof item === "object" && item !== null)
           .map((item) => ({
+            domain: stringField(item, "domain"),
+            name: stringField(item, "name"),
+            role: stringField(item, "role", "unknown"),
+            canonical: boolField(item, "canonical"),
             path: stringField(item, "path"),
-            lines: numberField(item, "lines") ?? 0,
-            defs: numberField(item, "defs") ?? 0,
-            classes: numberField(item, "classes") ?? 0,
-            imports: numberField(item, "imports") ?? 0,
+            exists: boolField(item, "exists"),
+            is_git: boolField(item, "is_git"),
+            branch: stringField(item, "branch") || undefined,
+            head: stringField(item, "head") || undefined,
+            dirty:
+              typeof item.dirty === "boolean"
+                ? item.dirty
+                : item.dirty === null || item.dirty === undefined
+                  ? null
+                  : String(item.dirty).toLowerCase() === "true",
+            modified_count: numberField(item, "modified_count") ?? 0,
+            untracked_count: numberField(item, "untracked_count") ?? 0,
           }))
-          .filter((item) => item.path.length > 0)
-      : [],
-    most_imported_modules: Array.isArray(payload.most_imported_modules)
-      ? payload.most_imported_modules
-          .filter((item): item is Record<string, unknown> => typeof item === "object" && item !== null)
-          .map((item) => ({module: stringField(item, "module"), count: numberField(item, "count") ?? 0}))
-          .filter((item) => item.module.length > 0)
-      : [],
+          .filter((item) => item.name.length > 0)
+      : [];
+    return {
+      version: "v1",
+      domain: "workspace_snapshot",
+      repo_root: stringField(payload, "repo_root", "unavailable"),
+      git: {
+        branch: stringField(git, "branch", "unavailable"),
+        head: stringField(git, "head", "unavailable"),
+        staged: numberField(git, "staged"),
+        unstaged: numberField(git, "unstaged"),
+        untracked: numberField(git, "untracked"),
+        changed_hotspots: changedHotspots,
+        changed_paths: asStringArray(git.changed_paths),
+        sync: {
+          summary: stringField(sync, "summary", "unavailable"),
+          status: stringField(sync, "status", "unavailable"),
+          upstream: stringField(sync, "upstream") || undefined,
+          ahead: numberField(sync, "ahead"),
+          behind: numberField(sync, "behind"),
+        },
+      },
+      topology: {
+        warnings: asStringArray(topology.warnings),
+        repos: topologyRepos,
+        preview: stringField(topology, "preview") || undefined,
+        pressure_preview: stringField(topology, "pressure_preview") || undefined,
+      },
+      inventory: {
+        python_modules: numberField(inventory, "python_modules"),
+        python_tests: numberField(inventory, "python_tests"),
+        scripts: numberField(inventory, "scripts"),
+        docs: numberField(inventory, "docs"),
+        workflows: numberField(inventory, "workflows"),
+      },
+      language_mix: Array.isArray(payload.language_mix)
+        ? payload.language_mix
+            .filter((item): item is Record<string, unknown> => typeof item === "object" && item !== null)
+            .map((item) => ({suffix: stringField(item, "suffix"), count: numberField(item, "count") ?? 0}))
+            .filter((item) => item.suffix.length > 0)
+        : [],
+      largest_python_files: Array.isArray(payload.largest_python_files)
+        ? payload.largest_python_files
+            .filter((item): item is Record<string, unknown> => typeof item === "object" && item !== null)
+            .map((item) => ({
+              path: stringField(item, "path"),
+              lines: numberField(item, "lines") ?? 0,
+              defs: numberField(item, "defs") ?? 0,
+              classes: numberField(item, "classes") ?? 0,
+              imports: numberField(item, "imports") ?? 0,
+            }))
+            .filter((item) => item.path.length > 0)
+        : [],
+      most_imported_modules: Array.isArray(payload.most_imported_modules)
+        ? payload.most_imported_modules
+            .filter((item): item is Record<string, unknown> => typeof item === "object" && item !== null)
+            .map((item) => ({module: stringField(item, "module"), count: numberField(item, "count") ?? 0}))
+            .filter((item) => item.module.length > 0)
+        : [],
+    };
   };
+
+  for (const entry of nestedEnvelopeRecords(event)) {
+    const parsed = parsePayload(entry);
+    if (parsed) {
+      return parsed;
+    }
+  }
+  return parsePayload(asRecord(event.workspace_payload));
 }
 
 export function workspaceSnapshotToPreview(content: string): TabPreview {
@@ -764,6 +979,7 @@ export function workspaceSnapshotToPreview(content: string): TabPreview {
   const changedPaths = parseGitChangedPathsLine(content);
   const warningSummary =
     topology.warnings.length > 0 ? `${topology.warnings.length} (${topology.warnings.join(", ")})` : "0";
+  const warningMembers = summarizeTopologyWarningMembers(topology);
   const hotspotSummary = hotspots.length > 0 ? hotspots.join("; ") : "none";
   const inboundHotspots = summarizeImportedModules(content);
   const branchStatus = summarizeBranchStatus(sync);
@@ -776,6 +992,8 @@ export function workspaceSnapshotToPreview(content: string): TabPreview {
     topology.pressure,
   );
   const topologyPressurePreview = summarizeTopologyPressurePreview(topology);
+  const branchDivergence = summarizeBranchDivergence(sync, topology);
+  const detachedPeers = summarizeDetachedPeers(topology);
   const dirtyPressure = summarizeDirtyPressure(git);
   const repoRisk = summarizeRepoRisk(git, sync, topology);
   const branchSyncPreview = summarizeBranchSyncPreview(sync, branchStatus, repoRisk);
@@ -793,10 +1011,21 @@ export function workspaceSnapshotToPreview(content: string): TabPreview {
     primaryChangedHotspot,
     primaryDependencyHotspot,
   );
+  const hotspotSummaryPreview = summarizeHotspotPreview(changedHotspots, hotspotSummary, inboundHotspots, changedPaths);
   const dirtySummary =
     git.counts.staged === null || git.counts.unstaged === null || git.counts.untracked === null
       ? git.dirty
       : `${git.counts.staged} staged, ${git.counts.unstaged} unstaged, ${git.counts.untracked} untracked`;
+  const dirtyCountsLabel =
+    git.counts.staged === null || git.counts.unstaged === null || git.counts.untracked === null
+      ? git.dirty
+      : `staged ${git.counts.staged} | unstaged ${git.counts.unstaged} | untracked ${git.counts.untracked}`;
+  const repoTruthPreview = summarizeRepoTruthPreview(
+    `${git.branch}@${git.head}`,
+    dirtyCountsLabel,
+    topology.warnings.length > 0 ? topology.warnings.join("; ") : "none",
+    hotspotSummaryPreview,
+  );
 
   return {
     "Repo root": extractRepoRoot(content),
@@ -809,6 +1038,7 @@ export function workspaceSnapshotToPreview(content: string): TabPreview {
     Behind: sync.behind,
     "Branch sync preview": branchSyncPreview,
     "Repo risk preview": repoRiskPreview,
+    "Repo truth preview": repoTruthPreview,
     "Repo risk": repoRisk,
     Dirty: dirtySummary,
     "Dirty pressure": dirtyPressure,
@@ -817,10 +1047,11 @@ export function workspaceSnapshotToPreview(content: string): TabPreview {
     Untracked: git.counts.untracked === null ? "n/a" : String(git.counts.untracked),
     "Changed hotspots": changedHotspots,
     "Changed paths": changedPaths,
-    "Hotspot summary": summarizeHotspotPreview(changedHotspots, hotspotSummary, inboundHotspots, changedPaths),
+    "Hotspot summary": hotspotSummaryPreview,
     "Lead hotspot preview": leadHotspotPreview,
     "Hotspot pressure preview": hotspotPressurePreview,
     "Topology warnings": warningSummary,
+    "Topology warning members": warningMembers,
     "Topology warning severity": topology.warningSeverity,
     "Topology status": topologyStatus,
     "Topology risk": topologyRisk,
@@ -829,6 +1060,8 @@ export function workspaceSnapshotToPreview(content: string): TabPreview {
     "Topology pressure preview": topologyPressurePreview,
     "Primary warning": topology.warnings[0] ?? "none",
     "Primary peer drift": topology.primaryPeerDrift,
+    "Branch divergence": branchDivergence,
+    "Detached peers": detachedPeers,
     "Primary topology peer": topology.primaryPeer,
     "Topology peer count": String(topology.peerCount),
     "Peer drift markers": topology.peerDriftMarkers,
@@ -873,6 +1106,7 @@ export function workspacePayloadToPreview(payload: WorkspaceSnapshotPayload): Ta
   const branchStatus = summarizeBranchStatus(sync);
   const topologyStatus = summarizeTopologyStatus(topology);
   const topologyRisk = topology.warnings.length > 0 ? topology.warnings[0] ?? "warning" : "stable";
+  const warningMembers = summarizeTopologyWarningMembers(topology);
   const riskPreview = summarizeRiskPreview(topology);
   const topologyPreview = summarizeTopologyPreview(
     topology.warnings[0] ?? "none",
@@ -880,6 +1114,10 @@ export function workspacePayloadToPreview(payload: WorkspaceSnapshotPayload): Ta
     topology.pressure,
   );
   const topologyPressurePreview = summarizeTopologyPressurePreview(topology);
+  const authoritativeTopologyPreview = payload.topology.preview ?? "";
+  const authoritativeTopologyPressurePreview = payload.topology.pressure_preview ?? "";
+  const branchDivergence = summarizeBranchDivergence(sync, topology);
+  const detachedPeers = summarizeDetachedPeers(topology);
   const dirtySummary =
     git.staged === null || git.staged === undefined || git.unstaged === null || git.unstaged === undefined || git.untracked === null || git.untracked === undefined
       ? `${git.branch} (${git.sync.summary || "unavailable"})`
@@ -911,11 +1149,27 @@ export function workspacePayloadToPreview(payload: WorkspaceSnapshotPayload): Ta
     primaryChangedHotspot,
     primaryDependencyHotspot,
   );
+  const hotspotSummaryPreview = summarizeHotspotPreview(
+    changedHotspots,
+    hotspotSummary.join("; ") || "none",
+    inboundHotspots,
+    changedPaths,
+  );
+  const dirtyCountsLabel =
+    git.staged === null || git.staged === undefined || git.unstaged === null || git.unstaged === undefined || git.untracked === null || git.untracked === undefined
+      ? dirtySummary
+      : `staged ${git.staged} | unstaged ${git.unstaged} | untracked ${git.untracked}`;
+  const repoTruthPreview = summarizeRepoTruthPreview(
+    `${git.branch}@${normalizeGitHeadLabel(git.head)}`,
+    dirtyCountsLabel,
+    topology.warnings.length > 0 ? topology.warnings.join("; ") : "none",
+    hotspotSummaryPreview,
+  );
 
   return {
     "Repo root": payload.repo_root,
     Branch: git.branch,
-    Head: git.head,
+    Head: normalizeGitHeadLabel(git.head),
     Sync: sync.sync,
     "Branch status": branchStatus,
     Upstream: sync.upstream,
@@ -923,6 +1177,7 @@ export function workspacePayloadToPreview(payload: WorkspaceSnapshotPayload): Ta
     Behind: sync.behind,
     "Branch sync preview": branchSyncPreview,
     "Repo risk preview": repoRiskPreview,
+    "Repo truth preview": repoTruthPreview,
     "Repo risk": repoRisk,
     Dirty: dirtySummary,
     "Dirty pressure": dirtyPressure,
@@ -931,18 +1186,25 @@ export function workspacePayloadToPreview(payload: WorkspaceSnapshotPayload): Ta
     Untracked: git.untracked === null || git.untracked === undefined ? "n/a" : String(git.untracked),
     "Changed hotspots": changedHotspots,
     "Changed paths": changedPaths,
-    "Hotspot summary": summarizeHotspotPreview(changedHotspots, hotspotSummary.join("; ") || "none", inboundHotspots, changedPaths),
+    "Hotspot summary": hotspotSummaryPreview,
     "Lead hotspot preview": leadHotspotPreview,
     "Hotspot pressure preview": hotspotPressurePreview,
     "Topology warnings": topology.warnings.length > 0 ? `${topology.warnings.length} (${topology.warnings.join(", ")})` : "0",
+    "Topology warning members": warningMembers,
     "Topology warning severity": topology.warningSeverity,
     "Topology status": topologyStatus,
     "Topology risk": topologyRisk,
     "Risk preview": riskPreview,
-    "Topology preview": topologyPreview,
-    "Topology pressure preview": topologyPressurePreview,
+    "Topology preview": hasPreviewSignal(authoritativeTopologyPreview)
+      ? authoritativeTopologyPreview
+      : topologyPreview,
+    "Topology pressure preview": hasPreviewSignal(authoritativeTopologyPressurePreview)
+      ? authoritativeTopologyPressurePreview
+      : topologyPressurePreview,
     "Primary warning": topology.warnings[0] ?? "none",
     "Primary peer drift": topology.primaryPeerDrift,
+    "Branch divergence": branchDivergence,
+    "Detached peers": detachedPeers,
     "Primary topology peer": topology.primaryPeer,
     "Topology peer count": String(topology.peerCount),
     "Peer drift markers": topology.peerDriftMarkers,
@@ -1092,6 +1354,14 @@ function summarizeControlPulsePreview(lastResult: string, runtimeFreshness: stri
   ].join(" | ");
 }
 
+function summarizeControlTruthPreview(verificationBundle: string, loopState: string, nextTask: string): string {
+  return [
+    (verificationBundle || "none").trim() || "none",
+    (loopState || "unknown").trim() || "unknown",
+    `next ${(nextTask || "none").trim() || "none"}`,
+  ].join(" | ");
+}
+
 function previewControlPulse(preview: TabPreview, now: Date = new Date()): string | null {
   const explicit = preview["Control pulse preview"];
   if (typeof explicit === "string" && explicit.length > 0 && explicit !== "none" && explicit !== "unknown") {
@@ -1099,11 +1369,7 @@ function previewControlPulse(preview: TabPreview, now: Date = new Date()): strin
   }
 
   const lastResult = (preview["Last result"] ?? "").trim();
-  const verificationBundle =
-    preview["Verification bundle"] ??
-    verificationBundleLabel(
-      parseVerificationBundle(preview["Verification checks"] ?? "none", preview["Verification summary"] ?? "none"),
-    );
+  const verificationBundle = verificationBundleFromPreview(preview);
   const runtimeFreshness = (
     preview["Runtime freshness"] ??
     summarizeRuntimeFreshness(preview["Loop state"] ?? "unknown", preview.Updated ?? "unknown", verificationBundle)
@@ -1148,6 +1414,23 @@ function normalizeCanonicalRuntimeSnapshot(value: unknown): CanonicalRuntimeSnap
     context_bundle_count: numberField(snapshot, "context_bundle_count") ?? 0,
     anomaly_count: numberField(snapshot, "anomaly_count") ?? 0,
     verification_status: stringField(snapshot, "verification_status", "unknown"),
+    verification_summary: stringField(snapshot, "verification_summary") || undefined,
+    verification_bundle: stringField(snapshot, "verification_bundle") || undefined,
+    verification_checks: stringField(snapshot, "verification_checks") || undefined,
+    verification_passing: stringField(snapshot, "verification_passing") || undefined,
+    verification_failing: stringField(snapshot, "verification_failing") || undefined,
+    verification_receipt: stringField(snapshot, "verification_receipt") || undefined,
+    verification_updated_at: stringField(snapshot, "verification_updated_at") || undefined,
+    loop_state: stringField(snapshot, "loop_state") || undefined,
+    loop_decision: stringField(snapshot, "loop_decision") || undefined,
+    task_progress: stringField(snapshot, "task_progress") || undefined,
+    result_status: stringField(snapshot, "result_status") || undefined,
+    acceptance: stringField(snapshot, "acceptance") || undefined,
+    last_result: stringField(snapshot, "last_result") || undefined,
+    updated_at: stringField(snapshot, "updated_at") || undefined,
+    durable_state: stringField(snapshot, "durable_state") || undefined,
+    runtime_summary: stringField(snapshot, "runtime_summary") || undefined,
+    runtime_freshness: stringField(snapshot, "runtime_freshness") || undefined,
     next_task: stringField(snapshot, "next_task") || undefined,
     active_task: stringField(snapshot, "active_task") || undefined,
     worktree_count: numberField(snapshot, "worktree_count"),
@@ -1161,19 +1444,50 @@ function normalizeCanonicalRuntimeSnapshot(value: unknown): CanonicalRuntimeSnap
 }
 
 export function runtimeSnapshotPayloadFromEvent(event: Record<string, unknown>): RuntimeSnapshotPayload | undefined {
-  const payload = asRecord(event.payload);
-  if (stringField(payload, "domain") !== "runtime_snapshot" || stringField(payload, "version") !== "v1") {
-    return undefined;
-  }
-  const snapshot = normalizeCanonicalRuntimeSnapshot(payload.snapshot);
-  if (!snapshot) {
-    return undefined;
-  }
-  return {
-    version: "v1",
-    domain: "runtime_snapshot",
-    snapshot,
+  const parsePayload = (payload: Record<string, unknown> | undefined): RuntimeSnapshotPayload | undefined => {
+    if (!payload) {
+      return undefined;
+    }
+    if (stringField(payload, "domain") !== "runtime_snapshot" || stringField(payload, "version") !== "v1") {
+      return undefined;
+    }
+    const snapshot = normalizeCanonicalRuntimeSnapshot(payload.snapshot);
+    if (!snapshot) {
+      return undefined;
+    }
+    return {
+      version: "v1",
+      domain: "runtime_snapshot",
+      snapshot,
+    };
   };
+
+  for (const entry of nestedEnvelopeRecords(event)) {
+    const parsed = parsePayload(entry);
+    if (parsed) {
+      return parsed;
+    }
+  }
+  return parsePayload(asRecord(event.runtime_payload));
+}
+
+export function runtimePayloadHasAuthoritativeControlSignal(payload: RuntimeSnapshotPayload): boolean {
+  for (const key of RUNTIME_AUTHORITATIVE_SNAPSHOT_FIELDS) {
+    const value = payload.snapshot[key];
+    if (typeof value === "string" && hasPreviewSignal(value)) {
+      return true;
+    }
+  }
+
+  const supervisorPreview = runtimeSupervisorPreviewFromPayload(payload);
+  return Object.entries(supervisorPreview).some(
+    ([key, value]) =>
+      (RUNTIME_SUPERVISOR_AUTHORITATIVE_FIELDS.has(key) ||
+        key.startsWith("Verification ") ||
+        key === "Control pulse preview" ||
+        key === "Runtime freshness") &&
+      hasPreviewSignal(value),
+  );
 }
 
 function runtimeSnapshotStateFromPayload(payload: RuntimeSnapshotPayload): {
@@ -1208,16 +1522,41 @@ function hasPreviewSignal(value: string | undefined): boolean {
 }
 
 function normalizeVerificationPreview(preview: TabPreview): void {
-  const bundle = parseVerificationBundle(preview["Verification checks"] ?? "none", preview["Verification summary"] ?? "none");
+  const bundle = parseVerificationBundle(preview["Verification checks"] ?? "none", verificationBundleFromPreview(preview));
   if (bundle.length === 0) {
     return;
   }
   const rows = buildVerificationSummaryRows(bundle);
   preview["Verification summary"] = verificationBundleLabel(bundle);
+  preview["Verification checks"] = bundle.map((entry) => `${entry.name} ${entry.ok ? "ok" : "fail"}`).join("; ");
   preview["Verification bundle"] = rows.bundle;
   preview["Verification status"] = rows.status;
   preview["Verification passing"] = rows.passing;
   preview["Verification failing"] = rows.failing;
+}
+
+function compactSupervisorPreview(preview: TabPreview): TabPreview {
+  const pulse = parseControlPulsePreview(preview["Control pulse preview"] ?? "");
+  const runtimeFreshness = preview["Runtime freshness"] ?? pulse.runtimeFreshness ?? "";
+  const runtime = parseRuntimeFreshness(runtimeFreshness);
+  const bundle = parseVerificationBundle("none", runtime.verificationBundle ?? "none");
+  const rows = buildVerificationSummaryRows(bundle);
+
+  return {
+    ...(runtime.loopState ? {"Loop state": runtime.loopState} : {}),
+    ...(runtime.updated ? {Updated: runtime.updated} : {}),
+    ...(pulse.lastResult ? {"Last result": pulse.lastResult} : {}),
+    ...(bundle.length > 0
+      ? {
+          "Verification summary": rows.bundle,
+          "Verification bundle": rows.bundle,
+          "Verification checks": bundle.map((entry) => `${entry.name} ${entry.ok ? "ok" : "fail"}`).join("; "),
+          "Verification status": rows.status,
+          "Verification passing": rows.passing,
+          "Verification failing": rows.failing,
+        }
+      : {}),
+  };
 }
 
 function runtimeSupervisorPreviewFromPayload(payload: RuntimeSnapshotPayload): TabPreview {
@@ -1229,6 +1568,64 @@ function runtimeSupervisorPreviewFromPayload(payload: RuntimeSnapshotPayload): T
 export function runtimePayloadToPreview(payload: RuntimeSnapshotPayload, summary: SupervisorControlState | null = null, now: Date = new Date()): TabPreview {
   const state = runtimeSnapshotStateFromPayload(payload);
   const supervisorPreview = runtimeSupervisorPreviewFromPayload(payload);
+  const compactPreview = compactSupervisorPreview(supervisorPreview);
+  const authoritativeRuntimeSummary =
+    (hasPreviewSignal(supervisorPreview["Runtime summary"]) && supervisorPreview["Runtime summary"]) ||
+    (hasPreviewSignal(payload.snapshot.runtime_summary ?? undefined) && payload.snapshot.runtime_summary) ||
+    "";
+  const snapshotAuthoritativeFields: TabPreview = {
+    ...(hasPreviewSignal(payload.snapshot.loop_state ?? undefined) ? {"Loop state": payload.snapshot.loop_state ?? ""} : {}),
+    ...(hasPreviewSignal(payload.snapshot.loop_decision ?? undefined)
+      ? {"Loop decision": payload.snapshot.loop_decision ?? ""}
+      : {}),
+    ...(hasPreviewSignal(payload.snapshot.task_progress ?? undefined)
+      ? {"Task progress": payload.snapshot.task_progress ?? ""}
+      : {}),
+    ...(hasPreviewSignal(payload.snapshot.active_task ?? undefined) ? {"Active task": payload.snapshot.active_task ?? ""} : {}),
+    ...(hasPreviewSignal(payload.snapshot.result_status ?? undefined)
+      ? {"Result status": payload.snapshot.result_status ?? ""}
+      : {}),
+    ...(hasPreviewSignal(payload.snapshot.acceptance ?? undefined) ? {Acceptance: payload.snapshot.acceptance ?? ""} : {}),
+    ...(hasPreviewSignal(payload.snapshot.last_result ?? undefined) ? {"Last result": payload.snapshot.last_result ?? ""} : {}),
+    ...(hasPreviewSignal(payload.snapshot.verification_summary ?? undefined)
+      ? {"Verification summary": payload.snapshot.verification_summary ?? ""}
+      : {}),
+    ...(hasPreviewSignal(payload.snapshot.verification_checks ?? undefined)
+      ? {"Verification checks": payload.snapshot.verification_checks ?? ""}
+      : {}),
+    ...(hasPreviewSignal(payload.snapshot.verification_bundle ?? undefined)
+      ? {"Verification bundle": payload.snapshot.verification_bundle ?? ""}
+      : {}),
+    ...(hasPreviewSignal(payload.snapshot.next_task ?? undefined) ? {"Next task": payload.snapshot.next_task ?? ""} : {}),
+    ...(hasPreviewSignal(payload.snapshot.verification_status)
+      ? {"Verification status": payload.snapshot.verification_status}
+      : {}),
+    ...(hasPreviewSignal(payload.snapshot.verification_passing ?? undefined)
+      ? {"Verification passing": payload.snapshot.verification_passing ?? ""}
+      : {}),
+    ...(hasPreviewSignal(payload.snapshot.verification_failing ?? undefined)
+      ? {"Verification failing": payload.snapshot.verification_failing ?? ""}
+      : {}),
+    ...(hasPreviewSignal(payload.snapshot.verification_receipt ?? undefined)
+      ? {"Verification receipt": payload.snapshot.verification_receipt ?? ""}
+      : {}),
+    ...(hasPreviewSignal(payload.snapshot.verification_updated_at ?? undefined)
+      ? {"Verification updated": payload.snapshot.verification_updated_at ?? ""}
+      : {}),
+    ...(hasPreviewSignal(payload.snapshot.updated_at ?? undefined) ? {Updated: payload.snapshot.updated_at ?? ""} : {}),
+    ...(hasPreviewSignal(payload.snapshot.durable_state ?? undefined)
+      ? {"Durable state": payload.snapshot.durable_state ?? ""}
+      : {}),
+    ...(hasPreviewSignal(payload.snapshot.runtime_summary ?? undefined)
+      ? {"Runtime summary": payload.snapshot.runtime_summary ?? ""}
+      : {}),
+    ...(hasPreviewSignal(payload.snapshot.runtime_freshness ?? undefined)
+      ? {"Runtime freshness": payload.snapshot.runtime_freshness ?? ""}
+      : {}),
+    ...(!hasPreviewSignal(payload.snapshot.updated_at ?? undefined) && hasPreviewSignal(payload.snapshot.created_at)
+      ? {Updated: payload.snapshot.created_at}
+      : {}),
+  };
   const preview: TabPreview = {
     "Runtime DB": state.runtimeDb,
     "Session state": state.sessionState,
@@ -1239,7 +1636,9 @@ export function runtimePayloadToPreview(payload: RuntimeSnapshotPayload, summary
     Toolchain: "none",
     Alerts: state.alerts,
   };
-  preview["Runtime summary"] = summarizeRuntimeSummary(preview["Runtime DB"], preview["Session state"], preview["Run state"], preview["Context state"]);
+  preview["Runtime summary"] =
+    payload.snapshot.runtime_summary ??
+    summarizeRuntimeSummary(preview["Runtime DB"], preview["Session state"], preview["Run state"], preview["Context state"]);
 
   const mergedPreview = summary
     ? {
@@ -1255,39 +1654,52 @@ export function runtimePayloadToPreview(payload: RuntimeSnapshotPayload, summary
       }
     : preview;
 
-  const fallbackFields: TabPreview = {
-    ...supervisorPreview,
-    ...(hasPreviewSignal(payload.snapshot.active_task ?? undefined) ? {"Active task": payload.snapshot.active_task ?? ""} : {}),
-    ...(hasPreviewSignal(payload.snapshot.next_task ?? undefined) ? {"Next task": payload.snapshot.next_task ?? ""} : {}),
-    ...(hasPreviewSignal(payload.snapshot.verification_status)
-      ? {"Verification status": payload.snapshot.verification_status}
-      : {}),
-    ...(hasPreviewSignal(payload.snapshot.created_at) ? {Updated: payload.snapshot.created_at} : {}),
-  };
-
-  Object.entries(supervisorPreview).forEach(([key, value]) => {
+  Object.entries(snapshotAuthoritativeFields).forEach(([key, value]) => {
     if (RUNTIME_SUPERVISOR_AUTHORITATIVE_FIELDS.has(key) && hasPreviewSignal(value)) {
+      if (hasPreviewSignal(supervisorPreview[key])) {
+        return;
+      }
       mergedPreview[key] = value;
+      return;
     }
-  });
-
-  Object.entries(fallbackFields).forEach(([key, value]) => {
     if (!hasPreviewSignal(mergedPreview[key])) {
       mergedPreview[key] = value;
     }
   });
 
-  mergedPreview["Runtime summary"] = summarizeRuntimeSummary(
-    mergedPreview["Runtime DB"] ?? "runtime db not reported",
-    mergedPreview["Session state"] ?? "none",
-    mergedPreview["Run state"] ?? "none",
-    mergedPreview["Context state"] ?? "none",
-  );
+  Object.entries(supervisorPreview).forEach(([key, value]) => {
+    if (RUNTIME_SUPERVISOR_AUTHORITATIVE_FIELDS.has(key) && hasPreviewSignal(value)) {
+      mergedPreview[key] = value;
+      return;
+    }
+    if (!hasPreviewSignal(mergedPreview[key])) {
+      mergedPreview[key] = value;
+    }
+  });
+
+  Object.entries(compactPreview).forEach(([key, value]) => {
+    if (hasPreviewSignal(value)) {
+      mergedPreview[key] = value;
+    }
+  });
+
+  mergedPreview["Runtime summary"] =
+    authoritativeRuntimeSummary ||
+    summarizeRuntimeSummary(
+      mergedPreview["Runtime DB"] ?? "runtime db not reported",
+      mergedPreview["Session state"] ?? "none",
+      mergedPreview["Run state"] ?? "none",
+      mergedPreview["Context state"] ?? "none",
+    );
 
   if (!hasPreviewSignal(mergedPreview["Verification summary"]) && hasPreviewSignal(mergedPreview["Verification status"])) {
     mergedPreview["Verification summary"] = mergedPreview["Verification status"];
   }
   normalizeVerificationPreview(mergedPreview);
+
+  if (!hasPreviewSignal(mergedPreview["Runtime freshness"]) && hasPreviewSignal(payload.snapshot.runtime_freshness ?? undefined)) {
+    mergedPreview["Runtime freshness"] = payload.snapshot.runtime_freshness ?? "";
+  }
   if (!hasPreviewSignal(mergedPreview["Last result"])) {
     const resultParts = [mergedPreview["Result status"], mergedPreview.Acceptance].filter((value) => hasPreviewSignal(value));
     if (resultParts.length > 0) {
@@ -1298,10 +1710,7 @@ export function runtimePayloadToPreview(payload: RuntimeSnapshotPayload, summary
     mergedPreview["Runtime freshness"] = summarizeRuntimeFreshness(
       mergedPreview["Loop state"] ?? "unknown",
       mergedPreview.Updated ?? "unknown",
-      mergedPreview["Verification bundle"] ??
-        verificationBundleLabel(
-          parseVerificationBundle(mergedPreview["Verification checks"] ?? "none", mergedPreview["Verification summary"] ?? "none"),
-        ),
+      verificationBundleFromPreview(mergedPreview),
     );
   }
   if (!hasPreviewSignal(mergedPreview["Control pulse preview"])) {
@@ -1310,6 +1719,13 @@ export function runtimePayloadToPreview(payload: RuntimeSnapshotPayload, summary
       mergedPreview["Runtime freshness"] ?? "unknown",
       mergedPreview.Updated ?? "unknown",
       now,
+    );
+  }
+  if (!hasPreviewSignal(mergedPreview["Control truth preview"])) {
+    mergedPreview["Control truth preview"] = summarizeControlTruthPreview(
+      mergedPreview["Verification bundle"] ?? "none",
+      mergedPreview["Loop state"] ?? "unknown",
+      mergedPreview["Next task"] ?? "none",
     );
   }
 
@@ -1347,6 +1763,8 @@ function buildRuntimeSnapshotPreludeFromPreview(preview: TabPreview, now: Date =
     `Toolchain: ${preview.Toolchain ?? "none"}`,
     `Alerts: ${preview.Alerts ?? "none"}`,
     ...(controlPulse ? [`Control pulse preview: ${controlPulse}`] : []),
+    ...(hasPreviewSignal(preview["Runtime freshness"]) ? [`Runtime freshness: ${preview["Runtime freshness"]}`] : []),
+    ...(hasPreviewSignal(preview["Runtime summary"]) ? [`Runtime summary: ${preview["Runtime summary"]}`] : []),
     "",
   ];
 }
@@ -1402,6 +1820,11 @@ export function runtimeSnapshotToPreview(content: string, summary: SupervisorCon
     preview["Verification bundle"],
   );
   preview["Control pulse preview"] = summarizeControlPulsePreview(preview["Last result"], preview["Runtime freshness"], preview.Updated, now);
+  preview["Control truth preview"] = summarizeControlTruthPreview(
+    preview["Verification bundle"],
+    preview["Loop state"],
+    preview["Next task"],
+  );
   return preview;
 }
 
@@ -1442,11 +1865,7 @@ function buildSupervisorPrelude(summary: SupervisorControlState | null): string[
 }
 
 function buildSupervisorPreludeFromPreview(preview: TabPreview): string[] {
-  const bundle =
-    preview["Verification bundle"] ??
-    verificationBundleLabel(
-      parseVerificationBundle(preview["Verification checks"] ?? "none", preview["Verification summary"] ?? "none"),
-    );
+  const bundle = verificationBundleFromPreview(preview);
   const lines = [
     `Loop state: ${preview["Loop state"] ?? "n/a"}`,
     `Task progress: ${preview["Task progress"] ?? "n/a"}`,
@@ -1460,6 +1879,8 @@ function buildSupervisorPreludeFromPreview(preview: TabPreview): string[] {
     `Verification passing: ${preview["Verification passing"] ?? "unknown"}`,
     `Verification failing: ${preview["Verification failing"] ?? "unknown"}`,
     `Verification bundle: ${bundle}`,
+    ...(hasPreviewSignal(preview["Verification receipt"]) ? [`Verification receipt: ${preview["Verification receipt"]}`] : []),
+    ...(hasPreviewSignal(preview["Verification updated"]) ? [`Verification updated: ${preview["Verification updated"]}`] : []),
     `Loop decision: ${preview["Loop decision"] ?? "unknown"}`,
     `Next task: ${preview["Next task"] ?? "none"}`,
     `Updated: ${preview.Updated ?? "unknown"}`,
@@ -1483,6 +1904,215 @@ function summarizeTool(argumentsText: string, toolName: string): string {
   } catch {
     return toolName;
   }
+}
+
+function prettyRaw(value: unknown): Record<string, unknown> | undefined {
+  return typeof value === "object" && value !== null ? (value as Record<string, unknown>) : undefined;
+}
+
+function compactText(value: string, max = 160): string {
+  const normalized = value.replace(/\s+/g, " ").trim();
+  if (normalized.length <= max) {
+    return normalized;
+  }
+  return `${normalized.slice(0, Math.max(0, max - 1))}\u2026`;
+}
+
+function detailLinesFromUnknown(value: unknown): string[] {
+  if (value === null || value === undefined) {
+    return [];
+  }
+  if (typeof value === "string") {
+    return value
+      .split("\n")
+      .map((line) => line.trimEnd())
+      .filter((line) => line.trim().length > 0);
+  }
+  try {
+    return JSON.stringify(value, null, 2)
+      .split("\n")
+      .map((line) => line.trimEnd());
+  } catch {
+    return [String(value)];
+  }
+}
+
+export function activityEntriesFromEvent(event: Record<string, unknown>): ActivityEntry[] {
+  const type = String(event.type ?? "");
+
+  if (type === "thinking_delta" || type === "thinking_complete") {
+    const content = String(event.content ?? "").trim();
+    if (!content) {
+      return [];
+    }
+    return [
+      makeActivityEntry("thinking", compactText(content), {
+        phase: type === "thinking_complete" ? "complete" : "running",
+        detail: detailLinesFromUnknown(content),
+        raw: prettyRaw(event),
+        timestamp: stringField(event, "timestamp", stringField(event, "created_at", "")) || undefined,
+      }),
+    ];
+  }
+
+  if (type === "tool_call_complete") {
+    const toolName = String(event.tool_name ?? "tool");
+    const summary = summarizeTool(String(event.arguments ?? ""), toolName);
+    return [
+      makeActivityEntry("tool", summary, {
+        phase: "running",
+        summary: toolName,
+        detail: [
+          `Tool: ${toolName}`,
+          ...detailLinesFromUnknown(event.arguments),
+        ],
+        raw: prettyRaw(event),
+        timestamp: stringField(event, "created_at", "") || undefined,
+        correlationId: stringField(event, "tool_call_id", "") || undefined,
+      }),
+    ];
+  }
+
+  if (type === "tool_result") {
+    const toolName = String(event.tool_name ?? "tool");
+    const content = String(event.content ?? "").trim();
+    const failed =
+      event.success === false ||
+      Boolean(event.error) ||
+      Boolean(event.error_message) ||
+      stringField(event, "status", "").toLowerCase() === "failed";
+    return [
+      makeActivityEntry("tool", `${toolName} completed`, {
+        phase: failed ? "failed" : "complete",
+        summary: compactText(content || "no output"),
+        detail: [
+          `Tool: ${toolName}`,
+          ...detailLinesFromUnknown(content || "no output"),
+        ],
+        raw: prettyRaw(event),
+        timestamp: stringField(event, "created_at", "") || undefined,
+        correlationId: stringField(event, "tool_call_id", "") || undefined,
+      }),
+    ];
+  }
+
+  if (type === "permission.decision") {
+    const decision = permissionDecisionFromEvent(event);
+    if (!decision) {
+      return [];
+    }
+    return [
+      makeActivityEntry("approval", `${decision.tool_name} requires ${decision.decision}`, {
+        phase: decision.decision === "require_approval" ? "queued" : "complete",
+        summary: `${decision.risk} | ${decision.action_id}`,
+        detail: [
+          `Risk: ${decision.risk}`,
+          `Rationale: ${decision.rationale}`,
+          `Policy: ${decision.policy_source}`,
+        ],
+        raw: prettyRaw(event),
+        timestamp: stringField(decision.metadata, "created_at", "") || undefined,
+        correlationId: decision.action_id,
+      }),
+    ];
+  }
+
+  if (type === "permission.resolution") {
+    const resolution = permissionResolutionFromEvent(event);
+    if (!resolution) {
+      return [];
+    }
+    return [
+      makeActivityEntry("approval", `resolution ${resolution.resolution}`, {
+        phase: "complete",
+        summary: `${resolution.action_id} | ${resolution.enforcement_state}`,
+        detail: [
+          `Action: ${resolution.action_id}`,
+          `Enforcement: ${resolution.enforcement_state}`,
+          ...(resolution.note ? [`Note: ${resolution.note}`] : []),
+        ],
+        raw: prettyRaw(event),
+        timestamp: resolution.resolved_at,
+        correlationId: resolution.action_id,
+      }),
+    ];
+  }
+
+  if (type === "permission.outcome") {
+    const outcome = permissionOutcomeFromEvent(event);
+    if (!outcome) {
+      return [];
+    }
+    return [
+      makeActivityEntry("approval", `runtime ${outcome.outcome}`, {
+        phase: outcome.outcome === "runtime_record_failed" || outcome.outcome === "runtime_rejected" || outcome.outcome === "runtime_expired" ? "failed" : "complete",
+        summary: `${outcome.action_id} | ${outcome.source}`,
+        detail: [
+          `Action: ${outcome.action_id}`,
+          `Source: ${outcome.source}`,
+          `Summary: ${outcome.summary}`,
+        ],
+        raw: prettyRaw(event),
+        timestamp: outcome.outcome_at,
+        correlationId: outcome.action_id,
+      }),
+    ];
+  }
+
+  if (type === "task_started" || type === "task_progress" || type === "task_complete") {
+    const taskId = stringField(event, "task_id", "task");
+    const status = stringField(event, "status", type.replace("task_", ""));
+    const summary = compactText(String(event.summary ?? event.message ?? status));
+    return [
+      makeActivityEntry("task", `${taskId} ${status}`, {
+        phase: type === "task_complete" ? "complete" : type === "task_started" ? "queued" : "running",
+        summary,
+        detail: detailLinesFromUnknown(event),
+        raw: prettyRaw(event),
+        timestamp: stringField(event, "timestamp", stringField(event, "created_at", "")) || undefined,
+        correlationId: taskId,
+      }),
+    ];
+  }
+
+  if (type === "command.result" || (type === "action.result" && resolveEventActionType(event) === "command.run")) {
+    const command = resolveEventCommand(event);
+    const summary = String(event.summary ?? "").trim();
+    const output = resolveEventOutput(event);
+    if (!command && !summary) {
+      return [];
+    }
+    return [
+      makeActivityEntry("pivot", command ? `intent ${command}` : "command result", {
+        phase: "complete",
+        summary: compactText(summary || output || "completed"),
+        detail: command ? [`Command: ${command}`] : [],
+        raw: prettyRaw(event),
+        correlationId: stringField(event, "id", "") || undefined,
+      }),
+    ];
+  }
+
+  if (type === "bridge.ready" || type === "handshake.result") {
+    return [
+      makeActivityEntry("status", type === "bridge.ready" ? "bridge process ready" : "bridge handshake complete", {
+        phase: "complete",
+        raw: prettyRaw(event),
+      }),
+    ];
+  }
+
+  if (type === "error" || type === "bridge.error") {
+    return [
+      makeActivityEntry("error", String(event.message ?? event.code ?? "error"), {
+        phase: "failed",
+        detail: detailLinesFromUnknown(event),
+        raw: prettyRaw(event),
+      }),
+    ];
+  }
+
+  return [];
 }
 
 export function isSlashCommandPrompt(prompt: string): boolean {
@@ -1530,26 +2160,231 @@ function nestedEnvelopeRecords(value: unknown): Record<string, unknown>[] {
     return [];
   }
 
+  const expandEnvelopeRecord = (entry: Record<string, unknown>): Record<string, unknown>[] => {
+    const payload = asRecord(entry.payload);
+    const payloadPayload = asRecord(payload.payload);
+    const payloadResult = asRecord(payload.result);
+    const payloadResultPayload = asRecord(payloadResult.payload);
+    const result = asRecord(entry.result);
+    const resultPayload = asRecord(result.payload);
+    const resultPayloadPayload = asRecord(resultPayload.payload);
+    const resultResult = asRecord(result.result);
+    const resultResultPayload = asRecord(resultResult.payload);
+
+    return [
+      entry,
+      payload,
+      payloadPayload,
+      payloadResult,
+      payloadResultPayload,
+      result,
+      resultPayload,
+      resultPayloadPayload,
+      resultResult,
+      resultResultPayload,
+    ];
+  };
+  const nestedRequestActionArgumentRecords = (entry: Record<string, unknown>): Record<string, unknown>[] => {
+    const request = asRecord(entry.request);
+    const action = asRecord(entry.action);
+    const argumentsRecord = asRecord(entry.arguments);
+
+    return [
+      ...expandEnvelopeRecord(request),
+      ...expandEnvelopeRecord(action),
+      ...expandEnvelopeRecord(argumentsRecord),
+      asRecord(request.arguments),
+      asRecord(asRecord(request.payload).arguments),
+      asRecord(asRecord(request.result).arguments),
+      asRecord(action.arguments),
+      asRecord(argumentsRecord.arguments),
+      asRecord(asRecord(action.payload).arguments),
+      asRecord(asRecord(action.result).arguments),
+      asRecord(asRecord(argumentsRecord.payload).arguments),
+      asRecord(asRecord(argumentsRecord.result).arguments),
+    ];
+  };
+  const nestedRoots = expandEnvelopeRecord(record);
+
   return [
-    record,
-    asRecord(record.payload),
-    asRecord(record.request),
-    asRecord(record.action),
-    asRecord(record.arguments),
-    asRecord(asRecord(record.payload).request),
-    asRecord(asRecord(record.payload).action),
-    asRecord(asRecord(record.payload).arguments),
-    asRecord(asRecord(record.request).arguments),
-    asRecord(asRecord(record.action).arguments),
+    ...nestedRoots,
+    ...nestedRoots.flatMap(nestedRequestActionArgumentRecords),
   ].filter((entry, index, entries) => Object.keys(entry).length > 0 && entries.indexOf(entry) === index);
 }
 
-function nestedTargetPane(event: Record<string, unknown>): string {
+function nestedTargetPaneCandidates(event: Record<string, unknown>): string[] {
+  const targets: string[] = [];
   for (const entry of nestedEnvelopeRecords(event)) {
-    const candidate = entry.target_pane;
-    const normalized = normalizeTargetPaneId(String(candidate ?? ""));
-    if (normalized) {
-      return normalized;
+    const commandRecord = asRecord(entry.command);
+    const commandPayload = asRecord(commandRecord.payload);
+    const commandResult = asRecord(commandRecord.result);
+    const candidates = [
+      entry.target_surface,
+      entry.targetSurface,
+      entry.target_surface_id,
+      entry.targetSurfaceId,
+      entry.target_pane,
+      entry.targetPane,
+      entry.surface,
+      entry.surface_id,
+      entry.surfaceId,
+      entry.target_pane_id,
+      entry.targetPaneId,
+      entry.target_tab,
+      entry.targetTab,
+      entry.target_tab_id,
+      entry.targetTabId,
+      entry.pane,
+      entry.pane_id,
+      entry.paneId,
+      entry.tab,
+      entry.tab_id,
+      entry.tabId,
+      commandRecord.target_pane,
+      commandRecord.targetPane,
+      commandRecord.target_surface,
+      commandRecord.targetSurface,
+      commandRecord.target_surface_id,
+      commandRecord.targetSurfaceId,
+      commandRecord.surface,
+      commandRecord.surface_id,
+      commandRecord.surfaceId,
+      commandRecord.target_pane_id,
+      commandRecord.targetPaneId,
+      commandRecord.target_tab,
+      commandRecord.targetTab,
+      commandRecord.target_tab_id,
+      commandRecord.targetTabId,
+      commandRecord.pane,
+      commandRecord.pane_id,
+      commandRecord.paneId,
+      commandRecord.tab,
+      commandRecord.tab_id,
+      commandRecord.tabId,
+      asRecord(commandRecord.arguments).target_pane,
+      asRecord(commandRecord.arguments).targetPane,
+      asRecord(commandRecord.arguments).target_surface,
+      asRecord(commandRecord.arguments).targetSurface,
+      asRecord(commandRecord.arguments).target_surface_id,
+      asRecord(commandRecord.arguments).targetSurfaceId,
+      asRecord(commandRecord.arguments).surface,
+      asRecord(commandRecord.arguments).surface_id,
+      asRecord(commandRecord.arguments).surfaceId,
+      asRecord(commandRecord.arguments).target_pane_id,
+      asRecord(commandRecord.arguments).targetPaneId,
+      asRecord(commandRecord.arguments).target_tab,
+      asRecord(commandRecord.arguments).targetTab,
+      asRecord(commandRecord.arguments).target_tab_id,
+      asRecord(commandRecord.arguments).targetTabId,
+      asRecord(commandRecord.arguments).pane,
+      asRecord(commandRecord.arguments).pane_id,
+      asRecord(commandRecord.arguments).paneId,
+      asRecord(commandRecord.arguments).tab,
+      asRecord(commandRecord.arguments).tab_id,
+      asRecord(commandRecord.arguments).tabId,
+      commandPayload.target_pane,
+      commandPayload.targetPane,
+      commandPayload.target_surface,
+      commandPayload.targetSurface,
+      commandPayload.target_surface_id,
+      commandPayload.targetSurfaceId,
+      commandPayload.surface,
+      commandPayload.surface_id,
+      commandPayload.surfaceId,
+      commandPayload.target_pane_id,
+      commandPayload.targetPaneId,
+      commandPayload.target_tab,
+      commandPayload.targetTab,
+      commandPayload.target_tab_id,
+      commandPayload.targetTabId,
+      commandPayload.pane,
+      commandPayload.pane_id,
+      commandPayload.paneId,
+      commandPayload.tab,
+      commandPayload.tab_id,
+      commandPayload.tabId,
+      asRecord(commandPayload.arguments).target_pane,
+      asRecord(commandPayload.arguments).targetPane,
+      asRecord(commandPayload.arguments).target_surface,
+      asRecord(commandPayload.arguments).targetSurface,
+      asRecord(commandPayload.arguments).target_surface_id,
+      asRecord(commandPayload.arguments).targetSurfaceId,
+      asRecord(commandPayload.arguments).surface,
+      asRecord(commandPayload.arguments).surface_id,
+      asRecord(commandPayload.arguments).surfaceId,
+      asRecord(commandPayload.arguments).target_pane_id,
+      asRecord(commandPayload.arguments).targetPaneId,
+      asRecord(commandPayload.arguments).target_tab,
+      asRecord(commandPayload.arguments).targetTab,
+      asRecord(commandPayload.arguments).target_tab_id,
+      asRecord(commandPayload.arguments).targetTabId,
+      asRecord(commandPayload.arguments).pane,
+      asRecord(commandPayload.arguments).pane_id,
+      asRecord(commandPayload.arguments).paneId,
+      asRecord(commandPayload.arguments).tab,
+      asRecord(commandPayload.arguments).tab_id,
+      asRecord(commandPayload.arguments).tabId,
+      commandResult.target_pane,
+      commandResult.targetPane,
+      commandResult.target_surface,
+      commandResult.targetSurface,
+      commandResult.target_surface_id,
+      commandResult.targetSurfaceId,
+      commandResult.surface,
+      commandResult.surface_id,
+      commandResult.surfaceId,
+      commandResult.target_pane_id,
+      commandResult.targetPaneId,
+      commandResult.target_tab,
+      commandResult.targetTab,
+      commandResult.target_tab_id,
+      commandResult.targetTabId,
+      commandResult.pane,
+      commandResult.pane_id,
+      commandResult.paneId,
+      commandResult.tab,
+      commandResult.tab_id,
+      commandResult.tabId,
+      asRecord(commandResult.arguments).target_pane,
+      asRecord(commandResult.arguments).targetPane,
+      asRecord(commandResult.arguments).target_surface,
+      asRecord(commandResult.arguments).targetSurface,
+      asRecord(commandResult.arguments).target_surface_id,
+      asRecord(commandResult.arguments).targetSurfaceId,
+      asRecord(commandResult.arguments).surface,
+      asRecord(commandResult.arguments).surface_id,
+      asRecord(commandResult.arguments).surfaceId,
+      asRecord(commandResult.arguments).target_pane_id,
+      asRecord(commandResult.arguments).targetPaneId,
+      asRecord(commandResult.arguments).target_tab,
+      asRecord(commandResult.arguments).targetTab,
+      asRecord(commandResult.arguments).target_tab_id,
+      asRecord(commandResult.arguments).targetTabId,
+      asRecord(commandResult.arguments).pane,
+      asRecord(commandResult.arguments).pane_id,
+      asRecord(commandResult.arguments).paneId,
+      asRecord(commandResult.arguments).tab,
+      asRecord(commandResult.arguments).tab_id,
+      asRecord(commandResult.arguments).tabId,
+    ];
+    for (const candidate of candidates) {
+      const normalized = normalizeTargetPaneId(String(candidate ?? ""));
+      if (normalized && !targets.includes(normalized)) {
+        targets.push(normalized);
+      }
+    }
+  }
+
+  return targets;
+}
+
+export function resolveEventOutput(event: Record<string, unknown>): string {
+  for (const entry of nestedEnvelopeRecords(event)) {
+    const candidates = [entry.output, entry.content, entry.stdout, entry.stderr];
+    for (const candidate of candidates) {
+      if (typeof candidate === "string" && candidate.trim()) {
+        return candidate;
+      }
     }
   }
 
@@ -1558,18 +2393,31 @@ function nestedTargetPane(event: Record<string, unknown>): string {
 
 export function resolveEventCommand(event: Record<string, unknown>): string {
   for (const entry of nestedEnvelopeRecords(event)) {
-    const explicitCommand = String(entry.command ?? "").trim();
-    if (explicitCommand) {
-      return explicitCommand;
-    }
-
     const nestedCommand = nestedCommandString(entry.command);
     if (nestedCommand) {
       return nestedCommand;
     }
+
+    const explicitCommand = typeof entry.command === "string" ? entry.command.trim() : "";
+    if (explicitCommand) {
+      return explicitCommand;
+    }
   }
 
   return inferSlashCommand(String(event.summary ?? ""));
+}
+
+export function resolveEventActionType(event: Record<string, unknown>): string {
+  for (const entry of nestedEnvelopeRecords(event)) {
+    const candidates = [entry.action_type, entry.actionType];
+    for (const candidate of candidates) {
+      if (typeof candidate === "string" && candidate.trim()) {
+        return candidate.trim();
+      }
+    }
+  }
+
+  return "";
 }
 
 export function commandTargetTab(command: string): string {
@@ -1587,7 +2435,7 @@ export function commandTargetTab(command: string): string {
     return "repo";
   }
 
-  if (normalized === "model") {
+  if (normalized === "model" || normalized === "models") {
     return "models";
   }
 
@@ -1613,6 +2461,10 @@ export function commandTargetTab(command: string): string {
 
   if (["sessions", "session", "notes", "memory", "archive", "darwin", "logs", "truth", "stigmergy"].includes(normalized)) {
     return "sessions";
+  }
+
+  if (["approval", "approvals", "permission", "permissions"].includes(normalized)) {
+    return "approvals";
   }
 
   if (["status", "help", "dashboard"].includes(normalized)) {
@@ -1671,13 +2523,35 @@ function isLauncherPaneTarget(targetPane: string): boolean {
   return targetPane === "commands";
 }
 
+function deepestOperationalTargetPane(targetPanes: string[]): string {
+  for (let index = targetPanes.length - 1; index >= 0; index -= 1) {
+    const targetPane = targetPanes[index];
+    if (targetPane !== "chat" && !isLauncherPaneTarget(targetPane)) {
+      return targetPane;
+    }
+  }
+  return "";
+}
+
 export function resolveCommandTargetPane(event: Record<string, unknown>, fallback = "control"): string {
-  const explicitTargetPane = nestedTargetPane(event);
   const command = resolveEventCommand(event);
   const inferredTargetPane = command ? commandTargetTab(command) : "";
+  const explicitTargetPanes = nestedTargetPaneCandidates(event);
+  const explicitTargetPane = explicitTargetPanes[0] ?? "";
   if (explicitTargetPane) {
     if (inferredTargetPane === "chat") {
       return "chat";
+    }
+
+    if (!command && isLauncherPaneTarget(explicitTargetPane)) {
+      return fallback;
+    }
+
+    if (command) {
+      const preferredOperationalTarget = deepestOperationalTargetPane(explicitTargetPanes);
+      if (preferredOperationalTarget) {
+        return preferredOperationalTarget;
+      }
     }
 
     if (command && isLauncherPaneTarget(explicitTargetPane)) {
@@ -1994,13 +2868,16 @@ export function sessionDetailToLines(payload: Record<string, unknown>): Transcri
 
   const lines = [
     "# Session Detail",
+    "## Identity",
     `Session: ${stringField(session, "session_id", "unknown")}`,
-    `Route: ${sessionRouteLabel(session)}`,
-    `Status: ${stringField(session, "status", "unknown")}`,
-    `Summary: ${sessionSummaryLine(session)}`,
-    `Branch: ${sessionBranchLabel(session)}`,
+    `Route: ${sessionRouteLabel(session)}  |  Status: ${stringField(session, "status", "unknown")}`,
+    `Branch: ${sessionBranchLabel(session)}  |  Replay: ${summarizeReplayState(boolField(detail, "replay_ok"), replayIssues)}`,
     `Working tree: ${stringField(session, "cwd", "unknown")}`,
-    `Replay: ${summarizeReplayState(boolField(detail, "replay_ok"), replayIssues)}`,
+    "",
+    "## Summary",
+    sessionSummaryLine(session),
+    "",
+    "## Replay + compaction",
     `Compaction: ${numberField(compaction, "event_count") ?? 0} events | compactable ${compactableRatioLabel(numberField(compaction, "compactable_ratio"))}`,
     `Protected events: ${protectedTypes.join(", ") || "none"}`,
     "",
@@ -2246,10 +3123,9 @@ export function approvalPaneToLines(approvalPane: ApprovalQueueState): Transcrip
   }
   const lines = [
     "# Approval Queue",
-    `Authority: ${approvalPane.historyBacked ? "history" : "provisional_live"}`,
-    `Pending: ${pending.length}`,
-    `Resolved: ${resolved.length}`,
-    `Tracked: ${entries.length}`,
+    "## Deck",
+    `Authority: ${approvalPane.historyBacked ? "history-backed" : "provisional-live"}`,
+    `Pending: ${pending.length}  |  Resolved: ${resolved.length}  |  Tracked: ${entries.length}`,
     "",
     "## Pending approvals",
   ];
@@ -2258,8 +3134,9 @@ export function approvalPaneToLines(approvalPane: ApprovalQueueState): Transcrip
     lines.push("none");
   } else {
     for (const entry of pending.slice(0, 12)) {
-      lines.push(`- ${entry.decision.action_id} | ${approvalLabel(entry.decision)}`);
+      lines.push(`- ${entry.decision.tool_name}  |  ${entry.decision.risk}  |  ${entry.decision.action_id}`);
       lines.push(`  ${entry.decision.rationale}`);
+      lines.push(`  session ${stringField(entry.decision.metadata, "session_id", "none")}  |  provider ${stringField(entry.decision.metadata, "provider_id", "unknown")}`);
     }
   }
 
@@ -2292,23 +3169,23 @@ export function approvalPaneToLines(approvalPane: ApprovalQueueState): Transcrip
   const toolCallId = stringField(selected.decision.metadata, "tool_call_id", "none");
   lines.push(
     `Action: ${selected.decision.action_id}`,
-    `Tool: ${selected.decision.tool_name}`,
-    `Risk: ${selected.decision.risk}`,
-    `Decision: ${selected.decision.decision}`,
-    `Status: ${approvalStatusLabel(selected.status)}`,
+    `Tool: ${selected.decision.tool_name}  |  Risk: ${selected.decision.risk}`,
+    `Decision: ${selected.decision.decision}  |  Status: ${approvalStatusLabel(selected.status)}`,
     `Policy: ${selected.decision.policy_source}`,
     `Requires confirmation: ${selected.decision.requires_confirmation ? "yes" : "no"}`,
     `Command: ${selected.decision.command_prefix ?? "n/a"}`,
-    `Session: ${sessionId}`,
-    `Provider: ${providerId}`,
-    `Tool call: ${toolCallId}`,
+    `Session: ${sessionId}  |  Provider: ${providerId}  |  Tool call: ${toolCallId}`,
     `Seen: ${selected.seenCount} | first ${selected.firstSeenAt} | last ${selected.lastSeenAt}`,
-    `Rationale: ${selected.decision.rationale}`,
+    "",
+    "## Rationale",
+    selected.decision.rationale,
   );
   if (selected.outcome) {
     const runtimeActionId = stringField(selected.outcome.metadata, "runtime_action_id");
     const runtimeEventId = stringField(selected.outcome.metadata, "runtime_event_id");
     lines.push(
+      "",
+      "## Runtime outcome",
       `Runtime outcome: ${selected.outcome.outcome}`,
       `Outcome at: ${selected.outcome.outcome_at}`,
       `Outcome source: ${selected.outcome.source}`,
@@ -2322,6 +3199,8 @@ export function approvalPaneToLines(approvalPane: ApprovalQueueState): Transcrip
   }
   if (selected.resolution) {
     lines.push(
+      "",
+      "## Resolution",
       `Resolution: ${selected.resolution.resolution}`,
       `Resolved at: ${selected.resolution.resolved_at}`,
       `Actor: ${selected.resolution.actor}`,
@@ -2495,8 +3374,10 @@ export function sessionBootstrapToLines(payload: Record<string, unknown>): Trans
   const routingStrategy = String(payload.routing_strategy ?? "responsive");
   const intent =
     typeof payload.intent === "object" && payload.intent !== null ? (payload.intent as Record<string, unknown>) : {};
-  const workspacePreview =
-    typeof payload.workspace_preview === "object" && payload.workspace_preview !== null
+  const workspacePayload = workspaceSnapshotPayloadFromEvent(payload);
+  const workspacePreview = workspacePayload
+    ? workspacePayloadToPreview(workspacePayload)
+    : typeof payload.workspace_preview === "object" && payload.workspace_preview !== null
       ? (payload.workspace_preview as Record<string, unknown>)
       : {};
   const runtimePreview =
@@ -2506,6 +3387,7 @@ export function sessionBootstrapToLines(payload: Record<string, unknown>): Trans
   const repoGuidance = String(payload.repo_guidance ?? "").trim();
   const sessionContextHint = String(payload.session_context_hint ?? "").trim();
   const workingMemory = String(payload.working_memory ?? "").trim();
+  const resumeSessionId = String(payload.resume_session_id ?? "").trim();
 
   return toLines(
     "system",
@@ -2525,6 +3407,7 @@ export function sessionBootstrapToLines(payload: Record<string, unknown>): Trans
       `Repo guidance: ${repoGuidance ? "loaded" : "missing"}`,
       `Session hint: ${sessionContextHint ? sessionContextHint : "none"}`,
       `Working memory: ${workingMemory ? "loaded" : "none"}`,
+      `Continuity: ${resumeSessionId ? `resume ${resumeSessionId}` : "fresh session"}`,
     ].join("\n"),
   );
 }
@@ -2532,8 +3415,10 @@ export function sessionBootstrapToLines(payload: Record<string, unknown>): Trans
 export function sessionBootstrapToPreview(payload: Record<string, unknown>): TabPreview {
   const intent =
     typeof payload.intent === "object" && payload.intent !== null ? (payload.intent as Record<string, unknown>) : {};
-  const workspacePreview =
-    typeof payload.workspace_preview === "object" && payload.workspace_preview !== null
+  const workspacePayload = workspaceSnapshotPayloadFromEvent(payload);
+  const workspacePreview = workspacePayload
+    ? workspacePayloadToPreview(workspacePayload)
+    : typeof payload.workspace_preview === "object" && payload.workspace_preview !== null
       ? (payload.workspace_preview as Record<string, unknown>)
       : {};
   const runtimePreview =
@@ -2553,6 +3438,7 @@ export function sessionBootstrapToPreview(payload: Record<string, unknown>): Tab
     "Repo guidance": String(payload.repo_guidance ?? "").trim() ? "loaded" : "missing",
     "Session hint": String(payload.session_context_hint ?? "").trim() || "none",
     "Working memory": String(payload.working_memory ?? "").trim() ? "loaded" : "none",
+    Continuity: String(payload.resume_session_id ?? "").trim() ? `resume ${String(payload.resume_session_id ?? "").trim()}` : "fresh session",
   };
 }
 
@@ -2734,13 +3620,19 @@ export function operatorSnapshotToPreview(payload: Record<string, unknown>): Tab
 }
 
 export function modelPolicyToLines(payload: Record<string, unknown>): TranscriptLine[] {
+  const routePolicy = routePolicyFromValue(payload);
   const routingPayload = routingDecisionPayloadFromEvent(payload);
   if (routingPayload) {
     const decision = routingPayload.decision;
     const metadata = asRecord(decision.metadata);
+    const activeLabel = displayModelRouteLabel(
+      stringField(metadata, "active_label", decision.model_id || "unknown"),
+      decision.provider_id,
+      decision.model_id,
+    );
     const lines = [
       "# Model Policy",
-      `Active: ${stringField(metadata, "active_label", decision.model_id || "unknown")}`,
+      `Active: ${activeLabel}`,
       `Route: ${decision.route_id}`,
       `Strategy: ${decision.strategy}`,
       `Default route: ${stringField(metadata, "default_route", "unknown")}`,
@@ -2751,20 +3643,40 @@ export function modelPolicyToLines(payload: Record<string, unknown>): Transcript
       lines.push("none");
     } else {
       for (const entry of routingPayload.fallback_targets.slice(0, 6)) {
-        lines.push(`- ${stringField(entry, "label", stringField(entry, "alias", "?"))} [${stringField(entry, "provider", "?")}]`);
+        lines.push(
+          `- ${stringField(entry, "label", stringField(entry, "alias", "?"))} [${stringField(entry, "provider", "?")} | ${stringField(entry, "route_state", "unknown")}]`,
+        );
       }
     }
-    lines.push("", "## Targets");
-    for (const entry of routingPayload.targets) {
-      lines.push(`- ${stringField(entry, "alias", "?")} -> ${stringField(entry, "label", "?")} (${stringField(entry, "provider", "?")}:${stringField(entry, "model", "?")})`);
+    lines.push("", "## Selectable targets");
+    const selectableTargets = selectableRouteTargets(routePolicy);
+    if (selectableTargets.length === 0) {
+      lines.push("none");
+    }
+    for (const entry of selectableTargets) {
+      lines.push(
+        `- ${entry.alias} -> ${entry.label} (${entry.provider}:${entry.model}) [${entry.routeState}]`,
+      );
+    }
+    const suppressedTargets = nonSelectableRouteTargets(routePolicy);
+    if (suppressedTargets.length > 0) {
+      lines.push("", "## Non-primary routes");
+      for (const entry of suppressedTargets) {
+        lines.push(`- ${entry.alias} -> ${entry.label} (${entry.provider}:${entry.model}) [${entry.routeState}]${entry.availabilityReason ? ` | ${entry.availabilityReason}` : ""}`);
+      }
     }
     return toLines("system", lines.join("\n"));
   }
   const policy =
     typeof payload.policy === "object" && payload.policy !== null ? (payload.policy as Record<string, unknown>) : payload;
+  const activeLabel = displayModelRouteLabel(
+    String(policy.active_label ?? policy.selected_model ?? "unknown"),
+    String(policy.selected_provider ?? ""),
+    String(policy.selected_model ?? ""),
+  );
   const lines = [
     "# Model Policy",
-    `Active: ${String(policy.active_label ?? policy.selected_model ?? "unknown")}`,
+    `Active: ${activeLabel}`,
     `Route: ${String(policy.selected_route ?? "unknown")}`,
     `Strategy: ${String(policy.strategy ?? "responsive")}`,
     `Default route: ${String(policy.default_route ?? "unknown")}`,
@@ -2777,44 +3689,67 @@ export function modelPolicyToLines(payload: Record<string, unknown>): Transcript
   } else {
     for (const entry of chain.slice(0, 6)) {
       const record = typeof entry === "object" && entry !== null ? (entry as Record<string, unknown>) : {};
-      lines.push(`- ${String(record.label ?? record.alias ?? "?")} [${String(record.provider ?? "?")}]`);
+      lines.push(
+        `- ${String(record.label ?? record.alias ?? "?")} [${String(record.provider ?? "?")} | ${String(record.route_state ?? "unknown")}]`,
+      );
     }
   }
-  lines.push("", "## Targets");
-  const targets = Array.isArray(policy.targets) ? policy.targets : [];
-  for (const entry of targets) {
-    const record = typeof entry === "object" && entry !== null ? (entry as Record<string, unknown>) : {};
-    lines.push(
-      `- ${String(record.alias ?? "?")} -> ${String(record.label ?? "?")} (${String(record.provider ?? "?")}:${String(record.model ?? "?")})`,
-    );
+  lines.push("", "## Selectable targets");
+  const selectableTargets = selectableRouteTargets(routePolicy);
+  if (selectableTargets.length === 0) {
+    lines.push("none");
+  }
+  for (const entry of selectableTargets) {
+    lines.push(`- ${entry.alias} -> ${entry.label} (${entry.provider}:${entry.model}) [${entry.routeState}]`);
+  }
+  const suppressedTargets = nonSelectableRouteTargets(routePolicy);
+  if (suppressedTargets.length > 0) {
+    lines.push("", "## Non-primary routes");
+    for (const entry of suppressedTargets) {
+      lines.push(`- ${entry.alias} -> ${entry.label} (${entry.provider}:${entry.model}) [${entry.routeState}]${entry.availabilityReason ? ` | ${entry.availabilityReason}` : ""}`);
+    }
   }
   return toLines("system", lines.join("\n"));
 }
 
 export function modelPolicyToPreview(payload: Record<string, unknown>): TabPreview {
+  const routePolicy = routePolicyFromValue(payload);
   const routingPayload = routingDecisionPayloadFromEvent(payload);
   if (routingPayload) {
     const decision = routingPayload.decision;
     const metadata = asRecord(decision.metadata);
     return {
-      Active: stringField(metadata, "active_label", decision.model_id || "unknown"),
+      Active: displayModelRouteLabel(
+        stringField(metadata, "active_label", decision.model_id || "unknown"),
+        decision.provider_id,
+        decision.model_id,
+      ),
       Route: decision.route_id,
+      "Route state": routePolicy.routeState,
       Strategy: decision.strategy,
       "Default route": stringField(metadata, "default_route", "unknown"),
       Fallbacks: String(routingPayload.fallback_targets.length),
-      Targets: String(routingPayload.targets.length),
+      Targets: String(selectableRouteTargets(routePolicy).length),
+      "Non-primary routes": String(nonSelectableRouteTargets(routePolicy).length),
     };
   }
   const policy =
     typeof payload.policy === "object" && payload.policy !== null ? (payload.policy as Record<string, unknown>) : payload;
   const chain = Array.isArray(policy.fallback_chain) ? policy.fallback_chain : [];
+  const activeLabel = displayModelRouteLabel(
+    String(policy.active_label ?? policy.selected_model ?? "unknown"),
+    String(policy.selected_provider ?? ""),
+    String(policy.selected_model ?? ""),
+  );
   return {
-    Active: String(policy.active_label ?? policy.selected_model ?? "unknown"),
+    Active: activeLabel,
     Route: String(policy.selected_route ?? "unknown"),
+    "Route state": routePolicy.routeState,
     Strategy: String(policy.strategy ?? "responsive"),
     "Default route": String(policy.default_route ?? "unknown"),
     Fallbacks: String(chain.length),
-    Targets: String(Array.isArray(policy.targets) ? policy.targets.length : 0),
+    Targets: String(selectableRouteTargets(routePolicy).length),
+    "Non-primary routes": String(nonSelectableRouteTargets(routePolicy).length),
   };
 }
 
@@ -2907,16 +3842,25 @@ export function eventToTabPatch(event: Record<string, unknown>): {tabId: string;
       {tabId: "runtime", lines: [makeLine("system", "bridge handshake complete")]},
     ];
   }
-  if (type === "command.result" || (type === "action.result" && String(event.action_type ?? "") === "command.run")) {
-    const output = String(event.output ?? "").trim();
+  if (type === "command.result" || (type === "action.result" && resolveEventActionType(event) === "command.run")) {
+    const output = resolveEventOutput(event).trim();
     const targetPane = resolveCommandTargetPane(event, "control");
+    const command = resolveEventCommand(event);
+    const workspacePayload = workspaceSnapshotPayloadFromEvent(event);
+    const runtimePayload = runtimeSnapshotPayloadFromEvent(event);
     if (!output) {
       return [];
     }
-    if (targetPane === "repo" && isWorkspaceSnapshotContent(output)) {
+    if (targetPane === "chat" && command) {
       return [];
     }
-    if ((targetPane === "control" || targetPane === "runtime") && (output.includes("# Runtime") || /^(Runtime DB|Durable state):\s+/m.test(output))) {
+    if (targetPane === "repo" && (workspacePayload || isWorkspaceSnapshotContent(output))) {
+      return [];
+    }
+    if (
+      (targetPane === "control" || targetPane === "runtime") &&
+      (runtimePayload || output.includes("# Runtime") || /^(Runtime DB|Durable state):\s+/m.test(output))
+    ) {
       return [];
     }
     return [{tabId: targetPane, lines: [makeLine("system", output)]}];
@@ -2946,24 +3890,32 @@ export function eventToTabPatch(event: Record<string, unknown>): {tabId: string;
   if (type === "text_delta" || type === "text_complete") {
     return [{tabId: "chat", lines: [makeLine("assistant", String(event.content ?? ""))]}];
   }
-  if (type === "thinking_delta" || type === "thinking_complete") {
+  if (type === "thinking_delta") {
     return [{tabId: "thinking", lines: [makeLine("thinking", String(event.content ?? ""))]}];
+  }
+  if (type === "thinking_complete") {
+    const content = String(event.content ?? "");
+    const line = makeLine("thinking", content);
+    return [
+      {tabId: "thinking", lines: [line]},
+      {tabId: "chat", lines: [line]},
+    ];
   }
   if (type === "permission.decision") {
     const decision = permissionDecisionFromEvent(event);
     if (!decision) {
       return [];
     }
+    const line = makeLine(
+      decision.decision === "require_approval" ? "tool" : "system",
+      `approval ${decision.action_id} | ${decision.tool_name} | ${decision.risk} | ${decision.rationale}`,
+    );
     return [
       {
         tabId: "tools",
-        lines: [
-          makeLine(
-            decision.decision === "require_approval" ? "tool" : "system",
-            `approval ${decision.action_id} | ${decision.tool_name} | ${decision.risk} | ${decision.rationale}`,
-          ),
-        ],
+        lines: [line],
       },
+      {tabId: "chat", lines: [line]},
     ];
   }
   if (type === "permission.resolution") {
@@ -2971,41 +3923,53 @@ export function eventToTabPatch(event: Record<string, unknown>): {tabId: string;
     if (!resolution) {
       return [];
     }
+    const line = makeLine(
+      "system",
+      `resolution ${resolution.action_id} | ${resolution.resolution} | ${resolution.enforcement_state}`,
+    );
     return [
       {
         tabId: "tools",
-        lines: [
-          makeLine(
-            "system",
-            `resolution ${resolution.action_id} | ${resolution.resolution} | ${resolution.enforcement_state}`,
-          ),
-        ],
+        lines: [line],
       },
+      {tabId: "chat", lines: [line]},
     ];
   }
   if (type === "tool_call_complete") {
+    const line = makeLine(
+      "tool",
+      `⠋ ${summarizeTool(String(event.arguments ?? ""), String(event.tool_name ?? "tool"))}`,
+    );
     return [
       {
         tabId: "tools",
-        lines: [
-          makeLine(
-            "tool",
-            `⠋ ${summarizeTool(String(event.arguments ?? ""), String(event.tool_name ?? "tool"))}`,
-          ),
-        ],
+        lines: [line],
       },
+      {tabId: "chat", lines: [line]},
     ];
   }
   if (type === "tool_result") {
+    const line = makeLine("tool", `✓ ${String(event.tool_name ?? "tool")}: ${String(event.content ?? "").trim()}`);
     return [
       {
         tabId: "tools",
-        lines: [makeLine("tool", `✓ ${String(event.tool_name ?? "tool")}: ${String(event.content ?? "").trim()}`)],
+        lines: [line],
       },
+      {tabId: "chat", lines: [line]},
     ];
   }
   if (type === "task_started" || type === "task_progress" || type === "task_complete") {
-    return [{tabId: "timeline", lines: [makeLine("system", JSON.stringify(event))]}];
+    const summary =
+      type === "task_started"
+        ? `task started: ${String(event.description ?? event.task_id ?? "task")}`
+        : type === "task_complete"
+          ? `task complete: ${String(event.summary ?? event.task_id ?? "task")}`
+          : `task progress: ${String(event.summary ?? event.task_id ?? "task")}`;
+    const line = makeLine("system", summary);
+    return [
+      {tabId: "timeline", lines: [line]},
+      {tabId: "chat", lines: [line]},
+    ];
   }
   if (type === "session_end") {
     const ok = Boolean(event.success);

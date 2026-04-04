@@ -1,25 +1,43 @@
 import React, {useEffect, useMemo, useReducer, useRef} from "react";
 import {Box, useApp, useInput} from "ink";
 
-import {DharmaBridge, type BridgeEvent} from "./bridge.js";
+import {DharmaBridge, type BridgeEvent} from "./bridge.ts";
+import {ActivityPane, activityRowCount} from "./components/ActivityPane.tsx";
+import {canonicalEventsFromBridgeEvent, localStatusExecutionEvent, userPromptExecutionEvent} from "./executionLog.ts";
 import {
   loadSupervisorRepoPreview,
   loadStoredState,
+  normalizeRepoPreview,
   loadSupervisorControlPreview,
   loadSupervisorControlState,
   saveSupervisorRepoPreview,
   saveStoredState,
   saveSupervisorControlSummary,
-} from "./persistence.js";
-import {Composer} from "./components/Composer.js";
-import {ControlPane, buildControlPaneSections, buildRuntimePaneSections} from "./components/ControlPane.js";
-import {ModelPicker} from "./components/ModelPicker.js";
-import {RepoPane, buildRepoPaneSections} from "./components/RepoPane.js";
-import {ShellHeader} from "./components/ShellHeader.js";
-import {Sidebar} from "./components/Sidebar.js";
-import {StatusFooter} from "./components/StatusFooter.js";
-import {TabBar} from "./components/TabBar.js";
-import {TranscriptPane} from "./components/TranscriptPane.js";
+} from "./persistence.ts";
+import {Composer} from "./components/Composer.tsx";
+import {ApprovalsPane} from "./components/ApprovalsPane.tsx";
+import {AgentsPane} from "./components/AgentsPane.tsx";
+import {ControlPane, buildControlPaneSections, buildRuntimePaneSections} from "./components/ControlPane.tsx";
+import {ModelPicker} from "./components/ModelPicker.tsx";
+import {OperatorSummaryBand} from "./components/OperatorSummaryBand.tsx";
+import {PaneSwitcher} from "./components/PaneSwitcher.tsx";
+import {RepoPane, buildRepoPaneSections} from "./components/RepoPane.tsx";
+import {ScenicStrip} from "./components/ScenicStrip.tsx";
+import {SessionsPane} from "./components/SessionsPane.tsx";
+import {ShellHeader} from "./components/ShellHeader.tsx";
+import {Sidebar} from "./components/Sidebar.tsx";
+import {StatusFooter} from "./components/StatusFooter.tsx";
+import {TabBar} from "./components/TabBar.tsx";
+import {TranscriptPane} from "./components/TranscriptPane.tsx";
+import {parseControlPulsePreview, parseRuntimeFreshness} from "./freshness.ts";
+import {routeLabel, routePolicyFromValue, routeSummary, selectableRouteTargets} from "./routePolicy.ts";
+import {focusModeFor, footerHintFor, paneActionsFor, type PaneAction} from "./shellControls.ts";
+import {
+  buildVerificationSummaryRows,
+  isGenericVerificationLabel,
+  parseVerificationBundle,
+  resolveVerificationEntries,
+} from "./verification.ts";
 import {
   approvalPaneToLines,
   approvalPaneToPreview,
@@ -43,10 +61,13 @@ import {
   permissionOutcomeFromEvent,
   permissionResolutionFromEvent,
   resolveCommandTargetPane,
+  resolveEventActionType,
   resolveEventCommand,
+  resolveEventOutput,
   routingDecisionPayloadFromEvent,
   outlineFromTabs,
   runtimePreviewToLines,
+  runtimePayloadHasAuthoritativeControlSignal,
   runtimePayloadToPreview,
   runtimeSnapshotPayloadFromEvent,
   runtimeSnapshotToLines,
@@ -61,28 +82,35 @@ import {
   workspacePayloadToPreview,
   workspaceSnapshotPayloadFromEvent,
   workspaceSnapshotToPreview,
-} from "./protocol.js";
-import {initialState, reduceApp} from "./state.js";
-import type {AppAction, AppState, ApprovalQueueEntry, ApprovalQueueState, CanonicalPermissionDecision, CanonicalPermissionOutcome, CanonicalPermissionResolution, SessionCatalogPayload, SessionDetailPayload, SessionPaneState, SurfaceAuthorityState, TabPreview, TabSpec, TranscriptLine} from "./types.js";
+} from "./protocol.ts";
+import {initialState, reduceApp} from "./state.ts";
+import type {AppAction, AppState, ApprovalQueueEntry, ApprovalQueueState, CanonicalPermissionDecision, CanonicalPermissionOutcome, CanonicalPermissionResolution, RouteTarget, RuntimeSnapshotPayload, SessionCatalogPayload, SessionDetailPayload, SessionPaneState, SurfaceAuthorityState, TabPreview, TabSpec, TranscriptLine, WorkspaceSnapshotPayload} from "./types.ts";
 
 const SNAPSHOT_REFRESH_INTERVAL_MS = 15000;
 const SESSION_CATALOG_LIMIT = 12;
 const SESSION_TRANSCRIPT_LIMIT = 40;
-const SCROLL_WINDOW_SIZE = 24;
+const MIN_SCROLL_WINDOW_SIZE = 8;
 
-type PaneAction = {
-  label: string;
-  summary: string;
-  requestType?: string;
-  payload: Record<string, unknown>;
+type ModelChoice = RouteTarget;
+
+type PendingCommandStream = {
+  command: string;
+  tabId: string;
+  lastCompletedText?: string;
 };
 
-type ModelChoice = {
-  alias: string;
-  label: string;
-  provider: string;
-  model: string;
+const shellControlOptions = {
+  sessionCatalogLimit: SESSION_CATALOG_LIMIT,
+  approvalResolveAction,
 };
+
+function bridgeRouteState(state: AppState): {provider: string; model: string; strategy: string} {
+  return {
+    provider: state.routePolicy.provider,
+    model: state.routePolicy.model,
+    strategy: state.routePolicy.strategy,
+  };
+}
 
 function ensureRuntimeTabs(stateTabs: TabSpec[]): TabSpec[] {
   const existingIds = new Set(stateTabs.map((tab) => tab.id));
@@ -96,6 +124,662 @@ function requestLiveSnapshots(bridge: DharmaBridge, provider: string, model: str
   bridge.send("model.policy", {provider, model, strategy});
   bridge.send("agent.routes");
   bridge.send("evolution.surface");
+}
+
+function queueAppActions(dispatch: React.Dispatch<AppAction>, actions: AppAction[]): void {
+  if (actions.length === 0) {
+    return;
+  }
+  if (actions.length === 1) {
+    dispatch(actions[0]);
+    return;
+  }
+  dispatch({type: "batch", actions});
+}
+
+function markPendingCommandStream(
+  pendingCommandStream: React.MutableRefObject<PendingCommandStream | null> | undefined,
+  event: Record<string, unknown>,
+): void {
+  if (!pendingCommandStream) {
+    return;
+  }
+  const command = resolveEventCommand(event);
+  if (!command) {
+    return;
+  }
+  pendingCommandStream.current = {
+    command,
+    tabId: resolveCommandTargetPane(event, commandTargetTab(command)),
+    lastCompletedText: undefined,
+  };
+}
+
+function clearPendingCommandStream(
+  pendingCommandStream: React.MutableRefObject<PendingCommandStream | null> | undefined,
+): void {
+  if (pendingCommandStream) {
+    pendingCommandStream.current = null;
+  }
+}
+
+function reconcilePendingCommandStream(
+  pendingCommand: PendingCommandStream | null,
+  event: Record<string, unknown>,
+): PendingCommandStream | null {
+  if (!pendingCommand) {
+    return null;
+  }
+
+  const command = resolveEventCommand(event) || pendingCommand.command;
+  const tabId = resolveSlashCommandResultTabId(event, command, pendingCommand.tabId);
+  if (command === pendingCommand.command && tabId === pendingCommand.tabId) {
+    return pendingCommand;
+  }
+
+  return {
+    ...pendingCommand,
+    command,
+    tabId,
+  };
+}
+
+function normalizeCommandStreamText(content: unknown): string {
+  return typeof content === "string" ? content.trim() : "";
+}
+
+function shouldSuppressPendingCommandStreamOutput(pendingCommand: PendingCommandStream | null): boolean {
+  if (!pendingCommand) {
+    return false;
+  }
+  return pendingCommand.tabId === "chat";
+}
+
+function shouldSuppressDuplicatePendingCommandPatch(
+  event: Record<string, unknown>,
+  pendingCommand: PendingCommandStream | null,
+): boolean {
+  if (!pendingCommand?.lastCompletedText) {
+    return false;
+  }
+  const eventType = String(event.type ?? "");
+  const isSlashCommandResult =
+    eventType === "command.result" || (eventType === "action.result" && resolveEventActionType(event) === "command.run");
+  if (!isSlashCommandResult) {
+    return false;
+  }
+  if (normalizeCommandStreamText(resolveEventOutput(event)) !== pendingCommand.lastCompletedText) {
+    return false;
+  }
+  return resolveCommandTargetPane(event, "control") === pendingCommand.tabId;
+}
+
+function snapshotActionsForPendingCommandStream(
+  pendingCommand: PendingCommandStream | null,
+  output: string,
+  liveRepoPreview?: TabPreview,
+  liveControlPreview?: TabPreview,
+  supervisor = loadSupervisorControlState(),
+): AppAction[] {
+  if (!pendingCommand || !output) {
+    return [];
+  }
+
+  return commandRunSnapshotActionsForBridgeEvent(
+    {
+      type: "command.result",
+      command: pendingCommand.command,
+      target_pane: pendingCommand.tabId,
+      output,
+    },
+    liveRepoPreview,
+    liveControlPreview,
+    supervisor,
+  );
+}
+
+export function commandRunEventFromPaneAction(
+  action: {summary: string; payload: Record<string, unknown>} | undefined,
+): Record<string, unknown> | undefined {
+  if (!action || String(action.payload.action_type ?? "") !== "command.run") {
+    return undefined;
+  }
+
+  return {
+    ...action.payload,
+    summary: action.summary,
+  };
+}
+
+function transcriptMetaForTab(tab: TabSpec | undefined): {subtitle: string; emptyState: string; accentColor: string} {
+  switch (tab?.kind) {
+    case "chat":
+      return {
+        subtitle: "Live operator exchange, assistant output, and command spillover that still belongs in chat.",
+        emptyState: "No operator exchange yet.",
+        accentColor: "cyan",
+      };
+    case "mission":
+      return {
+        subtitle: "Bootstrap framing, intent routing, and session launch context.",
+        emptyState: "Mission bootstrap is waiting on the next session start.",
+        accentColor: "magenta",
+      };
+    case "ontology":
+      return {
+        subtitle: "Shared world model, foundations, and semantic frame updates.",
+        emptyState: "Ontology surface has not been refreshed yet.",
+        accentColor: "green",
+      };
+    case "commands":
+      return {
+        subtitle: "Registered command graph and operational affordances.",
+        emptyState: "Command registry is waiting on refresh.",
+        accentColor: "yellow",
+      };
+    case "evolution":
+      return {
+        subtitle: "Forward-loop, swarm evolution, and shell continuation surface.",
+        emptyState: "Evolution surface has not been materialized yet.",
+        accentColor: "blue",
+      };
+    default:
+      return {
+        subtitle: "Structured operator transcript.",
+        emptyState: "No content yet.",
+        accentColor: "gray",
+      };
+  }
+}
+
+function previewField(preview: TabPreview | undefined, label: string): string {
+  const value = preview?.[label];
+  return typeof value === "string" ? value.trim() : "";
+}
+
+function hasPreviewSignal(value: string): boolean {
+  return value.length > 0 && value !== "unknown" && value !== "none" && value !== "n/a";
+}
+
+const DEFERRED_CONTROL_PREVIEW_FIELDS = [
+  "Loop state",
+  "Task progress",
+  "Active task",
+  "Result status",
+  "Acceptance",
+  "Last result",
+  "Loop decision",
+  "Next task",
+  "Updated",
+  "Durable state",
+  "Verification summary",
+  "Verification bundle",
+  "Verification checks",
+  "Verification status",
+  "Verification passing",
+  "Verification failing",
+  "Verification updated",
+  "Control pulse preview",
+  "Control truth preview",
+  "Runtime freshness",
+] as const;
+
+const DEFERRED_REPO_TOPOLOGY_PREVIEW_FIELDS = [
+  "Topology status",
+  "Topology peer count",
+  "Topology warnings",
+  "Topology warning members",
+  "Topology warning severity",
+  "Topology risk",
+  "Risk preview",
+  "Topology preview",
+  "Topology pressure preview",
+  "Primary warning",
+  "Primary peer drift",
+  "Branch divergence",
+  "Detached peers",
+  "Primary topology peer",
+  "Peer drift markers",
+  "Topology peers",
+  "Topology pressure",
+] as const;
+
+const DEFERRED_REPO_HOTSPOT_PREVIEW_FIELDS = [
+  "Hotspot summary",
+  "Lead hotspot preview",
+  "Hotspot pressure preview",
+  "Primary file hotspot",
+  "Primary dependency hotspot",
+  "Hotspots",
+  "Inbound hotspots",
+] as const;
+
+function preserveDeferredControlPreview(nextPreview: TabPreview, livePreview?: TabPreview): TabPreview {
+  if (!livePreview) {
+    return nextPreview;
+  }
+  const mergedPreview: TabPreview = {...nextPreview};
+  for (const field of DEFERRED_CONTROL_PREVIEW_FIELDS) {
+    const liveValue = previewField(livePreview, field);
+    if (hasPreviewSignal(liveValue)) {
+      mergedPreview[field] = liveValue;
+    }
+  }
+  return mergedPreview;
+}
+
+function previewSignalPresent(value: string): boolean {
+  return value.length > 0 && value !== "unknown" && value !== "none" && value !== "n/a";
+}
+
+function preservePreviewFields(
+  nextPreview: TabPreview,
+  livePreview: TabPreview | undefined,
+  fields: readonly string[],
+): TabPreview {
+  if (!livePreview) {
+    return nextPreview;
+  }
+  const mergedPreview: TabPreview = {...nextPreview};
+  for (const field of fields) {
+    const liveValue = previewField(livePreview, field);
+    if (!previewSignalPresent(liveValue)) {
+      continue;
+    }
+    mergedPreview[field] = liveValue;
+  }
+  return mergedPreview;
+}
+
+function rawWorkspacePayloadRecord(event: Record<string, unknown>): Record<string, unknown> | undefined {
+  const directRecord =
+    typeof event.domain === "string" && event.domain === "workspace_snapshot" ? event : undefined;
+  if (directRecord) {
+    return directRecord;
+  }
+  const payload = event.payload;
+  if (typeof payload !== "object" || payload === null) {
+    return undefined;
+  }
+  return typeof (payload as {domain?: unknown}).domain === "string" &&
+    String((payload as {domain?: unknown}).domain) === "workspace_snapshot"
+    ? (payload as Record<string, unknown>)
+    : undefined;
+}
+
+function workspaceEventHasAuthoritativeTopology(event: Record<string, unknown>): boolean {
+  const rawPayload = rawWorkspacePayloadRecord(event);
+  if (rawPayload) {
+    return Object.hasOwn(rawPayload, "topology");
+  }
+  const content = String(event.content ?? "");
+  return /^##\s+Topology\b/m.test(content);
+}
+
+function workspaceEventHasAuthoritativeHotspotDetail(event: Record<string, unknown>): boolean {
+  const rawPayload = rawWorkspacePayloadRecord(event);
+  if (rawPayload) {
+    return Object.hasOwn(rawPayload, "largest_python_files") || Object.hasOwn(rawPayload, "most_imported_modules");
+  }
+  const content = String(event.content ?? "");
+  const hasHotspotSummary = /^Git hotspots:\s*(?!none\b).+/im.test(content);
+  const hasChangedPathDetail = /^Git changed paths:\s*(?!none\b).+/im.test(content);
+  const hasHotspotDetailSection =
+    /^##\s+(?:Largest Python files|Most imported local modules)\b/im.test(content) ||
+    /^(?:Primary file hotspot|Dependency hotspots|Inbound hotspots):\s*(?!none\b).+/im.test(content);
+  return hasHotspotSummary && hasChangedPathDetail && hasHotspotDetailSection;
+}
+
+function workspaceEventHasAuthoritativeRepoSignal(event: Record<string, unknown>): boolean {
+  return workspaceEventHasAuthoritativeTopology(event) && workspaceEventHasAuthoritativeHotspotDetail(event);
+}
+
+function preserveDeferredRepoPreview(nextPreview: TabPreview, livePreview: TabPreview | undefined, event: Record<string, unknown>): TabPreview {
+  let mergedPreview = nextPreview;
+  if (!workspaceEventHasAuthoritativeTopology(event)) {
+    mergedPreview = preservePreviewFields(mergedPreview, livePreview, DEFERRED_REPO_TOPOLOGY_PREVIEW_FIELDS);
+  }
+  if (!workspaceEventHasAuthoritativeHotspotDetail(event)) {
+    mergedPreview = preservePreviewFields(mergedPreview, livePreview, DEFERRED_REPO_HOTSPOT_PREVIEW_FIELDS);
+  }
+  return mergedPreview;
+}
+
+function derivedOperatorRuntimeFreshness(preview: TabPreview | undefined): string {
+  const explicit = previewField(preview, "Runtime freshness");
+  if (hasPreviewSignal(explicit)) {
+    return explicit;
+  }
+  return parseControlPulsePreview(previewField(preview, "Control pulse preview")).runtimeFreshness ?? "";
+}
+
+function normalizeOperatorLoopLabel(loopState: string): string {
+  return loopState.replace(/\brunning_cycle\b/gi, "running").replace(/\s+/g, " ").trim();
+}
+
+function operatorLoopSummary(preview: TabPreview | undefined): {value: string; tone: "live" | "warn" | "critical" | "neutral"} {
+  const explicitLoopState = previewField(preview, "Loop state");
+  const loopState = hasPreviewSignal(explicitLoopState)
+    ? explicitLoopState
+    : parseRuntimeFreshness(derivedOperatorRuntimeFreshness(preview)).loopState || "";
+  if (!hasPreviewSignal(loopState)) {
+    return {value: "unknown", tone: "neutral"};
+  }
+  const normalizedLabel = normalizeOperatorLoopLabel(loopState);
+  const normalized = normalizedLabel.toLowerCase();
+  if (/(fail|error|blocked|stalled)/.test(normalized)) {
+    return {value: normalizedLabel, tone: "critical"};
+  }
+  if (/(wait|pending|verify|review)/.test(normalized)) {
+    return {value: normalizedLabel, tone: "warn"};
+  }
+  return {value: normalizedLabel, tone: "live"};
+}
+
+function operatorVerificationSummary(preview: TabPreview | undefined): {value: string; tone: "live" | "warn" | "critical" | "neutral"} {
+  const checks = previewField(preview, "Verification checks");
+  const summary = previewField(preview, "Verification summary");
+  const bundle = resolveVerificationEntries({
+    checksText: checks,
+    summaryText: summary,
+    bundleText: previewField(preview, "Verification bundle"),
+    passingText: previewField(preview, "Verification passing"),
+    failingText: previewField(preview, "Verification failing"),
+  });
+  if (bundle.length > 0) {
+    const rows = buildVerificationSummaryRows(bundle);
+    return {
+      value: rows.status,
+      tone: rows.failing === "none" ? "live" : "critical",
+    };
+  }
+
+  const compactBundle = parseRuntimeFreshness(derivedOperatorRuntimeFreshness(preview)).verificationBundle ?? "";
+  const parsedCompactBundle = parseVerificationBundle("none", compactBundle);
+  if (parsedCompactBundle.length > 0) {
+    const rows = buildVerificationSummaryRows(parsedCompactBundle);
+    return {
+      value: rows.status,
+      tone: rows.failing === "none" ? "live" : "critical",
+    };
+  }
+
+  const status = previewField(preview, "Verification status");
+  if (hasPreviewSignal(status)) {
+    if (!isGenericVerificationLabel(status)) {
+      return {value: status, tone: "warn"};
+    }
+    const normalized = status.toLowerCase();
+    return {
+      value: status,
+      tone: /(fail|error)/.test(normalized) ? "critical" : /(ok|pass)/.test(normalized) ? "live" : "warn",
+    };
+  }
+  if (hasPreviewSignal(summary) && isGenericVerificationLabel(summary)) {
+    const normalized = summary.toLowerCase();
+    return {
+      value: summary,
+      tone: /(fail|error)/.test(normalized) ? "critical" : /(ok|pass)/.test(normalized) ? "live" : "warn",
+    };
+  }
+  return {value: "unknown", tone: "neutral"};
+}
+
+function parseRuntimeActivityMetrics(value: string): Record<string, string> {
+  if (!hasPreviewSignal(value)) {
+    return {};
+  }
+  return Object.fromEntries(
+    Array.from(value.matchAll(/([A-Za-z][A-Za-z0-9]*)=([^\s]+)/g), (match) => [match[1], match[2]]),
+  );
+}
+
+function operatorRuntimeSummary(
+  preview: TabPreview | undefined,
+  fallbackSessionCount: number,
+): {value: string; tone: "live" | "warn" | "critical" | "neutral"} {
+  const runtimeSummary = previewField(preview, "Runtime summary");
+  if (hasPreviewSignal(runtimeSummary)) {
+    return {value: runtimeSummary, tone: "live"};
+  }
+
+  const metrics = parseRuntimeActivityMetrics(previewField(preview, "Runtime activity"));
+  const fragments = [
+    metrics.Sessions ? `${metrics.Sessions} sessions` : "",
+    metrics.Runs ? `${metrics.Runs} runs` : "",
+    metrics.ActiveRuns && metrics.ActiveRuns !== "0" ? `${metrics.ActiveRuns} active` : "",
+  ].filter((value) => value.length > 0);
+  if (fragments.length > 0) {
+    return {value: fragments.join(" | "), tone: "live"};
+  }
+
+  if (fallbackSessionCount > 0) {
+    return {value: `${fallbackSessionCount} sessions`, tone: "live"};
+  }
+
+  return {value: "idle", tone: "neutral"};
+}
+
+function mergeOperatorSummaryPreviewSources(...previews: Array<TabPreview | undefined>): TabPreview | undefined {
+  const merged: TabPreview = {};
+  for (const preview of previews) {
+    if (!preview) {
+      continue;
+    }
+    for (const [key, rawValue] of Object.entries(preview)) {
+      const candidate = rawValue.trim();
+      if (!candidate) {
+        continue;
+      }
+      const existing = previewField(merged, key);
+      if (!existing || !hasPreviewSignal(existing) || hasPreviewSignal(candidate)) {
+        merged[key] = candidate;
+      }
+    }
+  }
+  return Object.keys(merged).length > 0 ? merged : undefined;
+}
+
+function operatorSummaryPreview(state: AppState): TabPreview | undefined {
+  const controlTabPreview = state.tabs.find((tab) => tab.id === "control")?.preview;
+  const runtimeTabPreview = state.tabs.find((tab) => tab.id === "runtime")?.preview;
+  const repoPreview = mergeOperatorSummaryPreviewSources(
+    state.tabs.find((tab) => tab.id === "repo")?.preview,
+    state.liveRepoPreview,
+  );
+  return controlPanePreview(
+    mergeOperatorSummaryPreviewSources(controlTabPreview, runtimeTabPreview, state.liveControlPreview),
+    repoPreview,
+  );
+}
+
+export function buildOperatorSummaryItems(state: AppState): Array<{label: string; value: string; tone?: "live" | "warn" | "critical" | "neutral"}> {
+  const pendingApprovals = state.approvalPane.order.filter((actionId) => state.approvalPane.entriesByActionId[actionId]?.pending).length;
+  const sessionCount = state.sessionPane.catalog?.count ?? state.sessionPane.catalog?.sessions.length ?? 0;
+  const route = routeLabel(state.routePolicy);
+  const preview = operatorSummaryPreview(state);
+  const loop = operatorLoopSummary(preview);
+  const verification = operatorVerificationSummary(preview);
+  const runtime = operatorRuntimeSummary(preview, sessionCount);
+  const approvalsTone = pendingApprovals > 0 ? "warn" : "live";
+  const bridgeTone =
+    state.bridgeStatus === "connected" ? "live" : state.bridgeStatus === "degraded" ? "warn" : "critical";
+  return [
+    {label: "bridge", value: state.bridgeStatus, tone: bridgeTone},
+    {label: "route", value: `${route} (${state.routePolicy.routeState})`, tone: "neutral"},
+    {label: "strategy", value: state.routePolicy.strategy, tone: "neutral"},
+    {label: "loop", value: loop.value, tone: loop.tone},
+    {label: "verify", value: verification.value, tone: verification.tone},
+    {label: "runtime", value: runtime.value, tone: runtime.tone},
+    {label: "approvals", value: pendingApprovals === 0 ? "clear" : `${pendingApprovals} pending`, tone: approvalsTone},
+    {label: "sessions", value: `${sessionCount}`, tone: sessionCount > 0 ? "live" : "neutral"},
+  ];
+}
+
+type ConversationMessage = {
+  role: "user" | "assistant";
+  content: string;
+};
+
+const MAX_CONVERSATION_MESSAGES = 24;
+
+function normalizeConversationLine(line: TranscriptLine): ConversationMessage | undefined {
+  if (line.kind === "user") {
+    const content = line.text.replace(/^>\s*/, "").trim();
+    return content ? {role: "user", content} : undefined;
+  }
+  if (line.kind === "assistant") {
+    const content = line.text.trim();
+    return content ? {role: "assistant", content} : undefined;
+  }
+  return undefined;
+}
+
+function buildConversationMessages(chatLines: TranscriptLine[], submittedPrompt: string): ConversationMessage[] {
+  const firstUserIndex = chatLines.findIndex((line) => line.kind === "user");
+  const relevantLines = firstUserIndex >= 0 ? chatLines.slice(firstUserIndex) : [];
+  const collapsed: ConversationMessage[] = [];
+
+  for (const line of relevantLines) {
+    const normalized = normalizeConversationLine(line);
+    if (!normalized) {
+      continue;
+    }
+    const previous = collapsed[collapsed.length - 1];
+    if (previous && previous.role === normalized.role) {
+      previous.content = `${previous.content}\n${normalized.content}`.trim();
+    } else {
+      collapsed.push({...normalized});
+    }
+  }
+
+  const prompt = submittedPrompt.trim();
+  if (prompt) {
+    const previous = collapsed[collapsed.length - 1];
+    if (previous?.role === "user" && previous.content === prompt) {
+      return collapsed.slice(-MAX_CONVERSATION_MESSAGES);
+    }
+    collapsed.push({role: "user", content: prompt});
+  }
+
+  return collapsed.slice(-MAX_CONVERSATION_MESSAGES);
+}
+
+function isDuplicateCompletedAssistantPatch(state: AppState, event: Record<string, unknown>): boolean {
+  if (String(event.type ?? "") !== "text_complete") {
+    return false;
+  }
+  const content = String(event.content ?? "").trim();
+  if (!content) {
+    return false;
+  }
+  const chatLines = state.tabs.find((tab) => tab.id === "chat")?.lines ?? [];
+  for (let index = chatLines.length - 1; index >= 0; index -= 1) {
+    const line = chatLines[index];
+    if (!line) {
+      continue;
+    }
+    if (line.kind !== "assistant") {
+      continue;
+    }
+    return line.text.trim() === content;
+  }
+  return false;
+}
+
+function boundedContinuityMessages(state: AppState, submittedPrompt: string): Array<{role: "user" | "assistant" | "system"; content: string}> {
+  const selectedSessionId = state.sessionPane.selectedSessionId;
+  const selectedDetail = selectedSessionId ? state.sessionPane.detailsBySessionId[selectedSessionId] : undefined;
+
+  if (selectedDetail) {
+    const history: Array<{role: "user" | "assistant" | "system"; content: string}> = [];
+    for (const envelope of selectedDetail.recent_events) {
+      const payload = envelope.payload ?? {};
+      if (envelope.event_type === "text_complete" || envelope.event_type === "text_delta") {
+        const content = String(payload.content ?? "").trim();
+        if (content) {
+          history.push({role: "assistant", content});
+        }
+        continue;
+      }
+      if (envelope.event_type === "session_start") {
+        const content = String(payload.prompt ?? "").trim();
+        if (content) {
+          history.push({role: "user", content});
+        }
+      }
+    }
+    const prompt = submittedPrompt.trim();
+    if (prompt) {
+      history.push({role: "user", content: prompt});
+    }
+    return history.slice(-MAX_CONVERSATION_MESSAGES);
+  }
+
+  const chatLines = state.tabs.find((tab) => tab.id === "chat")?.lines ?? [];
+  return buildConversationMessages(chatLines, submittedPrompt);
+}
+
+function providerResumeSessionId(detail: SessionDetailPayload | undefined): string | undefined {
+  const metadata = detail?.session.metadata;
+  if (!metadata || typeof metadata !== "object") {
+    return undefined;
+  }
+  const value = (metadata as Record<string, unknown>).provider_session_id;
+  return typeof value === "string" && value.trim().length > 0 ? value.trim() : undefined;
+}
+
+function displayedTranscriptLinesForTab(activeTab: TabSpec | undefined, state: AppState): TranscriptLine[] {
+  if (activeTab?.kind !== "chat") {
+    return activeTab?.lines ?? [];
+  }
+  const firstUserIndex = activeTab.lines.findIndex((line) => line.kind === "user");
+  const chatPreludeLines = firstUserIndex >= 0 ? activeTab.lines.slice(0, firstUserIndex) : activeTab.lines;
+  return [...chatPreludeLines, ...state.chatTraceLines];
+}
+
+export function continuityStateFromSession(state: AppState, detail: SessionDetailPayload | undefined): AppState["sessionContinuity"] {
+  if (!detail) {
+    return {
+      ...state.sessionContinuity,
+      activeSessionId: undefined,
+      resumeSessionId: undefined,
+      activeRouteId: state.routePolicy.routeId,
+      continuityMode: "fresh",
+      boundedHistory: [],
+      compactionPolicy: {
+        eventCount: 0,
+        compactableRatio: 0,
+        protectedEventTypes: [],
+        recentEventTypes: [],
+      },
+      compactedSummary: undefined,
+    };
+  }
+
+  const boundedHistory = boundedContinuityMessages(state, "").slice(-state.sessionContinuity.historyLimit).map((entry) => ({
+    ...entry,
+    source: "session_detail" as const,
+  }));
+  const resumableProviderSessionId = providerResumeSessionId(detail);
+  const sameProviderAsActiveRoute = detail.session.provider_id === state.routePolicy.provider;
+  const canResumeProviderSession = detail.replay_ok && sameProviderAsActiveRoute && Boolean(resumableProviderSessionId);
+
+  return {
+    ...state.sessionContinuity,
+    activeSessionId: detail.session.session_id,
+    resumeSessionId: canResumeProviderSession ? resumableProviderSessionId : undefined,
+    activeRouteId: `${detail.session.provider_id}:${detail.session.model_id}`,
+    continuityMode: canResumeProviderSession ? "resume" : "fresh",
+    boundedHistory,
+    compactionPolicy: {
+      eventCount: detail.compaction_preview.event_count,
+      compactableRatio: detail.compaction_preview.compactable_ratio,
+      protectedEventTypes: detail.compaction_preview.protected_event_types,
+      recentEventTypes: detail.compaction_preview.recent_event_types,
+    },
+    compactedSummary: detail.session.summary ?? undefined,
+  };
 }
 
 export function missingAuthoritativeSurfaces(authoritative: SurfaceAuthorityState): Array<keyof SurfaceAuthorityState> {
@@ -342,7 +1026,8 @@ type BridgeHandlerDeps = {
   dispatch: React.Dispatch<AppAction>;
   getState: () => AppState;
   bridge: DharmaBridge;
-  pendingBootstraps: React.MutableRefObject<Record<string, {prompt: string; provider: string; model: string}>>;
+  pendingBootstraps: React.MutableRefObject<Record<string, {prompt: string; provider: string; model: string; messages: Array<{role: "user" | "assistant" | "system"; content: string}>; resumeSessionId?: string}>>;
+  pendingCommandStream?: React.MutableRefObject<PendingCommandStream | null>;
   requestHandshake?: (reason: "initial" | "reconnect" | "probe") => void;
   resetHandshakeBackoff?: () => void;
 };
@@ -360,36 +1045,15 @@ export function handshakeBackoffDelayMs(attempt: number): number {
   return 60_000;
 }
 
-function modelChoicesFromPolicy(value: unknown): ModelChoice[] {
-  if (typeof value !== "object" || value === null) {
-    return [];
-  }
-  const record = value as Record<string, unknown>;
-  const targetsValue =
-    typeof record.domain === "string" && record.domain === "routing_decision" ? record.targets : (record as {targets?: unknown}).targets;
-  const policyTargets = (value as {targets?: unknown}).targets;
-  const targets = targetsValue ?? policyTargets;
-  if (!Array.isArray(targets)) {
-    return [];
-  }
-  return targets
-    .filter((item): item is Record<string, unknown> => typeof item === "object" && item !== null)
-    .map((item) => ({
-      alias: String(item.alias ?? "").trim(),
-      label: String(item.label ?? "").trim(),
-      provider: String(item.provider ?? "").trim(),
-      model: String(item.model ?? "").trim(),
-    }))
-    .filter((choice) => choice.alias.length > 0 && choice.provider.length > 0 && choice.model.length > 0);
-}
-
-function flattenedSectionRowCount(sections: Array<{title: string; rows: string[]}>): number {
-  return sections.reduce((total, section) => total + section.rows.length + 2, 0);
-}
-
-function scrollMaxOffsetForTab(activeTab: TabSpec | undefined, state: AppState): number {
+function scrollMaxOffsetForTab(activeTab: TabSpec | undefined, state: AppState, windowSize: number): number {
   if (!activeTab) {
     return 0;
+  }
+  if (activeTab.kind === "chat") {
+    return Math.max(displayedTranscriptLinesForTab(activeTab, state).length - windowSize, 0);
+  }
+  if (activeTab.kind === "thinking" || activeTab.kind === "tools" || activeTab.kind === "timeline") {
+    return Math.max(activityRowCount(activeTab.kind, state.activityFeed) - windowSize, 0);
   }
   if (activeTab.kind === "repo") {
     const sections = buildRepoPaneSections(
@@ -398,21 +1062,24 @@ function scrollMaxOffsetForTab(activeTab: TabSpec | undefined, state: AppState):
       state.liveControlPreview ?? state.tabs.find((tab) => tab.id === "control")?.preview,
       state.tabs.find((tab) => tab.id === "control")?.lines ?? [],
     );
-    return Math.max(flattenedSectionRowCount(sections) - SCROLL_WINDOW_SIZE, 0);
+    const selected = sections[state.paneFocusIndices[activeTab.id] ?? 0];
+    return Math.max((selected?.rows.length ?? 0) - Math.max(windowSize - 4, MIN_SCROLL_WINDOW_SIZE), 0);
   }
   if (activeTab.kind === "control") {
     const preview = state.liveControlPreview ?? activeTab.preview ?? state.tabs.find((tab) => tab.id === "control")?.preview;
     const sections = buildControlPaneSections(preview, activeTab.lines);
-    return Math.max(flattenedSectionRowCount(sections) - SCROLL_WINDOW_SIZE, 0);
+    const selected = sections[state.paneFocusIndices[activeTab.id] ?? 0];
+    return Math.max((selected?.rows.length ?? 0) - Math.max(windowSize - 4, MIN_SCROLL_WINDOW_SIZE), 0);
   }
   if (activeTab.kind === "runtime") {
     const runtimeLines =
       activeTab.lines.length === 0 ? (state.tabs.find((tab) => tab.id === "control")?.lines ?? []) : activeTab.lines;
     const preview = state.liveControlPreview ?? activeTab.preview ?? state.tabs.find((tab) => tab.id === "control")?.preview;
     const sections = buildRuntimePaneSections(preview, runtimeLines);
-    return Math.max(flattenedSectionRowCount(sections) - SCROLL_WINDOW_SIZE, 0);
+    const selected = sections[state.paneFocusIndices[activeTab.id] ?? 0];
+    return Math.max((selected?.rows.length ?? 0) - Math.max(windowSize - 4, MIN_SCROLL_WINDOW_SIZE), 0);
   }
-  return Math.max((activeTab.lines.length || 0) - SCROLL_WINDOW_SIZE, 0);
+  return Math.max((activeTab.lines.length || 0) - windowSize, 0);
 }
 
 function isBareModelCommand(prompt: string): boolean {
@@ -420,122 +1087,67 @@ function isBareModelCommand(prompt: string): boolean {
   return trimmed === "/model" || trimmed === "/models" || trimmed === "/model list";
 }
 
-function paneActionsFor(tabId: string, state: AppState): {refresh: PaneAction; primary?: PaneAction; secondary?: PaneAction; tertiary?: PaneAction} {
-  const modelTarget = `${state.provider}:${state.model}`;
-  switch (tabId) {
-    case "repo":
-      return {
-        refresh: {label: "refresh repo", summary: "refresh repo snapshot", payload: {action_type: "surface.refresh", surface: "repo"}},
-        primary: {label: "/git", summary: "run /git", payload: {action_type: "command.run", command: "/git"}},
-      };
-    case "commands":
-      return {
-        refresh: {label: "refresh commands", summary: "refresh command registry", payload: {action_type: "surface.refresh", surface: "commands"}},
-        primary: {label: "/runtime", summary: "run /runtime", payload: {action_type: "command.run", command: "/runtime"}},
-        secondary: {label: "/git", summary: "run /git", payload: {action_type: "command.run", command: "/git"}},
-        tertiary: {label: "/foundations", summary: "run /foundations", payload: {action_type: "command.run", command: "/foundations"}},
-      };
-    case "models":
-      return {
-        refresh: {
-          label: "refresh models",
-          summary: "refresh model policy",
-          requestType: "model.policy",
-          payload: {provider: state.provider, model: state.model, strategy: state.strategy},
-        },
-        primary: {label: "codex responsive", summary: "route to Codex 5.4 responsive", payload: {action_type: "model.set", provider: "codex", model: "gpt-5.4", strategy: "responsive"}},
-        secondary: {label: "opus genius", summary: "route to Claude Opus 4.6 genius", payload: {action_type: "model.set", provider: "claude", model: "claude-opus-4-6", strategy: "genius"}},
-        tertiary: {label: "cost on current", summary: `apply cost strategy to ${modelTarget}`, payload: {action_type: "model.set", provider: state.provider, model: state.model, strategy: "cost"}},
-      };
-    case "ontology":
-      return {
-        refresh: {label: "refresh ontology", summary: "refresh ontology snapshot", payload: {action_type: "surface.refresh", surface: "ontology"}},
-        primary: {label: "/foundations", summary: "run /foundations", payload: {action_type: "command.run", command: "/foundations"}},
-        secondary: {label: "/context", summary: "run /context", payload: {action_type: "command.run", command: "/context"}},
-      };
-    case "control":
-    case "runtime":
-      return {
-        refresh: {label: "refresh control", summary: "refresh runtime snapshot", requestType: "runtime.snapshot", payload: {}},
-        primary: {label: "/runtime", summary: "run /runtime", payload: {action_type: "command.run", command: "/runtime"}},
-        secondary: {label: "/dashboard", summary: "run /dashboard", payload: {action_type: "command.run", command: "/dashboard"}},
-      };
-    case "agents":
-      return {
-        refresh: {label: "refresh agents", summary: "refresh operator and routing view", requestType: "agent.routes", payload: {}},
-        primary: {label: "deep_code_work", summary: "preview deep-code route", payload: {action_type: "agent.route", intent: "deep_code_work"}},
-        secondary: {label: "/swarm", summary: "run /swarm", payload: {action_type: "command.run", command: "/swarm"}},
-        tertiary: {label: "architecture_research", summary: "preview architecture route", payload: {action_type: "agent.route", intent: "architecture_research"}},
-      };
-    case "evolution":
-      return {
-        refresh: {label: "refresh evolution", summary: "refresh evolution surface", payload: {action_type: "surface.refresh", surface: "evolution"}},
-        primary: {label: "/loops", summary: "open loops lane", payload: {action_type: "evolution.run", command: "/loops"}},
-        secondary: {label: "/cascade code", summary: "prepare code cascade", payload: {action_type: "evolution.run", command: "/cascade code"}},
-        tertiary: {label: "/evolve shell", summary: "prepare shell evolution", payload: {action_type: "evolution.run", command: "/evolve terminal forward"}},
-      };
-    case "sessions":
-      return {
-        refresh: {label: "refresh sessions", summary: "refresh session catalog", requestType: "session.catalog", payload: {limit: SESSION_CATALOG_LIMIT}},
-        primary: state.sessionPane.selectedSessionId
-          ? {
-              label: "refresh detail",
-              summary: "refresh selected session detail",
-              requestType: "session.detail",
-              payload: {session_id: state.sessionPane.selectedSessionId, transcript_limit: SESSION_TRANSCRIPT_LIMIT},
-            }
-          : undefined,
-        secondary: {label: "/archive", summary: "run /archive", payload: {action_type: "command.run", command: "/archive"}},
-        tertiary: {label: "/memory", summary: "run /memory", payload: {action_type: "command.run", command: "/memory"}},
-      };
-    case "approvals":
-      {
-        const selectedEntry = state.approvalPane.selectedActionId
-          ? state.approvalPane.entriesByActionId[state.approvalPane.selectedActionId]
-          : undefined;
-        const primary =
-          selectedEntry && selectedEntry.pending
-            ? approvalResolveAction(selectedEntry, "approved", "approve")
-            : selectedEntry && selectedEntry.status === "observed"
-              ? approvalResolveAction(selectedEntry, "resolved", "mark resolved")
-              : {
-                  label: "focus approval",
-                  summary: "focus selected approval",
-                  payload: {},
-                };
-        const secondary =
-          selectedEntry && selectedEntry.pending ? approvalResolveAction(selectedEntry, "denied", "deny") : undefined;
-        const tertiary =
-          selectedEntry && selectedEntry.pending
-            ? approvalResolveAction(selectedEntry, "dismissed", "dismiss")
-            : undefined;
-        return {
-          refresh: {label: "refresh approvals", summary: "refresh approval history", requestType: "permission.history", payload: {limit: 50}},
-          primary: selectedEntry ? primary : undefined,
-          secondary,
-          tertiary,
-        };
-      }
-    default:
-      return {
-        refresh: {label: "refresh shell", summary: "refresh live snapshots", payload: {action_type: "surface.refresh", surface: "control"}},
-      };
+function stepApprovalSelection(state: AppState, direction: 1 | -1): string | undefined {
+  const order = state.approvalPane.order;
+  if (order.length === 0) {
+    return undefined;
   }
+  const currentIndex = state.approvalPane.selectedActionId ? order.indexOf(state.approvalPane.selectedActionId) : -1;
+  const nextIndex = currentIndex === -1 ? 0 : Math.min(Math.max(currentIndex + direction, 0), order.length - 1);
+  return order[nextIndex];
 }
 
-function footerHintFor(tabId: string, state: AppState): string {
-  const actions = paneActionsFor(tabId, state);
-  const parts = [state.footerHint, "↑/↓ scroll", `^L ${actions.refresh.label}`];
-  if (actions.primary) {
-    parts.push(`^X ${actions.primary.label}`);
+function stepSessionSelection(state: AppState, direction: 1 | -1): string | undefined {
+  const sessions = state.sessionPane.catalog?.sessions ?? [];
+  if (sessions.length === 0) {
+    return undefined;
   }
-  if (actions.secondary) {
-    parts.push(`^F ${actions.secondary.label}`);
+  const currentIndex = state.sessionPane.selectedSessionId
+    ? sessions.findIndex((entry) => entry.session.session_id === state.sessionPane.selectedSessionId)
+    : -1;
+  const nextIndex = currentIndex === -1 ? 0 : Math.min(Math.max(currentIndex + direction, 0), sessions.length - 1);
+  return sessions[nextIndex]?.session.session_id;
+}
+
+function stepPaneSectionFocus(
+  currentIndex: number | undefined,
+  sectionCount: number,
+  direction: 1 | -1,
+): number | undefined {
+  if (sectionCount <= 0) {
+    return undefined;
   }
-  if (actions.tertiary) {
-    parts.push(`^V ${actions.tertiary.label}`);
+  const baseIndex = currentIndex ?? 0;
+  return Math.min(Math.max(baseIndex + direction, 0), sectionCount - 1);
+}
+
+function agentRouteCount(lines: TranscriptLine[]): number {
+  return lines.filter((line) => /^\s*-\s+.+? -> .+?:.+? \| effort .+ \| role .+$/.test(line.text)).length;
+}
+
+function paneSectionCount(activeTab: TabSpec | undefined, state: AppState): number {
+  if (!activeTab) {
+    return 0;
   }
-  return parts.join(" | ");
+  if (activeTab.kind === "repo") {
+    return buildRepoPaneSections(
+      state.liveRepoPreview ?? activeTab.preview,
+      activeTab.lines,
+      state.liveControlPreview ?? state.tabs.find((tab) => tab.id === "control")?.preview,
+      state.tabs.find((tab) => tab.id === "control")?.lines ?? [],
+    ).length;
+  }
+  if (activeTab.kind === "control") {
+    const preview = state.liveControlPreview ?? activeTab.preview ?? state.tabs.find((tab) => tab.id === "control")?.preview;
+    return buildControlPaneSections(preview, activeTab.lines).length;
+  }
+  if (activeTab.kind === "runtime") {
+    const runtimeLines =
+      activeTab.lines.length === 0 ? (state.tabs.find((tab) => tab.id === "control")?.lines ?? []) : activeTab.lines;
+    const preview = state.liveControlPreview ?? activeTab.preview ?? state.tabs.find((tab) => tab.id === "control")?.preview;
+    return buildRuntimePaneSections(preview, runtimeLines).length;
+  }
+  return 0;
 }
 
 function mergePreview(current: Record<string, string> | undefined, incoming: Record<string, string> | undefined): Record<string, string> | undefined {
@@ -581,6 +1193,33 @@ function decorateSurfacePreview(
   };
 }
 
+export function controlPanePreview(
+  controlPreview: TabPreview | undefined,
+  repoPreview: TabPreview | undefined,
+): TabPreview | undefined {
+  if (!controlPreview && !repoPreview) {
+    return undefined;
+  }
+  const repoControlPreview = repoPreview?.["Repo/control preview"];
+  if (typeof repoControlPreview !== "string" || repoControlPreview.length === 0) {
+    return controlPreview;
+  }
+  return {
+    ...(controlPreview ?? {}),
+    ...(typeof controlPreview?.["Repo/control preview"] === "string" && controlPreview["Repo/control preview"].length > 0
+      ? {}
+      : {"Repo/control preview": repoControlPreview}),
+  };
+}
+
+function synchronizeRepoControlPreviews(
+  repoPreview: TabPreview | undefined,
+  controlPreview: TabPreview | undefined,
+  now: Date = new Date(),
+) {
+  return normalizeRepoPreview(repoPreview, controlPreview, now);
+}
+
 function isStructuredControlSnapshotContent(output: string): boolean {
   return output.includes("# Runtime") || /^(Runtime DB|Durable state):\s+/m.test(output);
 }
@@ -593,72 +1232,114 @@ export function commandRunSnapshotActionsForBridgeEvent(
 ): AppAction[] {
   const typed = event as Record<string, unknown>;
   const eventType = String(typed.type ?? "");
-  const isCommandRunAction = eventType === "action.result" && String(typed.action_type ?? "") === "command.run";
+  const isCommandRunAction = eventType === "action.result" && resolveEventActionType(typed) === "command.run";
   if (eventType !== "command.result" && !isCommandRunAction) {
     return [];
   }
 
   const targetPane = resolveCommandTargetPane(typed, "control");
-
-  const output = String(typed.output ?? "");
+  const workspacePayload = workspaceSnapshotPayloadFromEvent(typed);
+  const runtimePayload = runtimeSnapshotPayloadFromEvent(typed);
   if (targetPane === "repo") {
+    if (workspacePayload) {
+      const preview = workspacePayloadToPreview(workspacePayload);
+      const synchronizedPreview = synchronizeRepoControlPreviews(preview, liveControlPreview);
+      return [
+        {
+          type: "tab.replace",
+          tabId: "repo",
+          lines: workspacePreviewToLines(synchronizedPreview ?? preview),
+          preview: synchronizedPreview ?? preview,
+        },
+        {type: "live.repo.set", preview: synchronizedPreview ?? preview},
+      ];
+    }
+
+    const output = resolveEventOutput(typed);
     if (!isWorkspaceSnapshotContent(output)) {
       return [];
     }
 
     const preview = workspaceSnapshotToPreview(output);
-    const mergedPreview = mergePreview(liveRepoPreview, preview);
+    const synchronizedPreview = synchronizeRepoControlPreviews(preview, liveControlPreview);
     return [
       {
         type: "tab.replace",
         tabId: "repo",
-        lines: workspacePreviewToLines(mergedPreview ?? preview),
-        preview: mergedPreview,
+        lines: workspacePreviewToLines(synchronizedPreview ?? preview),
+        preview: synchronizedPreview ?? preview,
       },
-      {type: "live.repo.set", preview: mergedPreview},
+      {type: "live.repo.set", preview: synchronizedPreview ?? preview},
     ];
   }
 
-  if ((targetPane === "control" || targetPane === "runtime") && isStructuredControlSnapshotContent(output)) {
+  if (targetPane === "control" || targetPane === "runtime") {
+    if (runtimePayload) {
+      const preview = runtimePayloadToPreview(runtimePayload, supervisor);
+      const synchronizedRepoPreview = synchronizeRepoControlPreviews(liveRepoPreview, preview);
+      return [
+        {
+          type: "tab.replace",
+          tabId: "control",
+          lines: runtimePreviewToLines(preview),
+          preview,
+        },
+        {
+          type: "tab.replace",
+          tabId: "runtime",
+          lines: runtimePreviewToLines(preview),
+          preview,
+        },
+        {type: "live.control.set", preview},
+        ...(synchronizedRepoPreview ? [{type: "live.repo.set", preview: synchronizedRepoPreview} as const] : []),
+      ];
+    }
+
+    const output = resolveEventOutput(typed);
+    if (!isStructuredControlSnapshotContent(output)) {
+      return [];
+    }
+
     const preview = runtimeSnapshotToPreview(output, supervisor);
-    const mergedPreview = mergePreview(liveControlPreview, preview);
+    const synchronizedRepoPreview = synchronizeRepoControlPreviews(liveRepoPreview, preview);
     return [
       {
         type: "tab.replace",
         tabId: "control",
-        lines: runtimePreviewToLines(mergedPreview ?? preview),
-        preview: mergedPreview,
+        lines: runtimePreviewToLines(preview),
+        preview,
       },
       {
         type: "tab.replace",
         tabId: "runtime",
-        lines: runtimePreviewToLines(mergedPreview ?? preview),
-        preview: mergedPreview,
+        lines: runtimePreviewToLines(preview),
+        preview,
       },
-      {type: "live.control.set", preview: mergedPreview},
+      {type: "live.control.set", preview},
+      ...(synchronizedRepoPreview ? [{type: "live.repo.set", preview: synchronizedRepoPreview} as const] : []),
     ];
   }
 
   return [];
 }
 
-export function persistControlPreview(preview?: TabPreview): void {
+export function persistControlPreview(preview?: TabPreview, runtimePayload?: RuntimeSnapshotPayload): void {
   if (!preview) {
     return;
   }
   const supervisor = loadSupervisorControlState();
   if (supervisor) {
-    saveSupervisorControlSummary(supervisor, preview);
+    saveSupervisorControlSummary(supervisor, preview, {runtimePayload});
   }
 }
 
-export function persistRepoPreview(preview?: TabPreview): void {
+export function persistRepoPreview(preview?: TabPreview, workspacePayload?: WorkspaceSnapshotPayload): void {
   if (!preview) {
     return;
   }
   const supervisor = loadSupervisorControlState();
   if (supervisor) {
-    saveSupervisorRepoPreview(supervisor, preview);
+    saveSupervisorRepoPreview(supervisor, preview, {workspacePayload});
   }
 }
 
@@ -675,53 +1356,63 @@ export function snapshotActionsForBridgeEvent(
     const preview = typedPayload
       ? workspacePayloadToPreview(typedPayload)
       : workspaceSnapshotToPreview(String(typed.content ?? ""));
+    const effectivePreview = preserveDeferredRepoPreview(preview, liveRepoPreview, typed);
+    const synchronizedPreview = synchronizeRepoControlPreviews(effectivePreview, liveControlPreview);
     return [
       {
         type: "tab.replace",
         tabId: "repo",
-        lines: workspacePreviewToLines(preview),
-        preview,
+        lines: workspacePreviewToLines(synchronizedPreview ?? effectivePreview),
+        preview: synchronizedPreview ?? effectivePreview,
       },
-      {type: "live.repo.set", preview},
+      {type: "live.repo.set", preview: synchronizedPreview ?? effectivePreview},
     ];
   }
 
   if (eventType === "session.bootstrap.result") {
     const actions: AppAction[] = [];
-    const workspacePreview = asPreviewRecord(typed.workspace_preview);
-    const runtimePreview = asPreviewRecord(typed.runtime_preview);
+    const workspacePayload = workspaceSnapshotPayloadFromEvent(typed);
+    const runtimePayload = runtimeSnapshotPayloadFromEvent(typed);
+    const rawWorkspacePreview = workspacePayload
+      ? workspacePayloadToPreview(workspacePayload)
+      : asPreviewRecord(typed.workspace_preview) ?? liveRepoPreview;
+    const runtimePreview = runtimePayload
+      ? runtimePayloadToPreview(runtimePayload)
+      : asPreviewRecord(typed.runtime_preview) ?? liveControlPreview;
+    const workspacePreview = synchronizeRepoControlPreviews(
+      rawWorkspacePreview,
+      runtimePreview,
+    );
 
     if (workspacePreview) {
-      const mergedWorkspacePreview = mergePreview(liveRepoPreview, workspacePreview);
       actions.push({
         type: "tab.replace",
         tabId: "repo",
-        lines: workspacePreviewToLines(mergedWorkspacePreview ?? workspacePreview),
-        preview: mergedWorkspacePreview,
+        lines: workspacePreviewToLines(workspacePreview),
+        preview: workspacePreview,
       });
       actions.push({
         type: "live.repo.set",
-        preview: mergedWorkspacePreview,
+        preview: workspacePreview,
       });
     }
 
     if (runtimePreview) {
-      const mergedRuntimePreview = mergePreview(liveControlPreview, runtimePreview);
       actions.push({
         type: "tab.replace",
         tabId: "control",
-        lines: runtimePreviewToLines(mergedRuntimePreview ?? runtimePreview),
-        preview: mergedRuntimePreview,
+        lines: runtimePreviewToLines(runtimePreview),
+        preview: runtimePreview,
       });
       actions.push({
         type: "tab.replace",
         tabId: "runtime",
-        lines: runtimePreviewToLines(mergedRuntimePreview ?? runtimePreview),
-        preview: mergedRuntimePreview,
+        lines: runtimePreviewToLines(runtimePreview),
+        preview: runtimePreview,
       });
       actions.push({
         type: "live.control.set",
-        preview: mergedRuntimePreview,
+        preview: runtimePreview,
       });
     }
 
@@ -731,13 +1422,22 @@ export function snapshotActionsForBridgeEvent(
   return [];
 }
 
-export function commandResultActionsForBridgeEvent(event: BridgeEvent): AppAction[] {
+export function commandResultActionsForBridgeEvent(
+  event: BridgeEvent,
+  fallbackCommand?: string,
+  fallbackTabId?: string,
+): AppAction[] {
   const typed = event as Record<string, unknown>;
   if (String(typed.type ?? "") !== "command.result") {
     return [];
   }
 
-  return slashCommandResultActions(typed);
+  return slashCommandResultActions(
+    typed,
+    String(typed.summary ?? "action applied"),
+    fallbackCommand,
+    fallbackTabId,
+  );
 }
 
 export function slashCommandStartActions(event: Record<string, unknown>, statusPrefix = "command"): AppAction[] {
@@ -753,27 +1453,100 @@ export function slashCommandStartActions(event: Record<string, unknown>, statusP
   ];
 }
 
-export function actionResultActionsForBridgeEvent(event: BridgeEvent): AppAction[] {
+function commandIntentFromBootstrapIntent(intent: Record<string, unknown>, command: string): Record<string, unknown> {
+  const commandIntent: Record<string, unknown> = {command};
+  for (const key of [
+    "target_surface",
+    "targetSurface",
+    "target_surface_id",
+    "targetSurfaceId",
+    "target_pane",
+    "targetPane",
+    "surface",
+    "surface_id",
+    "surfaceId",
+    "target_pane_id",
+    "targetPaneId",
+    "target_tab",
+    "targetTab",
+    "target_tab_id",
+    "targetTabId",
+    "pane",
+    "pane_id",
+    "paneId",
+    "tab",
+    "tab_id",
+    "tabId",
+  ]) {
+    const value = intent[key];
+    if (typeof value === "string" && value.trim()) {
+      commandIntent[key] = value;
+    }
+  }
+  return commandIntent;
+}
+
+export function actionResultActionsForBridgeEvent(
+  event: BridgeEvent,
+  fallbackCommand?: string,
+  fallbackTabId?: string,
+): AppAction[] {
   const typed = event as Record<string, unknown>;
   if (String(typed.type ?? "") !== "action.result") {
     return [];
   }
 
-  if (String(typed.action_type ?? "") !== "command.run") {
+  if (resolveEventActionType(typed) !== "command.run") {
     return [];
   }
 
-  const tabId = resolveCommandTargetPane(typed, "control");
-  return [{type: "tab.activate", tabId}];
+  return slashCommandResultActions(
+    typed,
+    String(typed.summary ?? "action applied"),
+    fallbackCommand,
+    fallbackTabId,
+  );
+}
+
+function isOperationalResultTab(tabId: string): boolean {
+  return tabId.length > 0 && tabId !== "chat" && tabId !== "commands";
+}
+
+function sanitizeSlashCommandFallbackTabId(tabId: string | undefined): string {
+  return tabId === "commands" ? "" : tabId ?? "";
+}
+
+function resolveSlashCommandResultTabId(
+  event: Record<string, unknown>,
+  fallbackCommand?: string,
+  fallbackTabId?: string,
+): string {
+  const eventCommand = resolveEventCommand(event);
+  const command = eventCommand || fallbackCommand || "";
+  const resolvedTabId = resolveCommandTargetPane(event, "");
+  const fallbackCommandTabId = fallbackCommand ? commandTargetTab(fallbackCommand) : "";
+  const preferredFallbackTabId =
+    [fallbackTabId ?? "", fallbackCommandTabId].find((tabId) => isOperationalResultTab(tabId)) ?? fallbackTabId ?? "";
+  const sanitizedFallbackTabId = sanitizeSlashCommandFallbackTabId(fallbackTabId);
+  if (!eventCommand && isOperationalResultTab(sanitizedFallbackTabId) && resolvedTabId !== sanitizedFallbackTabId) {
+    return sanitizedFallbackTabId;
+  }
+  return (
+    isOperationalResultTab(preferredFallbackTabId) && !isOperationalResultTab(resolvedTabId)
+      ? preferredFallbackTabId
+      : resolvedTabId || sanitizedFallbackTabId || "control"
+  );
 }
 
 function slashCommandResultActions(
   event: Record<string, unknown>,
   fallbackStatus = String(event.summary ?? "action applied"),
+  fallbackCommand?: string,
+  fallbackTabId?: string,
 ): AppAction[] {
-  const command = resolveEventCommand(event);
+  const command = resolveEventCommand(event) || fallbackCommand || "";
   const normalized = normalizeCommandName(command);
-  const tabId = resolveCommandTargetPane(event, "control");
+  const tabId = resolveSlashCommandResultTabId(event, fallbackCommand, fallbackTabId);
   const statusValue = normalized ? `/${normalized} -> ${tabId}` : fallbackStatus;
   return [
     {type: "tab.activate", tabId},
@@ -781,11 +1554,43 @@ function slashCommandResultActions(
   ];
 }
 
+function enrichSparseCommandResultEvent(
+  event: Record<string, unknown>,
+  pendingCommand: PendingCommandStream | null,
+): Record<string, unknown> {
+  if (!pendingCommand) {
+    return event;
+  }
+
+  const eventType = String(event.type ?? "");
+  const isCommandResult = eventType === "command.result";
+  const isCommandRunAction = eventType === "action.result" && resolveEventActionType(event) === "command.run";
+  if (!isCommandResult && !isCommandRunAction) {
+    return event;
+  }
+
+  const command = resolveEventCommand(event);
+  const targetPane = resolveCommandTargetPane(event, "");
+  const shouldOverrideTargetPane =
+    isOperationalResultTab(pendingCommand.tabId) &&
+    (!isOperationalResultTab(targetPane) || (!command && targetPane !== pendingCommand.tabId));
+  if (command && targetPane && !shouldOverrideTargetPane) {
+    return event;
+  }
+
+  return {
+    ...event,
+    ...(command ? {} : {command: pendingCommand.command}),
+    ...((targetPane && !shouldOverrideTargetPane) ? {} : {target_pane: pendingCommand.tabId}),
+  };
+}
+
 export function createBridgeEventHandler({
   dispatch,
   getState,
   bridge,
   pendingBootstraps,
+  pendingCommandStream,
   requestHandshake,
   resetHandshakeBackoff,
 }: BridgeHandlerDeps): (event: BridgeEvent) => void {
@@ -794,13 +1599,16 @@ export function createBridgeEventHandler({
   let reconnectRequested = false;
   const reconnectingCodes = new Set(["bridge_exit", "bridge_spawn_error", "bridge_send_failed", "bridge_stdin_unavailable"]);
   let malformedBridgeEvents = 0;
+  const apply = (actions: AppAction[]): void => queueAppActions(dispatch, actions);
 
   function requestReconnect(status: string, offline = false): void {
     awaitingAuthoritativeResync = true;
     resyncPending = false;
-    dispatch({type: "surface.truth.reset"});
-    dispatch({type: "bridge.status", status: offline ? "offline" : "degraded"});
-    dispatch({type: "status.set", value: status});
+    apply([
+      {type: "surface.truth.reset"},
+      {type: "bridge.status", status: offline ? "offline" : "degraded"},
+      {type: "status.set", value: status},
+    ]);
     if (reconnectRequested) {
       return;
     }
@@ -813,15 +1621,31 @@ export function createBridgeEventHandler({
   }
 
   return (event: BridgeEvent) => {
-    const typed = event as Record<string, unknown>;
-    const eventType = String(typed.type ?? "");
     const state = getState();
+    const originalPendingCommand = pendingCommandStream?.current ?? null;
+    const streamedPendingCommand =
+      String((event as Record<string, unknown>).type ?? "") === "text_delta" ||
+      String((event as Record<string, unknown>).type ?? "") === "text_complete"
+        ? reconcilePendingCommandStream(originalPendingCommand, event as Record<string, unknown>)
+        : originalPendingCommand;
+    if (pendingCommandStream && streamedPendingCommand !== originalPendingCommand) {
+      pendingCommandStream.current = streamedPendingCommand;
+    }
+    const pendingCommand = streamedPendingCommand;
+    const typed = enrichSparseCommandResultEvent(event as Record<string, unknown>, pendingCommand);
+    const eventType = String(typed.type ?? "");
+    const canonicalEvents = canonicalEventsFromBridgeEvent(typed);
+    if (canonicalEvents.length > 0) {
+      apply([{type: "execution.events.ingest", events: canonicalEvents}]);
+    }
     if (eventType !== "bridge.error" && eventType !== "error") {
       malformedBridgeEvents = 0;
     }
     if (eventType === "bridge.ready") {
-      dispatch({type: "bridge.status", status: "connected"});
-      dispatch({type: "status.set", value: "bridge ready"});
+      apply([
+        {type: "bridge.status", status: "connected"},
+        {type: "status.set", value: "bridge ready"},
+      ]);
     }
     if (eventType === "bridge.error" || eventType === "error") {
       const code = String(typed.code ?? "");
@@ -835,12 +1659,16 @@ export function createBridgeEventHandler({
           malformedBridgeEvents = 0;
           requestReconnect("bridge unhealthy, reconnecting");
         } else {
-          dispatch({type: "bridge.status", status: "degraded"});
-          dispatch({type: "status.set", value: `bridge output invalid (${malformedBridgeEvents}/3)`});
+          apply([
+            {type: "bridge.status", status: "degraded"},
+            {type: "status.set", value: `bridge output invalid (${malformedBridgeEvents}/3)`},
+          ]);
         }
       } else {
-        dispatch({type: "bridge.status", status: "degraded"});
-        dispatch({type: "status.set", value: message});
+        apply([
+          {type: "bridge.status", status: "degraded"},
+          {type: "status.set", value: message},
+        ]);
       }
     }
     if (eventType === "handshake.result") {
@@ -857,79 +1685,85 @@ export function createBridgeEventHandler({
         | undefined;
       const provider = selectedProvider?.provider_id ?? fallbackProvider?.provider_id ?? "codex";
       const model = selectedProvider?.default_model ?? fallbackProvider?.default_model ?? "gpt-5.4";
-      dispatch({
+      apply([{
         type: "bridge.config",
         provider,
         model,
-        strategy: state.strategy,
-      });
+        strategy: state.routePolicy.strategy,
+      }]);
       malformedBridgeEvents = 0;
       reconnectRequested = false;
       resetHandshakeBackoff?.();
-      dispatch({type: "bridge.status", status: "connected"});
-      dispatch({type: "status.set", value: "backend connected"});
+      apply([
+        {type: "bridge.status", status: "connected"},
+        {type: "status.set", value: "backend connected"},
+      ]);
       if (awaitingAuthoritativeResync) {
         awaitingAuthoritativeResync = false;
         resyncPending = true;
-        requestAuthoritativeResync(bridge, provider, model, state.strategy);
-        dispatch({type: "status.set", value: authoritativeResyncStatus(state.authoritativeSurfaces)});
+        requestAuthoritativeResync(bridge, provider, model, getState().routePolicy.strategy);
+        apply([{type: "status.set", value: authoritativeResyncStatus(state.authoritativeSurfaces)}]);
       }
     }
     if (eventType === "command.result") {
-      const commandName = normalizeCommandName(resolveEventCommand(typed));
-      commandResultActionsForBridgeEvent(typed).forEach((action) => dispatch(action));
+      const command = resolveEventCommand(typed);
+      const commandName = normalizeCommandName(command);
+      apply(commandResultActionsForBridgeEvent(
+        typed,
+        pendingCommand?.command,
+        pendingCommand?.tabId,
+      ));
       const commandSnapshotActions = commandRunSnapshotActionsForBridgeEvent(
         typed,
         state.liveRepoPreview,
         state.liveControlPreview,
       );
-      commandSnapshotActions.forEach((action) => dispatch(action));
+      apply(commandSnapshotActions);
       const persistedRepoPreview = commandSnapshotActions.find((action) => action.type === "live.repo.set");
       if (persistedRepoPreview?.type === "live.repo.set") {
-        persistRepoPreview(persistedRepoPreview.preview);
+        persistRepoPreview(persistedRepoPreview.preview, workspaceSnapshotPayloadFromEvent(typed));
       }
       const persistedControlPreview = commandSnapshotActions.find((action) => action.type === "live.control.set");
       if (persistedControlPreview?.type === "live.control.set") {
-        persistControlPreview(persistedControlPreview.preview);
+        persistControlPreview(persistedControlPreview.preview, runtimeSnapshotPayloadFromEvent(typed));
       }
-      if (commandName === "model") {
-        dispatch({type: "modelPicker.open", returnTabId: state.activeTabId === "models" ? "chat" : state.activeTabId});
-        bridge.send("model.policy", {
-          provider: state.provider,
-          model: state.model,
-          strategy: state.strategy,
-        });
+      if (isBareModelCommand(command)) {
+        apply([{type: "modelPicker.open", returnTabId: state.uiMode.activeTabId}]);
       }
-      requestLiveSnapshots(bridge, state.provider, state.model, state.strategy);
+      const currentRoute = bridgeRouteState(getState());
+      requestLiveSnapshots(bridge, currentRoute.provider, currentRoute.model, currentRoute.strategy);
     }
     if (eventType === "workspace.snapshot.result") {
       const actions = snapshotActionsForBridgeEvent(typed, state.liveRepoPreview, state.liveControlPreview);
-      actions.forEach((action) => dispatch(action));
-      dispatch({type: "surface.truth.mark", surface: "repo"});
-      if (resyncPending && state.bridgeStatus === "connected") {
+      const repoIsAuthoritative = workspaceEventHasAuthoritativeRepoSignal(typed);
+      apply(repoIsAuthoritative ? [...actions, {type: "surface.truth.mark", surface: "repo"}] : actions);
+      if (repoIsAuthoritative && resyncPending && state.bridgeStatus === "connected") {
         const nextAuthority = markAuthoritativeSurface(state.authoritativeSurfaces, "repo");
-        dispatch({type: "status.set", value: authoritativeResyncStatus(nextAuthority)});
+        apply([{type: "status.set", value: authoritativeResyncStatus(nextAuthority)}]);
         resyncPending = !authoritativeResyncComplete(nextAuthority);
       }
       const persistedRepoPreview = actions.find((action) => action.type === "live.repo.set");
       if (persistedRepoPreview?.type === "live.repo.set") {
-        persistRepoPreview(persistedRepoPreview.preview);
+        persistRepoPreview(persistedRepoPreview.preview, workspaceSnapshotPayloadFromEvent(typed));
       }
     }
     if (eventType === "permission.decision") {
       const decision = permissionDecisionFromEvent(typed);
       if (decision) {
         const nextApprovalPane = nextApprovalPaneAfterDecision(state.approvalPane, decision);
-        dispatch({type: "approval.decision.set", decision, sourceEventType: eventType});
-        dispatch({
+        apply([
+          {type: "approval.decision.set", decision, sourceEventType: eventType},
+          {
           type: "tab.replace",
           tabId: "approvals",
           lines: approvalPaneToLines(nextApprovalPane),
           preview: approvalPaneToPreview(nextApprovalPane),
-        });
+          },
+        ]);
         if (decision.decision === "require_approval" && decision.requires_confirmation) {
-          dispatch({type: "tab.activate", tabId: "approvals"});
-          dispatch({type: "status.set", value: `approval required ${decision.tool_name} (${decision.risk})`});
+          apply([
+            {type: "status.set", value: `approval required ${decision.tool_name} (${decision.risk})`},
+          ]);
         }
         requestPermissionHistory(bridge);
       }
@@ -937,34 +1771,38 @@ export function createBridgeEventHandler({
     if (eventType === "permission.history.result") {
       const history = permissionHistoryFromEvent(typed);
       if (history) {
-        dispatch({type: "surface.truth.mark", surface: "approvals"});
+        apply([{type: "surface.truth.mark", surface: "approvals"}]);
         if (resyncPending && state.bridgeStatus === "connected") {
           const nextAuthority = markAuthoritativeSurface(state.authoritativeSurfaces, "approvals");
-          dispatch({type: "status.set", value: authoritativeResyncStatus(nextAuthority)});
+          apply([{type: "status.set", value: authoritativeResyncStatus(nextAuthority)}]);
           resyncPending = !authoritativeResyncComplete(nextAuthority);
         }
         const approvalPane = approvalPaneFromHistory(history);
-        dispatch({type: "approval.history.set", approvalPane});
-        dispatch({
+        apply([
+          {type: "approval.history.set", approvalPane},
+          {
           type: "tab.replace",
           tabId: "approvals",
           lines: approvalPaneToLines(approvalPane),
           preview: approvalPaneToPreview(approvalPane),
-        });
+          },
+        ]);
       }
     }
     if (eventType === "permission.resolution") {
       const resolution = permissionResolutionFromEvent(typed);
       if (resolution) {
         const nextApprovalPane = nextApprovalPaneAfterResolution(state.approvalPane, resolution);
-        dispatch({type: "approval.resolution.set", resolution, sourceEventType: eventType});
-        dispatch({
+        apply([
+          {type: "approval.resolution.set", resolution, sourceEventType: eventType},
+          {
           type: "tab.replace",
           tabId: "approvals",
           lines: approvalPaneToLines(nextApprovalPane),
           preview: approvalPaneToPreview(nextApprovalPane),
-        });
-        dispatch({type: "status.set", value: `${resolution.resolution} ${resolution.action_id} (${resolution.enforcement_state})`});
+          },
+          {type: "status.set", value: `${resolution.resolution} ${resolution.action_id} (${resolution.enforcement_state})`},
+        ]);
         requestPermissionHistory(bridge);
       }
     }
@@ -972,39 +1810,48 @@ export function createBridgeEventHandler({
       const outcome = permissionOutcomeFromEvent(typed);
       if (outcome) {
         const nextApprovalPane = nextApprovalPaneAfterOutcome(state.approvalPane, outcome);
-        dispatch({type: "approval.outcome.set", outcome, sourceEventType: eventType});
-        dispatch({
+        apply([
+          {type: "approval.outcome.set", outcome, sourceEventType: eventType},
+          {
           type: "tab.replace",
           tabId: "approvals",
           lines: approvalPaneToLines(nextApprovalPane),
           preview: approvalPaneToPreview(nextApprovalPane),
-        });
-        dispatch({type: "status.set", value: `${outcome.outcome} ${outcome.action_id}`});
+          },
+          {type: "status.set", value: `${outcome.outcome} ${outcome.action_id}`},
+        ]);
         requestPermissionHistory(bridge);
       }
     }
     if (eventType === "session.catalog.result") {
       const catalog = sessionCatalogFromEvent(typed);
       if (catalog) {
-        dispatch({type: "surface.truth.mark", surface: "sessions"});
+        apply([{type: "surface.truth.mark", surface: "sessions"}]);
         if (resyncPending && state.bridgeStatus === "connected") {
           const nextAuthority = markAuthoritativeSurface(state.authoritativeSurfaces, "sessions");
-          dispatch({type: "status.set", value: authoritativeResyncStatus(nextAuthority)});
+          apply([{type: "status.set", value: authoritativeResyncStatus(nextAuthority)}]);
           resyncPending = !authoritativeResyncComplete(nextAuthority);
         }
         const nextSessionPane = nextSessionPaneAfterCatalog(state.sessionPane, catalog);
-        dispatch({type: "session.catalog.set", catalog, selectedSessionId: nextSessionPane.selectedSessionId});
-        dispatch({
+        apply([
+          {type: "session.catalog.set", catalog, selectedSessionId: nextSessionPane.selectedSessionId},
+          {
           type: "tab.replace",
           tabId: "sessions",
           lines: sessionPaneToLines(nextSessionPane),
           preview: sessionPaneToPreview(nextSessionPane),
-        });
+          },
+        ]);
         if (
           nextSessionPane.selectedSessionId &&
           !nextSessionPane.detailsBySessionId[nextSessionPane.selectedSessionId]
         ) {
           requestSessionDetail(bridge, nextSessionPane.selectedSessionId);
+        } else {
+          const selectedDetail = nextSessionPane.selectedSessionId
+            ? nextSessionPane.detailsBySessionId[nextSessionPane.selectedSessionId]
+            : undefined;
+          apply([{type: "session.continuity.set", continuity: continuityStateFromSession(state, selectedDetail)}]);
         }
       }
     }
@@ -1012,13 +1859,16 @@ export function createBridgeEventHandler({
       const detail = sessionDetailFromEvent(typed);
       if (detail) {
         const nextSessionPane = nextSessionPaneAfterDetail(state.sessionPane, detail);
-        dispatch({type: "session.detail.set", detail});
-        dispatch({
+        apply([
+          {type: "session.detail.set", detail},
+          {type: "session.continuity.set", continuity: continuityStateFromSession(state, detail)},
+          {
           type: "tab.replace",
           tabId: "sessions",
           lines: sessionPaneToLines(nextSessionPane),
           preview: sessionPaneToPreview(nextSessionPane),
-        });
+          },
+        ]);
       }
     }
     if (eventType === "command.graph.result") {
@@ -1075,63 +1925,92 @@ export function createBridgeEventHandler({
       });
     }
     if (eventType === "runtime.snapshot.result") {
-      dispatch({type: "surface.truth.mark", surface: "control"});
-      if (resyncPending && state.bridgeStatus === "connected") {
+      const typedPayload = runtimeSnapshotPayloadFromEvent(typed);
+      const runtimeIsAuthoritative = typedPayload ? runtimePayloadHasAuthoritativeControlSignal(typedPayload) : true;
+      if (runtimeIsAuthoritative) {
+        apply([{type: "surface.truth.mark", surface: "control"}]);
+      }
+      if (runtimeIsAuthoritative && resyncPending && state.bridgeStatus === "connected") {
         const nextAuthority = markAuthoritativeSurface(state.authoritativeSurfaces, "control");
-        dispatch({type: "status.set", value: authoritativeResyncStatus(nextAuthority)});
+        apply([{type: "status.set", value: authoritativeResyncStatus(nextAuthority)}]);
         resyncPending = !authoritativeResyncComplete(nextAuthority);
       }
       const supervisor = loadSupervisorControlState();
-      const typedPayload = runtimeSnapshotPayloadFromEvent(typed);
       const content = String(typed.content ?? "");
       const preview = typedPayload ? runtimePayloadToPreview(typedPayload, supervisor) : runtimeSnapshotToPreview(content, supervisor);
-      const mergedPreview = mergePreview(state.liveControlPreview, preview);
-      persistControlPreview(mergedPreview);
-      dispatch({
+      const effectivePreview = runtimeIsAuthoritative ? preview : preserveDeferredControlPreview(preview, state.liveControlPreview);
+      const synchronizedRepoPreview = synchronizeRepoControlPreviews(state.liveRepoPreview, effectivePreview);
+      if (synchronizedRepoPreview) {
+        persistRepoPreview(synchronizedRepoPreview);
+      }
+      persistControlPreview(effectivePreview, typedPayload ?? undefined);
+      apply([{
         type: "tab.replace",
         tabId: "control",
-        lines: runtimePreviewToLines(mergedPreview ?? preview),
-        preview: mergedPreview,
-      });
-      dispatch({
+        lines: runtimePreviewToLines(effectivePreview),
+        preview: effectivePreview,
+      }, {
         type: "tab.replace",
         tabId: "runtime",
-        lines: runtimePreviewToLines(mergedPreview ?? preview),
-        preview: mergedPreview,
-      });
-      dispatch({type: "live.control.set", preview: mergedPreview});
+        lines: runtimePreviewToLines(effectivePreview),
+        preview: effectivePreview,
+      }, {type: "live.control.set", preview: effectivePreview},
+      ...(synchronizedRepoPreview ? [{type: "live.repo.set", preview: synchronizedRepoPreview} as const] : [])]);
     }
     if (eventType === "model.policy.result") {
-      dispatch({type: "surface.truth.mark", surface: "models"});
+      const suppressRouteStatus = resyncPending && state.bridgeStatus === "connected";
+      apply([{type: "surface.truth.mark", surface: "models"}]);
       if (resyncPending && state.bridgeStatus === "connected") {
         const nextAuthority = markAuthoritativeSurface(state.authoritativeSurfaces, "models");
-        dispatch({type: "status.set", value: authoritativeResyncStatus(nextAuthority)});
+        apply([{type: "status.set", value: authoritativeResyncStatus(nextAuthority)}]);
         resyncPending = !authoritativeResyncComplete(nextAuthority);
       }
       const routingPayload = routingDecisionPayloadFromEvent(typed);
-      const modelTargets = modelChoicesFromPolicy(routingPayload ?? typed.policy);
-      dispatch({
+      const policyRecord =
+        typeof typed.policy === "object" && typed.policy !== null ? (typed.policy as Record<string, unknown>) : undefined;
+      const nextRoutePolicy = routePolicyFromValue(routingPayload ?? policyRecord ?? typed, state.routePolicy);
+      const activeChoice = nextRoutePolicy.targets.find(
+        (choice) => choice.provider === nextRoutePolicy.provider && choice.model === nextRoutePolicy.model,
+      );
+      apply([{
+        type: "route.policy.set",
+        policy: nextRoutePolicy,
+      }, {
         type: "tab.replace",
         tabId: "models",
         lines: modelPolicyToLines(routingPayload ? {payload: routingPayload} : typed),
         preview: modelPolicyToPreview(routingPayload ? {payload: routingPayload} : typed),
-        modelTargets,
-      });
+      }]);
+      if (activeChoice) {
+        const actions: AppAction[] = [{
+          type: "bridge.config",
+          provider: activeChoice.provider,
+          model: activeChoice.model,
+          strategy: nextRoutePolicy.strategy,
+        }];
+        if (!suppressRouteStatus) {
+          actions.push({
+            type: "status.set",
+            value: activeChoice.selectable ? `route confirmed -> ${routeLabel(nextRoutePolicy)}` : `route constrained -> ${routeSummary(nextRoutePolicy)}`,
+          });
+        }
+        apply(actions);
+      }
     }
     if (eventType === "agent.routes.result") {
-      dispatch({type: "surface.truth.mark", surface: "agents"});
+      apply([{type: "surface.truth.mark", surface: "agents"}]);
       if (resyncPending && state.bridgeStatus === "connected") {
         const nextAuthority = markAuthoritativeSurface(state.authoritativeSurfaces, "agents");
-        dispatch({type: "status.set", value: authoritativeResyncStatus(nextAuthority)});
+        apply([{type: "status.set", value: authoritativeResyncStatus(nextAuthority)}]);
         resyncPending = !authoritativeResyncComplete(nextAuthority);
       }
       const routesPayload = agentRoutesPayloadFromEvent(typed);
-      dispatch({
+      apply([{
         type: "tab.replace",
         tabId: "agents",
         lines: agentRoutesToLines(routesPayload ? {payload: routesPayload} : typed),
         preview: agentRoutesToPreview(routesPayload ? {payload: routesPayload} : typed),
-      });
+      }]);
     }
     if (eventType === "evolution.surface.result") {
       dispatch({
@@ -1144,8 +2023,6 @@ export function createBridgeEventHandler({
     if (eventType === "session.bootstrap.result") {
       const requestId = String(typed.request_id ?? "");
       const pending = pendingBootstraps.current[requestId];
-      persistRepoPreview(mergePreview(state.liveRepoPreview, asPreviewRecord(typed.workspace_preview)));
-      persistControlPreview(mergePreview(state.liveControlPreview, asPreviewRecord(typed.runtime_preview)));
       dispatch({
         type: "tab.replace",
         tabId: "mission",
@@ -1154,18 +2031,28 @@ export function createBridgeEventHandler({
       });
       const actions = snapshotActionsForBridgeEvent(typed, state.liveRepoPreview, state.liveControlPreview);
       actions.forEach((action) => dispatch(action));
+      const persistedRepoPreview = actions.find((action) => action.type === "live.repo.set");
+      if (persistedRepoPreview?.type === "live.repo.set") {
+        persistRepoPreview(persistedRepoPreview.preview, workspaceSnapshotPayloadFromEvent(typed));
+      }
+      const persistedControlPreview = actions.find((action) => action.type === "live.control.set");
+      if (persistedControlPreview?.type === "live.control.set") {
+        persistControlPreview(persistedControlPreview.preview, runtimeSnapshotPayloadFromEvent(typed));
+      }
 
-      const selectedProvider = String(typed.selected_provider ?? pending?.provider ?? state.provider);
-      const selectedModel = String(typed.selected_model ?? pending?.model ?? state.model);
-      const selectedStrategy = String(typed.routing_strategy ?? state.strategy ?? "responsive");
+      const selectedProvider = String(typed.selected_provider ?? pending?.provider ?? state.routePolicy.provider);
+      const selectedModel = String(typed.selected_model ?? pending?.model ?? state.routePolicy.model);
+      const selectedStrategy = String(typed.routing_strategy ?? state.routePolicy.strategy ?? "responsive");
       dispatch({type: "bridge.config", provider: selectedProvider, model: selectedModel, strategy: selectedStrategy});
 
       const intent = typed.intent as Record<string, unknown> | undefined;
       if (intent && String(intent.kind ?? "") === "command" && Boolean(intent.auto_execute)) {
         const command = `/${String(intent.command ?? "")}`;
-        const tabId = commandTargetTab(command);
+        const commandIntent = commandIntentFromBootstrapIntent(intent, command);
+        const tabId = resolveCommandTargetPane(commandIntent, commandTargetTab(command));
         dispatch({type: "tab.activate", tabId});
-        bridge.send("command.run", {command});
+        markPendingCommandStream(pendingCommandStream, commandIntent);
+        bridge.send("command.run", commandIntent);
         dispatch({type: "status.set", value: `intent ${command} -> ${tabId}`});
       } else if (intent && String(intent.kind ?? "") === "model_switch") {
         bridge.send("action.run", {
@@ -1204,6 +2091,8 @@ export function createBridgeEventHandler({
             provider: selectedProvider,
             model: selectedModel,
             prompt: pending.prompt,
+            messages: pending.messages,
+            resume_session_id: pending.resumeSessionId,
             bootstrap: typed,
             system_prompt: String(typed.system_prompt ?? ""),
           });
@@ -1217,6 +2106,8 @@ export function createBridgeEventHandler({
             provider: selectedProvider,
             model: selectedModel,
             prompt: pending.prompt,
+            messages: pending.messages,
+            resume_session_id: pending.resumeSessionId,
             bootstrap: typed,
             system_prompt: String(typed.system_prompt ?? ""),
           });
@@ -1226,6 +2117,8 @@ export function createBridgeEventHandler({
           provider: selectedProvider,
           model: selectedModel,
           prompt: pending.prompt,
+          messages: pending.messages,
+          resume_session_id: pending.resumeSessionId,
           bootstrap: typed,
           system_prompt: String(typed.system_prompt ?? ""),
         });
@@ -1234,18 +2127,30 @@ export function createBridgeEventHandler({
       delete pendingBootstraps.current[requestId];
     }
     if (eventType === "session_end") {
-      requestLiveSnapshots(bridge, state.provider, state.model, state.strategy);
+      const currentRoute = bridgeRouteState(getState());
+      requestLiveSnapshots(bridge, currentRoute.provider, currentRoute.model, currentRoute.strategy);
       requestSessionCatalog(bridge);
     }
     if (eventType === "action.result") {
-      const actionType = String(typed.action_type ?? "");
+      const actionType = resolveEventActionType(typed);
+      const command = resolveEventCommand(typed);
       if (actionType === "command.run") {
-        slashCommandResultActions(typed).forEach((action) => dispatch(action));
+        clearPendingCommandStream(pendingCommandStream);
+        actionResultActionsForBridgeEvent(
+          typed,
+          pendingCommand?.command,
+          pendingCommand?.tabId,
+        ).forEach((action) => dispatch(action));
+        if (isBareModelCommand(command)) {
+          dispatch({type: "modelPicker.open", returnTabId: state.uiMode.activeTabId});
+        }
       } else {
         actionResultActionsForBridgeEvent(typed).forEach((action) => dispatch(action));
       }
       const pane =
-        actionType === "command.run" ? resolveCommandTargetPane(typed, "control") : String(typed.target_pane ?? "control");
+        actionType === "command.run"
+          ? resolveSlashCommandResultTabId(typed, pendingCommand?.command, pendingCommand?.tabId)
+          : String(typed.target_pane ?? "control");
       const commandRunSnapshotActions = commandRunSnapshotActionsForBridgeEvent(
         typed,
         state.liveRepoPreview,
@@ -1306,42 +2211,46 @@ export function createBridgeEventHandler({
         (action) => action.type === "live.repo.set",
       );
       if (persistedRepoPreview?.type === "live.repo.set") {
-        persistRepoPreview(persistedRepoPreview.preview);
+        persistRepoPreview(persistedRepoPreview.preview, workspaceSnapshotPayloadFromEvent(typed));
       }
       const persistedControlPreview = [...commandRunSnapshotActions, ...surfaceRefreshActions].find(
         (action) => action.type === "live.control.set",
       );
       if (persistedControlPreview?.type === "live.control.set") {
-        persistControlPreview(persistedControlPreview.preview);
+        persistControlPreview(persistedControlPreview.preview, runtimeSnapshotPayloadFromEvent(typed));
       }
-      const output = String(typed.output ?? "").trim();
+      const output = resolveEventOutput(typed).trim();
       const policy =
         typeof typed.policy === "object" && typed.policy !== null ? (typed.policy as Record<string, unknown>) : null;
       const routingPayload = routingDecisionPayloadFromEvent(typed);
+      let refreshProvider = getState().routePolicy.provider;
+      let refreshModel = getState().routePolicy.model;
+      let refreshStrategy = getState().routePolicy.strategy;
       if (policy || routingPayload) {
-        const modelTargets = modelChoicesFromPolicy(routingPayload ?? policy);
+        const nextRoutePolicy = routePolicyFromValue(routingPayload ?? policy, getState().routePolicy);
+        refreshProvider = nextRoutePolicy.provider;
+        refreshModel = nextRoutePolicy.model;
+        refreshStrategy = nextRoutePolicy.strategy;
         dispatch({
           type: "bridge.config",
-          provider: String(
-            routingPayload?.decision.provider_id ?? policy?.selected_provider ?? state.provider,
-          ),
-          model: String(routingPayload?.decision.model_id ?? policy?.selected_model ?? state.model),
-          strategy: String(routingPayload?.decision.strategy ?? policy?.strategy ?? state.strategy),
+          provider: refreshProvider,
+          model: refreshModel,
+          strategy: refreshStrategy,
         });
+        dispatch({type: "route.policy.set", policy: nextRoutePolicy});
         dispatch({
           type: "tab.replace",
           tabId: "models",
           lines: modelPolicyToLines(routingPayload ? {payload: routingPayload} : {policy}),
           preview: modelPolicyToPreview(routingPayload ? {payload: routingPayload} : {policy}),
-          modelTargets,
         });
       }
       if (
         output &&
-        actionType !== "command.run" &&
         commandRunSnapshotActions.length === 0 &&
         surfaceRefreshActions.length === 0 &&
-        !(pane === "models" && (policy || routingPayload))
+        !(pane === "models" && (policy || routingPayload)) &&
+        !(actionType === "command.run" && shouldSuppressDuplicatePendingCommandPatch(typed, pendingCommand))
       ) {
         dispatch({
           type: "tab.append",
@@ -1352,10 +2261,63 @@ export function createBridgeEventHandler({
       if (actionType !== "command.run" && !(actionType === "surface.refresh" && resyncPending)) {
         dispatch({type: "status.set", value: String(typed.summary ?? "action applied")});
       }
-      requestLiveSnapshots(bridge, state.provider, state.model, state.strategy);
+      requestLiveSnapshots(bridge, refreshProvider, refreshModel, refreshStrategy);
     }
 
-    const patches = eventToTabPatch(typed);
+    if (eventType === "command.result") {
+      clearPendingCommandStream(pendingCommandStream);
+    }
+
+    if (eventType === "text_delta" && pendingCommand && !shouldSuppressPendingCommandStreamOutput(pendingCommand)) {
+      dispatch({type: "tab.activate", tabId: pendingCommand.tabId});
+    }
+
+    if (eventType === "text_complete" && pendingCommand) {
+      const output = normalizeCommandStreamText(typed.content);
+      if (output) {
+        pendingCommand.lastCompletedText = output;
+        const streamSnapshotActions = snapshotActionsForPendingCommandStream(
+          pendingCommand,
+          output,
+          state.liveRepoPreview,
+          state.liveControlPreview,
+        );
+        if (!shouldSuppressPendingCommandStreamOutput(pendingCommand)) {
+          dispatch({type: "tab.activate", tabId: pendingCommand.tabId});
+          if (streamSnapshotActions.length > 0) {
+            queueAppActions(dispatch, streamSnapshotActions);
+            const persistedRepoPreview = streamSnapshotActions.find((action) => action.type === "live.repo.set");
+            if (persistedRepoPreview?.type === "live.repo.set") {
+              persistRepoPreview(persistedRepoPreview.preview);
+            }
+            const persistedControlPreview = streamSnapshotActions.find((action) => action.type === "live.control.set");
+            if (persistedControlPreview?.type === "live.control.set") {
+              persistControlPreview(persistedControlPreview.preview);
+            }
+          } else {
+            dispatch({
+              type: "tab.append",
+              tabId: pendingCommand.tabId,
+              lines: [{id: `command-stream-${Date.now()}`, kind: "system", text: output}],
+            });
+          }
+        }
+      }
+    }
+
+    const suppressChatPatch =
+      (eventType === "text_delta" || eventType === "text_complete") && Boolean(pendingCommand);
+    const suppressDuplicateCommandPatch = shouldSuppressDuplicatePendingCommandPatch(typed, pendingCommand);
+    const suppressDuplicateCompletedAssistantPatch = isDuplicateCompletedAssistantPatch(getState(), typed);
+    const canonicalLogOwnsTranscriptPatch =
+      canonicalEvents.length > 0 &&
+      eventType !== "text_delta" &&
+      eventType !== "text_complete" &&
+      eventType !== "command.result";
+    const patches =
+      suppressChatPatch || suppressDuplicateCommandPatch || suppressDuplicateCompletedAssistantPatch || canonicalLogOwnsTranscriptPatch
+        ? []
+        : eventToTabPatch(typed);
     for (const patch of patches) {
       dispatch({type: "tab.append", tabId: patch.tabId, lines: patch.lines});
     }
@@ -1406,49 +2368,50 @@ export function surfaceRefreshActionsForBridgeEvent(
 
   if (surface === "repo" || surface === "workspace") {
     const workspacePayload = workspaceSnapshotPayloadFromEvent(typed);
-    const output = String(typed.output ?? "");
+    const output = resolveEventOutput(typed);
     if (!workspacePayload && !output.trim()) {
       return [];
     }
     const preview = workspacePayload ? workspacePayloadToPreview(workspacePayload) : workspaceSnapshotToPreview(output);
-    const mergedPreview = mergePreview(liveRepoPreview, preview);
+    const synchronizedPreview = synchronizeRepoControlPreviews(preview, liveControlPreview);
     return [
       {
         type: "tab.replace",
         tabId: "repo",
-        lines: workspacePreviewToLines(mergedPreview ?? preview),
-        preview: mergedPreview,
+        lines: workspacePreviewToLines(synchronizedPreview ?? preview),
+        preview: synchronizedPreview ?? preview,
       },
-      {type: "live.repo.set", preview: mergedPreview},
+      {type: "live.repo.set", preview: synchronizedPreview ?? preview},
     ];
   }
 
   if (surface === "control" || surface === "runtime") {
     const typedPayload = runtimeSnapshotPayloadFromEvent(typed);
-    const output = String(typed.output ?? "");
+    const output = resolveEventOutput(typed);
     if (!typedPayload && !output.trim()) {
       return [];
     }
     const preview = typedPayload ? runtimePayloadToPreview(typedPayload, supervisor) : runtimeSnapshotToPreview(output, supervisor);
-    const mergedPreview = mergePreview(liveControlPreview, preview);
+    const synchronizedRepoPreview = synchronizeRepoControlPreviews(liveRepoPreview, preview);
     return [
       {
         type: "tab.replace",
         tabId: "control",
-        lines: runtimePreviewToLines(mergedPreview ?? preview),
-        preview: mergedPreview,
+        lines: runtimePreviewToLines(preview),
+        preview,
       },
       {
         type: "tab.replace",
         tabId: "runtime",
-        lines: runtimePreviewToLines(mergedPreview ?? preview),
-        preview: mergedPreview,
+        lines: runtimePreviewToLines(preview),
+        preview,
       },
-      {type: "live.control.set", preview: mergedPreview},
+      {type: "live.control.set", preview},
+      ...(synchronizedRepoPreview ? [{type: "live.repo.set", preview: synchronizedRepoPreview} as const] : []),
     ];
   }
 
-  const output = String(typed.output ?? "");
+  const output = resolveEventOutput(typed);
   if (!output.trim()) {
     return [];
   }
@@ -1457,22 +2420,17 @@ export function surfaceRefreshActionsForBridgeEvent(
 }
 
 export function paneActionStartActions(action: {summary: string; payload: Record<string, unknown>} | undefined): AppAction[] {
+  const commandRunEvent = commandRunEventFromPaneAction(action);
+  if (commandRunEvent) {
+    return slashCommandStartActions(commandRunEvent, "command");
+  }
+
   if (!action) {
     return [];
   }
 
-  if (String(action.payload.action_type ?? "") === "command.run") {
-    return slashCommandStartActions(
-      {
-        ...action.payload,
-        summary: action.summary,
-      },
-      "command",
-    );
-  }
-
   if (action.summary === "focus selected approval") {
-    return [{type: "tab.activate", tabId: "approvals"}, {type: "status.set", value: action.summary}];
+    return [{type: "status.set", value: action.summary}];
   }
 
   return [{type: "status.set", value: action.summary}];
@@ -1482,18 +2440,36 @@ export function App(): React.ReactElement {
   const {exit} = useApp();
   const [state, dispatch] = useReducer(reduceApp, initialState, createInitialAppState);
 
-  const activeTab = state.tabs.find((tab) => tab.id === state.activeTabId) ?? state.tabs[0];
+  const activeTab = state.tabs.find((tab) => tab.id === state.uiMode.activeTabId) ?? state.tabs[0];
+  const terminalWidth = (process.stdout.columns ?? Number(process.env.COLUMNS ?? "0")) || 120;
+  const terminalHeight = (process.stdout.rows ?? Number(process.env.LINES ?? "0")) || 30;
+  const compactShell = terminalWidth <= 90;
+  const paneWindowSize = Math.max(MIN_SCROLL_WINDOW_SIZE, terminalHeight - (compactShell ? 14 : 18));
   const outline = useMemo(() => outlineFromTabs(state.tabs), [state.tabs]);
-  const modelChoices = state.modelTargets;
+  const modelChoices = selectableRouteTargets(state.routePolicy);
+  const displayedTranscriptLines = displayedTranscriptLinesForTab(activeTab, state);
+  const transcriptMeta = transcriptMetaForTab(activeTab);
+  const operatorSummaryItems = buildOperatorSummaryItems(state);
   const activeScrollOffset = Math.min(
     state.paneScrollOffsets[activeTab?.id ?? ""] ?? 0,
-    scrollMaxOffsetForTab(activeTab, state),
+    scrollMaxOffsetForTab(activeTab, state, paneWindowSize),
   );
   const stateRef = useRef(state);
-  const pendingBootstraps = useRef<Record<string, {prompt: string; provider: string; model: string}>>({});
+  const pendingBootstraps = useRef<Record<string, {prompt: string; provider: string; model: string; messages: Array<{role: "user" | "assistant" | "system"; content: string}>; resumeSessionId?: string}>>({});
+  const pendingCommandStream = useRef<PendingCommandStream | null>(null);
   const bridgeRef = useRef<DharmaBridge | null>(null);
   const handshakeBackoffRef = useRef({attempt: 0, nextAllowedAt: 0});
   const persistTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const liveSnapshotRequestRef = useRef(0);
+
+  function requestLiveSnapshotsIfStale(provider: string, model: string, strategy: string, minIntervalMs = 900): void {
+    const now = Date.now();
+    if (now - liveSnapshotRequestRef.current < minIntervalMs) {
+      return;
+    }
+    liveSnapshotRequestRef.current = now;
+    requestLiveSnapshots(bridge, provider, model, strategy);
+  }
 
   function requestHandshake(reason: "initial" | "reconnect" | "probe"): void {
     const bridgeInstance = bridgeRef.current;
@@ -1530,6 +2506,7 @@ export function App(): React.ReactElement {
         getState: () => stateRef.current,
         bridge: instance,
         pendingBootstraps,
+        pendingCommandStream,
         requestHandshake: (reason) => requestHandshake(reason),
         resetHandshakeBackoff,
       });
@@ -1542,7 +2519,12 @@ export function App(): React.ReactElement {
     requestHandshake("initial");
     const intervalId = setInterval(() => {
       if (stateRef.current.bridgeStatus === "connected") {
-        requestAuthoritativeResync(bridge, stateRef.current.provider, stateRef.current.model, stateRef.current.strategy);
+        requestAuthoritativeResync(
+          bridge,
+          stateRef.current.routePolicy.provider,
+          stateRef.current.routePolicy.model,
+          stateRef.current.routePolicy.strategy,
+        );
       } else {
         requestHandshake("probe");
       }
@@ -1560,9 +2542,9 @@ export function App(): React.ReactElement {
     const repairId = setTimeout(() => {
       requestMissingAuthoritativeSurfaces(
         bridge,
-        stateRef.current.provider,
-        stateRef.current.model,
-        stateRef.current.strategy,
+        stateRef.current.routePolicy.provider,
+        stateRef.current.routePolicy.model,
+        stateRef.current.routePolicy.strategy,
         stateRef.current.authoritativeSurfaces,
       );
     }, 3_000);
@@ -1573,11 +2555,34 @@ export function App(): React.ReactElement {
 
   useEffect(() => {
     stateRef.current = state;
+  }, [state]);
+
+  useEffect(() => {
+    const selectedDetail = state.sessionPane.selectedSessionId
+      ? state.sessionPane.detailsBySessionId[state.sessionPane.selectedSessionId]
+      : undefined;
+    const nextContinuity = continuityStateFromSession(state, selectedDetail);
+    const current = state.sessionContinuity;
+    if (
+      current.activeSessionId === nextContinuity.activeSessionId &&
+      current.resumeSessionId === nextContinuity.resumeSessionId &&
+      current.activeRouteId === nextContinuity.activeRouteId &&
+      current.continuityMode === nextContinuity.continuityMode &&
+      current.compactedSummary === nextContinuity.compactedSummary &&
+      JSON.stringify(current.compactionPolicy) === JSON.stringify(nextContinuity.compactionPolicy) &&
+      JSON.stringify(current.boundedHistory) === JSON.stringify(nextContinuity.boundedHistory)
+    ) {
+      return;
+    }
+    dispatch({type: "session.continuity.set", continuity: nextContinuity});
+  }, [state.sessionPane.selectedSessionId, state.sessionPane.detailsBySessionId, state.routePolicy.routeId]);
+
+  useEffect(() => {
     if (persistTimeoutRef.current) {
       clearTimeout(persistTimeoutRef.current);
     }
     persistTimeoutRef.current = setTimeout(() => {
-      saveStoredState({...state, outline});
+      saveStoredState(state);
       persistTimeoutRef.current = null;
     }, 120);
     return () => {
@@ -1586,7 +2591,11 @@ export function App(): React.ReactElement {
         persistTimeoutRef.current = null;
       }
     };
-  }, [state, outline]);
+  }, [state.uiMode.sidebarVisible, state.uiMode.sidebarMode, outline]);
+
+  useEffect(() => {
+    dispatch({type: "ui.compact.set", compact: compactShell});
+  }, [compactShell]);
 
   function submitPrompt(prompt: string): void {
     const submitted = prompt.trim();
@@ -1597,39 +2606,61 @@ export function App(): React.ReactElement {
     if (isBareModelCommand(submitted)) {
       dispatch({
         type: "modelPicker.open",
-        returnTabId: stateRef.current.activeTabId === "models" ? "chat" : stateRef.current.activeTabId,
+        returnTabId: stateRef.current.uiMode.activeTabId,
       });
       bridge.send("model.policy", {
-        provider: stateRef.current.provider,
-        model: stateRef.current.model,
-        strategy: stateRef.current.strategy,
+        provider: stateRef.current.routePolicy.provider,
+        model: stateRef.current.routePolicy.model,
+        strategy: stateRef.current.routePolicy.strategy,
       });
-      dispatch({type: "status.set", value: "model picker ready"});
+      dispatch({type: "status.set", value: "route picker ready"});
       return;
     }
     if (isSlashCommandPrompt(submitted)) {
-      slashCommandStartActions({command: submitted}, "command").forEach((action) => dispatch(action));
+      queueAppActions(dispatch, slashCommandStartActions({command: submitted}, "command"));
+      markPendingCommandStream(pendingCommandStream, {command: submitted});
       bridge.send("command.run", {command: submitted});
     } else {
+      const messages = boundedContinuityMessages(state, submitted);
       const userLine: TranscriptLine = {
         id: `user-${Date.now()}`,
         kind: "user",
         text: `> ${submitted}`,
       };
-      dispatch({type: "tab.append", tabId: "chat", lines: [userLine]});
+      const route = routeLabel(state.routePolicy);
+      queueAppActions(dispatch, [
+        {type: "tab.append", tabId: "chat", lines: [userLine]},
+        {
+          type: "execution.events.ingest",
+          events: [
+            userPromptExecutionEvent(submitted),
+            localStatusExecutionEvent("bootstrapping context", route, "queued"),
+            localStatusExecutionEvent("selecting route", `${route} (${state.routePolicy.strategy})`, "queued"),
+          ],
+        },
+      ]);
       const requestId = bridge.send("session.bootstrap", {
-        provider: state.provider,
-        model: state.model,
-        strategy: state.strategy,
+        provider: state.routePolicy.provider,
+        model: state.routePolicy.model,
+        strategy: state.routePolicy.strategy,
         prompt: submitted,
-        active_tab: state.activeTabId,
+        active_tab: state.uiMode.activeTabId,
+        resume_session_id: state.sessionContinuity.resumeSessionId,
       });
       pendingBootstraps.current[requestId] = {
         prompt: submitted,
-        provider: state.provider,
-        model: state.model,
+        provider: state.routePolicy.provider,
+        model: state.routePolicy.model,
+        messages,
+        resumeSessionId: state.sessionContinuity.resumeSessionId,
       };
-      dispatch({type: "status.set", value: `bootstrapping ${state.provider}:${state.model} (${state.strategy})`});
+      dispatch({
+        type: "status.set",
+        value:
+          state.sessionContinuity.resumeSessionId
+            ? `resuming ${state.sessionContinuity.resumeSessionId} via ${routeLabel(state.routePolicy)} (${state.routePolicy.strategy})`
+            : `bootstrapping ${routeLabel(state.routePolicy)} (${state.routePolicy.strategy})`,
+      });
     }
   }
 
@@ -1637,37 +2668,38 @@ export function App(): React.ReactElement {
     if (!action) {
       return;
     }
-    paneActionStartActions(action).forEach((dispatchAction) => dispatch(dispatchAction));
+    queueAppActions(dispatch, paneActionStartActions(action));
     if (action.summary === "focus selected approval") {
       return;
+    }
+    const commandRunEvent = commandRunEventFromPaneAction(action);
+    if (commandRunEvent) {
+      markPendingCommandStream(pendingCommandStream, commandRunEvent);
     }
     bridge.send(action.requestType ?? "action.run", action.payload);
   }
 
   function applyModelChoice(index: number): void {
-    const choices = stateRef.current.modelTargets;
+    const choices = selectableRouteTargets(stateRef.current.routePolicy);
     const clampedIndex = Math.min(Math.max(index, 0), Math.max(choices.length - 1, 0));
     const choice = choices[clampedIndex];
     if (!choice) {
       dispatch({type: "status.set", value: "no model targets available"});
       return;
     }
-    dispatch({type: "modelPicker.set", index: clampedIndex});
-    dispatch({
-      type: "bridge.config",
-      provider: choice.provider,
-      model: choice.model,
-      strategy: stateRef.current.strategy,
-    });
+    queueAppActions(dispatch, [
+      {type: "modelPicker.set", index: clampedIndex},
+    ]);
     bridge.send("action.run", {
       action_type: "model.set",
       provider: choice.provider,
       model: choice.model,
-      strategy: stateRef.current.strategy,
+      strategy: stateRef.current.routePolicy.strategy,
     });
-    dispatch({type: "modelPicker.close"});
-    dispatch({type: "tab.activate", tabId: stateRef.current.modelPickerReturnTabId || "chat"});
-    dispatch({type: "status.set", value: `model route -> ${choice.alias}`});
+    queueAppActions(dispatch, [
+      {type: "modelPicker.close"},
+      {type: "status.set", value: `requesting route -> ${choice.provider}:${choice.model}`},
+    ]);
   }
 
   useInput((input, key) => {
@@ -1676,24 +2708,51 @@ export function App(): React.ReactElement {
       exit();
       return;
     }
-    if (state.modelPickerVisible) {
-      const choices = state.modelTargets;
-      const maxIndex = Math.max(choices.length - 1, 0);
+    if (state.uiMode.activeOverlay.kind === "paneSwitcher") {
+      const maxIndex = Math.max(state.tabs.length - 1, 0);
       if (key.escape) {
-        dispatch({type: "modelPicker.close"});
-        dispatch({type: "status.set", value: "model picker closed"});
+        dispatch({type: "paneSwitcher.close"});
+        dispatch({type: "status.set", value: "pane switcher closed"});
         return;
       }
       if (input === "j" || key.downArrow) {
-        dispatch({type: "modelPicker.set", index: Math.min(state.modelPickerIndex + 1, maxIndex)});
+        dispatch({type: "paneSwitcher.set", index: Math.min(state.uiMode.activeOverlay.selectedIndex + 1, maxIndex)});
         return;
       }
       if (input === "k" || key.upArrow) {
-        dispatch({type: "modelPicker.set", index: Math.max(state.modelPickerIndex - 1, 0)});
+        dispatch({type: "paneSwitcher.set", index: Math.max(state.uiMode.activeOverlay.selectedIndex - 1, 0)});
         return;
       }
       if (key.return) {
-        applyModelChoice(state.modelPickerIndex);
+        const target = state.tabs[state.uiMode.activeOverlay.selectedIndex];
+        if (target) {
+          queueAppActions(dispatch, [
+            {type: "paneSwitcher.close"},
+            {type: "tab.activate", tabId: target.id},
+            {type: "status.set", value: `pane -> ${target.title}`},
+          ]);
+        }
+        return;
+      }
+    }
+      if (state.uiMode.activeOverlay.kind === "modelPicker") {
+        const choices = modelChoices;
+        const maxIndex = Math.max(choices.length - 1, 0);
+        if (key.escape) {
+          dispatch({type: "modelPicker.close"});
+          dispatch({type: "status.set", value: "model picker closed"});
+          return;
+        }
+      if (input === "j" || key.downArrow) {
+        dispatch({type: "modelPicker.set", index: Math.min(state.uiMode.activeOverlay.selectedIndex + 1, maxIndex)});
+        return;
+      }
+      if (input === "k" || key.upArrow) {
+        dispatch({type: "modelPicker.set", index: Math.max(state.uiMode.activeOverlay.selectedIndex - 1, 0)});
+        return;
+      }
+      if (key.return) {
+        applyModelChoice(state.uiMode.activeOverlay.selectedIndex);
         return;
       }
       if (/^[1-9]$/.test(input)) {
@@ -1704,21 +2763,121 @@ export function App(): React.ReactElement {
         return;
       }
     }
+    if (activeTab?.kind === "sessions") {
+      if (input === "j") {
+        const nextSessionId = stepSessionSelection(stateRef.current, 1);
+        if (nextSessionId) {
+          dispatch({type: "session.select", sessionId: nextSessionId});
+          dispatch({type: "status.set", value: `session -> ${nextSessionId}`});
+        }
+        return;
+      }
+      if (input === "k") {
+        const nextSessionId = stepSessionSelection(stateRef.current, -1);
+        if (nextSessionId) {
+          dispatch({type: "session.select", sessionId: nextSessionId});
+          dispatch({type: "status.set", value: `session -> ${nextSessionId}`});
+        }
+        return;
+      }
+      if (key.return) {
+        if (state.sessionPane.selectedSessionId) {
+          requestSessionDetail(bridge, state.sessionPane.selectedSessionId);
+          dispatch({type: "status.set", value: `refresh detail ${state.sessionPane.selectedSessionId}`});
+        }
+        return;
+      }
+    }
+    if (activeTab?.kind === "approvals") {
+      if (input === "j") {
+        const nextActionId = stepApprovalSelection(stateRef.current, 1);
+        if (nextActionId) {
+          dispatch({type: "approval.select", actionId: nextActionId});
+          dispatch({type: "status.set", value: `approval -> ${nextActionId}`});
+        }
+        return;
+      }
+      if (input === "k") {
+        const nextActionId = stepApprovalSelection(stateRef.current, -1);
+        if (nextActionId) {
+          dispatch({type: "approval.select", actionId: nextActionId});
+          dispatch({type: "status.set", value: `approval -> ${nextActionId}`});
+        }
+        return;
+      }
+    }
+    if (activeTab?.kind === "agents") {
+      if (input === "j" || input === "k" || key.upArrow || key.downArrow) {
+        const direction: 1 | -1 = input === "k" || key.upArrow ? -1 : 1;
+        const nextIndex = stepPaneSectionFocus(
+          stateRef.current.paneFocusIndices[activeTab.id],
+          agentRouteCount(activeTab.lines),
+          direction,
+        );
+        if (typeof nextIndex === "number") {
+          dispatch({type: "pane.focus.set", tabId: activeTab.id, index: nextIndex});
+          dispatch({
+            type: "status.set",
+            value: `agent route ${nextIndex + 1}/${Math.max(agentRouteCount(activeTab.lines), 1)}`,
+          });
+        }
+        return;
+      }
+    }
+    if (activeTab?.kind === "repo" || activeTab?.kind === "control" || activeTab?.kind === "runtime") {
+      if (input === "j" || input === "k" || key.upArrow || key.downArrow) {
+        const direction: 1 | -1 = input === "k" || key.upArrow ? -1 : 1;
+        const nextIndex = stepPaneSectionFocus(
+          stateRef.current.paneFocusIndices[activeTab.id],
+          paneSectionCount(activeTab, stateRef.current),
+          direction,
+        );
+        if (typeof nextIndex === "number") {
+          dispatch({type: "pane.focus.set", tabId: activeTab.id, index: nextIndex});
+          dispatch({
+            type: "status.set",
+            value: `${activeTab.title.toLowerCase()} section ${nextIndex + 1}/${Math.max(paneSectionCount(activeTab, stateRef.current), 1)}`,
+          });
+        }
+        return;
+      }
+    }
+    if ((key.upArrow || key.downArrow) && activeTab?.kind === "sessions") {
+      const nextSessionId = stepSessionSelection(stateRef.current, key.downArrow ? 1 : -1);
+      if (nextSessionId) {
+        dispatch({type: "session.select", sessionId: nextSessionId});
+        dispatch({type: "status.set", value: `session -> ${nextSessionId}`});
+      }
+      return;
+    }
+    if ((key.upArrow || key.downArrow) && activeTab?.kind === "approvals") {
+      const nextActionId = stepApprovalSelection(stateRef.current, key.downArrow ? 1 : -1);
+      if (nextActionId) {
+        dispatch({type: "approval.select", actionId: nextActionId});
+        dispatch({type: "status.set", value: `approval -> ${nextActionId}`});
+      }
+      return;
+    }
     if ((key.upArrow || key.downArrow) && activeTab) {
       dispatch({
         type: "pane.scroll",
         tabId: activeTab.id,
         delta: key.upArrow ? -1 : 1,
-        maxOffset: scrollMaxOffsetForTab(activeTab, stateRef.current),
+        maxOffset: scrollMaxOffsetForTab(activeTab, stateRef.current, paneWindowSize),
       });
       return;
     }
     if (key.ctrl && input === "b") {
+      const nextSidebarVisible = !stateRef.current.uiMode.sidebarVisible;
       dispatch({type: "sidebar.toggle"});
+      dispatch({
+        type: "status.set",
+        value: nextSidebarVisible ? `sidebar -> ${stateRef.current.uiMode.sidebarMode}` : "sidebar hidden",
+      });
       return;
     }
     if (key.ctrl && input === "l") {
-      runPaneAction(paneActionsFor(activeTab?.id ?? "chat", state).refresh);
+      runPaneAction(paneActionsFor(activeTab?.id ?? "chat", state, shellControlOptions).refresh);
       return;
     }
     if (key.ctrl && input === "w" && activeTab?.closable) {
@@ -1726,15 +2885,15 @@ export function App(): React.ReactElement {
       return;
     }
     if (key.ctrl && input === "x") {
-      runPaneAction(paneActionsFor(activeTab?.id ?? "chat", state).primary);
+      runPaneAction(paneActionsFor(activeTab?.id ?? "chat", state, shellControlOptions).primary);
       return;
     }
     if (key.ctrl && input === "f") {
-      runPaneAction(paneActionsFor(activeTab?.id ?? "chat", state).secondary);
+      runPaneAction(paneActionsFor(activeTab?.id ?? "chat", state, shellControlOptions).secondary);
       return;
     }
     if (key.ctrl && input === "v") {
-      runPaneAction(paneActionsFor(activeTab?.id ?? "chat", state).tertiary);
+      runPaneAction(paneActionsFor(activeTab?.id ?? "chat", state, shellControlOptions).tertiary);
       return;
     }
     if (key.tab || key.rightArrow) {
@@ -1776,14 +2935,19 @@ export function App(): React.ReactElement {
     if (key.ctrl && input === "p") {
       dispatch({
         type: "modelPicker.open",
-        returnTabId: state.activeTabId === "models" ? "chat" : state.activeTabId,
+        returnTabId: state.uiMode.activeTabId,
       });
       bridge.send("model.policy", {
-        provider: stateRef.current.provider,
-        model: stateRef.current.model,
-        strategy: stateRef.current.strategy,
+        provider: stateRef.current.routePolicy.provider,
+        model: stateRef.current.routePolicy.model,
+        strategy: stateRef.current.routePolicy.strategy,
       });
-      dispatch({type: "status.set", value: "model picker ready"});
+      dispatch({type: "status.set", value: "route picker ready"});
+      return;
+    }
+    if (key.ctrl && input === "k") {
+      dispatch({type: "paneSwitcher.open"});
+      dispatch({type: "status.set", value: "pane switcher ready"});
       return;
     }
     if (key.ctrl && input === "e") {
@@ -1798,16 +2962,39 @@ export function App(): React.ReactElement {
       dispatch({type: "tab.activate", tabId: "runtime"});
       return;
     }
+    if (key.ctrl && input === "h") {
+      dispatch({type: "tab.activate", tabId: "thinking"});
+      return;
+    }
+    if (key.ctrl && input === "j") {
+      dispatch({type: "tab.activate", tabId: "tools"});
+      return;
+    }
+    if (key.ctrl && input === "n") {
+      dispatch({type: "tab.activate", tabId: "timeline"});
+      return;
+    }
+    if (key.ctrl && input === "u") {
+      dispatch({type: "activity.visibility.toggle"});
+      return;
+    }
+    if (key.ctrl && input === "i") {
+      dispatch({type: "activity.raw.toggle"});
+      return;
+    }
     if (input === "1") {
       dispatch({type: "sidebar.mode", mode: "toc"});
+      dispatch({type: "status.set", value: "sidebar -> toc"});
       return;
     }
     if (input === "2") {
       dispatch({type: "sidebar.mode", mode: "context"});
+      dispatch({type: "status.set", value: "sidebar -> context"});
       return;
     }
     if (input === "3") {
       dispatch({type: "sidebar.mode", mode: "help"});
+      dispatch({type: "status.set", value: "sidebar -> help"});
       return;
     }
     if (key.return) {
@@ -1826,30 +3013,44 @@ export function App(): React.ReactElement {
   return (
     <Box flexDirection="column">
       <ShellHeader
-        provider={state.provider}
-        model={state.model}
+        routePolicy={state.routePolicy}
         bridgeStatus={state.bridgeStatus}
         activeTitle={activeTab?.title ?? "Workspace"}
+        focusMode={focusModeFor(activeTab, state)}
+        activeCount={state.tabs.length}
+        compact={compactShell}
       />
-      <TabBar tabs={state.tabs} activeTabId={state.activeTabId} />
+      {!compactShell ? (
+        <OperatorSummaryBand items={operatorSummaryItems} compact={compactShell} />
+      ) : null}
+      <TabBar tabs={state.tabs} activeTabId={state.uiMode.activeTabId} compact={compactShell} />
+      {activeTab?.kind === "chat" && !compactShell ? <ScenicStrip /> : null}
       <Box marginTop={1}>
-        {state.sidebarVisible && !state.modelPickerVisible ? (
+        {state.uiMode.sidebarVisible && state.uiMode.activeOverlay.kind !== "modelPicker" && !compactShell ? (
           <Sidebar
-            mode={state.sidebarMode}
+            mode={state.uiMode.sidebarMode}
             outline={outline}
             activeTabTitle={activeTab?.title ?? "Workspace"}
-            provider={state.provider}
-            model={state.model}
+            provider={state.routePolicy.provider}
+            model={state.routePolicy.model}
             bridgeStatus={state.bridgeStatus}
             tabs={state.tabs}
             repoPreview={decorateSurfacePreview(state.liveRepoPreview, "repo", state.bridgeStatus, state.authoritativeSurfaces)}
             controlPreview={decorateSurfacePreview(state.liveControlPreview, "control", state.bridgeStatus, state.authoritativeSurfaces)}
+            compact={compactShell}
           />
         ) : null}
-        {state.modelPickerVisible ? (
+        {state.uiMode.activeOverlay.kind === "paneSwitcher" ? (
+          <PaneSwitcher
+            tabs={state.tabs}
+            selectedIndex={Math.min(state.uiMode.activeOverlay.selectedIndex, Math.max(state.tabs.length - 1, 0))}
+          />
+        ) : state.uiMode.activeOverlay.kind === "modelPicker" ? (
           <ModelPicker
             choices={modelChoices}
-            selectedIndex={Math.min(state.modelPickerIndex, Math.max(modelChoices.length - 1, 0))}
+            selectedIndex={Math.min(state.uiMode.activeOverlay.selectedIndex, Math.max(modelChoices.length - 1, 0))}
+            title="Model Picker"
+            compact={compactShell}
           />
         ) : activeTab?.kind === "repo" ? (
           <RepoPane
@@ -1859,7 +3060,8 @@ export function App(): React.ReactElement {
             controlLines={state.tabs.find((tab) => tab.id === "control")?.lines ?? []}
             lines={activeTab.lines}
             scrollOffset={activeScrollOffset}
-            windowSize={SCROLL_WINDOW_SIZE}
+            windowSize={paneWindowSize}
+            selectedSectionIndex={state.paneFocusIndices[activeTab.id] ?? 0}
           />
         ) : activeTab?.kind === "control" || activeTab?.kind === "runtime" ? (
           <ControlPane
@@ -1867,9 +3069,12 @@ export function App(): React.ReactElement {
             mode={activeTab.kind}
             preview={
               decorateSurfacePreview(
-                state.liveControlPreview ??
-                  activeTab.preview ??
-                  state.tabs.find((tab) => tab.id === "control")?.preview,
+                controlPanePreview(
+                  state.liveControlPreview ??
+                    activeTab.preview ??
+                    state.tabs.find((tab) => tab.id === "control")?.preview,
+                  state.liveRepoPreview ?? state.tabs.find((tab) => tab.id === "repo")?.preview,
+                ),
                 "control",
                 state.bridgeStatus,
                 state.authoritativeSurfaces,
@@ -1881,19 +3086,47 @@ export function App(): React.ReactElement {
                 : activeTab.lines
             }
             scrollOffset={activeScrollOffset}
-            windowSize={SCROLL_WINDOW_SIZE}
+            windowSize={paneWindowSize}
+            selectedSectionIndex={state.paneFocusIndices[activeTab.id] ?? 0}
+          />
+        ) : activeTab?.kind === "approvals" ? (
+          <ApprovalsPane title={activeTab.title} approvalPane={state.approvalPane} />
+        ) : activeTab?.kind === "sessions" ? (
+          <SessionsPane title={activeTab.title} sessionPane={state.sessionPane} />
+        ) : activeTab?.kind === "agents" ? (
+          <AgentsPane
+            title={activeTab.title}
+            lines={activeTab.lines}
+            selectedRouteIndex={state.paneFocusIndices[activeTab.id] ?? 0}
+          />
+        ) : activeTab?.kind === "thinking" || activeTab?.kind === "tools" || activeTab?.kind === "timeline" ? (
+          <ActivityPane
+            title={activeTab.title}
+            paneKind={activeTab.kind}
+            feed={state.activityFeed}
+            scrollOffset={activeScrollOffset}
+            windowSize={paneWindowSize}
           />
         ) : (
           <TranscriptPane
             title={activeTab?.title ?? "Workspace"}
-            lines={activeTab?.lines ?? []}
+            lines={displayedTranscriptLines}
             scrollOffset={activeScrollOffset}
-            windowSize={SCROLL_WINDOW_SIZE}
+            windowSize={paneWindowSize}
+            subtitle={transcriptMeta.subtitle}
+            emptyState={transcriptMeta.emptyState}
+            accentColor={transcriptMeta.accentColor}
           />
         )}
       </Box>
-      <Composer prompt={state.prompt} />
-      <StatusFooter statusLine={state.statusLine} footerHint={footerHintFor(activeTab?.id ?? "chat", state)} />
+      <Composer prompt={state.prompt} compact={compactShell} />
+      <StatusFooter
+        statusLine={state.statusLine}
+        routeSummary={routeSummary(state.routePolicy)}
+        focusMode={focusModeFor(activeTab, state)}
+        footerHint={footerHintFor(activeTab?.id ?? "chat", state, shellControlOptions, compactShell)}
+        compact={compactShell}
+      />
     </Box>
   );
 }
@@ -1903,19 +3136,26 @@ export function createInitialAppState(baseState: AppState): AppState {
   const restoredTabs = ensureRuntimeTabs(baseState.tabs);
   const bootRepoPreview = loadSupervisorRepoPreview();
   const bootControlPreview = loadSupervisorControlPreview();
-  const restoredRepoPreview = mergePreview(restoredTabs.find((tab) => tab.id === "repo")?.preview, bootRepoPreview ?? undefined);
-  const restoredControlPreview = mergePreview(restoredTabs.find((tab) => tab.id === "control")?.preview, bootControlPreview ?? undefined);
+  const restoredControlSurfacePreview = mergePreview(
+    restoredTabs.find((tab) => tab.id === "control")?.preview,
+    restoredTabs.find((tab) => tab.id === "runtime")?.preview,
+  );
+  const restoredControlPreview = mergePreview(restoredControlSurfacePreview, bootControlPreview ?? undefined);
+  const restoredRepoPreview = normalizeRepoPreview(
+    mergePreview(restoredTabs.find((tab) => tab.id === "repo")?.preview, bootRepoPreview ?? undefined),
+    restoredControlPreview,
+  );
   const bootRepoLines = restoredRepoPreview ? workspacePreviewToLines(restoredRepoPreview) : undefined;
   const bootControlLines = restoredControlPreview ? runtimePreviewToLines(restoredControlPreview) : undefined;
   const hydratedTabs = restoredTabs.map((tab) => {
-    if (tab.id === "repo" && restoredRepoPreview && (!tab.preview || tab.lines.length <= 2)) {
+    if (tab.id === "repo" && restoredRepoPreview) {
       return {
         ...tab,
         lines: bootRepoLines ?? tab.lines,
         preview: restoredRepoPreview,
       };
     }
-    if ((tab.id === "control" || tab.id === "runtime") && restoredControlPreview && (!tab.preview || tab.lines.length <= 3)) {
+    if ((tab.id === "control" || tab.id === "runtime") && restoredControlPreview) {
       return {
         ...tab,
         lines: bootControlLines ?? tab.lines,
@@ -1927,9 +3167,13 @@ export function createInitialAppState(baseState: AppState): AppState {
 
   return {
     ...baseState,
-    sidebarVisible: restored?.sidebarVisible ?? baseState.sidebarVisible,
-    sidebarMode: restored?.sidebarMode ?? baseState.sidebarMode,
-    activeTabId: baseState.activeTabId,
+    uiMode: {
+      ...baseState.uiMode,
+      sidebarVisible: restored?.sidebarVisible ?? baseState.uiMode.sidebarVisible,
+      sidebarMode: restored?.sidebarMode ?? baseState.uiMode.sidebarMode,
+      activeTabId: baseState.uiMode.activeTabId,
+      focusedPaneId: baseState.uiMode.focusedPaneId,
+    },
     paneScrollOffsets: baseState.paneScrollOffsets,
     tabs: hydratedTabs,
     liveRepoPreview: mergePreview(baseState.liveRepoPreview, restoredRepoPreview),

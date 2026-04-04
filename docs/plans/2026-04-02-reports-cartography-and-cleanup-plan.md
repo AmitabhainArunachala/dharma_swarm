@@ -26,6 +26,8 @@ connected_relevant_files:
 - docs/plans/2026-04-02-cleanup-control-center.md
 - docs/plans/2026-04-02-generated-artifact-control-center.md
 - docs/plans/2026-04-02-retained-generated-packet-families-preaudit.md
+- docs/plans/2026-04-03-verification-family-classification-preaudit.md
+- docs/plans/2026-04-03-verification-family-retention-policy.md
 - docs/GENERATED_ARTIFACT_BOUNDARY_MATRIX_2026-04-02.md
 - reports/generated/README.md
 - reports/historical/GODEL_CLAW_V1_REPORT.md
@@ -113,6 +115,7 @@ Examples:
 - `reports/historical/FULL_REPO_AUDIT_2026-03-28.md`
 - `reports/historical/GODEL_CLAW_V1_REPORT.md`
 - `reports/historical/CONSTITUTIONAL_XRAY_REPORT.md`
+- `reports/historical/neural_consolidation_live_run_2026-03-22.md`
 
 Meaning:
 
@@ -198,6 +201,11 @@ Recommended posture:
 - later split into:
   - authored verification manifests
   - generated probe outputs
+
+Current preaudit:
+
+- [2026-04-03-verification-family-classification-preaudit.md](/Users/dhyana/dharma_swarm/docs/plans/2026-04-03-verification-family-classification-preaudit.md)
+- [2026-04-03-verification-family-retention-policy.md](/Users/dhyana/dharma_swarm/docs/plans/2026-04-03-verification-family-retention-policy.md)
 
 ## Best Next Seam
 

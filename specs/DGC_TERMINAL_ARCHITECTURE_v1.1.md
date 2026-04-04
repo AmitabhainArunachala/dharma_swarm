@@ -1,3 +1,99 @@
+---
+title: DGC Terminal Interface — Definitive Component Architecture
+path: specs/DGC_TERMINAL_ARCHITECTURE_v1.1.md
+slug: dgc-terminal-interface-definitive-component-architecture
+doc_type: spec
+status: canonical
+summary: 'Version 1.1 provider-agnostic terminal architecture. This is the current governing DGC terminal spec and supersedes specs/DGC_TERMINAL_ARCHITECTURE.md.'
+source:
+  provenance: repo_local
+  kind: spec
+  origin_signals: []
+  cited_urls:
+  - https://api.openai.com/v1"
+  - https://openrouter.ai/api/v1"
+  - http://localhost:11434"
+  - http://internal-lab.local:8080/v1"
+  - https://code.claude.com/docs/en/cli-reference
+  generated_hint: human_or_agent_authored_repo_doc
+disciplines:
+- swarm_intelligence
+- multi_agent_systems
+- software_architecture
+- knowledge_management
+- research_methodology
+- verification
+inspiration:
+- stigmergy
+- verification
+- operator_runtime
+- research_synthesis
+connected_python_files:
+- tests/tui/test_session_state_canonical.py
+- dharma_swarm/tui/widgets/tool_call_card.py
+- tests/test_agent_memory_manager.py
+- tests/test_agent_runner_memory.py
+- tests/test_agent_runner_routing_feedback.py
+connected_python_modules:
+- tests.tui.test_session_state_canonical
+- dharma_swarm.tui.widgets.tool_call_card
+- tests.test_agent_memory_manager
+- tests.test_agent_runner_memory
+- tests.test_agent_runner_routing_feedback
+connected_relevant_files:
+- specs/DGC_TERMINAL_ARCHITECTURE.md
+- specs/README.md
+- tests/tui/test_session_state_canonical.py
+- dharma_swarm/tui/widgets/tool_call_card.py
+- tests/test_agent_memory_manager.py
+- tests/test_agent_runner_memory.py
+- tests/test_agent_runner_routing_feedback.py
+improvement:
+  room_for_improvement:
+  - Add implementation status per section so the spec separates aspiration from runtime truth.
+  - Attach acceptance criteria or invariants that can be tested.
+  - Link every major claim to the modules that implement or contradict it.
+  - Keep precedence over v1.0 explicit in citations and local indexes.
+  - Recheck this spec against the protected Bun TUI baseline before treating future terminal changes as normative.
+  next_review_at: '2026-04-05T12:00:00+09:00'
+pkm:
+  note_class: spec
+  vault_path: specs/DGC_TERMINAL_ARCHITECTURE_v1.1.md
+  retrieval_terms:
+  - specs
+  - dgc
+  - terminal
+  - architecture
+  - v1.1
+  - provider
+  - agnostic
+  - canonical
+  - supersedes v1.0
+  evergreen_potential: high
+stigmergy:
+  meaning: This file is the current governing DGC terminal architecture spec and should take precedence over the retained v1.0 baseline in citations and cleanup decisions.
+  state: canonical
+  semantic_weight: 0.86
+  coordination_comment: 'Current governing DGC terminal spec. Supersedes specs/DGC_TERMINAL_ARCHITECTURE.md.'
+  levels:
+    sematectonic:
+      what_it_is: The document itself is the mark. Its existence, filename, location, and revision history attract or repel future work.
+      access_mark: Opening, linking, and revising specs/DGC_TERMINAL_ARCHITECTURE_v1.1.md reinforces its salience without needing a separate message.
+    marker_based:
+      what_it_is: The frontmatter is an explicit annotation layer on top of the document.
+      semantic_mark: Semantic weight, improvement prompts, related files, and provenance comments tell later agents how to use this document.
+  trace_role: constraint_and_design_trace
+curation:
+  last_frontmatter_refresh: '2026-04-03T20:34:00+09:00'
+  curated_by_model: Codex (GPT-5)
+  source_model_in_file: 
+  future_model_handoffs:
+  - GPT-5 Codex
+  - Claude
+  - Gemini
+  - Local evaluator
+  schema_version: pkm-phd-stigmergy-v1
+---
 # DGC Terminal Interface — Definitive Component Architecture
 
 **Version:** 1.1 — Provider-Agnostic  
@@ -5,7 +101,9 @@
 **Baseline:** v1.0 (2026-03-05) — Claude-specific architecture  
 **Target:** Python Textual 8.0.2 + Any LLM provider (Claude, OpenAI, OpenRouter, Ollama, custom)  
 **Platform:** macOS M3 Pro, Python 3.14  
-**Status:** Architecture Blueprint — Ready for Implementation
+**Status:** Current governing terminal architecture spec
+
+This file supersedes `specs/DGC_TERMINAL_ARCHITECTURE.md`.
 
 ---
 

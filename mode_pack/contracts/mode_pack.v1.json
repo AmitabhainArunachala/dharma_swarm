@@ -9,6 +9,53 @@
   ],
   "modes": [
     {
+      "slug": "autonomous-build",
+      "title": "Autonomous Build",
+      "summary": "Run a bounded overnight cleanup or build lane with explicit stop conditions, hot-path exclusions, and tranche-by-tranche validation.",
+      "runtime_aliases": {
+        "claude_skill": "dharma-autonomous-build",
+        "codex_mode": "autonomous-build",
+        "dgc_lane": "autonomous_build",
+        "openclaw_profile": "autonomous_build"
+      },
+      "allowed_tools": [
+        "Read",
+        "Grep",
+        "Glob",
+        "Bash",
+        "Edit",
+        "Write"
+      ],
+      "required_outputs": [
+        "current_lane",
+        "tranche_completed",
+        "files_changed",
+        "validation_performed",
+        "residual_risks",
+        "next_bounded_seam"
+      ],
+      "required_artifacts": [
+        "lane_control_note",
+        "issue_log"
+      ],
+      "escalation_triggers": [
+        "hot-path collision",
+        "path-coupling uncertainty",
+        "merge-safety ambiguity",
+        "lane drift beyond bounded cleanup"
+      ],
+      "handoff_to": [
+        "preflight-review",
+        "retro"
+      ],
+      "non_goals": [
+        "broad repo-wide rewrites",
+        "TUI or dashboard product polish",
+        "claiming a lane is complete without validation",
+        "running forever without an explicit operator-owned boundary"
+      ]
+    },
+    {
       "slug": "ceo-review",
       "title": "CEO Review",
       "summary": "Reframe the problem around user value, commercial wedge, and product ambition before implementation starts.",

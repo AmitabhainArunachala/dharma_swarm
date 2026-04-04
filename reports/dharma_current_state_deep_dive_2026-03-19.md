@@ -1,3 +1,100 @@
+---
+title: DHARMA Current State Deep Dive
+path: reports/dharma_current_state_deep_dive_2026-03-19.md
+slug: dharma-current-state-deep-dive
+doc_type: report
+status: active
+summary: 'Date: 2026-03-19 Scope: forensic review of the canonical /Users/dhyana/dharma swarm repo before the next build phase Method: local code inspection, repo xray output, test inventory, and prior ecosystem comparison agai...'
+source:
+  provenance: repo_local
+  kind: report
+  origin_signals:
+  - dharma_swarm/dgc_cli.py
+  - dharma_swarm/runtime_state.py
+  - dharma_swarm/operator_bridge.py
+  - dharma_swarm/operator_views.py
+  - dharma_swarm/message_bus.py
+  cited_urls: []
+  generated_hint: human_or_agent_authored_repo_doc
+disciplines:
+- swarm_intelligence
+- multi_agent_systems
+- software_architecture
+- knowledge_management
+- research_methodology
+- verification
+inspiration:
+- stigmergy
+- verification
+- operator_runtime
+- product_surface
+- research_synthesis
+connected_python_files:
+- dharma_swarm/dgc_cli.py
+- dharma_swarm/runtime_state.py
+- dharma_swarm/operator_bridge.py
+- dharma_swarm/operator_views.py
+- dharma_swarm/message_bus.py
+connected_python_modules:
+- dharma_swarm.dgc_cli
+- dharma_swarm.runtime_state
+- dharma_swarm.operator_bridge
+- dharma_swarm.operator_views
+- dharma_swarm.message_bus
+connected_relevant_files:
+- dharma_swarm/dgc_cli.py
+- dharma_swarm/runtime_state.py
+- dharma_swarm/operator_bridge.py
+- dharma_swarm/operator_views.py
+- dharma_swarm/message_bus.py
+improvement:
+  room_for_improvement:
+  - 'Surface the decision delta: what should change now because this report exists.'
+  - Link findings to exact code, tests, or commits where possible.
+  - Distinguish measured facts from operator interpretation.
+  - Review whether this file should stay in `reports` or be consolidated elsewhere.
+  next_review_at: '2026-04-01T00:43:19+09:00'
+pkm:
+  note_class: report
+  vault_path: reports/dharma_current_state_deep_dive_2026-03-19.md
+  retrieval_terms:
+  - reports
+  - current
+  - state
+  - deep
+  - dive
+  - '2026'
+  - date
+  - scope
+  - forensic
+  - review
+  - canonical
+  - users
+  evergreen_potential: medium
+stigmergy:
+  meaning: This file is a shared environmental trace in the DHARMA corpus. Its path, recency, and linked surfaces guide future agent attention; its frontmatter now adds machine-readable coordination cues.
+  state: working
+  semantic_weight: 0.6
+  coordination_comment: 'Date: 2026-03-19 Scope: forensic review of the canonical /Users/dhyana/dharma swarm repo before the next build phase Method: local code inspection, repo xray output, test inventory, and prior ecosystem comparison agai...'
+  levels:
+    sematectonic:
+      what_it_is: The document itself is the mark. Its existence, filename, location, and revision history attract or repel future work.
+      access_mark: Opening, linking, and revising reports/dharma_current_state_deep_dive_2026-03-19.md reinforces its salience without needing a separate message.
+    marker_based:
+      what_it_is: The frontmatter is an explicit annotation layer on top of the document.
+      semantic_mark: Semantic weight, improvement prompts, related files, and provenance comments tell later agents how to use this document.
+  trace_role: diagnostic_or_evidence_trace
+curation:
+  last_frontmatter_refresh: '2026-04-01T00:43:19+09:00'
+  curated_by_model: Codex (GPT-5)
+  source_model_in_file: 
+  future_model_handoffs:
+  - GPT-5 Codex
+  - Claude
+  - Gemini
+  - Local evaluator
+  schema_version: pkm-phd-stigmergy-v1
+---
 # DHARMA Current State Deep Dive
 
 Date: 2026-03-19
@@ -221,7 +318,7 @@ The repo contains several documents with master-spec energy, but they do not all
 Observed pattern:
 
 - `SWARMLENS_MASTER_SPEC.md` is ambitious but product/venture heavy
-- `docs/DHARMA_SWARM_THREE_PLANE_ARCHITECTURE_2026-03-16.md` is closer to the right operational doctrine
+- `docs/architecture/DHARMA_SWARM_THREE_PLANE_ARCHITECTURE_2026-03-16.md` is closer to the right operational doctrine
 - `specs/KERNEL_CORE_SPEC.md` defines philosophical/telos invariants
 - `docs/README.md` and merge docs introduce additional framing layers
 

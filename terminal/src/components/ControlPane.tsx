@@ -1,15 +1,39 @@
 import React from "react";
+import path from "node:path";
 import {Box, Text} from "ink";
 
-import type {TabPreview, TranscriptLine} from "../types.js";
-import {buildVerificationSummaryRows, isGenericVerificationLabel, parseVerificationBundle} from "../verification.js";
+import type {TabPreview, TranscriptLine} from "../types";
+import {parseControlPulsePreview, parseRuntimeFreshness} from "../freshness";
+import {parseRepoControlPreview} from "../repoControlPreview";
+import {buildVerificationSummaryRows, isGenericVerificationLabel, resolveVerificationEntries} from "../verification";
+import {THEME} from "../theme";
 
 type ControlSection = {
   title: string;
   rows: string[];
 };
 
+type DetailRow = {
+  value: string;
+  tone?: "strong" | "muted";
+};
+
+type SignalTone = "strong" | "warning" | "muted";
+
+type SignalRow = {
+  value: string;
+  tone: SignalTone;
+};
+
+type SectionPreviewPreference = {
+  title: string;
+  prefixes: string[];
+};
+
 const STRUCTURED_CONTROL_LABELS = [
+  "Repo/control preview",
+  "Control pulse preview",
+  "Runtime freshness",
   "Loop state",
   "Task progress",
   "Active task",
@@ -33,6 +57,8 @@ const STRUCTURED_CONTROL_LABELS = [
   "Verification passing",
   "Verification failing",
   "Verification bundle",
+  "Verification receipt",
+  "Verification updated",
   "Last result",
   "Next task",
   "Durable state",
@@ -45,7 +71,15 @@ type Props = {
   lines: TranscriptLine[];
   scrollOffset?: number;
   windowSize?: number;
+  selectedSectionIndex?: number;
 };
+
+function clampSectionIndex(index: number, sections: ControlSection[]): number {
+  if (sections.length === 0) {
+    return 0;
+  }
+  return Math.min(Math.max(index, 0), sections.length - 1);
+}
 
 function previewValue(preview: TabPreview | undefined, lines: TranscriptLine[], label: string): string {
   const value = preview?.[label];
@@ -54,18 +88,305 @@ function previewValue(preview: TabPreview | undefined, lines: TranscriptLine[], 
   }
   const match = lines.find((line) => line.text.startsWith(`${label}: `));
   if (!match) {
-    return "n/a";
+    return repoControlFallbackValue(preview, label);
   }
   return match.text.slice(label.length + 2).trim();
+}
+
+function repoControlFallbackValue(preview: TabPreview | undefined, label: string): string {
+  const parsed = parseRepoControlPreview(preview);
+  if (!parsed) {
+    return "n/a";
+  }
+
+  switch (label) {
+    case "Loop state":
+      return parsed.loopState;
+    case "Active task":
+      return parsed.task;
+    case "Task progress":
+      return parsed.taskProgress;
+    case "Result status":
+      return parsed.resultStatus;
+    case "Acceptance":
+      return parsed.acceptance;
+    case "Loop decision":
+      return parsed.loopDecision;
+    case "Updated":
+      return parsed.updated;
+    case "Runtime DB":
+      return parsed.runtimeDb;
+    case "Runtime activity":
+      return parsed.runtimeActivity;
+    case "Artifact state":
+      return parsed.artifactState;
+    case "Verification bundle":
+    case "Verification summary":
+      return parsed.verificationBundle;
+    case "Verification checks": {
+      const bundle = resolveVerificationEntries({bundleText: parsed.verificationBundle});
+      return bundle.length > 0 ? bundle.map((entry) => `${entry.name} ${entry.ok ? "ok" : "fail"}`).join("; ") : "n/a";
+    }
+    case "Runtime freshness":
+      return [parsed.loopState, `updated ${parsed.updated}`, `verify ${parsed.verificationBundle}`]
+        .filter((value) => value !== "n/a" && value !== "none")
+        .join(" | ") || "n/a";
+    case "Last result":
+      return [parsed.resultStatus, parsed.acceptance].every((value) => value !== "n/a" && value !== "none")
+        ? `${parsed.resultStatus} / ${parsed.acceptance}`
+        : "n/a";
+    case "Control pulse preview":
+      return [
+        parsed.freshness,
+        repoControlFallbackValue(preview, "Last result"),
+        repoControlFallbackValue(preview, "Runtime freshness"),
+      ]
+        .filter((value) => value !== "n/a" && value !== "none")
+        .join(" | ") || "n/a";
+    case "Next task":
+      return parsed.nextTask;
+    default:
+      return "n/a";
+  }
+}
+
+function isPlaceholderValue(value: string): boolean {
+  return value === "n/a" || value === "none" || value === "unknown";
+}
+
+function derivedRuntimeFreshness(preview: TabPreview | undefined, lines: TranscriptLine[]): string {
+  const explicit = previewValue(preview, lines, "Runtime freshness");
+  if (!isPlaceholderValue(explicit)) {
+    return explicit;
+  }
+
+  return parseControlPulsePreview(previewValue(preview, lines, "Control pulse preview")).runtimeFreshness ?? "n/a";
+}
+
+function derivedLoopState(preview: TabPreview | undefined, lines: TranscriptLine[]): string {
+  const explicit = previewValue(preview, lines, "Loop state");
+  if (!isPlaceholderValue(explicit)) {
+    return explicit;
+  }
+
+  return parseRuntimeFreshness(derivedRuntimeFreshness(preview, lines)).loopState ?? "n/a";
+}
+
+function derivedUpdated(preview: TabPreview | undefined, lines: TranscriptLine[]): string {
+  const explicit = previewValue(preview, lines, "Updated");
+  if (!isPlaceholderValue(explicit)) {
+    return explicit;
+  }
+
+  return parseRuntimeFreshness(derivedRuntimeFreshness(preview, lines)).updated ?? "n/a";
+}
+
+function derivedFreshness(preview: TabPreview | undefined, lines: TranscriptLine[]): string {
+  const freshness = parseControlPulsePreview(previewValue(preview, lines, "Control pulse preview")).freshness;
+  return freshness && !isPlaceholderValue(freshness) ? freshness : "n/a";
+}
+
+function derivedLastResult(preview: TabPreview | undefined, lines: TranscriptLine[]): string {
+  const explicit = previewValue(preview, lines, "Last result");
+  if (!isPlaceholderValue(explicit)) {
+    return explicit;
+  }
+
+  return parseControlPulsePreview(previewValue(preview, lines, "Control pulse preview")).lastResult ?? "n/a";
+}
+
+function derivedResultParts(preview: TabPreview | undefined, lines: TranscriptLine[]): {status?: string; acceptance?: string} {
+  const lastResult = derivedLastResult(preview, lines);
+  if (lastResult === "n/a" || lastResult === "none") {
+    return {};
+  }
+  const [status, acceptance] = lastResult.split("/").map((part) => part.trim());
+  return {
+    ...(status ? {status} : {}),
+    ...(acceptance ? {acceptance} : {}),
+  };
+}
+
+function derivedResultStatus(preview: TabPreview | undefined, lines: TranscriptLine[]): string {
+  const explicit = previewValue(preview, lines, "Result status");
+  if (!isPlaceholderValue(explicit)) {
+    return explicit;
+  }
+
+  return derivedResultParts(preview, lines).status ?? "n/a";
+}
+
+function derivedAcceptance(preview: TabPreview | undefined, lines: TranscriptLine[]): string {
+  const explicit = previewValue(preview, lines, "Acceptance");
+  if (!isPlaceholderValue(explicit)) {
+    return explicit;
+  }
+
+  return derivedResultParts(preview, lines).acceptance ?? "n/a";
+}
+
+function derivedVerificationInputs(preview: TabPreview | undefined, lines: TranscriptLine[]): {
+  summary: string;
+  checks: string;
+  bundleLabel: string;
+} {
+  const explicitSummary = previewValue(preview, lines, "Verification summary");
+  const explicitChecks = previewValue(preview, lines, "Verification checks");
+  const explicitBundle = previewValue(preview, lines, "Verification bundle");
+  const explicitPassing = previewValue(preview, lines, "Verification passing");
+  const explicitFailing = previewValue(preview, lines, "Verification failing");
+  const compactBundle = parseRuntimeFreshness(derivedRuntimeFreshness(preview, lines)).verificationBundle ?? "n/a";
+  const bundleFallback = !isPlaceholderValue(explicitBundle) ? explicitBundle : compactBundle;
+  const derivedEntries = resolveVerificationEntries({
+    checksText: !isPlaceholderValue(explicitChecks) ? explicitChecks : "",
+    summaryText: !isPlaceholderValue(explicitSummary) ? explicitSummary : "",
+    bundleText: !isPlaceholderValue(bundleFallback) ? bundleFallback : "",
+    passingText: !isPlaceholderValue(explicitPassing) ? explicitPassing : "",
+    failingText: !isPlaceholderValue(explicitFailing) ? explicitFailing : "",
+  });
+  const derivedChecksFromBundle = derivedEntries
+    .map((entry) => `${entry.name} ${entry.ok ? "ok" : "fail"}`)
+    .join("; ");
+
+  return {
+    summary: !isPlaceholderValue(explicitSummary) ? explicitSummary : bundleFallback,
+    checks: !isPlaceholderValue(explicitChecks) ? explicitChecks : derivedChecksFromBundle || "n/a",
+    bundleLabel: bundleFallback,
+  };
 }
 
 function hasSignal(value: string): boolean {
   return value !== "n/a" && value !== "none" && value !== "unknown";
 }
 
+function isPlaceholderAuthorityRow(value: string): boolean {
+  return /^Authority placeholder\s+\|/i.test(value);
+}
+
+function authorityOverviewRows(preview: TabPreview | undefined, lines: TranscriptLine[], bodyRows: string[]): string[] {
+  const authority = previewValue(preview, lines, "Authority");
+  if (!hasSignal(authority)) {
+    return [];
+  }
+  if (isPlaceholderAuthorityRow(`Authority ${authority}`) && bodyRows.length > 0) {
+    return [];
+  }
+  return [`Authority ${authority}`];
+}
+
+const SECTION_PREVIEW_PREFERENCES: SectionPreviewPreference[] = [
+  {title: "Overview", prefixes: ["Loop ", "Verification ", "Freshness ", "Outcome ", "Pulse ", "Runtime ", "Context ", "Decision ", "State "]},
+  {title: "Loop", prefixes: ["State ", "Task ", "Outcome ", "Freshness ", "Decision ", "Updated "]},
+  {title: "Runtime", prefixes: ["DB ", "Sessions ", "Runs ", "Active ", "Context ", "Actions ", "Activity ", "Artifacts ", "Summary "]},
+  {title: "Verification", prefixes: ["Verification ", "Receipt ", "Updated ", "Freshness ", "Status ", "Failing ", "Passing ", "Summary ", "Bundle ", "Last "]},
+  {title: "Durability", prefixes: ["State ", "Receipt ", "Truth ", "Pulse "]},
+  {title: "Tools", prefixes: ["Toolchain ", "Alerts "]},
+  {title: "Next", prefixes: ["Decision ", "Freshness ", "Task ", "State "]},
+];
+
+function matchingSectionPreviewPreference(title: string): SectionPreviewPreference | undefined {
+  return SECTION_PREVIEW_PREFERENCES.find((preference) => preference.title === title);
+}
+
+export function sectionCardPreviewRows(section: ControlSection, maxRows = 2): string[] {
+  const candidates = section.rows.filter((row) => !isPlaceholderAuthorityRow(row));
+  const rows = candidates.length > 0 ? candidates : section.rows;
+  if (rows.length <= maxRows) {
+    return rows.slice(0, maxRows);
+  }
+
+  const preference = matchingSectionPreviewPreference(section.title);
+  if (!preference) {
+    return rows.slice(0, maxRows);
+  }
+
+  const selected: string[] = [];
+  for (const prefix of preference.prefixes) {
+    const match = rows.find((row) => row.startsWith(prefix) && !selected.includes(row));
+    if (match) {
+      selected.push(match);
+    }
+    if (selected.length >= maxRows) {
+      return selected;
+    }
+  }
+
+  for (const row of rows) {
+    if (!selected.includes(row)) {
+      selected.push(row);
+    }
+    if (selected.length >= maxRows) {
+      break;
+    }
+  }
+
+  return selected;
+}
+
 function runtimeSummaryRow(preview: TabPreview | undefined, lines: TranscriptLine[]): string {
   const explicit = previewValue(preview, lines, "Runtime summary");
   return hasSignal(explicit) ? `Runtime ${explicit}` : "Runtime unknown";
+}
+
+function primaryRuntimeSignalFragment(value: string): string {
+  if (!hasSignal(value)) {
+    return "";
+  }
+  return value
+    .split("|")
+    .map((part) => part.trim())
+    .find((part) => part.length > 0) ?? "";
+}
+
+function runtimeOverviewRow(preview: TabPreview | undefined, lines: TranscriptLine[]): string {
+  const runtimeActivity = parseRuntimeMetrics(previewValue(preview, lines, "Runtime activity"));
+  if (Object.keys(runtimeActivity).length > 0) {
+    return `Runtime ${[
+      metricFragment(runtimeActivity, "Sessions", "sessions"),
+      metricFragment(runtimeActivity, "Runs", "runs"),
+      nonZeroMetricFragment(runtimeActivity, "ActiveRuns", "active runs"),
+      nonZeroMetricFragment(runtimeActivity, "ActiveClaims", "active claims"),
+    ]
+      .filter((value) => value.length > 0)
+      .join(" | ")}`;
+  }
+  const derivedFragments = [
+    primaryRuntimeSignalFragment(previewValue(preview, lines, "Session state")),
+    primaryRuntimeSignalFragment(previewValue(preview, lines, "Run state")),
+    primaryRuntimeSignalFragment(previewValue(preview, lines, "Context state")),
+  ].filter((value) => value.length > 0);
+  if (derivedFragments.length > 0) {
+    return `Runtime ${derivedFragments.join(" | ")}`;
+  }
+  return runtimeSummaryRow(preview, lines);
+}
+
+function signalTaskContextRow(
+  mode: "control" | "runtime",
+  activeTask: string,
+  taskProgress: string,
+  nextTask: string,
+): string {
+  const parts: string[] = [];
+  const taskSummary = [activeTask, taskProgress].filter(hasSignal).join(" | ");
+  if (taskSummary.length > 0) {
+    parts.push(`Task ${taskSummary}`);
+  }
+  if (hasSignal(nextTask)) {
+    parts.push(`${taskSummary.length > 0 || mode === "control" ? "Next" : "Task"} ${nextTask}`);
+  }
+  return parts.join(" | ");
+}
+
+function signalDurabilityRow(verificationReceipt: string, durableState: string): string {
+  const parts: string[] = [];
+  if (hasSignal(verificationReceipt)) {
+    parts.push(`Receipt ${verificationReceipt}`);
+  }
+  if (hasSignal(durableState)) {
+    parts.push(`State ${durableState}`);
+  }
+  return parts.join(" | ");
 }
 
 function buildControlPulseRow(preview: TabPreview | undefined, lines: TranscriptLine[]): string {
@@ -74,8 +395,8 @@ function buildControlPulseRow(preview: TabPreview | undefined, lines: Transcript
     return `Pulse ${explicit}`;
   }
 
-  const lastResult = previewValue(preview, lines, "Last result");
-  const runtimeFreshness = previewValue(preview, lines, "Runtime freshness");
+  const lastResult = derivedLastResult(preview, lines);
+  const runtimeFreshness = derivedRuntimeFreshness(preview, lines);
   const parts = [lastResult, runtimeFreshness].filter((value) => value !== "n/a" && value !== "none");
   return parts.length > 0 ? `Pulse ${parts.join(" | ")}` : "Pulse unknown";
 }
@@ -116,7 +437,7 @@ function runtimeRow(
   formatter: (metrics: Record<string, string>) => string,
 ): string {
   const explicit = previewValue(preview, lines, label);
-  if (explicit !== "n/a" && explicit !== "none") {
+  if (!isPlaceholderValue(explicit)) {
     return `${fallbackLabel} ${explicit}`;
   }
   const metrics = parseRuntimeMetrics(previewValue(preview, lines, label === "Context state" ? "Artifact state" : "Runtime activity"));
@@ -129,7 +450,7 @@ function hasStructuredControlState(preview: TabPreview | undefined, lines: Trans
       const value = preview[label];
       return typeof value === "string" && hasSignal(value);
     });
-    if (previewHasStructuredSignal) {
+    if (previewHasStructuredSignal || parseRepoControlPreview(preview)) {
       return true;
     }
   }
@@ -138,10 +459,14 @@ function hasStructuredControlState(preview: TabPreview | undefined, lines: Trans
 
 function verificationStatusRow(preview: TabPreview | undefined, lines: TranscriptLine[]): string {
   const explicit = previewValue(preview, lines, "Verification status");
-  const bundle = parseVerificationBundle(
-    previewValue(preview, lines, "Verification checks"),
-    previewValue(preview, lines, "Verification summary"),
-  );
+  const verification = derivedVerificationInputs(preview, lines);
+  const bundle = resolveVerificationEntries({
+    checksText: verification.checks,
+    summaryText: verification.summary,
+    bundleText: verification.bundleLabel,
+    passingText: previewValue(preview, lines, "Verification passing"),
+    failingText: previewValue(preview, lines, "Verification failing"),
+  });
   if (explicit !== "n/a" && explicit !== "none" && (!isGenericVerificationLabel(explicit) || bundle.length === 0)) {
     return `Status ${explicit}`;
   }
@@ -154,10 +479,14 @@ function verificationStatusRow(preview: TabPreview | undefined, lines: Transcrip
 
 function verificationPassingRow(preview: TabPreview | undefined, lines: TranscriptLine[]): string {
   const explicit = previewValue(preview, lines, "Verification passing");
-  const bundle = parseVerificationBundle(
-    previewValue(preview, lines, "Verification checks"),
-    previewValue(preview, lines, "Verification summary"),
-  );
+  const verification = derivedVerificationInputs(preview, lines);
+  const bundle = resolveVerificationEntries({
+    checksText: verification.checks,
+    summaryText: verification.summary,
+    bundleText: verification.bundleLabel,
+    passingText: explicit,
+    failingText: previewValue(preview, lines, "Verification failing"),
+  });
   if (explicit !== "n/a" && explicit !== "none" && (!isGenericVerificationLabel(explicit) || bundle.length === 0)) {
     return `Passing ${explicit}`;
   }
@@ -169,10 +498,14 @@ function verificationPassingRow(preview: TabPreview | undefined, lines: Transcri
 
 function verificationFailingRow(preview: TabPreview | undefined, lines: TranscriptLine[]): string {
   const explicit = previewValue(preview, lines, "Verification failing");
-  const bundle = parseVerificationBundle(
-    previewValue(preview, lines, "Verification checks"),
-    previewValue(preview, lines, "Verification summary"),
-  );
+  const verification = derivedVerificationInputs(preview, lines);
+  const bundle = resolveVerificationEntries({
+    checksText: verification.checks,
+    summaryText: verification.summary,
+    bundleText: verification.bundleLabel,
+    passingText: previewValue(preview, lines, "Verification passing"),
+    failingText: explicit,
+  });
   if (explicit !== "n/a" && explicit !== "none" && (!isGenericVerificationLabel(explicit) || bundle.length === 0)) {
     return `Failing ${explicit}`;
   }
@@ -183,23 +516,51 @@ function verificationFailingRow(preview: TabPreview | undefined, lines: Transcri
 }
 
 function verificationBundleRow(preview: TabPreview | undefined, lines: TranscriptLine[]): string {
-  const explicit = previewValue(preview, lines, "Verification bundle");
+  const verification = derivedVerificationInputs(preview, lines);
+  const explicit = verification.bundleLabel;
   if (explicit !== "n/a" && explicit !== "none" && !isGenericVerificationLabel(explicit)) {
     return `Bundle ${explicit}`;
   }
-  const bundle = parseVerificationBundle(
-    previewValue(preview, lines, "Verification checks"),
-    previewValue(preview, lines, "Verification summary"),
-  );
+  const bundle = resolveVerificationEntries({
+    checksText: verification.checks,
+    summaryText: verification.summary,
+    bundleText: explicit,
+    passingText: previewValue(preview, lines, "Verification passing"),
+    failingText: previewValue(preview, lines, "Verification failing"),
+  });
   return `Bundle ${buildVerificationSummaryRows(bundle).bundle}`;
 }
 
+function verificationChecksRow(preview: TabPreview | undefined, lines: TranscriptLine[]): string {
+  const verification = derivedVerificationInputs(preview, lines);
+  const explicit = verification.checks;
+  if (explicit !== "n/a" && explicit !== "none" && !isGenericVerificationLabel(explicit)) {
+    return `Checks ${explicit}`;
+  }
+
+  const bundle = resolveVerificationEntries({
+    checksText: verification.checks,
+    summaryText: verification.summary,
+    bundleText: verification.bundleLabel,
+    passingText: previewValue(preview, lines, "Verification passing"),
+    failingText: previewValue(preview, lines, "Verification failing"),
+  });
+  if (bundle.length === 0) {
+    return "Checks unknown";
+  }
+  return `Checks ${bundle.map((entry) => `${entry.name} ${entry.ok ? "ok" : "fail"}`).join("; ")}`;
+}
+
 function verificationSummaryRow(preview: TabPreview | undefined, lines: TranscriptLine[]): string {
-  const explicit = previewValue(preview, lines, "Verification summary");
-  const bundle = parseVerificationBundle(
-    previewValue(preview, lines, "Verification checks"),
-    explicit,
-  );
+  const verification = derivedVerificationInputs(preview, lines);
+  const explicit = verification.summary;
+  const bundle = resolveVerificationEntries({
+    checksText: verification.checks,
+    summaryText: explicit,
+    bundleText: verification.bundleLabel,
+    passingText: previewValue(preview, lines, "Verification passing"),
+    failingText: previewValue(preview, lines, "Verification failing"),
+  });
   if (explicit !== "n/a" && explicit !== "none" && (!isGenericVerificationLabel(explicit) || bundle.length === 0)) {
     return `Summary ${explicit}`;
   }
@@ -207,6 +568,43 @@ function verificationSummaryRow(preview: TabPreview | undefined, lines: Transcri
     return `Summary ${buildVerificationSummaryRows(bundle).bundle}`;
   }
   return "Summary unknown";
+}
+
+function verificationUpdatedRow(preview: TabPreview | undefined, lines: TranscriptLine[]): string {
+  const verification = derivedVerificationInputs(preview, lines);
+  const updated = previewValue(preview, lines, "Verification updated");
+  const fallbackUpdated = derivedUpdated(preview, lines);
+  const effectiveUpdated = hasSignal(updated)
+    ? updated
+    : resolveVerificationEntries({
+          checksText: verification.checks,
+          summaryText: verification.summary,
+          bundleText: verification.bundleLabel,
+          passingText: previewValue(preview, lines, "Verification passing"),
+          failingText: previewValue(preview, lines, "Verification failing"),
+        }).length > 0
+      ? fallbackUpdated
+      : "unknown";
+  return hasSignal(effectiveUpdated) ? `Updated ${effectiveUpdated}` : "Updated unknown";
+}
+
+function derivedVerificationReceipt(preview: TabPreview | undefined, lines: TranscriptLine[]): string {
+  const explicitReceipt = previewValue(preview, lines, "Verification receipt");
+  const durableState = previewValue(preview, lines, "Durable state");
+  return hasSignal(explicitReceipt)
+    ? explicitReceipt
+    : hasSignal(durableState)
+      ? path.join(durableState, "verification.json")
+      : "unknown";
+}
+
+function verificationReceiptRow(preview: TabPreview | undefined, lines: TranscriptLine[]): string {
+  const receipt = derivedVerificationReceipt(preview, lines);
+  const updated = verificationUpdatedRow(preview, lines).replace(/^Updated\s+/, "");
+  if (hasSignal(receipt)) {
+    return hasSignal(updated) ? `Receipt ${receipt} | updated ${updated}` : `Receipt ${receipt}`;
+  }
+  return "Receipt unknown";
 }
 
 function verificationOverviewRow(preview: TabPreview | undefined, lines: TranscriptLine[]): string {
@@ -218,15 +616,66 @@ function verificationOverviewRow(preview: TabPreview | undefined, lines: Transcr
   return failing !== "unknown" && failing !== "none" ? `Verification ${status} | failing ${failing}` : `Verification ${status}`;
 }
 
+function verificationSignalRow(preview: TabPreview | undefined, lines: TranscriptLine[]): string {
+  const overview = verificationOverviewRow(preview, lines);
+  if (overview === "Verification unknown") {
+    return overview;
+  }
+  const updated = verificationUpdatedRow(preview, lines).replace(/^Updated\s+/, "");
+  return hasSignal(updated) ? `${overview} | updated ${updated}` : overview;
+}
+
+function freshnessRow(preview: TabPreview | undefined, lines: TranscriptLine[]): string {
+  const freshness = derivedFreshness(preview, lines);
+  return hasSignal(freshness) ? `Freshness ${freshness}` : "Freshness unknown";
+}
+
+function loopVerificationRow(preview: TabPreview | undefined, lines: TranscriptLine[]): string {
+  const verification = verificationOverviewRow(preview, lines);
+  return verification === "Verification unknown" ? "Verify unknown" : verification.replace(/^Verification\s+/, "Verify ");
+}
+
+function decisionSummaryRow(preview: TabPreview | undefined, lines: TranscriptLine[]): string {
+  const loopDecision = previewValue(preview, lines, "Loop decision");
+  const nextTask = previewValue(preview, lines, "Next task");
+  const parts = [loopDecision, nextTask].filter(hasSignal);
+  return parts.length > 0 ? `Decision ${parts.join(" | ")}` : "Decision unknown";
+}
+
+function durabilitySectionRows(preview: TabPreview | undefined, lines: TranscriptLine[]): string[] {
+  const rows: string[] = [];
+  const durableState = previewValue(preview, lines, "Durable state");
+  const receipt = verificationReceiptRow(preview, lines);
+  const truth = previewValue(preview, lines, "Control truth preview");
+  const pulse = buildControlPulseRow(preview, lines);
+
+  if (hasSignal(durableState)) {
+    rows.push(`State ${durableState}`);
+  }
+  if (!/\sunknown$/.test(receipt)) {
+    rows.push(receipt);
+  }
+  if (hasSignal(truth)) {
+    rows.push(`Truth ${truth}`);
+  }
+  if (rows.length > 0 && !/\sunknown$/.test(pulse)) {
+    rows.push(pulse);
+  }
+
+  return rows;
+}
+
 function loopSectionRows(preview: TabPreview | undefined, lines: TranscriptLine[]): string[] {
   const rows: string[] = [];
-  const loopState = previewValue(preview, lines, "Loop state");
+  const loopState = derivedLoopState(preview, lines);
   const activeTask = previewValue(preview, lines, "Active task");
   const taskProgress = previewValue(preview, lines, "Task progress");
-  const resultStatus = previewValue(preview, lines, "Result status");
-  const acceptance = previewValue(preview, lines, "Acceptance");
+  const resultStatus = derivedResultStatus(preview, lines);
+  const acceptance = derivedAcceptance(preview, lines);
+  const verification = loopVerificationRow(preview, lines);
+  const freshness = derivedFreshness(preview, lines);
   const loopDecision = previewValue(preview, lines, "Loop decision");
-  const updated = previewValue(preview, lines, "Updated");
+  const updated = derivedUpdated(preview, lines);
 
   if (hasSignal(loopState)) {
     rows.push(`State ${loopState}`);
@@ -236,6 +685,12 @@ function loopSectionRows(preview: TabPreview | undefined, lines: TranscriptLine[
   }
   if (hasSignal(resultStatus) || hasSignal(acceptance)) {
     rows.push(`Outcome ${resultStatus} | accept ${acceptance}`);
+  }
+  if (verification !== "Verify unknown") {
+    rows.push(verification);
+  }
+  if (hasSignal(freshness)) {
+    rows.push(`Freshness ${freshness}`);
   }
   if (hasSignal(loopDecision)) {
     rows.push(`Decision ${loopDecision}`);
@@ -249,18 +704,18 @@ function loopSectionRows(preview: TabPreview | undefined, lines: TranscriptLine[
 
 function overviewSectionRows(preview: TabPreview | undefined, lines: TranscriptLine[]): string[] {
   const rows: string[] = [];
-  const loopState = previewValue(preview, lines, "Loop state");
+  const loopState = derivedLoopState(preview, lines);
   const taskProgress = previewValue(preview, lines, "Task progress");
   const activeTask = previewValue(preview, lines, "Active task");
   const controlPulse = buildControlPulseRow(preview, lines);
-  const resultStatus = previewValue(preview, lines, "Result status");
-  const acceptance = previewValue(preview, lines, "Acceptance");
+  const resultStatus = derivedResultStatus(preview, lines);
+  const acceptance = derivedAcceptance(preview, lines);
+  const freshness = derivedFreshness(preview, lines);
   const runtimeActivity = parseRuntimeMetrics(previewValue(preview, lines, "Runtime activity"));
   const artifactState = parseRuntimeMetrics(previewValue(preview, lines, "Artifact state"));
   const contextState = previewValue(preview, lines, "Context state");
   const verification = verificationOverviewRow(preview, lines);
-  const loopDecision = previewValue(preview, lines, "Loop decision");
-  const nextTask = previewValue(preview, lines, "Next task");
+  const decisionSummary = decisionSummaryRow(preview, lines);
   const durableState = previewValue(preview, lines, "Durable state");
 
   if (hasSignal(loopState) || hasSignal(taskProgress) || hasSignal(activeTask)) {
@@ -274,6 +729,9 @@ function overviewSectionRows(preview: TabPreview | undefined, lines: TranscriptL
   }
   if (verification !== "Verification unknown") {
     rows.push(verification);
+  }
+  if (hasSignal(freshness)) {
+    rows.push(`Freshness ${freshness}`);
   }
   if (Object.keys(runtimeActivity).length > 0) {
     rows.push(
@@ -306,8 +764,8 @@ function overviewSectionRows(preview: TabPreview | undefined, lines: TranscriptL
         .join(" | ")}`,
     );
   }
-  if (hasSignal(loopDecision) || hasSignal(nextTask)) {
-    rows.push(`Decision ${[loopDecision, nextTask].filter(hasSignal).join(" | ")}`);
+  if (decisionSummary !== "Decision unknown") {
+    rows.push(decisionSummary);
   }
   if (hasSignal(durableState)) {
     rows.push(`State ${durableState}`);
@@ -407,6 +865,60 @@ function runtimeSectionRows(preview: TabPreview | undefined, lines: TranscriptLi
   return rows;
 }
 
+export function buildOperatorSignalRows(
+  mode: "control" | "runtime",
+  preview?: TabPreview,
+  lines: TranscriptLine[] = [],
+): SignalRow[] {
+  const loopParts = [
+    derivedLoopState(preview, lines),
+    previewValue(preview, lines, "Loop decision"),
+    derivedUpdated(preview, lines),
+  ].filter(hasSignal);
+  const freshness = derivedFreshness(preview, lines);
+  const verification = verificationSignalRow(preview, lines);
+  const runtime = runtimeOverviewRow(preview, lines);
+  const activeTask = previewValue(preview, lines, "Active task");
+  const taskProgress = previewValue(preview, lines, "Task progress");
+  const verificationReceipt = derivedVerificationReceipt(preview, lines);
+  const durableState = previewValue(preview, lines, "Durable state");
+  const nextTask = previewValue(preview, lines, "Next task");
+  const taskContext = signalTaskContextRow(mode, activeTask, taskProgress, nextTask);
+  const durabilityContext = signalDurabilityRow(verificationReceipt, durableState);
+
+  const rows: SignalRow[] = [];
+  if (loopParts.length > 0) {
+    rows.push({value: `Loop ${loopParts.join(" | ")}`, tone: "strong"});
+  }
+  if (verification !== "Verification unknown") {
+    rows.push({
+      value: verification,
+      tone: /failing/i.test(verification) ? "warning" : "strong",
+    });
+  }
+  if (hasSignal(freshness) && (mode === "runtime" || freshness === "stale")) {
+    rows.push({value: `Freshness ${freshness}`, tone: freshness === "stale" ? "warning" : "muted"});
+  }
+  if (mode === "control" && taskContext) {
+    rows.push({value: taskContext, tone: "muted"});
+  }
+  if (mode === "control" && durabilityContext) {
+    rows.push({value: durabilityContext, tone: "muted"});
+  }
+  if (runtime !== "Runtime unknown") {
+    rows.push({value: runtime, tone: "muted"});
+  } else if (mode === "control" && hasSignal(freshness) && freshness !== "stale") {
+    rows.push({value: `Freshness ${freshness}`, tone: "muted"});
+  }
+  if (mode !== "control" && durabilityContext) {
+    rows.push({value: durabilityContext, tone: "muted"});
+  }
+  if (mode !== "control" && taskContext) {
+    rows.push({value: taskContext, tone: "muted"});
+  }
+  return rows.slice(0, mode === "control" ? 4 : 5);
+}
+
 export function buildControlPaneSections(preview?: TabPreview, lines: TranscriptLine[] = []): ControlSection[] {
   if (!hasStructuredControlState(preview, lines)) {
     return [
@@ -419,25 +931,36 @@ export function buildControlPaneSections(preview?: TabPreview, lines: Transcript
 
   const toolchain = previewValue(preview, lines, "Toolchain");
   const alerts = previewValue(preview, lines, "Alerts");
+  const overviewRows = overviewSectionRows(preview, lines);
+  const verificationOverview = verificationOverviewRow(preview, lines);
+  const verificationSummary = verificationSummaryRow(preview, lines);
+  const verificationBundle = verificationBundleRow(preview, lines);
   const verificationRows = [
+    verificationOverview,
+    freshnessRow(preview, lines),
+    verificationUpdatedRow(preview, lines),
+    verificationReceiptRow(preview, lines),
     verificationStatusRow(preview, lines),
     verificationPassingRow(preview, lines),
     verificationFailingRow(preview, lines),
-    verificationSummaryRow(preview, lines),
-    verificationBundleRow(preview, lines),
-    `Last ${previewValue(preview, lines, "Last result")}`,
-  ].filter((row) => !/\s(?:n\/a|none|unknown)$/.test(row));
+    verificationChecksRow(preview, lines),
+    verificationSummary,
+    ...(verificationBundle !== verificationSummary.replace(/^Summary\s+/, "Bundle ") ? [verificationBundle] : []),
+    `Last ${derivedLastResult(preview, lines)}`,
+  ].filter((row) => row !== "Verification unknown" && !/\s(?:n\/a|none|unknown)$/.test(row));
+  const decisionSummary = decisionSummaryRow(preview, lines);
   const nextRows = [
+    decisionSummary,
     `Task ${previewValue(preview, lines, "Next task")}`,
     `State ${previewValue(preview, lines, "Durable state")}`,
-  ].filter((row) => !/\s(?:n\/a|none|unknown)$/.test(row));
+  ].filter((row) => row !== "Decision unknown" && !/\s(?:n\/a|none|unknown)$/.test(row));
 
   return [
     {
       title: "Overview",
       rows: [
-        ...(hasSignal(previewValue(preview, lines, "Authority")) ? [`Authority ${previewValue(preview, lines, "Authority")}`] : []),
-        ...overviewSectionRows(preview, lines),
+        ...authorityOverviewRows(preview, lines, overviewRows),
+        ...overviewRows,
       ],
     },
     {
@@ -454,6 +977,10 @@ export function buildControlPaneSections(preview?: TabPreview, lines: Transcript
     {
       title: "Verification",
       rows: verificationRows,
+    },
+    {
+      title: "Durability",
+      rows: durabilitySectionRows(preview, lines),
     },
     {
       title: "Next",
@@ -476,25 +1003,36 @@ export function buildRuntimePaneSections(preview?: TabPreview, lines: Transcript
     ...(hasSignal(previewValue(preview, lines, "Toolchain")) ? [`Toolchain ${previewValue(preview, lines, "Toolchain")}`] : []),
     ...(hasSignal(previewValue(preview, lines, "Alerts")) ? [`Alerts ${previewValue(preview, lines, "Alerts")}`] : []),
   ];
+  const overviewRows = overviewSectionRows(preview, lines);
+  const verificationOverview = verificationOverviewRow(preview, lines);
+  const verificationSummary = verificationSummaryRow(preview, lines);
+  const verificationBundle = verificationBundleRow(preview, lines);
   const verificationRows = [
+    verificationOverview,
+    freshnessRow(preview, lines),
+    verificationUpdatedRow(preview, lines),
+    verificationReceiptRow(preview, lines),
     verificationStatusRow(preview, lines),
     verificationPassingRow(preview, lines),
     verificationFailingRow(preview, lines),
-    verificationBundleRow(preview, lines),
-    verificationSummaryRow(preview, lines),
-    `Last ${previewValue(preview, lines, "Last result")}`,
-  ].filter((row) => !/\s(?:n\/a|none|unknown)$/.test(row));
+    verificationChecksRow(preview, lines),
+    verificationSummary,
+    ...(verificationBundle !== verificationSummary.replace(/^Summary\s+/, "Bundle ") ? [verificationBundle] : []),
+    `Last ${derivedLastResult(preview, lines)}`,
+  ].filter((row) => row !== "Verification unknown" && !/\s(?:n\/a|none|unknown)$/.test(row));
+  const decisionSummary = decisionSummaryRow(preview, lines);
   const nextRows = [
+    decisionSummary,
     `Task ${previewValue(preview, lines, "Next task")}`,
     `State ${previewValue(preview, lines, "Durable state")}`,
-  ].filter((row) => !/\s(?:n\/a|none|unknown)$/.test(row));
+  ].filter((row) => row !== "Decision unknown" && !/\s(?:n\/a|none|unknown)$/.test(row));
 
   return [
     {
       title: "Overview",
       rows: [
-        ...(hasSignal(previewValue(preview, lines, "Authority")) ? [`Authority ${previewValue(preview, lines, "Authority")}`] : []),
-        ...overviewSectionRows(preview, lines),
+        ...authorityOverviewRows(preview, lines, overviewRows),
+        ...overviewRows,
       ],
     },
     {
@@ -514,8 +1052,12 @@ export function buildRuntimePaneSections(preview?: TabPreview, lines: Transcript
       rows: verificationRows,
     },
     {
+      title: "Durability",
+      rows: durabilitySectionRows(preview, lines),
+    },
+    {
       title: "Next",
-      rows: nextRows,
+      rows: nextRows.filter((row) => row !== `State ${previewValue(preview, lines, "Durable state")}`),
     },
   ].filter((section) => section.rows.length > 0);
 }
@@ -527,24 +1069,81 @@ export function ControlPane({
   lines,
   scrollOffset = 0,
   windowSize = 24,
+  selectedSectionIndex = 0,
 }: Props): React.ReactElement {
   const sections = mode === "runtime" ? buildRuntimePaneSections(preview, lines) : buildControlPaneSections(preview, lines);
-  const flattened = sections.flatMap((section) => [
-    {kind: "section" as const, id: section.title, text: section.title},
-    ...section.rows.map((row, index) => ({kind: "row" as const, id: `${section.title}-${index}`, text: row})),
-    {kind: "spacer" as const, id: `${section.title}-spacer`, text: ""},
-  ]);
-  const visible = flattened.slice(scrollOffset, scrollOffset + windowSize);
+  const signalRows = buildOperatorSignalRows(mode, preview, lines);
+  const activeSectionIndex = clampSectionIndex(selectedSectionIndex, sections);
+  const activeSection = sections[activeSectionIndex];
+  const visibleRows = activeSection ? activeSection.rows.slice(scrollOffset, scrollOffset + Math.max(windowSize - 4, 8)) : [];
+  const detailRows: DetailRow[] = visibleRows.map((value, index) => ({
+    value,
+    tone: index === 0 || (activeSection?.title === "Overview" && index < 2) ? "strong" : "muted",
+  }));
 
   return (
-    <Box flexGrow={1} flexDirection="column" borderStyle="single" borderColor="gray" paddingX={1}>
-      <Text color="cyan">{title}</Text>
-      <Text color="gray"> </Text>
-      {visible.map((entry) => (
-        <Text key={entry.id} color={entry.kind === "section" ? "white" : "gray"}>
-          {entry.text}
-        </Text>
-      ))}
+    <Box flexGrow={1} flexDirection="column" borderStyle="round" borderColor={THEME.river} paddingX={1}>
+      <Text color={THEME.wave} bold>{title}</Text>
+      <Text color={THEME.stone}>
+        {mode === "runtime"
+          ? "runtime pulse, verification, and loop state | j/k or ↑/↓ move between sections"
+          : "control summary, loop health, and next action | j/k or ↑/↓ move between sections"}
+      </Text>
+      {signalRows.length > 0 ? (
+        <Box marginTop={1} flexDirection="column" borderStyle="single" borderColor={THEME.ink} paddingX={1}>
+          <Text color={THEME.parchment} bold>{mode === "runtime" ? "Runtime Signal" : "Control Signal"}</Text>
+          {signalRows.map((row, index) => (
+            <Text
+              key={`signal-${index}`}
+              color={row.tone === "warning" ? THEME.persimmon : row.tone === "strong" ? THEME.foam : THEME.stone}
+              bold={row.tone !== "muted"}
+            >
+              {row.value}
+            </Text>
+          ))}
+        </Box>
+      ) : null}
+      <Box marginTop={1}>
+        <Box width="35%" flexDirection="column" borderStyle="single" borderColor={THEME.ink} paddingX={1}>
+          <Text color={THEME.parchment} bold>Sections</Text>
+          <Text color={THEME.stone}>{mode === "runtime" ? "runtime state cards" : "control loop cards"}</Text>
+          {sections.map((section, index) => {
+            const active = index === activeSectionIndex;
+            const previewRows = sectionCardPreviewRows(section);
+            return (
+              <Box key={section.title} flexDirection="column" marginTop={1} borderStyle={active ? "round" : undefined} borderColor={active ? THEME.wave : undefined} paddingX={active ? 1 : 0}>
+                <Text color={active ? THEME.wave : THEME.foam} bold={active}>
+                  {active ? "▶ " : "• "}
+                  {section.title}
+                </Text>
+                <Text color={active ? THEME.foam : THEME.stone}>
+                  {"  "}{section.rows.length} rows
+                </Text>
+                {previewRows.map((row, rowIndex) => (
+                  <Text key={`${section.title}-preview-${rowIndex}`} color={THEME.stone}>  {row}</Text>
+                ))}
+              </Box>
+            );
+          })}
+        </Box>
+        <Box width="65%" marginLeft={1} flexDirection="column" borderStyle="single" borderColor={THEME.ink} paddingX={1}>
+          <Text color={THEME.wave} bold>{activeSection?.title ?? "Section"}</Text>
+          <Text color={THEME.stone}>{mode === "runtime" ? "selected runtime card" : "selected control card"}</Text>
+          {visibleRows.length === 0 ? (
+            <Text color={THEME.stone}>No section detail.</Text>
+          ) : (
+            detailRows.map((row, index) => (
+              <Text
+                key={`${activeSection?.title ?? "section"}-${index}`}
+                color={row.tone === "strong" ? THEME.foam : THEME.stone}
+                bold={row.tone === "strong"}
+              >
+                {row.value}
+              </Text>
+            ))
+          )}
+        </Box>
+      </Box>
     </Box>
   );
 }

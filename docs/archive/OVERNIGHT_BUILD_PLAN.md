@@ -1,3 +1,98 @@
+---
+title: DHARMA SWARM -- 25-Agent Overnight Build Orchestration Plan
+path: docs/archive/OVERNIGHT_BUILD_PLAN.md
+slug: dharma-swarm-25-agent-overnight-build-orchestration-plan
+doc_type: report
+status: archival
+summary: 'Version : 2026-03-04 23:00 JST Window : 22:00 - 06:00 JST (8 hours) Codebase : ~/dharma swarm/ -- 8,347 lines, 202 tests passing, branch main, NO remote Lead Agent : VYUHA (this document''s executor)'
+source:
+  provenance: repo_local
+  kind: report
+  origin_signals:
+  - tests/conftest.py
+  - dharma_swarm/evolution.py
+  - dharma_swarm/archive.py
+  - dharma_swarm/selector.py
+  - dharma_swarm/elegance.py
+  cited_urls: []
+  generated_hint: human_or_agent_authored_repo_doc
+disciplines:
+- multi_agent_systems
+- software_architecture
+- knowledge_management
+- research_methodology
+- verification
+- product_strategy
+inspiration:
+- verification
+- operator_runtime
+- research_synthesis
+connected_python_files:
+- tests/conftest.py
+- dharma_swarm/evolution.py
+- dharma_swarm/archive.py
+- dharma_swarm/selector.py
+- dharma_swarm/elegance.py
+connected_python_modules:
+- tests.conftest
+- dharma_swarm.evolution
+- dharma_swarm.archive
+- dharma_swarm.selector
+- dharma_swarm.elegance
+connected_relevant_files:
+- tests/conftest.py
+- dharma_swarm/evolution.py
+- dharma_swarm/archive.py
+- dharma_swarm/selector.py
+- dharma_swarm/elegance.py
+improvement:
+  room_for_improvement:
+  - 'Surface the decision delta: what should change now because this report exists.'
+  - Link findings to exact code, tests, or commits where possible.
+  - Distinguish measured facts from operator interpretation.
+  - Review whether this file should stay in `docs/reports` or be consolidated elsewhere.
+  next_review_at: '2026-04-01T00:43:19+09:00'
+pkm:
+  note_class: report
+  vault_path: docs/archive/OVERNIGHT_BUILD_PLAN.md
+  retrieval_terms:
+  - reports
+  - overnight
+  - build
+  - agent
+  - orchestration
+  - version
+  - '2026'
+  - jst
+  - window
+  - hours
+  - codebase
+  - '347'
+  evergreen_potential: medium
+stigmergy:
+  meaning: This file is a shared environmental trace in the DHARMA corpus. Its path, recency, and linked surfaces guide future agent attention; its frontmatter now adds machine-readable coordination cues.
+  state: archive
+  semantic_weight: 0.6
+  coordination_comment: 'Version : 2026-03-04 23:00 JST Window : 22:00 - 06:00 JST (8 hours) Codebase : ~/dharma swarm/ -- 8,347 lines, 202 tests passing, branch main, NO remote Lead Agent : VYUHA (this document''s executor)'
+  levels:
+    sematectonic:
+      what_it_is: The document itself is the mark. Its existence, filename, location, and revision history attract or repel future work.
+      access_mark: Opening, linking, and revising docs/archive/OVERNIGHT_BUILD_PLAN.md reinforces its salience without needing a separate message.
+    marker_based:
+      what_it_is: The frontmatter is an explicit annotation layer on top of the document.
+      semantic_mark: Semantic weight, improvement prompts, related files, and provenance comments tell later agents how to use this document.
+  trace_role: diagnostic_or_evidence_trace
+curation:
+  last_frontmatter_refresh: '2026-04-01T00:43:19+09:00'
+  curated_by_model: Codex (GPT-5)
+  source_model_in_file: 
+  future_model_handoffs:
+  - GPT-5 Codex
+  - Claude
+  - Gemini
+  - Local evaluator
+  schema_version: pkm-phd-stigmergy-v1
+---
 # DHARMA SWARM -- 25-Agent Overnight Build Orchestration Plan
 
 **Version**: 2026-03-04 23:00 JST

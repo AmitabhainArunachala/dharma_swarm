@@ -69,7 +69,12 @@ Current examples:
 - [DGC_100X_LEAN_ESSENCE_2026-03-08.md](/Users/dhyana/dharma_swarm/docs/archive/DGC_100X_LEAN_ESSENCE_2026-03-08.md)
 - [DGC_KEEP_CUT_ADD_MATRIX_2026-03-08.md](/Users/dhyana/dharma_swarm/docs/archive/DGC_KEEP_CUT_ADD_MATRIX_2026-03-08.md)
 - [DHARMA_SWARM_1000X_MASTERPLAN_2026-03-16.md](/Users/dhyana/dharma_swarm/docs/archive/DHARMA_SWARM_1000X_MASTERPLAN_2026-03-16.md)
+- [FIRST_LIVE_RUN_REPORT.md](/Users/dhyana/dharma_swarm/docs/archive/FIRST_LIVE_RUN_REPORT.md)
 - [KAIZEN_IMPLEMENTATION_SUMMARY.md](/Users/dhyana/dharma_swarm/docs/archive/KAIZEN_IMPLEMENTATION_SUMMARY.md)
+- [OVERNIGHT_AUTOPILOT.md](/Users/dhyana/dharma_swarm/docs/archive/OVERNIGHT_AUTOPILOT.md)
+- [PUBLISH_TOMORROW.md](/Users/dhyana/dharma_swarm/docs/archive/PUBLISH_TOMORROW.md)
+- [OVERNIGHT_BUILD_PLAN.md](/Users/dhyana/dharma_swarm/docs/archive/OVERNIGHT_BUILD_PLAN.md)
+- [TEST_STRATEGY.md](/Users/dhyana/dharma_swarm/docs/archive/TEST_STRATEGY.md)
 - [VISION_COMPLETE_CIRCUIT.md](/Users/dhyana/dharma_swarm/docs/archive/VISION_COMPLETE_CIRCUIT.md)
 - [specs_research_living_layers/README.md](/Users/dhyana/dharma_swarm/docs/archive/specs_research_living_layers/README.md)
 

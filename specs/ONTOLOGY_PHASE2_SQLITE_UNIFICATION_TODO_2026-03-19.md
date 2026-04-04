@@ -1,8 +1,101 @@
+---
+title: Ontology Phase 2 SQLite Unification TODO
+path: specs/ONTOLOGY_PHASE2_SQLITE_UNIFICATION_TODO_2026-03-19.md
+slug: ontology-phase-2-sqlite-unification-todo
+doc_type: spec
+status: reference
+summary: 'Pinned execution companion checklist for the ontology Phase 2 SQLite unification spec. Subordinate to specs/ONTOLOGY_PHASE2_SQLITE_UNIFICATION_SPEC_2026-03-19.md.'
+source:
+  provenance: repo_local
+  kind: spec
+  origin_signals:
+  - specs/ONTOLOGY_PHASE2_SQLITE_UNIFICATION_SPEC_2026-03-19.md
+  - dharma_swarm/ontology_hub.py
+  - tests/test_ontology_hub.py
+  - dharma_swarm/ontology_runtime.py
+  - tests/test_ontology_runtime_sqlite.py
+  cited_urls: []
+  generated_hint: human_or_agent_authored_repo_doc
+disciplines:
+- multi_agent_systems
+- software_architecture
+- knowledge_management
+- verification
+- frontend_engineering
+inspiration:
+- verification
+- operator_runtime
+- product_surface
+connected_python_files:
+- dharma_swarm/ontology_hub.py
+- tests/test_ontology_hub.py
+- dharma_swarm/ontology_runtime.py
+- tests/test_ontology_runtime_sqlite.py
+- dharma_swarm/ontology.py
+connected_python_modules:
+- dharma_swarm.ontology_hub
+- tests.test_ontology_hub
+- dharma_swarm.ontology_runtime
+- tests.test_ontology_runtime_sqlite
+- dharma_swarm.ontology
+connected_relevant_files:
+- specs/ONTOLOGY_PHASE2_SQLITE_UNIFICATION_SPEC_2026-03-19.md
+- specs/README.md
+- dharma_swarm/ontology_hub.py
+- tests/test_ontology_hub.py
+- dharma_swarm/ontology_runtime.py
+- tests/test_ontology_runtime_sqlite.py
+improvement:
+  room_for_improvement:
+  - Keep checklist semantics subordinate to the canonical ontology spec.
+  - Archive or demote this companion if a later wave makes the checklist obsolete.
+  - Link future verification reruns back to the governing spec rather than treating this file as standalone truth.
+  next_review_at: '2026-04-05T12:00:00+09:00'
+pkm:
+  note_class: checklist
+  vault_path: specs/ONTOLOGY_PHASE2_SQLITE_UNIFICATION_TODO_2026-03-19.md
+  retrieval_terms:
+  - specs
+  - ontology
+  - phase2
+  - sqlite
+  - unification
+  - todo
+  - companion checklist
+  - execution
+  evergreen_potential: high
+stigmergy:
+  meaning: This file is an execution companion checklist for the ontology Phase 2 spec and should be used as subordinate implementation tracking, not independent canonical truth.
+  state: reference
+  semantic_weight: 0.72
+  coordination_comment: 'Pinned companion checklist for specs/ONTOLOGY_PHASE2_SQLITE_UNIFICATION_SPEC_2026-03-19.md.'
+  levels:
+    sematectonic:
+      what_it_is: The document itself is the mark. Its existence, filename, location, and revision history attract or repel future work.
+      access_mark: Opening, linking, and revising specs/ONTOLOGY_PHASE2_SQLITE_UNIFICATION_TODO_2026-03-19.md reinforces its salience without needing a separate message.
+    marker_based:
+      what_it_is: The frontmatter is an explicit annotation layer on top of the document.
+      semantic_mark: Semantic weight, improvement prompts, related files, and provenance comments tell later agents how to use this document.
+  trace_role: constraint_and_design_trace
+curation:
+  last_frontmatter_refresh: '2026-04-03T20:34:00+09:00'
+  curated_by_model: Codex (GPT-5)
+  source_model_in_file: 
+  future_model_handoffs:
+  - GPT-5 Codex
+  - Claude
+  - Gemini
+  - Local evaluator
+  schema_version: pkm-phd-stigmergy-v1
+---
 # Ontology Phase 2 SQLite Unification TODO
 
 Date: 2026-03-19
-Status: pinned execution checklist
+Status: pinned execution companion checklist
 Canonical spec: `specs/ONTOLOGY_PHASE2_SQLITE_UNIFICATION_SPEC_2026-03-19.md`
+
+This file is a companion checklist for the canonical ontology Phase 2 spec.
+Use the spec as current contract truth and this file as execution tracking.
 
 Progress update:
 

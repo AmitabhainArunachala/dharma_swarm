@@ -27,6 +27,9 @@ inspiration:
 connected_relevant_files:
 - docs/plans/2026-04-02-repo-dirt-taxonomy-and-run-plan.md
 - docs/plans/2026-04-02-generated-artifact-control-center.md
+- docs/plans/2026-04-03-tui-baseline-protection-note.md
+- docs/plans/2026-04-03-autonomous-cleanup-overnight-control.md
+- docs/plans/2026-04-03-autonomous-build-skill-issues-and-fixes.md
 - docs/plans/2026-04-02-root-residue-classification.md
 - docs/plans/2026-04-02-root-helper-artifact-policy.md
 - docs/plans/2026-04-02-root-operational-notes-policy.md
@@ -56,6 +59,7 @@ pkm:
   - root
   - substrate
   - generated artifacts
+  - tui baseline
   evergreen_potential: high
 stigmergy:
   meaning: This file gives later cleanup runs one current entrypoint into the active non-TUI hygiene control surface.
@@ -101,6 +105,15 @@ If the question is about report noise, generated-state retention, or packet-fami
 
 - [generated-artifact-control-center.md](/Users/dhyana/dharma_swarm/docs/plans/2026-04-02-generated-artifact-control-center.md)
 
+If the question is about whether repo dirt invalidates the Bun TUI lane, or how cleanup should coexist with the TUI freeze baseline, read:
+
+- [tui-baseline-protection-note.md](/Users/dhyana/dharma_swarm/docs/plans/2026-04-03-tui-baseline-protection-note.md)
+
+If the question is about running this lane overnight under bounded autonomy, read:
+
+- [autonomous-cleanup-overnight-control.md](/Users/dhyana/dharma_swarm/docs/plans/2026-04-03-autonomous-cleanup-overnight-control.md)
+- [autonomous-build-skill-issues-and-fixes.md](/Users/dhyana/dharma_swarm/docs/plans/2026-04-03-autonomous-build-skill-issues-and-fixes.md)
+
 ## Live Policy Docs
 
 These govern present cleanup decisions:
@@ -109,6 +122,14 @@ These govern present cleanup decisions:
 - [root-operational-notes-policy.md](/Users/dhyana/dharma_swarm/docs/plans/2026-04-02-root-operational-notes-policy.md)
 - [substrate-layer-policy.md](/Users/dhyana/dharma_swarm/docs/plans/2026-04-02-substrate-layer-policy.md)
 
+## Active Substrate Support Docs
+
+Use these when the question is about substrate directory shape, graduation-watch candidates, or local authority labels:
+
+- [substrate-directory-cartography.md](/Users/dhyana/dharma_swarm/docs/plans/2026-04-03-substrate-directory-cartography.md)
+- [substrate-graduation-candidates.md](/Users/dhyana/dharma_swarm/docs/plans/2026-04-03-substrate-graduation-candidates.md)
+- [substrate-local-indexing-guidelines.md](/Users/dhyana/dharma_swarm/docs/plans/2026-04-03-substrate-local-indexing-guidelines.md)
+
 ## Parallel Control Seam
 
 This cleanup lane also has one bounded parallel control surface:
@@ -116,6 +137,16 @@ This cleanup lane also has one bounded parallel control surface:
 - [generated-artifact-control-center.md](/Users/dhyana/dharma_swarm/docs/plans/2026-04-02-generated-artifact-control-center.md)
 
 Use it for generated-state, retained packet families, and report-boundary decisions. Do not mix that seam back into root cleanup unless a path explicitly crosses both.
+
+## Protected Hot-Lane Boundary
+
+The TUI lane is excluded from this cleanup program, but not because it is unreal.
+
+Use:
+
+- [tui-baseline-protection-note.md](/Users/dhyana/dharma_swarm/docs/plans/2026-04-03-tui-baseline-protection-note.md)
+
+to preserve the stronger truth: dirty repo state and valid TUI convergence are coexisting realities, not one verdict.
 
 ## Deferred But Important Preaduits
 

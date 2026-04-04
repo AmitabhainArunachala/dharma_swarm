@@ -1,14 +1,18 @@
 import React from "react";
 import {Box, Text} from "ink";
 
-import type {TranscriptLine} from "../types.js";
-import {formatTranscriptLine} from "../transcriptFormatting.js";
+import type {TranscriptLine} from "../types";
+import {formatTranscriptLine} from "../transcriptFormatting";
+import {THEME} from "../theme";
 
 type Props = {
   title: string;
   lines: TranscriptLine[];
   scrollOffset?: number;
   windowSize?: number;
+  subtitle?: string;
+  emptyState?: string;
+  accentColor?: string;
 };
 
 function visibleWindow<T>(items: T[], scrollOffset: number, windowSize: number): T[] {
@@ -18,14 +22,23 @@ function visibleWindow<T>(items: T[], scrollOffset: number, windowSize: number):
   return items.slice(start, end);
 }
 
-export function TranscriptPane({title, lines, scrollOffset = 0, windowSize = 24}: Props): React.ReactElement {
+export function TranscriptPane({
+  title,
+  lines,
+  scrollOffset = 0,
+  windowSize = 24,
+  subtitle,
+  emptyState = "No content yet.",
+  accentColor = THEME.ink,
+}: Props): React.ReactElement {
   const visible = visibleWindow(lines, scrollOffset, windowSize);
   return (
-    <Box flexGrow={1} flexDirection="column" borderStyle="single" borderColor="gray" paddingX={1}>
-      <Text color="cyan">{title}</Text>
-      <Text color="gray"> </Text>
+    <Box flexGrow={1} flexDirection="column" borderStyle="round" borderColor={accentColor} paddingX={1}>
+      <Text color={accentColor} bold>{title}</Text>
+      {subtitle ? <Text color={THEME.stone}>{subtitle}</Text> : <Text color={THEME.stone}> </Text>}
+      {subtitle ? <Text color={THEME.stone}> </Text> : null}
       {visible.length === 0 ? (
-        <Text color="gray">No content yet.</Text>
+        <Text color={THEME.stone}>{emptyState}</Text>
       ) : (
         visible.map((line) => {
           const formatted = formatTranscriptLine(line);

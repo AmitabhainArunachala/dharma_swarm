@@ -29,7 +29,11 @@ connected_relevant_files:
   - docs/plans/ALLOUT_6H_MODE.md
   - docs/plans/ALL_NIGHT_BUILD_CONCLAVE_2026-03-20.md
   - docs/plans/CODEX_ALLNIGHT_YOLO.md
+  - docs/plans/YOLO_4AM_TASKS.md
+  - docs/plans/GINKO_ENHANCEMENT_WAVE.md
+  - docs/plans/SPRINT_GOTCHAS.md
   - docs/plans/2026-04-02-cleanup-control-center.md
+  - docs/plans/REPO_HYGIENE_TRIAGE_2026-04-01.md
   - docs/plans/2026-04-02-top-level-docs-canon-map.md
 improvement:
   room_for_improvement:
@@ -73,7 +77,11 @@ Current examples:
 - [ALLOUT_6H_MODE.md](/Users/dhyana/dharma_swarm/docs/plans/ALLOUT_6H_MODE.md)
 - [ALL_NIGHT_BUILD_CONCLAVE_2026-03-20.md](/Users/dhyana/dharma_swarm/docs/plans/ALL_NIGHT_BUILD_CONCLAVE_2026-03-20.md)
 - [CODEX_ALLNIGHT_YOLO.md](/Users/dhyana/dharma_swarm/docs/plans/CODEX_ALLNIGHT_YOLO.md)
+- [YOLO_4AM_TASKS.md](/Users/dhyana/dharma_swarm/docs/plans/YOLO_4AM_TASKS.md)
+- [GINKO_ENHANCEMENT_WAVE.md](/Users/dhyana/dharma_swarm/docs/plans/GINKO_ENHANCEMENT_WAVE.md)
+- [SPRINT_GOTCHAS.md](/Users/dhyana/dharma_swarm/docs/plans/SPRINT_GOTCHAS.md)
 - [2026-04-02-cleanup-control-center.md](/Users/dhyana/dharma_swarm/docs/plans/2026-04-02-cleanup-control-center.md)
+- [REPO_HYGIENE_TRIAGE_2026-04-01.md](/Users/dhyana/dharma_swarm/docs/plans/REPO_HYGIENE_TRIAGE_2026-04-01.md)
 
 Rule:
 

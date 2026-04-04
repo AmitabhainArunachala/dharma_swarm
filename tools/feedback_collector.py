@@ -488,7 +488,7 @@ def main() -> None:
         epilog=(
             "Examples:\n"
             "  python3 tools/feedback_collector.py --since 7\n"
-            "  python3 tools/feedback_collector.py --since 3 --output docs/SPRINT_GOTCHAS.md\n"
+            "  python3 tools/feedback_collector.py --since 3 --output docs/plans/SPRINT_GOTCHAS.md\n"
             "  python3 tools/feedback_collector.py --since 14 --min-occurrences 3\n"
         ),
     )

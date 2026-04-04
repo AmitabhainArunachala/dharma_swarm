@@ -1,10 +1,106 @@
+---
+title: DGC Terminal Interface — Definitive Component Architecture
+path: specs/DGC_TERMINAL_ARCHITECTURE.md
+slug: dgc-terminal-interface-definitive-component-architecture
+doc_type: spec
+status: superseded
+summary: 'Version 1.0 baseline terminal architecture. Retained as the Claude-specific predecessor to specs/DGC_TERMINAL_ARCHITECTURE_v1.1.md, not the current governing spec.'
+source:
+  provenance: repo_local
+  kind: spec
+  origin_signals: []
+  cited_urls:
+  - https://textual.textualize.io/
+  - https://github.com/Textualize/textual/discussions
+  - https://textual.textualize.io/blog/2024/09/15/anatomy-of-a-textual-user-interface/
+  - https://leanpub.com/textual/
+  - https://code.claude.com/docs/en/cli-reference
+  generated_hint: human_or_agent_authored_repo_doc
+disciplines:
+- swarm_intelligence
+- multi_agent_systems
+- software_architecture
+- knowledge_management
+- research_methodology
+- verification
+inspiration:
+- stigmergy
+- operator_runtime
+- research_synthesis
+connected_python_files:
+- dharma_swarm/tui/widgets/tool_call_card.py
+- tests/test_agent_runner_routing_feedback.py
+- tests/test_auto_research_engine.py
+- tests/test_auto_research_models.py
+- tests/test_evolution_runtime_fields.py
+connected_python_modules:
+- dharma_swarm.tui.widgets.tool_call_card
+- tests.test_agent_runner_routing_feedback
+- tests.test_auto_research_engine
+- tests.test_auto_research_models
+- tests.test_evolution_runtime_fields
+connected_relevant_files:
+- specs/DGC_TERMINAL_ARCHITECTURE_v1.1.md
+- specs/README.md
+- dharma_swarm/tui/widgets/tool_call_card.py
+- tests/test_agent_runner_routing_feedback.py
+- tests/test_auto_research_engine.py
+- tests/test_auto_research_models.py
+- tests/test_evolution_runtime_fields.py
+improvement:
+  room_for_improvement:
+  - Keep the v1.0 baseline readable as historical design context without letting it compete with v1.1.
+  - Add a sharper delta summary if later agents still need to compare v1.0 to the provider-agnostic path.
+  - Link any still-live citations to the governing v1.1 file when appropriate.
+  next_review_at: '2026-04-05T12:00:00+09:00'
+pkm:
+  note_class: spec
+  vault_path: specs/DGC_TERMINAL_ARCHITECTURE.md
+  retrieval_terms:
+  - specs
+  - dgc
+  - terminal
+  - architecture
+  - v1.0
+  - baseline
+  - superseded
+  - claude-specific
+  evergreen_potential: high
+stigmergy:
+  meaning: This file is the retained v1.0 design baseline for the DGC terminal architecture and should be read as predecessor context rather than current governing truth.
+  state: archive
+  semantic_weight: 0.64
+  coordination_comment: 'Retained as the v1.0 Claude-specific predecessor to specs/DGC_TERMINAL_ARCHITECTURE_v1.1.md.'
+  levels:
+    sematectonic:
+      what_it_is: The document itself is the mark. Its existence, filename, location, and revision history attract or repel future work.
+      access_mark: Opening, linking, and revising specs/DGC_TERMINAL_ARCHITECTURE.md reinforces its salience without needing a separate message.
+    marker_based:
+      what_it_is: The frontmatter is an explicit annotation layer on top of the document.
+      semantic_mark: Semantic weight, improvement prompts, related files, and provenance comments tell later agents how to use this document.
+  trace_role: constraint_and_design_trace
+curation:
+  last_frontmatter_refresh: '2026-04-03T20:34:00+09:00'
+  curated_by_model: Codex (GPT-5)
+  source_model_in_file: 
+  future_model_handoffs:
+  - GPT-5 Codex
+  - Claude
+  - Gemini
+  - Local evaluator
+  schema_version: pkm-phd-stigmergy-v1
+---
 # DGC Terminal Interface — Definitive Component Architecture
 
 **Version:** 1.0  
 **Date:** 2026-03-05  
 **Target:** Python Textual 8.0.2 + Claude Code CLI v2.1.69 `--output-format stream-json`  
 **Platform:** macOS M3 Pro, Python 3.14  
-**Status:** Architecture Blueprint — Ready for Implementation
+**Status:** Superseded baseline retained for historical comparison  
+**Current Governing Successor:** `specs/DGC_TERMINAL_ARCHITECTURE_v1.1.md`
+
+This file is kept as the Claude-specific v1.0 predecessor.
+Treat v1.1 as the current governing terminal architecture spec.
 
 ---
 

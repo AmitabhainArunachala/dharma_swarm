@@ -26,6 +26,7 @@ connected_relevant_files:
 - docs/GENERATED_ARTIFACT_BOUNDARY_MATRIX_2026-04-02.md
 - docs/plans/2026-04-02-generated-artifact-control-center.md
 - docs/plans/2026-04-02-reports-cartography-and-cleanup-plan.md
+- reports/generated/verification/README.md
 - reports/generated/nightwatch/terminal_nightwatch_20260401.log
 improvement:
   room_for_improvement:
@@ -73,6 +74,7 @@ These files may still have audit, replay, or forensic value, but they are not:
 ## Current Families
 
 - `nightwatch/`: generated terminal watchdog logs
+- `verification/`: relocated uncited generated verification probe artifacts
 
 ## Rules
 
@@ -84,3 +86,4 @@ These files may still have audit, replay, or forensic value, but they are not:
 
 - [generated-artifact-control-center.md](/Users/dhyana/dharma_swarm/docs/plans/2026-04-02-generated-artifact-control-center.md)
 - [GENERATED_ARTIFACT_BOUNDARY_MATRIX_2026-04-02.md](/Users/dhyana/dharma_swarm/docs/GENERATED_ARTIFACT_BOUNDARY_MATRIX_2026-04-02.md)
+- [verification-family-retention-policy.md](/Users/dhyana/dharma_swarm/docs/plans/2026-04-03-verification-family-retention-policy.md)

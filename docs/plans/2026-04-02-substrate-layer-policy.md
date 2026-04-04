@@ -26,11 +26,12 @@ inspiration:
 - canonical_truth
 connected_relevant_files:
   - docs/plans/2026-04-02-cleanup-control-center.md
+  - docs/plans/2026-04-03-substrate-directory-cartography.md
   - foundations/INDEX.md
   - lodestones/README.md
-- mode_pack/README.md
-- docs/plans/2026-04-02-repo-dirt-taxonomy-and-run-plan.md
-- docs/plans/2026-04-02-root-residue-classification.md
+  - mode_pack/README.md
+  - docs/plans/2026-04-02-repo-dirt-taxonomy-and-run-plan.md
+  - docs/plans/2026-04-02-root-residue-classification.md
 improvement:
   room_for_improvement:
   - Add per-directory validation checks once the next cleanup tranche starts moving files across these boundaries.
@@ -132,6 +133,10 @@ When a file in these directories looks “odd,” ask:
 Only after that should you ask whether it needs to move.
 
 This reverses the bad cleanup instinct of deciding by filename vibe or directory size.
+
+Current directory map:
+
+- [2026-04-03-substrate-directory-cartography.md](/Users/dhyana/dharma_swarm/docs/plans/2026-04-03-substrate-directory-cartography.md)
 
 ## Recommended Next Step
 

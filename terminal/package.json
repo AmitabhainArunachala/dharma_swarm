@@ -7,10 +7,24 @@
   "packageManager": "bun@1.1.38",
   "scripts": {
     "dev": "bun run --watch src/index.tsx",
-    "start": "bun run src/index.tsx"
+    "start": "bun run src/index.tsx",
+    "test": "bun test",
+    "test:command-routing": "bun test tests/protocol.test.ts tests/app.test.ts",
+    "test:control-surface": "bun test tests/controlPane.test.ts tests/persistence.test.ts",
+    "test:repo-pane": "bun test tests/protocol.test.ts tests/persistence.test.ts tests/repoPane.test.ts tests/sidebar.test.ts tests/app.test.ts",
+    "typecheck": "tsc --noEmit",
+    "verify:command-routing": "bun run typecheck && bun run test:command-routing",
+    "verify:control-surface": "bun run typecheck && bun run test:control-surface",
+    "verify:repo-pane": "bun run typecheck && bun run test:repo-pane"
   },
   "dependencies": {
+    "ascii-art": "^2.8.5",
+    "ascii-artist": "^0.0.14",
+    "cfonts": "^3.3.1",
+    "figlet": "^1.11.0",
     "ink": "^5.1.0",
+    "ink-big-text": "^2.0.0",
+    "ink-gradient": "^4.0.0",
     "react": "^18.3.1"
   },
   "devDependencies": {

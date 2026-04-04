@@ -31,13 +31,16 @@ connected_relevant_files:
 - lodestones/reframes/morphogenetic_field_architecture.md
 - lodestones/seeds/dharma_genome_generative_passage_lodestone.md
 - foundations/INDEX.md
-- docs/plans/2026-04-02-root-residue-classification.md
+- docs/plans/2026-04-02-substrate-layer-policy.md
+- docs/plans/2026-04-03-substrate-directory-cartography.md
+- docs/plans/2026-04-03-substrate-graduation-candidates.md
 improvement:
   room_for_improvement:
   - Add sharper cross-links from lodestone files into the specific foundation, architecture, or report surfaces they influence.
   - Keep the distinction between orienting material and normative canon explicit.
+  - Recheck grounding and pillars_expanded only if they start behaving like maintained evidence or canon.
   - Add local sub-indexes if any lodestones subtree grows materially larger.
-  next_review_at: '2026-04-03T12:00:00+09:00'
+  next_review_at: '2026-04-05T12:00:00+09:00'
 pkm:
   note_class: readme
   vault_path: lodestones/README.md
@@ -57,7 +60,7 @@ stigmergy:
   coordination_comment: Use this file to decide whether a lodestone document is a seed, grounding source, bridge, or reframe before moving or citing it.
   trace_role: coordination_trace
 curation:
-  last_frontmatter_refresh: '2026-04-02T23:59:00+09:00'
+  last_frontmatter_refresh: '2026-04-03T20:20:00+09:00'
   curated_by_model: Codex (GPT-5)
   future_model_handoffs:
   - GPT-5 Codex
@@ -71,6 +74,17 @@ curation:
 `lodestones/` is a substrate layer, not a normative doctrine surface.
 
 These files are meant to orient, provoke, reframe, and seed future work. They can be highly influential without being the final source of product, runtime, or repo truth.
+
+## Layer Role
+
+`lodestones/` is the interpretive and orienting substrate layer.
+
+Its job is to:
+
+- name attractors
+- seed future synthesis
+- bridge conceptual regimes
+- provide grounding that supports later doctrine without becoming doctrine by default
 
 ## What A Lodestone Is
 

@@ -66,6 +66,7 @@ import asyncio
 import inspect
 import json
 import os
+import shutil
 import signal
 import subprocess
 import sys
@@ -3635,6 +3636,41 @@ def cmd_run(interval: float) -> None:
 
 def cmd_tui() -> None:
     """Launch the interactive TUI dashboard."""
+    use_legacy = os.getenv("DGC_USE_LEGACY_TUI", "").strip().lower() in {
+        "1",
+        "true",
+        "yes",
+        "on",
+    }
+    if not use_legacy:
+        terminal_dir = DHARMA_SWARM / "terminal"
+        if terminal_dir.exists() and (terminal_dir / "package.json").exists():
+            bun_path = shutil.which("bun")
+            if bun_path:
+                try:
+                    env = dict(os.environ)
+                    native_auth = subprocess.run(
+                        ["/bin/zsh", "-lc", "env -u ANTHROPIC_API_KEY claude auth status"],
+                        capture_output=True,
+                        text=True,
+                        check=False,
+                    )
+                    if native_auth.returncode == 0:
+                        try:
+                            payload = json.loads(native_auth.stdout or "{}")
+                        except json.JSONDecodeError:
+                            payload = {}
+                        if isinstance(payload, dict) and str(payload.get("subscriptionType", "")).strip().lower() == "max":
+                            env["DHARMA_CLAUDE_AUTH_MODE"] = "subscription"
+                    subprocess.run(
+                        [bun_path, "run", "start"],
+                        cwd=str(terminal_dir),
+                        env=env,
+                        check=True,
+                    )
+                    return
+                except subprocess.CalledProcessError:
+                    pass
     try:
         from dharma_swarm.tui import run
         run()
@@ -4729,6 +4765,47 @@ def cmd_model_catalog(
     from dharma_swarm.model_catalog import model_catalog_summary
 
     print(model_catalog_summary(selector=selector, as_json=as_json))
+
+
+def cmd_cross(
+    cross_cmd: str | None = None,
+    max_edges: int = 5,
+    dry_run: bool = False,
+) -> None:
+    """YATAGARASU cross-pollination engine commands."""
+    from dharma_swarm.cross_pollination import CrossPollinationEngine
+
+    engine = CrossPollinationEngine()
+
+    match cross_cmd:
+        case "run":
+            if dry_run:
+                print("  YATAGARASU — dry run (showing candidates only)")
+                from dharma_swarm.catalytic_graph import CatalyticGraph
+                cg = CatalyticGraph()
+                if cg.load():
+                    missing = cg.loop_closure_priority()[:max_edges]
+                    for src, tgt, score in missing:
+                        print(f"  {src} → {tgt}  (score: {score:.3f})")
+                else:
+                    print("  No catalytic graph data. Run `dgc cross run` (without --dry-run) to seed.")
+            else:
+                import asyncio
+                print(f"  YATAGARASU — cross-pollination session (max_edges={max_edges})")
+                results = asyncio.run(engine.run_session(max_edges=max_edges))
+                accepted = [r for r in results if r.accepted]
+                rejected = [r for r in results if not r.accepted]
+                print(f"\n  Results: {len(accepted)} accepted, {len(rejected)} rejected")
+                for r in accepted:
+                    print(f"  ✅ {r.source} → {r.target} ({r.edge_type}, strength={r.score:.2f}) via {r.model_used}")
+                for r in rejected:
+                    print(f"  ❌ {r.source} → {r.target} — {r.evidence[:60]}")
+        case "status":
+            print(engine.format_status())
+        case _:
+            print("Usage: dgc cross {run|status}")
+            print("  run [--max-edges N] [--dry-run]  Run cross-pollination session")
+            print("  status                           Show catalytic graph health")
 
 
 def cmd_custodians(
@@ -5988,6 +6065,14 @@ def _build_parser() -> argparse.ArgumentParser:
     cust_sub.add_parser("status", help="Show custodian fleet status")
     cust_sub.add_parser("schedule", help="Create recurring custodian cron jobs")
 
+    # -- cross (YATAGARASU: Cross-Pollination Engine) --
+    p_cross = sub.add_parser("cross", help="YATAGARASU cross-pollination — weave lattice connections")
+    cross_sub = p_cross.add_subparsers(dest="cross_cmd")
+    p_cross_run = cross_sub.add_parser("run", help="Run one cross-pollination session")
+    p_cross_run.add_argument("--max-edges", type=int, default=5, help="Max missing edges to investigate (default: 5)")
+    p_cross_run.add_argument("--dry-run", dest="dry_run", action="store_true", default=False, help="Show candidates without calling LLM")
+    cross_sub.add_parser("status", help="Catalytic graph health + last run")
+
     return parser
 
 
@@ -6063,7 +6148,7 @@ def main() -> None:
         try:
             cmd_tui()
         except ImportError as e:
-            print(f"TUI not available ({e}). Install: pip3 install textual")
+            print(f"TUI not available ({e}). Run: cd terminal && bun run start")
             print("Falling back to status...\n")
             cmd_status()
         except Exception as e:
@@ -6077,7 +6162,7 @@ def main() -> None:
         try:
             cmd_tui()
         except ImportError as e:
-            print(f"TUI not available ({e}). Install: pip3 install textual")
+            print(f"TUI not available ({e}). Run: cd terminal && bun run start")
             print("Falling back to status...\n")
             cmd_status()
         except Exception as e:
@@ -6879,6 +6964,12 @@ def main() -> None:
                 custodians_cmd=args.custodians_cmd,
                 roles=getattr(args, "roles", None),
                 dry_run=getattr(args, "dry_run", True),
+            )
+        case "cross":
+            cmd_cross(
+                cross_cmd=args.cross_cmd,
+                max_edges=getattr(args, "max_edges", 5),
+                dry_run=getattr(args, "dry_run", False),
             )
         case _:
             parser.print_help()

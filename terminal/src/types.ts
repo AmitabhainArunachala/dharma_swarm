@@ -42,7 +42,33 @@ export type TabSpec = {
   preview?: TabPreview;
 };
 
+export type ActivityKind = "status" | "thinking" | "pivot" | "tool" | "approval" | "task" | "error";
+
+export type ActivityVisibilityMode = "compact" | "expanded";
+
+export type ActivityPhase = "queued" | "running" | "complete" | "failed";
+
+export type ActivityEntry = {
+  id: string;
+  kind: ActivityKind;
+  phase: ActivityPhase;
+  title: string;
+  summary?: string;
+  detail?: string[];
+  raw?: Record<string, unknown>;
+  timestamp?: string;
+  correlationId?: string;
+};
+
+export type ActivityFeedState = {
+  entries: ActivityEntry[];
+  visibilityMode: ActivityVisibilityMode;
+  showRaw: boolean;
+};
+
 export type BridgeStatus = "booting" | "connected" | "degraded" | "offline";
+
+export type RouteState = "ready" | "degraded" | "slow" | "unavailable" | "invalid";
 
 export type SupervisorControlState = {
   stateDir: string;
@@ -55,6 +81,11 @@ export type SupervisorControlState = {
   acceptance: string;
   verificationSummary: string;
   verificationChecks: string[];
+  verificationStatus: string;
+  verificationPassing: string;
+  verificationFailing: string;
+  verificationBundle: string;
+  verificationUpdatedAt: string;
   continueRequired: boolean | null;
   nextTask: string;
   updatedAt: string;
@@ -101,6 +132,23 @@ export type CanonicalRuntimeSnapshot = {
   context_bundle_count: number;
   anomaly_count: number;
   verification_status: string;
+  verification_summary?: string | null;
+  verification_bundle?: string | null;
+  verification_checks?: string | null;
+  verification_passing?: string | null;
+  verification_failing?: string | null;
+  verification_receipt?: string | null;
+  verification_updated_at?: string | null;
+  loop_state?: string | null;
+  loop_decision?: string | null;
+  task_progress?: string | null;
+  result_status?: string | null;
+  acceptance?: string | null;
+  last_result?: string | null;
+  updated_at?: string | null;
+  durable_state?: string | null;
+  runtime_summary?: string | null;
+  runtime_freshness?: string | null;
   next_task?: string | null;
   active_task?: string | null;
   worktree_count?: number | null;
@@ -201,6 +249,8 @@ export type WorkspaceSnapshotPayload = {
   topology: {
     warnings: string[];
     repos: WorkspaceTopologyRepo[];
+    preview?: string | null;
+    pressure_preview?: string | null;
   };
   inventory: WorkspaceInventory;
   language_mix: Array<{suffix: string; count: number}>;
@@ -347,6 +397,28 @@ export type SessionPaneState = {
   detailsBySessionId: Record<string, SessionDetailPayload>;
 };
 
+export type ContinuityMessage = {
+  role: "user" | "assistant" | "system";
+  content: string;
+  source: "session_detail" | "working_set" | "prompt";
+};
+
+export type SessionContinuityState = {
+  activeSessionId?: string;
+  resumeSessionId?: string;
+  activeRouteId?: string;
+  continuityMode: "fresh" | "resume";
+  boundedHistory: ContinuityMessage[];
+  historyLimit: number;
+  compactionPolicy: {
+    eventCount: number;
+    compactableRatio: number;
+    protectedEventTypes: string[];
+    recentEventTypes: string[];
+  };
+  compactedSummary?: string;
+};
+
 export type SurfaceAuthorityState = {
   repo: boolean;
   control: boolean;
@@ -356,42 +428,114 @@ export type SurfaceAuthorityState = {
   agents: boolean;
 };
 
-export type AppState = {
+export type RouteTarget = {
+  alias: string;
+  label: string;
+  provider: string;
+  model: string;
+  routeId: string;
+  routeState: RouteState;
+  availabilityReason?: string;
+  selectable: boolean;
+};
+
+export type ModelTarget = RouteTarget;
+
+export type UIModeOverlay =
+  | {kind: "none"}
+  | {kind: "modelPicker"; selectedIndex: number; returnTabId: string}
+  | {kind: "paneSwitcher"; selectedIndex: number};
+
+export type UIModeState = {
+  activeTabId: string;
+  activeOverlay: UIModeOverlay;
   sidebarVisible: boolean;
   sidebarMode: SidebarMode;
-  bridgeStatus: BridgeStatus;
+  focusedPaneId: string;
+  compactMode: boolean;
+};
+
+export type RoutePolicyState = {
+  routeId: string;
   provider: string;
   model: string;
   strategy: string;
-  modelTargets: Array<{alias: string; label: string; provider: string; model: string}>;
-  modelPickerVisible: boolean;
-  modelPickerIndex: number;
-  modelPickerReturnTabId: string;
+  routeState: RouteState;
+  selectable: boolean;
+  availabilityReason?: string;
+  defaultRouteId?: string;
+  fallbackChain: string[];
+  lastConfirmedRouteId?: string;
+  activeLabel?: string;
+  targets: RouteTarget[];
+};
+
+export type CanonicalExecutionEventKind =
+  | "user_prompt"
+  | "assistant_text"
+  | "thinking"
+  | "tool_call"
+  | "tool_result"
+  | "approval"
+  | "task"
+  | "command"
+  | "status"
+  | "error";
+
+export type CanonicalExecutionEvent = {
+  id: string;
+  sourceEventType: string;
+  kind: CanonicalExecutionEventKind;
+  phase: ActivityPhase;
+  title: string;
+  summary?: string;
+  detail?: string[];
+  content?: string;
+  timestamp?: string;
+  correlationId?: string;
+  raw?: Record<string, unknown>;
+};
+
+export type AppState = {
+  uiMode: UIModeState;
+  bridgeStatus: BridgeStatus;
+  routePolicy: RoutePolicyState;
+  executionEventLog: CanonicalExecutionEvent[];
+  chatTraceLines: TranscriptLine[];
+  sessionContinuity: SessionContinuityState;
   prompt: string;
-  activeTabId: string;
   tabs: TabSpec[];
   paneScrollOffsets: Record<string, number>;
+  paneFocusIndices: Record<string, number>;
   liveRepoPreview?: TabPreview;
   liveControlPreview?: TabPreview;
   authoritativeSurfaces: SurfaceAuthorityState;
   approvalPane: ApprovalQueueState;
   sessionPane: SessionPaneState;
+  activityFeed: ActivityFeedState;
   outline: OutlineItem[];
   statusLine: string;
   footerHint: string;
 };
 
 export type AppAction =
+  | {type: "batch"; actions: AppAction[]}
   | {type: "prompt.append"; value: string}
   | {type: "prompt.backspace"}
   | {type: "prompt.clear"}
   | {type: "state.replace"; state: AppState}
   | {type: "bridge.status"; status: BridgeStatus}
   | {type: "bridge.config"; provider: string; model: string; strategy?: string}
+  | {type: "route.policy.set"; policy: RoutePolicyState}
+  | {type: "execution.events.ingest"; events: CanonicalExecutionEvent[]}
+  | {type: "ui.compact.set"; compact: boolean}
   | {type: "modelPicker.open"; returnTabId?: string}
   | {type: "modelPicker.close"}
   | {type: "modelPicker.move"; direction: 1 | -1}
   | {type: "modelPicker.set"; index: number}
+  | {type: "paneSwitcher.open"}
+  | {type: "paneSwitcher.close"}
+  | {type: "paneSwitcher.set"; index: number}
   | {type: "status.set"; value: string}
   | {type: "footer.set"; value: string}
   | {type: "sidebar.toggle"}
@@ -400,6 +544,7 @@ export type AppAction =
   | {type: "tab.cycle"; direction: 1 | -1}
   | {type: "pane.scroll"; tabId: string; delta: number; maxOffset: number}
   | {type: "pane.scroll.reset"; tabId: string}
+  | {type: "pane.focus.set"; tabId: string; index: number}
   | {type: "tab.ensure"; tab: TabSpec}
   | {type: "tab.close"; tabId: string}
   | {type: "tab.append"; tabId: string; lines: TranscriptLine[]}
@@ -408,7 +553,6 @@ export type AppAction =
       tabId: string;
       lines: TranscriptLine[];
       preview?: TabPreview;
-      modelTargets?: Array<{alias: string; label: string; provider: string; model: string}>;
     }
   | {type: "live.repo.set"; preview?: TabPreview}
   | {type: "live.control.set"; preview?: TabPreview}
@@ -421,5 +565,9 @@ export type AppAction =
   | {type: "approval.select"; actionId: string}
   | {type: "session.catalog.set"; catalog: SessionCatalogPayload; selectedSessionId?: string}
   | {type: "session.detail.set"; detail: SessionDetailPayload}
+  | {type: "session.continuity.set"; continuity: SessionContinuityState}
   | {type: "session.select"; sessionId: string}
+  | {type: "activity.ingest"; entries: ActivityEntry[]}
+  | {type: "activity.visibility.toggle"}
+  | {type: "activity.raw.toggle"}
   | {type: "outline.set"; outline: OutlineItem[]};

@@ -1,3 +1,87 @@
+---
+title: DHARMA SWARM — Briefing for Parallel Agent
+path: docs/archive/BRIEFING.md
+slug: dharma-swarm-briefing-for-parallel-agent
+doc_type: documentation
+status: archival
+summary: 'Date : 2026-03-04 Status : Phase 1 complete, committed, 115/115 tests passing Location : ~/dharma swarm/'
+source:
+  provenance: repo_local
+  kind: documentation
+  origin_signals: []
+  cited_urls: []
+  generated_hint: human_or_agent_authored_repo_doc
+disciplines:
+- multi_agent_systems
+- software_architecture
+- knowledge_management
+- research_methodology
+- verification
+- operations
+inspiration:
+- verification
+- operator_runtime
+- research_synthesis
+connected_python_files:
+- dharma_swarm/cli.py
+- dharma_swarm/telos_gates.py
+connected_python_modules:
+- dharma_swarm.cli
+- dharma_swarm.telos_gates
+connected_relevant_files:
+- dharma_swarm/cli.py
+- dharma_swarm/telos_gates.py
+- docs/archive/FIRST_LIVE_RUN_REPORT.md
+- docs/archive/OVERNIGHT_BUILD_PLAN.md
+- docs/archive/TEST_STRATEGY.md
+improvement:
+  room_for_improvement:
+  - Strengthen cross-links to adjacent docs and implementing modules.
+  - Separate durable knowledge from transient session context.
+  - Add a tighter summary for first-pass retrieval.
+  - Review whether this file should stay in `docs/archive` or be consolidated elsewhere.
+  next_review_at: '2026-04-01T00:43:19+09:00'
+pkm:
+  note_class: documentation
+  vault_path: docs/archive/BRIEFING.md
+  retrieval_terms:
+  - archive
+  - briefing
+  - parallel
+  - agent
+  - date
+  - '2026'
+  - status
+  - phase
+  - complete
+  - committed
+  - '115'
+  - tests
+  evergreen_potential: medium
+stigmergy:
+  meaning: This file is a shared environmental trace in the DHARMA corpus. Its path, recency, and linked surfaces guide future agent attention; its frontmatter now adds machine-readable coordination cues.
+  state: archive
+  semantic_weight: 0.45
+  coordination_comment: 'Date : 2026-03-04 Status : Phase 1 complete, committed, 115/115 tests passing Location : ~/dharma swarm/'
+  levels:
+    sematectonic:
+      what_it_is: The document itself is the mark. Its existence, filename, location, and revision history attract or repel future work.
+      access_mark: Opening, linking, and revising docs/archive/BRIEFING.md reinforces its salience without needing a separate message.
+    marker_based:
+      what_it_is: The frontmatter is an explicit annotation layer on top of the document.
+      semantic_mark: Semantic weight, improvement prompts, related files, and provenance comments tell later agents how to use this document.
+  trace_role: coordination_trace
+curation:
+  last_frontmatter_refresh: '2026-04-01T00:43:19+09:00'
+  curated_by_model: Codex (GPT-5)
+  source_model_in_file: 
+  future_model_handoffs:
+  - GPT-5 Codex
+  - Claude
+  - Gemini
+  - Local evaluator
+  schema_version: pkm-phd-stigmergy-v1
+---
 # DHARMA SWARM — Briefing for Parallel Agent
 
 **Date**: 2026-03-04

@@ -10,7 +10,7 @@ source:
   kind: documentation
   origin_signals:
   - docs/GOTCHA_PROTOCOL.md
-  - docs/SPRINT_GOTCHAS.md
+  - docs/plans/SPRINT_GOTCHAS.md
   - tools/feedback_collector.py
   cited_urls: []
   generated_hint: human_or_agent_authored_repo_doc
@@ -29,7 +29,7 @@ connected_python_files:
 connected_python_modules:
 - tools.feedback_collector
 connected_relevant_files:
-- docs/SPRINT_GOTCHAS.md
+- docs/plans/SPRINT_GOTCHAS.md
 - tools/feedback_collector.py
 - docs/plans/ALLOUT_6H_MODE.md
 - docs/plans/ALL_NIGHT_BUILD_CONCLAVE_2026-03-20.md
@@ -103,7 +103,7 @@ the bottom. Skill-level gotchas are scoped to that skill's domain.
 System-wide gotchas live in two places:
 
 - **This file** (`docs/GOTCHA_PROTOCOL.md`) -- the protocol and core examples
-- **`docs/SPRINT_GOTCHAS.md`** -- rolling log of errors encountered during
+- **`docs/plans/SPRINT_GOTCHAS.md`** -- rolling log of errors encountered during
   development sprints, auto-populated by `tools/feedback_collector.py`
 
 ## Gotcha Format
@@ -158,10 +158,10 @@ Open the SKILL.md, find `## Gotchas` (create it if missing), append:
 Run the feedback collector to auto-detect patterns:
 
 ```bash
-python3 tools/feedback_collector.py --since 7 --output docs/SPRINT_GOTCHAS.md
+python3 tools/feedback_collector.py --since 7 --output docs/plans/SPRINT_GOTCHAS.md
 ```
 
-Or append manually to `docs/SPRINT_GOTCHAS.md` using the same format.
+Or append manually to `docs/plans/SPRINT_GOTCHAS.md` using the same format.
 
 ### To this protocol document
 
@@ -240,7 +240,7 @@ error patterns and proposes gotcha entries automatically. Run it periodically:
 python3 tools/feedback_collector.py --since 7
 
 # Write results to sprint log
-python3 tools/feedback_collector.py --since 7 --output docs/SPRINT_GOTCHAS.md
+python3 tools/feedback_collector.py --since 7 --output docs/plans/SPRINT_GOTCHAS.md
 ```
 
 The collector detects:

@@ -25,6 +25,7 @@ inspiration:
 connected_relevant_files:
   - docs/plans/2026-04-02-cleanup-control-center.md
   - docs/plans/2026-04-02-generated-artifact-control-center.md
+  - docs/plans/2026-04-03-tui-baseline-protection-note.md
   - docs/plans/2026-04-02-current-meta-topology-of-dharma-swarm.md
   - docs/plans/2026-04-02-non-tui-repo-hygiene-map.md
   - docs/plans/2026-04-02-frontmatter-alignment-map.md
@@ -40,6 +41,7 @@ improvement:
     - Recompute counts after the next specs tranche lands.
     - Split root-level residue into active canon versus archive candidates.
     - Keep generated-artifact handling linked to its own control surface rather than burying it inside root cleanup notes.
+    - Keep hot-lane dirt language aligned with the accepted Bun TUI freeze baseline rather than implying structural incoherence.
   next_review_at: '2026-04-03T12:00:00+09:00'
 pkm:
   note_class: plan
@@ -107,6 +109,11 @@ Interpretation:
 
 - these paths are actively evolving
 - they should be stabilized in bounded implementation slices, not forced clean prematurely
+- dirty status here does not imply the Bun TUI lane lacks a real converged baseline
+
+Boundary note:
+
+- `docs/plans/2026-04-03-tui-baseline-protection-note.md`
 
 ### 2. Structured Cleanup Dirt
 
@@ -219,6 +226,9 @@ Current progress:
 
 - `lodestones/` now has an explicit local index at `lodestones/README.md`
 - substrate handling policy now lives at `docs/plans/2026-04-02-substrate-layer-policy.md`
+- substrate directory reality is now mapped in `docs/plans/2026-04-03-substrate-directory-cartography.md`
+- substrate keep-versus-watch candidates now live in `docs/plans/2026-04-03-substrate-graduation-candidates.md`
+- substrate local label discipline now lives in `docs/plans/2026-04-03-substrate-local-indexing-guidelines.md`
 - the remaining work is to settle the boundary between conceptual canon (`foundations/`), orienting substrate (`lodestones/`), and operational workflow contract (`mode_pack/`)
 
 ## Run Plan
@@ -234,6 +244,7 @@ Current progress:
 - do not try to clean the entire repo in one pass
 - do not force generated families to move while they are still path-coupled
 - do not demand a clean worktree from the hot TUI lane while it is actively converging
+- do not use repo dirt as evidence that the Bun TUI lane lacks a real freeze point
 
 ## Plain-English Read
 

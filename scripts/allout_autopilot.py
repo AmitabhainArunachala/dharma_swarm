@@ -596,7 +596,7 @@ def collect_historical_steps(limit_files: int = 400) -> list[str]:
             if m:
                 steps.append(m.group(1).strip())
 
-    yolo_file = ROOT / "docs" / "YOLO_4AM_TASKS.md"
+    yolo_file = ROOT / "docs" / "plans" / "YOLO_4AM_TASKS.md"
     if yolo_file.exists():
         for line in yolo_file.read_text(encoding="utf-8", errors="ignore").splitlines():
             m = step_pat.match(line.strip())

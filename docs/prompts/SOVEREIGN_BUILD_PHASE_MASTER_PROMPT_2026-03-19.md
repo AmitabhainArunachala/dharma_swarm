@@ -12,7 +12,7 @@ source:
   - reports/dharma_current_state_deep_dive_2026-03-19.md
   - reports/ecosystem_forensics_audit_2026-03-19.md
   - specs/SOVEREIGN_BUILD_PHASE_MASTER_SPEC_2026-03-19.md
-  - docs/DHARMA_SWARM_THREE_PLANE_ARCHITECTURE_2026-03-16.md
+  - docs/architecture/DHARMA_SWARM_THREE_PLANE_ARCHITECTURE_2026-03-16.md
   - specs/KERNEL_CORE_SPEC.md
   cited_urls: []
   generated_hint: human_or_agent_authored_repo_doc
@@ -44,7 +44,7 @@ connected_relevant_files:
 - reports/dharma_current_state_deep_dive_2026-03-19.md
 - reports/ecosystem_forensics_audit_2026-03-19.md
 - specs/SOVEREIGN_BUILD_PHASE_MASTER_SPEC_2026-03-19.md
-- docs/DHARMA_SWARM_THREE_PLANE_ARCHITECTURE_2026-03-16.md
+- docs/architecture/DHARMA_SWARM_THREE_PLANE_ARCHITECTURE_2026-03-16.md
 - specs/KERNEL_CORE_SPEC.md
 improvement:
   room_for_improvement:
@@ -119,7 +119,7 @@ Read and follow these files before making design decisions:
 1. `reports/dharma_current_state_deep_dive_2026-03-19.md`
 2. `reports/ecosystem_forensics_audit_2026-03-19.md`
 3. `specs/SOVEREIGN_BUILD_PHASE_MASTER_SPEC_2026-03-19.md`
-4. `docs/DHARMA_SWARM_THREE_PLANE_ARCHITECTURE_2026-03-16.md`
+4. `docs/architecture/DHARMA_SWARM_THREE_PLANE_ARCHITECTURE_2026-03-16.md`
 5. `specs/KERNEL_CORE_SPEC.md`
 
 Interpret them this way:

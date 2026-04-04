@@ -10,6 +10,14 @@ export type VerificationSummaryRows = {
   bundle: string;
 };
 
+export type VerificationFields = {
+  checksText?: string;
+  summaryText?: string;
+  bundleText?: string;
+  passingText?: string;
+  failingText?: string;
+};
+
 function uniqueEntries(entries: VerificationEntry[]): VerificationEntry[] {
   const seen = new Set<string>();
   return entries.filter((entry) => {
@@ -60,6 +68,36 @@ export function parseVerificationBundle(checksText: string, summaryText = ""): V
     .filter((entry): entry is VerificationEntry => entry !== null && entry.name.length > 0);
 
   return uniqueEntries(fromSummary);
+}
+
+function parseVerificationNames(value = ""): string[] {
+  return value
+    .split(/[;,]/)
+    .map((part) => part.trim())
+    .filter((part) => part.length > 0 && part.toLowerCase() !== "none" && !isGenericVerificationLabel(part));
+}
+
+export function resolveVerificationEntries(fields: VerificationFields): VerificationEntry[] {
+  const fromChecks = parseVerificationBundle(fields.checksText ?? "", "");
+  if (fromChecks.length > 0) {
+    return fromChecks;
+  }
+
+  const fromBundle = parseVerificationBundle("none", fields.bundleText ?? "");
+  if (fromBundle.length > 0) {
+    return fromBundle;
+  }
+
+  const fromSummary = parseVerificationBundle("none", fields.summaryText ?? "");
+  if (fromSummary.length > 0) {
+    return fromSummary;
+  }
+
+  const fromDetailRows = uniqueEntries([
+    ...parseVerificationNames(fields.passingText).map((name) => ({name, ok: true})),
+    ...parseVerificationNames(fields.failingText).map((name) => ({name, ok: false})),
+  ]);
+  return fromDetailRows;
 }
 
 export function verificationBundleLabel(bundle: VerificationEntry[]): string {

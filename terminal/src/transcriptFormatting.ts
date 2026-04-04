@@ -1,4 +1,4 @@
-import type {TranscriptLine} from "./types.js";
+import type {TranscriptLine} from "./types";
 
 export type TranscriptSegment = {
   text: string;

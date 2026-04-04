@@ -1,3 +1,97 @@
+---
+title: 'DHARMA SWARM Integration Build: Complete Test Strategy'
+path: docs/archive/TEST_STRATEGY.md
+slug: dharma-swarm-integration-build-complete-test-strategy
+doc_type: report
+status: archival
+summary: 'DHARMA SWARM Integration Build: Complete Test Strategy Date : 2026-03-04 Scope : Integration of ~4,000 lines from 5+ source repos into dharma swarm Baseline : 203/203 tests passing (verified 2026-03-04T23:20) Constrai...'
+source:
+  provenance: repo_local
+  kind: report
+  origin_signals:
+  - scripts/regression_guard.py
+  - tests/test_models.py
+  - tests/test_telos_gates.py
+  - tests/test_providers.py
+  cited_urls: []
+  generated_hint: human_or_agent_authored_repo_doc
+disciplines:
+- multi_agent_systems
+- software_architecture
+- knowledge_management
+- research_methodology
+- verification
+- product_strategy
+inspiration:
+- verification
+- product_surface
+- research_synthesis
+connected_python_files:
+- scripts/regression_guard.py
+- tests/test_models.py
+- tests/test_telos_gates.py
+- tests/test_providers.py
+- dharma_swarm/telos_gates.py
+connected_python_modules:
+- scripts.regression_guard
+- tests.test_models
+- tests.test_telos_gates
+- tests.test_providers
+- dharma_swarm.telos_gates
+connected_relevant_files:
+- scripts/regression_guard.py
+- tests/test_models.py
+- tests/test_telos_gates.py
+- tests/test_providers.py
+- dharma_swarm/telos_gates.py
+improvement:
+  room_for_improvement:
+  - 'Surface the decision delta: what should change now because this report exists.'
+  - Link findings to exact code, tests, or commits where possible.
+  - Distinguish measured facts from operator interpretation.
+  - Review whether this file should stay in `docs/reports` or be consolidated elsewhere.
+  next_review_at: '2026-04-01T00:43:19+09:00'
+pkm:
+  note_class: report
+  vault_path: docs/archive/TEST_STRATEGY.md
+  retrieval_terms:
+  - reports
+  - test
+  - strategy
+  - integration
+  - build
+  - complete
+  - date
+  - '2026'
+  - scope
+  - '000'
+  - lines
+  - source
+  evergreen_potential: medium
+stigmergy:
+  meaning: This file is a shared environmental trace in the DHARMA corpus. Its path, recency, and linked surfaces guide future agent attention; its frontmatter now adds machine-readable coordination cues.
+  state: archive
+  semantic_weight: 0.6
+  coordination_comment: 'DHARMA SWARM Integration Build: Complete Test Strategy Date : 2026-03-04 Scope : Integration of ~4,000 lines from 5+ source repos into dharma swarm Baseline : 203/203 tests passing (verified 2026-03-04T23:20) Constrai...'
+  levels:
+    sematectonic:
+      what_it_is: The document itself is the mark. Its existence, filename, location, and revision history attract or repel future work.
+      access_mark: Opening, linking, and revising docs/archive/TEST_STRATEGY.md reinforces its salience without needing a separate message.
+    marker_based:
+      what_it_is: The frontmatter is an explicit annotation layer on top of the document.
+      semantic_mark: Semantic weight, improvement prompts, related files, and provenance comments tell later agents how to use this document.
+  trace_role: diagnostic_or_evidence_trace
+curation:
+  last_frontmatter_refresh: '2026-04-01T00:43:19+09:00'
+  curated_by_model: Codex (GPT-5)
+  source_model_in_file: 
+  future_model_handoffs:
+  - GPT-5 Codex
+  - Claude
+  - Gemini
+  - Local evaluator
+  schema_version: pkm-phd-stigmergy-v1
+---
 # DHARMA SWARM Integration Build: Complete Test Strategy
 **Date**: 2026-03-04
 **Scope**: Integration of ~4,000 lines from 5+ source repos into dharma_swarm

@@ -426,9 +426,9 @@ Key directories inside `docs/`:
 
 Notable standalone docs:
 - `docs/archive/DHARMA_SWARM_1000X_MASTERPLAN_2026-03-16.md`
-- `docs/DHARMA_SWARM_THREE_PLANE_ARCHITECTURE_2026-03-16.md`
-- `docs/PRODUCTION_DEPLOYMENT_GUIDE.md`
-- `docs/DARWIN_ENGINE_QUICK_START_GUIDE.md`
+- `docs/architecture/DHARMA_SWARM_THREE_PLANE_ARCHITECTURE_2026-03-16.md`
+- `docs/architecture/PRODUCTION_DEPLOYMENT_GUIDE.md`
+- `docs/architecture/DARWIN_ENGINE_QUICK_START_GUIDE.md`
 
 ---
 

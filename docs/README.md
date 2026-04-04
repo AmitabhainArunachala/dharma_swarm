@@ -33,6 +33,7 @@ connected_relevant_files:
 - docs/GENERATED_ARTIFACT_BOUNDARY_MATRIX_2026-04-02.md
 - docs/plans/2026-04-02-cleanup-control-center.md
 - docs/plans/2026-04-02-generated-artifact-control-center.md
+- docs/plans/2026-04-03-tui-baseline-protection-note.md
 - docs/plans/ROOT_DRAIN_VALIDATION_2026-04-02.md
 - docs/REPO_LIVING_MAP_2026-03-31.md
 - docs/SWARM_FRONTEND_MASTER_SPEC_2026-04-01.md
@@ -103,6 +104,10 @@ If a file does not fit one of those classes, it probably should not be created y
 - [plans/README.md](/Users/dhyana/dharma_swarm/docs/plans/README.md): index for bounded execution plans, cleanup packets, and operating-mode docs
 - `docs/architecture/`:
   subsystem architecture docs and technical structure notes that should not compete with repo-level canon
+- [architecture/README.md](/Users/dhyana/dharma_swarm/docs/architecture/README.md): index for subsystem architecture and architecture-local operator docs
+- `docs/reports/`:
+  authored active-reference reports and synthesis packets that still matter operationally
+- [reports/README.md](/Users/dhyana/dharma_swarm/docs/reports/README.md): index for active-reference report material that is neither canon nor archive
 - `docs/missions/`:
   mission-specific execution docs
 - `docs/prompts/`:
@@ -175,6 +180,16 @@ These are useful, but they should not compete with repo-level canon:
 - [root-next-tranche-plan.md](/Users/dhyana/dharma_swarm/docs/plans/2026-04-02-root-next-tranche-plan.md): bounded next-step plan for the remaining root cleanup seam
 - [root-state-reconciliation.md](/Users/dhyana/dharma_swarm/docs/plans/2026-04-02-root-state-reconciliation.md): current-state bridge between older root-drain wave notes and the present root layout
 - [substrate-layer-policy.md](/Users/dhyana/dharma_swarm/docs/plans/2026-04-02-substrate-layer-policy.md): boundary rules for `foundations/`, `lodestones/`, and `mode_pack/`
+- [substrate-directory-cartography.md](/Users/dhyana/dharma_swarm/docs/plans/2026-04-03-substrate-directory-cartography.md): directory-reality map for the substrate layer
+- [substrate-graduation-candidates.md](/Users/dhyana/dharma_swarm/docs/plans/2026-04-03-substrate-graduation-candidates.md): keep-versus-watch map for `foundations/`, `lodestones/`, and `mode_pack/`
+- [substrate-local-indexing-guidelines.md](/Users/dhyana/dharma_swarm/docs/plans/2026-04-03-substrate-local-indexing-guidelines.md): local labeling rules that keep canon, orientation, and operational contract surfaces distinct
+- [autonomous-cleanup-overnight-control.md](/Users/dhyana/dharma_swarm/docs/plans/2026-04-03-autonomous-cleanup-overnight-control.md): control file for bounded overnight non-TUI cleanup runs
+- [autonomous-build-skill-issues-and-fixes.md](/Users/dhyana/dharma_swarm/docs/plans/2026-04-03-autonomous-build-skill-issues-and-fixes.md): live issue log for the repo-local autonomous-build mode
+- [tui-baseline-protection-note.md](/Users/dhyana/dharma_swarm/docs/plans/2026-04-03-tui-baseline-protection-note.md): boundary note that keeps repo hygiene from misreading overall dirt as evidence against the Bun TUI freeze baseline
+
+Operational helper:
+
+- `bash scripts/start_autonomous_cleanup_tmux.sh`: start the bounded non-TUI overnight cleanup launcher
 - [HOT_PATH_INTEGRATION_PROTOCOL_2026-04-01.md](/Users/dhyana/dharma_swarm/docs/HOT_PATH_INTEGRATION_PROTOCOL_2026-04-01.md): dashboard hot-path freeze and integration rules
 
 ## Rules

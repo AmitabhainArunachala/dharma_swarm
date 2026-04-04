@@ -4,7 +4,7 @@ set -euo pipefail
 ROOT="${HOME}/dharma_swarm"
 STATE="${HOME}/.dharma"
 LOG_DIR="${STATE}/logs/caffeine"
-TODO_FILE="${ROOT}/docs/YOLO_4AM_TASKS.md"
+TODO_FILE="${ROOT}/docs/plans/YOLO_4AM_TASKS.md"
 
 TARGET_JST="${1:-04:00}"           # HH:MM (JST)
 POLL_SECONDS="${POLL_SECONDS:-300}" # default 5 min

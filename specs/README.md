@@ -26,15 +26,19 @@ connected_relevant_files:
 - specs/TaskBoardCoordination.tla
 - specs/TaskBoardCoordination.cfg
 - specs/KERNEL_CORE_SPEC.md
+- specs/DGC_TERMINAL_ARCHITECTURE.md
+- specs/DGC_TERMINAL_ARCHITECTURE_v1.1.md
 - specs/ONTOLOGY_PHASE2_SQLITE_UNIFICATION_SPEC_2026-03-19.md
+- specs/ONTOLOGY_PHASE2_SQLITE_UNIFICATION_TODO_2026-03-19.md
 - spec-forge/README.md
 - docs/REPO_ONTOLOGY_AND_HYGIENE_MASTER_SPEC_2026-04-01.md
 improvement:
   room_for_improvement:
   - Keep this directory focused on formal and protocol-level truth.
-  - Mark versioned or superseded specs explicitly.
+  - Keep versioned specs explicit about which file currently governs and which one is retained as prior baseline.
+  - Keep companion checklists clearly subordinate to their canonical spec rather than letting them impersonate the spec itself.
   - Move non-spec planning material elsewhere over time.
-  next_review_at: '2026-04-01T23:59:00+09:00'
+  next_review_at: '2026-04-05T12:00:00+09:00'
 pkm:
   note_class: readme
   vault_path: specs/README.md
@@ -51,7 +55,7 @@ stigmergy:
   coordination_comment: Use this file to decide whether a document belongs in `specs/` or somewhere else.
   trace_role: coordination_trace
 curation:
-  last_frontmatter_refresh: '2026-04-01T23:59:00+09:00'
+  last_frontmatter_refresh: '2026-04-03T20:34:00+09:00'
   curated_by_model: Codex (GPT-5)
   schema_version: pkm-phd-stigmergy-v1
 ---
@@ -76,9 +80,19 @@ Current high-signal specs in this directory:
 
 - [TaskBoardCoordination.tla](/Users/dhyana/dharma_swarm/specs/TaskBoardCoordination.tla) and [TaskBoardCoordination.cfg](/Users/dhyana/dharma_swarm/specs/TaskBoardCoordination.cfg): formal task-board coordination model
 - [KERNEL_CORE_SPEC.md](/Users/dhyana/dharma_swarm/specs/KERNEL_CORE_SPEC.md): bounded core-kernel specification
+- [DGC_TERMINAL_ARCHITECTURE_v1.1.md](/Users/dhyana/dharma_swarm/specs/DGC_TERMINAL_ARCHITECTURE_v1.1.md): current provider-agnostic terminal architecture spec
 - [ONTOLOGY_PHASE2_SQLITE_UNIFICATION_SPEC_2026-03-19.md](/Users/dhyana/dharma_swarm/specs/ONTOLOGY_PHASE2_SQLITE_UNIFICATION_SPEC_2026-03-19.md): active ontology runtime spec
-- [ONTOLOGY_PHASE2_SQLITE_UNIFICATION_TODO_2026-03-19.md](/Users/dhyana/dharma_swarm/specs/ONTOLOGY_PHASE2_SQLITE_UNIFICATION_TODO_2026-03-19.md): working companion list for that ontology pass
+- [ONTOLOGY_PHASE2_SQLITE_UNIFICATION_TODO_2026-03-19.md](/Users/dhyana/dharma_swarm/specs/ONTOLOGY_PHASE2_SQLITE_UNIFICATION_TODO_2026-03-19.md): execution companion checklist for that ontology pass
 - [STIGMERGY_11_LAYER_SPEC_2026-03-23.md](/Users/dhyana/dharma_swarm/specs/STIGMERGY_11_LAYER_SPEC_2026-03-23.md): structured subsystem spec
+
+## Version And Companion Precedence
+
+Use these rules when multiple spec-shaped files exist for one surface:
+
+- [DGC_TERMINAL_ARCHITECTURE_v1.1.md](/Users/dhyana/dharma_swarm/specs/DGC_TERMINAL_ARCHITECTURE_v1.1.md) is the current governing DGC terminal architecture spec.
+- [DGC_TERMINAL_ARCHITECTURE.md](/Users/dhyana/dharma_swarm/specs/DGC_TERMINAL_ARCHITECTURE.md) is retained as the v1.0 baseline, not the current precedence file.
+- [ONTOLOGY_PHASE2_SQLITE_UNIFICATION_SPEC_2026-03-19.md](/Users/dhyana/dharma_swarm/specs/ONTOLOGY_PHASE2_SQLITE_UNIFICATION_SPEC_2026-03-19.md) is the canonical ontology Phase 2 spec.
+- [ONTOLOGY_PHASE2_SQLITE_UNIFICATION_TODO_2026-03-19.md](/Users/dhyana/dharma_swarm/specs/ONTOLOGY_PHASE2_SQLITE_UNIFICATION_TODO_2026-03-19.md) is a companion execution checklist, not an independent canonical spec.
 
 ## Classification Rules
 
@@ -94,6 +108,7 @@ Current high-signal specs in this directory:
 - `reports/` stores historical outputs and audits.
 - `specs/` defines precise contracts that should outlive any one planning wave.
 - `spec-forge/` is the draft and incubation lane for candidate specs that are not yet normative.
+- `specs/research/` is the active research companion subtree for current spec interpretation and alignment work.
 
 ## Specs vs Spec-Forge
 

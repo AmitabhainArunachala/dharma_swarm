@@ -210,7 +210,7 @@ def main():
     print("  3. Run: python3 -m dharma_swarm.ginko_audit --fix")
     print("  4. Run: python3 -m pytest tests/test_ginko_*.py -v")
     print("  5. Run: python3 -m dharma_swarm.ginko_audit --enhancements")
-    print("  6. Launch enhancement wave (see docs/GINKO_ENHANCEMENT_WAVE.md)")
+    print("  6. Launch enhancement wave (see docs/plans/GINKO_ENHANCEMENT_WAVE.md)")
     print()
     print("  ENHANCEMENT WAVE LAUNCH:")
     print("  python3 -m dharma_swarm.ginko_audit --enhancements | head -50")

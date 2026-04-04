@@ -1,4 +1,4 @@
-import type {OutlineItem, TabSpec, TranscriptLine} from "./types.js";
+import type {OutlineItem, TabSpec, TranscriptLine} from "./types";
 
 function line(id: string, kind: TranscriptLine["kind"], text: string): TranscriptLine {
   return {id, kind, text};
@@ -11,9 +11,9 @@ export function buildInitialTabs(): TabSpec[] {
       title: "Chat",
       kind: "chat",
       lines: [
-        line("boot-1", "system", "Dharma Terminal rebuild alpha"),
-        line("boot-2", "system", "Keyboard-first shell. Backend bridged over stdio."),
-        line("boot-3", "assistant", "Use plain prompts or slash commands. Chat is conversation only; system state lives in its own tabs."),
+        line("boot-1", "system", "Dharma Terminal"),
+        line("boot-2", "system", "Keyboard-first operator shell. Backend bridged over stdio."),
+        line("boot-3", "assistant", "Use plain prompts or slash commands. Chat carries the conversation; the surrounding tabs expose runtime, tools, and system state."),
       ],
     },
     {
@@ -21,11 +21,11 @@ export function buildInitialTabs(): TabSpec[] {
       title: "Mission",
       kind: "mission",
       lines: [
-        line("mission-1", "system", "# Terminal Rebuild"),
+        line("mission-1", "system", "# Operator Shell"),
         line("mission-2", "system", "## Goal"),
-        line("mission-3", "assistant", "Replace the fragmented Python CLI/Textual seam with a clean Bun/Ink operator shell."),
+        line("mission-3", "assistant", "Provide one clean operator shell with continuity, visible execution, and repo-aware state."),
         line("mission-4", "system", "## Principles"),
-        line("mission-5", "assistant", "One state model. One bridge. Open tabs. Minimal chrome. No duplicate output."),
+        line("mission-5", "assistant", "One state model. One bridge. Visible tools. Minimal chrome. No duplicate output."),
       ],
     },
     {
@@ -70,7 +70,7 @@ export function buildInitialTabs(): TabSpec[] {
       lines: [
         line("runtime-1", "system", "Bridge: booting"),
         line("runtime-2", "system", "Python runtime: expected 3.11+"),
-        line("runtime-3", "system", "Frontend runtime: Bun preferred, Node fallback only for local editing"),
+        line("runtime-3", "system", "Frontend runtime: Bun"),
       ],
     },
     {

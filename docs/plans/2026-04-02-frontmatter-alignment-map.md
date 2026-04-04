@@ -135,14 +135,14 @@ It is mismatch between metadata and filing reality in some important top-level d
 
 Examples of top-level `docs/*.md` still lacking frontmatter:
 
-- `CURRENT_META_TOPOLOGY_2026-04-02.md`
+- `docs/plans/2026-04-02-current-meta-topology-of-dharma-swarm.md`
 - `DHARMA_COMMAND_NORTH_STAR_SPEC_2026-04-01.md`
 - `DHARMA_COMMAND_POWER_BUILD_LOOP_SPEC_2026-04-01.md`
 - `DHARMA_COMMAND_WORLD_CLASS_PRODUCT_SPEC_2026-04-01.md`
 - `GENERATED_ARTIFACT_BOUNDARY_MATRIX_2026-04-02.md`
 - `HOT_PATH_INTEGRATION_PROTOCOL_2026-04-01.md`
 - `OVERNIGHT_AGENT_SUPERVISOR_ARCHITECTURE_2026-04-01.md`
-- `REPO_HYGIENE_TRIAGE_2026-04-01.md`
+- `docs/plans/REPO_HYGIENE_TRIAGE_2026-04-01.md`
 - `REPO_ONTOLOGY_AND_HYGIENE_MASTER_SPEC_2026-04-01.md`
 - `REPO_RECLASSIFICATION_MATRIX_2026-04-01.md`
 - several terminal-specific top-level docs
