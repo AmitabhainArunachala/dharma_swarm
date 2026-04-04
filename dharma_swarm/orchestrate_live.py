@@ -356,17 +356,29 @@ async def run_evolution_loop(shutdown_event: asyncio.Event) -> None:
             # Drain lifecycle events — task completion throughput for fitness context
             completions = 0
             try:
-                lifecycle_msgs = await _bus.receive("evolution_loop", limit=20)
+                # Prefer consume_events (idempotent, timestamp-based) over
+                # receive+mark_read (status-based, loses data on re-read).
+                lifecycle_events = await _bus.consume_events(
+                    "AGENT_LIFECYCLE_COMPLETED", limit=20
+                )
                 completions = sum(
-                    1 for m in lifecycle_msgs
-                    if m.metadata.get("event") == "task_completed"
+                    1 for e in lifecycle_events
+                    if (e.get("payload") or {}).get("event") == "task_completed"
                 )
                 if completions:
                     _log("evolution", f"Lifecycle: {completions} task completion(s) since last cycle")
-                # Mark consumed so they don't pile up
-                for m in lifecycle_msgs:
-                    await _bus.mark_read(m.id)
             except Exception:
+                # Fallback: try the old receive path in case events table is missing
+                try:
+                    lifecycle_msgs = await _bus.receive("evolution_loop", limit=20)
+                    completions = sum(
+                        1 for m in lifecycle_msgs
+                        if (getattr(m, 'metadata', None) or {}).get("event") == "task_completed"
+                    )
+                    for m in lifecycle_msgs:
+                        await _bus.mark_read(m.id)
+                except Exception:
+                    pass
                 logger.debug("Evolution: lifecycle drain failed", exc_info=True)
 
             # Check fitness trend
@@ -680,7 +692,10 @@ async def run_health_loop(shutdown_event: asyncio.Event) -> None:
         await asyncio.sleep(HEALTH_INTERVAL)
 
 
-async def run_living_layers(shutdown_event: asyncio.Event) -> None:
+async def run_living_layers(
+    shutdown_event: asyncio.Event,
+    stigmergy_store: "StigmergyStore | None" = None,
+) -> None:
     """Living layers — stigmergy decay, shakti perception, subconscious dreams."""
     _log("living", f"Starting (interval={LIVING_INTERVAL}s)")
     await asyncio.sleep(45)  # Let other systems init first
@@ -690,7 +705,7 @@ async def run_living_layers(shutdown_event: asyncio.Event) -> None:
     from dharma_swarm.subconscious import SubconsciousStream
     from dharma_swarm.shakti import ShaktiLoop
 
-    store = StigmergyStore()
+    store = stigmergy_store or StigmergyStore()
     stream = SubconsciousStream(stigmergy=store)
     loop = ShaktiLoop(stigmergy=store)
 
@@ -1244,10 +1259,10 @@ async def _run_replication_monitor_loop(shutdown_event: asyncio.Event) -> None:
 
                             child = PersistentAgent(
                                 name=outcome.child_agent_name,
-                                role=outcome.child_spec.get("role", "worker"),
-                                provider_type=outcome.child_spec.get(
+                                role=AgentRole(outcome.child_spec.get("role", "general")),
+                                provider_type=PT(outcome.child_spec.get(
                                     "default_provider", "openrouter_free"
-                                ),
+                                )),
                                 model=outcome.child_spec.get("default_model", ""),
                                 state_dir=STATE_DIR,
                                 wake_interval_seconds=float(

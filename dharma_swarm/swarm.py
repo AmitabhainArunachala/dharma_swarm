@@ -439,6 +439,9 @@ class SwarmManager:
         try:
             from dharma_swarm.witness import WitnessAuditor
 
+            # Use the router itself — it will pick the cheapest available
+            # provider via the policy router. Passing a specific free provider
+            # would bypass routing memory and circuit breakers.
             self._witness = WitnessAuditor(
                 cycle_seconds=3600.0,
                 provider=self._router,
@@ -788,6 +791,8 @@ class SwarmManager:
             # to routing memory, retries, and audit trails while staying pinned
             # to config.provider unless task metadata widens the lane set.
             spawner = self._worker_spawners.get(name)
+            if self._agent_pool is None:
+                raise RuntimeError("AgentPool not initialized — cannot spawn agents")
             runner = await self._agent_pool.spawn(
                 config,
                 provider=self._router,
@@ -2085,7 +2090,9 @@ class SwarmManager:
                 result["organism_verdict"] = hb.gnani_verdict.decision if hb.gnani_verdict else None
                 result["organism_power"] = (
                     self._organism.samvara.current_power.value
-                    if self._organism.samvara.active else None
+                    if (self._organism.samvara.active
+                        and self._organism.samvara.current_power is not None)
+                    else None
                 )
                 if hb.gnani_verdict and hb.gnani_verdict.decision == "HOLD":
                     gnani_holds = True
