@@ -189,8 +189,9 @@ async def run_swarm_loop(
 
                 # Drain instinct signals — negative patterns inform task quality
                 try:
+                    from dharma_swarm.signal_bus import SIGNAL_ECC_INSTINCT
                     instinct_events = await _instinct_bus.consume_events(
-                        "ECC_INSTINCT_SIGNAL", limit=10,
+                        SIGNAL_ECC_INSTINCT, limit=10,
                     )
                     negatives = [
                         e for e in instinct_events
