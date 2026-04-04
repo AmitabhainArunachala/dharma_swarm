@@ -41,13 +41,19 @@ describe("reduceApp UI state", () => {
     expect(closed.uiMode.activeOverlay).toEqual({kind: "none"});
   });
 
-  test("toggles sidebar visibility and forces visibility when switching sidebar modes", () => {
+  test("toggles sidebar visibility through 3 states and forces visibility when switching sidebar modes", () => {
     const hidden = reduceApp(initialState, {type: "sidebar.toggle"});
-    expect(hidden.uiMode.sidebarVisible).toBe(false);
+    expect(hidden.uiMode.sidebarVisible).toBe("hidden");
+
+    const visible = reduceApp(hidden, {type: "sidebar.toggle"});
+    expect(visible.uiMode.sidebarVisible).toBe("visible");
+
+    const collapsed = reduceApp(visible, {type: "sidebar.toggle"});
+    expect(collapsed.uiMode.sidebarVisible).toBe("collapsed");
 
     const contextMode = reduceApp(hidden, {type: "sidebar.mode", mode: "context"});
     expect(contextMode.uiMode.sidebarMode).toBe("context");
-    expect(contextMode.uiMode.sidebarVisible).toBe(true);
+    expect(contextMode.uiMode.sidebarVisible).toBe("visible");
   });
 
   test("cycles tabs and supports direct tab activation without unintended jumps", () => {

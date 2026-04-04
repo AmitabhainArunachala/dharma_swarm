@@ -813,7 +813,7 @@ describe("snapshotActionsForBridgeEvent", () => {
 
     persistRepoPreview(bootstrapWorkspacePreview);
     persistControlPreview(bootstrapRuntimePreview);
-    saveTerminalStateOverride({version: 3, sidebarVisible: true, sidebarMode: "context"});
+    saveTerminalStateOverride({version: 3, sidebarVisible: "visible", sidebarMode: "context"});
 
     const sentMessages: Array<{type: string; payload: Record<string, unknown>}> = [];
     const originalSend = DharmaBridge.prototype.send;
@@ -899,7 +899,7 @@ describe("snapshotActionsForBridgeEvent", () => {
     process.env.DHARMA_TERMINAL_SUPERVISOR_STATE_DIR = stateDir;
 
     persistControlPreview(bootstrapRuntimePreview);
-    saveTerminalStateOverride({version: 3, sidebarVisible: false, sidebarMode: "toc"});
+    saveTerminalStateOverride({version: 3, sidebarVisible: "hidden", sidebarMode: "toc"});
 
     const originalSend = DharmaBridge.prototype.send;
     const originalClose = DharmaBridge.prototype.close;
@@ -10039,7 +10039,7 @@ Workflows: 1
       "Topology peers":
         "dharma_swarm (canonical_core, main...origin/main, dirty True); dgc-core (operator_shell, detached, dirty False)",
     });
-    saveTerminalStateOverride({version: 3, sidebarVisible: true, sidebarMode: "context"});
+    saveTerminalStateOverride({version: 3, sidebarVisible: "visible", sidebarMode: "context"});
 
     const sentMessages: Array<{type: string; payload: Record<string, unknown>}> = [];
     const originalSend = DharmaBridge.prototype.send;
@@ -10121,7 +10121,7 @@ Workflows: 1
       Ahead: "2",
       Behind: "0",
     });
-    saveTerminalStateOverride({version: 3, sidebarVisible: true, sidebarMode: "context"});
+    saveTerminalStateOverride({version: 3, sidebarVisible: "visible", sidebarMode: "context"});
 
     const bootState = createInitialAppState(initialState);
     const visibleSidebarLines = buildVisibleContextSidebarLines(
@@ -10202,7 +10202,7 @@ Workflows: 1
       Ahead: "2",
       Behind: "0",
     });
-    saveTerminalStateOverride({version: 3, sidebarVisible: true, sidebarMode: "context"});
+    saveTerminalStateOverride({version: 3, sidebarVisible: "visible", sidebarMode: "context"});
 
     let state = createInitialAppState(initialState);
     const sent: Array<{type: string; payload: Record<string, unknown>}> = [];
@@ -10344,7 +10344,7 @@ Workflows: 1
       "Topology pressure preview": "1 warning | dharma_swarm Δ563 (517 modified, 46 untracked)",
       "Primary changed hotspot": "terminal (274)",
     });
-    saveTerminalStateOverride({version: 3, sidebarVisible: true, sidebarMode: "context"});
+    saveTerminalStateOverride({version: 3, sidebarVisible: "visible", sidebarMode: "context"});
 
     const sentMessages: Array<{type: string; payload: Record<string, unknown>}> = [];
     const originalSend = DharmaBridge.prototype.send;
@@ -10423,7 +10423,7 @@ Workflows: 1
       "Branch divergence": "local +2/-0 | peer dgc-core detached",
       "Detached peers": "dgc-core detached",
     });
-    saveTerminalStateOverride({version: 3, sidebarVisible: true, sidebarMode: "context"});
+    saveTerminalStateOverride({version: 3, sidebarVisible: "visible", sidebarMode: "context"});
 
     let state = createInitialAppState(initialState);
     const sent: Array<{type: string; payload: Record<string, unknown>}> = [];
@@ -10599,7 +10599,7 @@ Git sync: origin/main | ahead 2 | behind 0
       Updated: "2026-04-03T01:15:00Z",
     });
     persistRepoPreview(bootstrapWorkspacePreview);
-    saveTerminalStateOverride({version: 3, sidebarVisible: true, sidebarMode: "context"});
+    saveTerminalStateOverride({version: 3, sidebarVisible: "visible", sidebarMode: "context"});
 
     let state = createInitialAppState(initialState);
     const sent: Array<{type: string; payload: Record<string, unknown>}> = [];
@@ -10719,7 +10719,7 @@ Workflows: 1
       Ahead: "2",
       Behind: "0",
     });
-    saveTerminalStateOverride({version: 3, sidebarVisible: true, sidebarMode: "context"});
+    saveTerminalStateOverride({version: 3, sidebarVisible: "visible", sidebarMode: "context"});
 
     let state = createInitialAppState(initialState);
     const sent: Array<{type: string; payload: Record<string, unknown>}> = [];
@@ -10895,7 +10895,7 @@ Git sync: origin/main | ahead 2 | behind 0`,
       Updated: "2026-04-03T01:15:00Z",
     });
     persistRepoPreview(bootstrapWorkspacePreview);
-    saveTerminalStateOverride({version: 3, sidebarVisible: true, sidebarMode: "context"});
+    saveTerminalStateOverride({version: 3, sidebarVisible: "visible", sidebarMode: "context"});
 
     let state = createInitialAppState(initialState);
     const sent: Array<{type: string; payload: Record<string, unknown>}> = [];

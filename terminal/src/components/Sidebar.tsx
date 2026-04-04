@@ -38,6 +38,7 @@ type Props = {
   repoPreview?: TabPreview;
   controlPreview?: TabPreview;
   compact?: boolean;
+  collapsed?: boolean;
 };
 
 function normalizedPreviewValue(value: unknown): string {
@@ -2520,7 +2521,16 @@ export function buildVisibleContextSidebarLines(
   ];
 }
 
-function SidebarInner({mode, outline, activeTabTitle, provider, model, bridgeStatus, tabs, repoPreview, controlPreview, compact = false}: Props): React.ReactElement {
+function SidebarInner({mode, outline, activeTabTitle, provider, model, bridgeStatus, tabs, repoPreview, controlPreview, compact = false, collapsed = false}: Props): React.ReactElement {
+  if (collapsed) {
+    const icon = mode === "toc" ? "T" : mode === "context" ? "C" : "?";
+    return (
+      <Box width={4} flexDirection="column" borderStyle="round" borderColor={THEME.ink} marginRight={1}>
+        <Text color={THEME.wave} bold>{icon}</Text>
+      </Box>
+    );
+  }
+
   const contextLines = buildVisibleContextSidebarLines(
     tabs,
     activeTabTitle,
@@ -2531,7 +2541,7 @@ function SidebarInner({mode, outline, activeTabTitle, provider, model, bridgeSta
     controlPreview,
   );
   return (
-    <Box width={compact ? 22 : 34} flexDirection="column" borderStyle="round" borderColor={THEME.ink} paddingX={1} marginRight={1}>
+    <Box width={compact ? 18 : 28} flexDirection="column" borderStyle="round" borderColor={THEME.ink} paddingX={1} marginRight={1}>
       <Text color={THEME.wave} bold>{mode === "toc" ? "TOC" : mode === "context" ? "Context" : "Help"}</Text>
       <Text color={THEME.stone}> </Text>
       {mode === "toc" &&

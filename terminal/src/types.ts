@@ -446,10 +446,12 @@ export type UIModeOverlay =
   | {kind: "modelPicker"; selectedIndex: number; returnTabId: string}
   | {kind: "paneSwitcher"; selectedIndex: number};
 
+export type SidebarVisibility = "visible" | "collapsed" | "hidden";
+
 export type UIModeState = {
   activeTabId: string;
   activeOverlay: UIModeOverlay;
-  sidebarVisible: boolean;
+  sidebarVisible: SidebarVisibility;
   sidebarMode: SidebarMode;
   focusedPaneId: string;
   compactMode: boolean;

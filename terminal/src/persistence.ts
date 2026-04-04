@@ -118,11 +118,14 @@ const REPO_PREVIEW_FIELDS = [
 
 type StoredState = {
   version: number;
-  sidebarVisible: boolean;
+  sidebarVisible: "visible" | "collapsed" | "hidden" | boolean;
   sidebarMode: AppState["uiMode"]["sidebarMode"];
 };
 
-type RestoredState = Omit<StoredState, "version">;
+type RestoredState = {
+  sidebarVisible: "visible" | "collapsed" | "hidden";
+  sidebarMode: AppState["uiMode"]["sidebarMode"];
+};
 type PersistedSnapshotOptions = {
   workspacePayload?: WorkspaceSnapshotPayload;
   runtimePayload?: RuntimeSnapshotPayload;
@@ -143,7 +146,7 @@ export function loadStoredState(): RestoredState | null {
       return null;
     }
     return {
-      sidebarVisible: decoded.sidebarVisible ?? true,
+      sidebarVisible: typeof decoded.sidebarVisible === "string" ? (decoded.sidebarVisible as "visible" | "collapsed" | "hidden") : decoded.sidebarVisible === false ? "hidden" : "collapsed",
       sidebarMode: decoded.sidebarMode ?? "toc",
     };
   } catch {

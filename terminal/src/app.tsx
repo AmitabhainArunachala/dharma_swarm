@@ -2868,11 +2868,16 @@ export function App(): React.ReactElement {
       return;
     }
     if (key.ctrl && input === "b") {
-      const nextSidebarVisible = !stateRef.current.uiMode.sidebarVisible;
+      const current = stateRef.current.uiMode.sidebarVisible;
+      const statusMap: Record<string, string> = {
+        visible: "sidebar collapsed",
+        collapsed: "sidebar hidden",
+        hidden: `sidebar -> ${stateRef.current.uiMode.sidebarMode}`,
+      };
       dispatch({type: "sidebar.toggle"});
       dispatch({
         type: "status.set",
-        value: nextSidebarVisible ? `sidebar -> ${stateRef.current.uiMode.sidebarMode}` : "sidebar hidden",
+        value: statusMap[current] ?? "sidebar",
       });
       return;
     }
@@ -3026,7 +3031,7 @@ export function App(): React.ReactElement {
       <TabBar tabs={state.tabs} activeTabId={state.uiMode.activeTabId} compact={compactShell} />
       {activeTab?.kind === "chat" && !compactShell ? <ScenicStrip /> : null}
       <Box marginTop={1}>
-        {state.uiMode.sidebarVisible && state.uiMode.activeOverlay.kind !== "modelPicker" && !compactShell ? (
+        {state.uiMode.sidebarVisible !== "hidden" && state.uiMode.activeOverlay.kind !== "modelPicker" && !compactShell ? (
           <Sidebar
             mode={state.uiMode.sidebarMode}
             outline={outline}
@@ -3038,6 +3043,7 @@ export function App(): React.ReactElement {
             repoPreview={decorateSurfacePreview(state.liveRepoPreview, "repo", state.bridgeStatus, state.authoritativeSurfaces)}
             controlPreview={decorateSurfacePreview(state.liveControlPreview, "control", state.bridgeStatus, state.authoritativeSurfaces)}
             compact={compactShell}
+            collapsed={state.uiMode.sidebarVisible === "collapsed"}
           />
         ) : null}
         {state.uiMode.activeOverlay.kind === "paneSwitcher" ? (

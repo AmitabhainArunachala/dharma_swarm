@@ -81,7 +81,7 @@ export const initialState: AppState = {
   uiMode: {
     activeTabId: "chat",
     activeOverlay: {kind: "none"},
-    sidebarVisible: true,
+    sidebarVisible: "collapsed",
     sidebarMode: "toc",
     focusedPaneId: "chat",
     compactMode: false,
@@ -297,21 +297,23 @@ export function reduceApp(state: AppState, action: AppAction): AppState {
       return {...state, statusLine: action.value};
     case "footer.set":
       return {...state, footerHint: action.value};
-    case "sidebar.toggle":
+    case "sidebar.toggle": {
+      const cycle = {visible: "collapsed", collapsed: "hidden", hidden: "visible"} as const;
       return {
         ...state,
         uiMode: {
           ...state.uiMode,
-          sidebarVisible: !state.uiMode.sidebarVisible,
+          sidebarVisible: cycle[state.uiMode.sidebarVisible] ?? "visible",
         },
       };
+    }
     case "sidebar.mode":
       return {
         ...state,
         uiMode: {
           ...state.uiMode,
           sidebarMode: action.mode,
-          sidebarVisible: true,
+          sidebarVisible: "visible",
         },
       };
     case "tab.activate":
