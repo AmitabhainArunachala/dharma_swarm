@@ -92,9 +92,11 @@ ALL_TIERS: dict[str, tuple[ProviderType, ...]] = {
     "paid": TIER_PAID,
 }
 
-# The canonical seed ordering: ALL free → cheap → paid.
-# This is ONLY used on cold-start (no EWMA data).
-CANONICAL_SEED_ORDER: tuple[ProviderType, ...] = TIER_FREE + TIER_CHEAP + TIER_PAID
+# The canonical seed ordering: PAID (most powerful) → cheap → free.
+# Power-first: always try the strongest model first. Fall back to cheaper
+# models only when the powerful ones fail (rate limit, key missing, etc.).
+# After ~100 routing events, EWMA scores override this seed order.
+CANONICAL_SEED_ORDER: tuple[ProviderType, ...] = TIER_PAID + TIER_CHEAP + TIER_FREE
 
 
 # ─── Canonical Lane Roles ────────────────────────────────────────────────

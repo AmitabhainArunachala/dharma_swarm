@@ -62,14 +62,18 @@ Your job is to keep the system healthy and catch problems early.
 def _resolve_conductor_provider() -> tuple[ProviderType, str]:
     """Resolve the best available provider for conductors.
 
-    Prefers Anthropic (Opus/Sonnet) if key is set, falls back through
-    the standard tier order: free → cheap → paid.
+    Power-first: try the strongest model available, degrade gracefully.
+    Anthropic Opus → OpenAI GPT-5 → OpenRouter → Google AI → free tiers.
     """
     import os
     if os.environ.get("ANTHROPIC_API_KEY", "").strip():
         return ProviderType.ANTHROPIC, "claude-opus-4-6"
+    if os.environ.get("OPENAI_API_KEY", "").strip():
+        return ProviderType.OPENAI, "gpt-5"
     if os.environ.get("OPENROUTER_API_KEY", "").strip():
         return ProviderType.OPENROUTER, "anthropic/claude-sonnet-4-20250514"
+    if os.environ.get("GOOGLE_AI_API_KEY", "").strip():
+        return ProviderType.GOOGLE_AI, "gemini-2.5-flash"
     if os.environ.get("OLLAMA_API_KEY", "").strip():
         return ProviderType.OLLAMA, "glm-5:cloud"
     if os.environ.get("GROQ_API_KEY", "").strip():
