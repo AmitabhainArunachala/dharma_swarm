@@ -551,6 +551,19 @@ class SwarmManager:
         """Initialize all subsystems."""
         self.state_dir.mkdir(parents=True, exist_ok=True)
 
+        # Clear stale EMERGENCY_HOLD from previous crashed/cold-start sessions.
+        # On a fresh system with no task history, the organism fires critical
+        # because blended coherence is 0.0 — that's expected cold-start, not
+        # an emergency. The organism.py fix (requiring _has_history) prevents
+        # NEW false holds, but old hold files persist across restarts.
+        _hold = self.state_dir / "EMERGENCY_HOLD"
+        if _hold.exists():
+            try:
+                logger.info("Clearing stale EMERGENCY_HOLD from previous session")
+                _hold.unlink()
+            except OSError:
+                pass
+
         from dharma_swarm.agent_constitution import bootstrap_dynamic_roster
 
         from dharma_swarm.agent_runner import AgentPool

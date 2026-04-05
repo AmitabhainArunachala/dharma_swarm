@@ -377,9 +377,11 @@ def pulse(config: DaemonConfig | None = None) -> str:
     if gate.attempts:
         print(f"[pulse] witness reroute applied ({gate.attempts} attempts)")
 
-    # Execute via Claude Code headless
+    # Execute via Claude Code headless.
+    # Use "sonnet" (not opus) for pulse — heartbeat checks don't need
+    # the most expensive model, and opus drains credits fast.
     print(f"[pulse] Thread: {thread} | Executing...")
-    result = run_claude_headless(prompt)
+    result = run_claude_headless(prompt, model="sonnet")
 
     # Record
     tm.record_contribution()

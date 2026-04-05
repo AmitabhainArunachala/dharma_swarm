@@ -1152,8 +1152,11 @@ class OrganismRuntime:
         """Fire pain signals when the organism is incoherent."""
         signals: list[AlgedonicSignal] = []
 
-        # Telos drift: blended coherence below threshold
-        if blended < self.TELOS_DRIFT_THRESHOLD:
+        # Telos drift: blended coherence below threshold.
+        # On cold start (no task data), blended=0.0 is expected — NOT an emergency.
+        # Only fire critical when we have enough data to trust the signal.
+        _has_history = (live_score > 0.0 or tcs > 0.0)
+        if blended < self.TELOS_DRIFT_THRESHOLD and _has_history:
             sig = AlgedonicSignal(
                 kind="telos_drift",
                 severity="critical",
