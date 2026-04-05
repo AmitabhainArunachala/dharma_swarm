@@ -340,6 +340,15 @@ class Orchestrator:
         """One orchestration cycle: collect completed, then route pending."""
         import time as _tt
         _t0 = _tt.monotonic()
+
+        # Snapshot completed count BEFORE this tick so we can compute delta
+        _pre_completed = 0
+        try:
+            _pre_stats = await self._board.stats()
+            _pre_completed = _pre_stats.get("completed", 0)
+        except Exception:
+            pass
+
         settled, recovered = await self._collect_completed()
         logger.info("orchestrator.tick: collect=%.1fs", _tt.monotonic() - _t0)
         dispatches = await self.route_next()
@@ -362,8 +371,19 @@ class Orchestrator:
             coordination = dict(self._last_coordination_summary)
             logger.info("orchestrator.tick: coordination cached (%.0fs ago)", _since_last_refresh)
 
+        # Compute actual completions from task board delta
+        _post_completed = 0
+        try:
+            _post_stats = await self._board.stats()
+            _post_completed = _post_stats.get("completed", 0)
+        except Exception:
+            pass
+        _board_settled = max(0, _post_completed - _pre_completed)
+        # Use the larger of asyncio-based and board-based counts
+        actual_settled = max(settled, _board_settled)
+
         summary = {
-            "settled": settled,
+            "settled": actual_settled,
             "recovered": recovered,
             "dispatched": len(dispatches),
             "coordination_global_truths": int(coordination.get("global_truths", 0) or 0),

@@ -1589,15 +1589,22 @@ def cmd_organism_pulse(task: str | None = None, dry_run: bool = False) -> None:
 
 
 def cmd_invariants() -> None:
-    """Show the 4 computable system invariants."""
+    """Show the 4 computable system invariants.
+
+    Reads REAL data from: catalytic graph, task board, evolution archive,
+    and agent roster to compute invariants from actual system state.
+    """
     from dharma_swarm.invariants import snapshot
     import numpy as np
+    from pathlib import Path
+    import json
 
-    # Try to get real data from catalytic graph
+    state_dir = Path.home() / ".dharma"
+
+    # 1. Catalytic graph → criticality + closure
     try:
         from dharma_swarm.catalytic_graph import CatalyticGraph
         graph = CatalyticGraph()
-        # Load from seed if available
         try:
             from dharma_swarm.catalytic_graph import seed_ecosystem
             seed_ecosystem(graph)
@@ -1612,10 +1619,71 @@ def cmd_invariants() -> None:
         total_nodes = 0
         ac_count = 0
 
+    # 2. Evolution archive → info retention (mutation rate vs selective advantage)
+    mutation_rate = 0.0
+    selective_advantage = 1.0
+    genome_length = 9
+    archive_coverage = 0.0
+    try:
+        archive_path = state_dir / "evolution" / "archive.jsonl"
+        if archive_path.exists():
+            entries = [json.loads(l) for l in archive_path.read_text().strip().split("\n") if l.strip()]
+            if entries:
+                genome_length = max(len(entries), 9)
+                # Estimate mutation rate from recent entries
+                recent = entries[-20:]
+                if len(recent) >= 2:
+                    fitnesses = [e.get("fitness", {}).get("weighted", 0.0) for e in recent]
+                    if fitnesses:
+                        selective_advantage = max(fitnesses) - min(fitnesses) + 0.01
+                        mutation_rate = sum(1 for f in fitnesses if f < 0.3) / len(fitnesses)
+                archive_coverage = len(set(e.get("component", "") for e in entries if e.get("component"))) / max(genome_length, 1)
+    except Exception:
+        pass
+
+    # 3. Agent diversity → diversity equilibrium
+    kv_diversity = None
+    try:
+        # Count unique active agent models from stigmergy
+        marks_path = state_dir / "stigmergy" / "marks.jsonl"
+        if marks_path.exists():
+            lines = marks_path.read_text().strip().split("\n")[-100:]  # last 100 marks
+            agents = set()
+            for l in lines:
+                if l.strip():
+                    try:
+                        m = json.loads(l)
+                        agents.add(m.get("agent", ""))
+                    except json.JSONDecodeError:
+                        pass
+            if agents:
+                kv_diversity = min(len(agents) / 10.0, 1.0)  # normalize: 10 unique agents = 1.0
+    except Exception:
+        pass
+
+    # 4. Task board → supplementary info for display
+    task_info = ""
+    try:
+        import asyncio
+        from dharma_swarm.task_board import TaskBoard
+        db_path = state_dir / "db" / "tasks.db"
+        if db_path.exists():
+            board = TaskBoard(db_path)
+            asyncio.get_event_loop().run_until_complete(board.init_db())
+            stats = asyncio.get_event_loop().run_until_complete(board.stats())
+            task_info = f"  Tasks: {stats.get('completed', 0)} completed, {stats.get('failed', 0)} failed, {stats.get('total', 0)} total"
+    except Exception:
+        pass
+
     snap = snapshot(
         adjacency_matrix=mat,
         total_nodes=total_nodes,
         autocatalytic_node_count=ac_count,
+        mutation_rate=mutation_rate,
+        selective_advantage=selective_advantage,
+        genome_length=genome_length,
+        archive_coverage=archive_coverage,
+        kv_diversity=kv_diversity,
     )
 
     print("=== System Invariants ===")
@@ -1625,6 +1693,11 @@ def cmd_invariants() -> None:
     print(f"  Diversity equilibrium:  {snap.diversity_equilibrium:.4f}  [{snap.diversity_status}]")
     print(f"  Overall:                {snap.overall}")
     print(f"  Timestamp:              {snap.timestamp}")
+    if task_info:
+        print(task_info)
+    # Data sources
+    print(f"  Data: adj_matrix={mat.shape}, nodes={total_nodes}, ac_sets={ac_count}, "
+          f"archive_cov={archive_coverage:.2f}, agents={snap.diversity_equilibrium:.2f}")
 
 
 def cmd_transcendence() -> None:

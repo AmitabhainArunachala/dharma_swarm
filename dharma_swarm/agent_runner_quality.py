@@ -648,12 +648,25 @@ async def assess_completion_semantics(
     if any(marker in lowered for marker in ("next actions:", "next steps:", "action items:", "\n- ", "\n1.")):
         quality_score = _clamp01(quality_score + 0.05)
 
+    # Strip reasoning tags instead of rejecting.
+    # Many models (GLM-5, DeepSeek, Qwen) include <think>...</think> blocks
+    # as part of their chain-of-thought. The content after stripping is
+    # usually valid. Penalize quality slightly but don't reject.
     if any(marker in lowered for marker in _REASONING_LEAK_MARKERS):
-        return CompletionAssessment(
-            accepted=False,
-            quality_score=min(quality_score, 0.15),
-            reason="Semantic acceptance failed: leaked reasoning tags in completion",
-        )
+        import re
+        normalized = re.sub(
+            r"<(?:think|analysis)>.*?</(?:think|analysis)>",
+            "", normalized, flags=re.DOTALL | re.IGNORECASE,
+        ).strip()
+        lowered = normalized.lower()
+        quality_score = _clamp01(quality_score * 0.85)  # 15% penalty, not rejection
+        if not normalized:
+            # Nothing left after stripping — THEN reject
+            return CompletionAssessment(
+                accepted=False,
+                quality_score=0.0,
+                reason="Semantic acceptance failed: response was entirely reasoning tags with no content",
+            )
 
     if (
         normalized
