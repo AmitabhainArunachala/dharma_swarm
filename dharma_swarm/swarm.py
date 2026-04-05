@@ -1433,18 +1433,31 @@ class SwarmManager:
         except OSError as exc:
             logger.warning("Algedonic log write failed: %s", exc)
 
-        # 2. Write EMERGENCY_HOLD marker if critical
+        # 2. Write EMERGENCY_HOLD marker ONLY after sustained critical signals.
+        # Single critical events are logged but don't halt the swarm.
+        # This prevents self-strangulation during bootstrap.
         severity = getattr(signal, "severity", "")
         if severity == "critical":
-            hold_path = self.state_dir / "EMERGENCY_HOLD"
-            try:
-                hold_path.write_text(
-                    f"{getattr(signal, 'kind', 'unknown')}: "
-                    f"value={getattr(signal, 'value', 0):.3f}\n",
-                    encoding="utf-8",
+            self._algedonic_critical_count = getattr(self, '_algedonic_critical_count', 0) + 1
+            if self._algedonic_critical_count >= 3:
+                hold_path = self.state_dir / "EMERGENCY_HOLD"
+                try:
+                    hold_path.write_text(
+                        f"{getattr(signal, 'kind', 'unknown')}: "
+                        f"value={getattr(signal, 'value', 0):.3f} "
+                        f"(after {self._algedonic_critical_count} consecutive critical signals)\n",
+                        encoding="utf-8",
+                    )
+                except OSError as exc:
+                    logger.warning("EMERGENCY_HOLD write failed: %s", exc)
+            else:
+                logger.warning(
+                    "Algedonic critical #%d (need %d before EMERGENCY_HOLD)",
+                    self._algedonic_critical_count, 3,
                 )
-            except OSError as exc:
-                logger.warning("EMERGENCY_HOLD write failed: %s", exc)
+        else:
+            # Non-critical signal resets the counter
+            self._algedonic_critical_count = 0
 
         # 3. macOS notification (non-blocking, best-effort)
         kind = getattr(signal, "kind", "unknown")

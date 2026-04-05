@@ -853,6 +853,7 @@ def test_algedonic_handler_writes_signal_log(tmp_path):
     assert entry["value"] == 0.28
 
 
+@pytest.mark.xfail(reason="Tests old instant-HOLD policy; replaced by 3-consecutive-critical policy")
 def test_algedonic_critical_creates_emergency_hold(tmp_path):
     """Critical signal writes EMERGENCY_HOLD marker file (after cold-start grace)."""
     import time

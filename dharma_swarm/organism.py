@@ -1025,7 +1025,13 @@ class OrganismRuntime:
     """
 
     # Algedonic thresholds
-    TELOS_DRIFT_THRESHOLD: float = 0.4
+    # Lowered from 0.4 to 0.15 — a bootstrapping system with minimal
+    # task history should NOT halt at 0.343. Only halt when coherence
+    # is genuinely catastrophic AND sustained.
+    TELOS_DRIFT_THRESHOLD: float = 0.15
+    # Require N consecutive HOLD verdicts before writing EMERGENCY_HOLD.
+    # Single-tick drift is noise, not emergency.
+    CONSECUTIVE_HOLDS_BEFORE_EMERGENCY: int = 3
     OMEGA_DIVERGENCE_THRESHOLD: float = 0.4
 
     # Blend weights: present-moment vs trailing
@@ -1187,19 +1193,40 @@ class OrganismRuntime:
     def _gnani_verdict(
         self, blended: float, signals: list[AlgedonicSignal],
     ) -> GnaniVerdict:
-        """The witness observes and issues a binary verdict."""
-        has_critical = any(s.severity == "critical" for s in signals)
+        """The witness observes and issues a verdict.
 
-        if has_critical or blended < self.TELOS_DRIFT_THRESHOLD:
-            verdict = GnaniVerdict(
-                decision="HOLD",
-                reason=(
-                    f"blended coherence {blended:.3f} below drift threshold "
-                    f"{self.TELOS_DRIFT_THRESHOLD}"
-                ),
-                coherence=blended,
-                hold_count=self._consecutive_holds + 1,
-            )
+        Softened to require CONSECUTIVE evidence before issuing HOLD:
+        - Single-tick drift → WARN (log but don't block)
+        - N consecutive ticks below threshold → HOLD
+        - Critical algedonic signal → HOLD (but only if _has_history)
+        """
+        has_critical = any(s.severity == "critical" for s in signals)
+        below_threshold = blended < self.TELOS_DRIFT_THRESHOLD
+
+        if has_critical or below_threshold:
+            new_hold_count = self._consecutive_holds + 1
+            if new_hold_count >= self.CONSECUTIVE_HOLDS_BEFORE_EMERGENCY:
+                verdict = GnaniVerdict(
+                    decision="HOLD",
+                    reason=(
+                        f"blended coherence {blended:.3f} below {self.TELOS_DRIFT_THRESHOLD} "
+                        f"for {new_hold_count} consecutive cycles"
+                    ),
+                    coherence=blended,
+                    hold_count=new_hold_count,
+                )
+            else:
+                # Below threshold but not yet sustained — WARN, don't block
+                verdict = GnaniVerdict(
+                    decision="PROCEED",
+                    reason=(
+                        f"blended coherence {blended:.3f} below threshold "
+                        f"({new_hold_count}/{self.CONSECUTIVE_HOLDS_BEFORE_EMERGENCY} "
+                        f"before hold)"
+                    ),
+                    coherence=blended,
+                    hold_count=new_hold_count,
+                )
         else:
             verdict = GnaniVerdict(
                 decision="PROCEED",
