@@ -1890,6 +1890,11 @@ class Orchestrator:
         pool_get = getattr(self._pool, "get", None)
         runner = await pool_get(td.agent_id) if pool_get else None
         task = task_for_gate or await self._safe_get_task(td.task_id)
+        logger.info(
+            "_assign_dispatch(%s): runner=%s task=%s pool_agents=%s",
+            td.task_id[:8], bool(runner), bool(task),
+            list((await self._pool.list_agents()) if self._pool else [])[:3],
+        )
         if runner and task:
             run_meta = self._task_meta(task)
             run_meta.pop("retry_not_before_epoch", None)
