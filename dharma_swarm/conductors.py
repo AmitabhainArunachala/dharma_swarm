@@ -9,8 +9,17 @@ Both compose PersistentAgent which composes AutonomousAgent.
 
 from __future__ import annotations
 
+import os
+
 from dharma_swarm.daemon_config import V7_BASE_RULES
 from dharma_swarm.models import AgentRole, ProviderType
+
+
+def _resolve_conductor_provider() -> ProviderType:
+    """Pick the best available provider for conductors (Anthropic > Claude Code)."""
+    if os.environ.get("ANTHROPIC_API_KEY"):
+        return ProviderType.ANTHROPIC
+    return ProviderType.CLAUDE_CODE
 
 
 _CONDUCTOR_CLAUDE_PROMPT = V7_BASE_RULES + """
@@ -59,36 +68,11 @@ Your job is to keep the system healthy and catch problems early.
 """
 
 
-def _resolve_conductor_provider() -> tuple[ProviderType, str]:
-    """Resolve the best available provider for conductors.
-
-    Power-first: try the strongest model available, degrade gracefully.
-    Anthropic Opus → OpenAI GPT-5 → OpenRouter → Google AI → free tiers.
-    """
-    import os
-    if os.environ.get("ANTHROPIC_API_KEY", "").strip():
-        return ProviderType.ANTHROPIC, "claude-opus-4-6"
-    if os.environ.get("OPENAI_API_KEY", "").strip():
-        return ProviderType.OPENAI, "gpt-5"
-    if os.environ.get("OPENROUTER_API_KEY", "").strip():
-        return ProviderType.OPENROUTER, "anthropic/claude-sonnet-4-20250514"
-    if os.environ.get("GOOGLE_AI_API_KEY", "").strip():
-        return ProviderType.GOOGLE_AI, "gemini-2.5-flash"
-    if os.environ.get("OLLAMA_API_KEY", "").strip():
-        return ProviderType.OLLAMA, "glm-5:cloud"
-    if os.environ.get("GROQ_API_KEY", "").strip():
-        return ProviderType.GROQ, "qwen/qwen3-32b"
-    # Last resort: Claude Code CLI (no API key needed, just the binary)
-    return ProviderType.CLAUDE_CODE, "sonnet"
-
-
-_conductor_provider, _conductor_model = _resolve_conductor_provider()
-
 CONDUCTOR_CLAUDE_CONFIG = {
     "name": "conductor_claude",
     "role": AgentRole.CONDUCTOR,
-    "provider_type": _conductor_provider,
-    "model": _conductor_model,
+    "provider_type": _resolve_conductor_provider(),
+    "model": "claude-opus-4-6",
     "wake_interval_seconds": 3600.0,
     "system_prompt": _CONDUCTOR_CLAUDE_PROMPT,
     "max_turns": 15,
@@ -97,8 +81,8 @@ CONDUCTOR_CLAUDE_CONFIG = {
 CONDUCTOR_CODEX_CONFIG = {
     "name": "conductor_codex",
     "role": AgentRole.CONDUCTOR,
-    "provider_type": _conductor_provider,
-    "model": _conductor_model,
+    "provider_type": _resolve_conductor_provider(),
+    "model": "claude-sonnet-4-20250514",
     "wake_interval_seconds": 1800.0,
     "system_prompt": _CONDUCTOR_CODEX_PROMPT,
     "max_turns": 10,

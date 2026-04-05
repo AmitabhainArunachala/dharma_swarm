@@ -17,6 +17,8 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
+from dharma_swarm.signal_bus import SIGNAL_ECC_INSTINCT
+
 logger = logging.getLogger(__name__)
 
 STATE_DIR = Path.home() / ".dharma"
@@ -206,7 +208,7 @@ async def emit_fitness_signals(
     for p in patterns:
         if p.get("signal") in ("positive", "negative"):
             await bus.emit_event(
-                "ECC_INSTINCT_SIGNAL",
+                SIGNAL_ECC_INSTINCT,
                 agent_id="instinct_bridge",
                 payload={
                     "pattern_type": p["type"],

@@ -2451,6 +2451,31 @@ class DarwinEngine:
 
     # -- analytics -----------------------------------------------------------
 
+    async def record_fitness_observation(
+        self,
+        agent_name: str,
+        fitness_score: float,
+        *,
+        task_id: str | None = None,
+    ) -> str:
+        """Persist a lightweight fitness observation from an agent task.
+
+        Unlike full proposal evaluation, this creates a minimal ArchiveEntry
+        so that ``get_fitness_trend()`` reflects real-time agent performance.
+        Returns the archive entry ID.
+        """
+        from dharma_swarm.archive import ArchiveEntry, FitnessScore
+
+        entry = ArchiveEntry(
+            component=f"agent:{agent_name}",
+            change_type="observation",
+            description=f"Task fitness: {fitness_score:.3f}",
+            fitness=FitnessScore(correctness=fitness_score),
+            status="applied",
+            test_results={"task_id": task_id} if task_id else {},
+        )
+        return await self.archive.add_entry(entry)
+
     async def get_fitness_trend(
         self,
         component: str | None = None,

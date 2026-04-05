@@ -63,59 +63,56 @@ _PROVIDER_MAP = {
 from dharma_swarm.model_hierarchy import DEFAULT_MODELS, TIER_FREE
 
 
-def _has_key(env_var: str) -> bool:
-    import os
-    return bool(os.environ.get(env_var, "").strip())
-
-
 def _has_openrouter_key() -> bool:
     from dharma_swarm.api_keys import provider_available
     return provider_available("openrouter")
 
 
 def _has_ollama_key() -> bool:
-    return _has_key("OLLAMA_API_KEY")
+    import os
+    return bool(os.environ.get("OLLAMA_API_KEY", "").strip())
 
 
 def _resolve_default_crew() -> list[dict]:
-    """Build crew with the MOST POWERFUL available provider.
+    """Build crew preferring free providers.  Ollama Cloud > OpenRouter > Claude Code.
 
-    Power-first: Anthropic Opus → OpenAI GPT-5 → OpenRouter (paid) →
-    Google AI → Ollama Cloud → Groq → OpenRouter Free → Claude Code CLI.
-    Degrades gracefully when credits/keys run out.
+    When Ollama Cloud is available, each agent gets a DIFFERENT frontier model
+    to maximize behavioral diversity (the Transcendence Principle requires
+    decorrelated errors — same model prompted differently does NOT suffice).
     """
-    # Power-first resolution
-    _provider_chain: list[tuple[bool, ProviderType, str]] = [
-        (_has_key("ANTHROPIC_API_KEY"), ProviderType.ANTHROPIC,
-         DEFAULT_MODELS.get(ProviderType.ANTHROPIC, "claude-opus-4-6")),
-        (_has_key("OPENAI_API_KEY"), ProviderType.OPENAI,
-         DEFAULT_MODELS.get(ProviderType.OPENAI, "gpt-5")),
-        (_has_openrouter_key(), ProviderType.OPENROUTER,
-         DEFAULT_MODELS.get(ProviderType.OPENROUTER, "anthropic/claude-sonnet-4-20250514")),
-        (_has_key("GOOGLE_AI_API_KEY"), ProviderType.GOOGLE_AI,
-         DEFAULT_MODELS.get(ProviderType.GOOGLE_AI, "gemini-2.5-flash")),
-        (_has_ollama_key(), ProviderType.OLLAMA,
-         DEFAULT_MODELS.get(ProviderType.OLLAMA, "glm-5:cloud")),
-        (_has_key("GROQ_API_KEY"), ProviderType.GROQ,
-         DEFAULT_MODELS.get(ProviderType.GROQ, "qwen/qwen3-32b")),
-        (_has_openrouter_key(), ProviderType.OPENROUTER_FREE,
-         DEFAULT_MODELS.get(ProviderType.OPENROUTER_FREE, "meta-llama/llama-3.3-70b-instruct:free")),
-    ]
+    if _has_ollama_key():
+        # Ollama Cloud — diverse frontier models for error decorrelation
+        from dharma_swarm.ollama_config import OLLAMA_CLOUD_FRONTIER_MODELS
+        _models = OLLAMA_CLOUD_FRONTIER_MODELS  # glm-5, deepseek-v3.2, kimi-k2.5, minimax-m2.7, qwen3-coder
+        return [
+            {"name": "cartographer", "role": AgentRole.CARTOGRAPHER,
+             "thread": "mechanistic", "provider": ProviderType.OLLAMA, "model": _models[0]},  # glm-5
+            {"name": "surgeon", "role": AgentRole.SURGEON,
+             "thread": "alignment", "provider": ProviderType.OLLAMA, "model": _models[2]},    # kimi-k2.5
+            {"name": "architect", "role": AgentRole.ARCHITECT,
+             "thread": "architectural", "provider": ProviderType.OLLAMA, "model": _models[1]}, # deepseek-v3.2
+            {"name": "validator", "role": AgentRole.VALIDATOR,
+             "thread": "scaling", "provider": ProviderType.OLLAMA, "model": _models[4]},       # qwen3-coder
+        ]
 
-    for available, provider, model in _provider_chain:
-        if available:
-            return [
-                {"name": "cartographer", "role": AgentRole.CARTOGRAPHER,
-                 "thread": "mechanistic", "provider": provider, "model": model},
-                {"name": "surgeon", "role": AgentRole.SURGEON,
-                 "thread": "alignment", "provider": provider, "model": model},
-                {"name": "architect", "role": AgentRole.ARCHITECT,
-                 "thread": "architectural", "provider": provider, "model": model},
-                {"name": "validator", "role": AgentRole.VALIDATOR,
-                 "thread": "scaling", "provider": provider, "model": model},
-            ]
+    if _has_openrouter_key():
+        # OpenRouter Free — diverse free models for error decorrelation
+        return [
+            {"name": "cartographer", "role": AgentRole.CARTOGRAPHER,
+             "thread": "mechanistic", "provider": ProviderType.OPENROUTER_FREE,
+             "model": "meta-llama/llama-3.3-70b-instruct:free"},
+            {"name": "surgeon", "role": AgentRole.SURGEON,
+             "thread": "alignment", "provider": ProviderType.OPENROUTER_FREE,
+             "model": "qwen/qwen3-32b:free"},
+            {"name": "architect", "role": AgentRole.ARCHITECT,
+             "thread": "architectural", "provider": ProviderType.OPENROUTER_FREE,
+             "model": "deepseek/deepseek-chat-v3-0324:free"},
+            {"name": "validator", "role": AgentRole.VALIDATOR,
+             "thread": "scaling", "provider": ProviderType.OPENROUTER_FREE,
+             "model": "mistralai/mistral-small-3.1-24b-instruct:free"},
+        ]
 
-    # No API keys at all — use Claude Code CLI (authenticated via `claude` binary)
+    # No API keys — use Claude Code (authenticated via `claude` CLI)
     return [
         {"name": "cartographer", "role": AgentRole.CARTOGRAPHER,
          "thread": "mechanistic", "provider": ProviderType.CLAUDE_CODE, "model": "sonnet"},

@@ -189,8 +189,9 @@ async def run_swarm_loop(
 
                 # Drain instinct signals — negative patterns inform task quality
                 try:
+                    from dharma_swarm.signal_bus import SIGNAL_ECC_INSTINCT
                     instinct_events = await _instinct_bus.consume_events(
-                        "ECC_INSTINCT_SIGNAL", limit=10,
+                        SIGNAL_ECC_INSTINCT, limit=10,
                     )
                     negatives = [
                         e for e in instinct_events
@@ -356,29 +357,13 @@ async def run_evolution_loop(shutdown_event: asyncio.Event) -> None:
             # Drain lifecycle events — task completion throughput for fitness context
             completions = 0
             try:
-                # Prefer consume_events (idempotent, timestamp-based) over
-                # receive+mark_read (status-based, loses data on re-read).
                 lifecycle_events = await _bus.consume_events(
-                    "AGENT_LIFECYCLE_COMPLETED", limit=20
+                    "AGENT_LIFECYCLE_COMPLETED", limit=20,
                 )
-                completions = sum(
-                    1 for e in lifecycle_events
-                    if (e.get("payload") or {}).get("event") == "task_completed"
-                )
+                completions = len(lifecycle_events)
                 if completions:
                     _log("evolution", f"Lifecycle: {completions} task completion(s) since last cycle")
             except Exception:
-                # Fallback: try the old receive path in case events table is missing
-                try:
-                    lifecycle_msgs = await _bus.receive("evolution_loop", limit=20)
-                    completions = sum(
-                        1 for m in lifecycle_msgs
-                        if (getattr(m, 'metadata', None) or {}).get("event") == "task_completed"
-                    )
-                    for m in lifecycle_msgs:
-                        await _bus.mark_read(m.id)
-                except Exception:
-                    pass
                 logger.debug("Evolution: lifecycle drain failed", exc_info=True)
 
             # Check fitness trend
@@ -394,14 +379,28 @@ async def run_evolution_loop(shutdown_event: asyncio.Event) -> None:
             # ── ACTIVE EVOLUTION: run cycle + meta-adaptation ──
             cycle_count += 1
 
-            # Extract live fitness from AGENT_FITNESS event payloads
+            # Extract live fitness from AGENT_FITNESS event payloads and persist
             live_fitness_scores: list[float] = []
             for ev in fitness_events:
                 payload = ev.get("payload") if isinstance(ev, dict) else {}
                 if isinstance(payload, dict):
-                    score = payload.get("fitness_score") or payload.get("composite")
+                    # agent_runner emits swabhaav_ratio as the primary score
+                    score = (
+                        payload.get("swabhaav_ratio")
+                        or payload.get("fitness_score")
+                        or payload.get("composite")
+                    )
                     if isinstance(score, (int, float)) and score > 0:
                         live_fitness_scores.append(float(score))
+                        # Persist to archive so get_fitness_trend() works
+                        try:
+                            await engine.record_fitness_observation(
+                                agent_name=payload.get("agent", "unknown"),
+                                fitness_score=float(score),
+                                task_id=payload.get("task_id"),
+                            )
+                        except Exception:
+                            logger.debug("Fitness archival failed", exc_info=True)
             if live_fitness_scores:
                 _log("evolution", f"Live fitness from {len(live_fitness_scores)} agents: "
                      f"avg={sum(live_fitness_scores)/len(live_fitness_scores):.3f} "

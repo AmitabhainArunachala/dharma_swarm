@@ -222,6 +222,17 @@ class SwarmManager:
         self._auto_rescue_max_age = timedelta(hours=_sm.auto_rescue_max_age_hours)
         self._auto_rescue_max_attempts = _sm.auto_rescue_max_attempts
 
+        # Auto-evolution wiring (stagnation-triggered Darwin Engine cycles)
+        self._evolution_interval_ticks: int = 120  # every ~60 min (120 × 30s)
+        self._evolution_tick_counter: int = 0
+        self._fitness_history: list[float] = []
+        self._max_auto_evolves_per_day: int = 6
+        self._auto_evolves_today: int = 0
+        self._auto_evolve_day: str | None = None
+        self._stagnation_threshold: float = 0.01
+        self._stagnation_window: int = 60
+        self._auto_evolution_enabled: bool = True
+
     # ── Subsystem access helpers ──
 
     # Subsystems classified by criticality
@@ -439,12 +450,16 @@ class SwarmManager:
         try:
             from dharma_swarm.witness import WitnessAuditor
 
-            # Use the router itself — it will pick the cheapest available
-            # provider via the policy router. Passing a specific free provider
-            # would bypass routing memory and circuit breakers.
+            # Use a cost-controlled free provider for witness audits instead
+            # of the full ModelRouter which may route to expensive models.
+            try:
+                from dharma_swarm.providers import OpenRouterFreeProvider
+                _witness_provider = OpenRouterFreeProvider()
+            except Exception:
+                _witness_provider = None
             self._witness = WitnessAuditor(
                 cycle_seconds=3600.0,
-                provider=self._router,
+                provider=_witness_provider,
             )
             logger.info("WitnessAuditor initialized — S3* sporadic audit active")
         except Exception as e:
@@ -790,9 +805,9 @@ class SwarmManager:
             # Route through the shared ModelRouter so live agent tasks contribute
             # to routing memory, retries, and audit trails while staying pinned
             # to config.provider unless task metadata widens the lane set.
-            spawner = self._worker_spawners.get(name)
             if self._agent_pool is None:
                 raise RuntimeError("AgentPool not initialized — cannot spawn agents")
+            spawner = self._worker_spawners.get(name)
             runner = await self._agent_pool.spawn(
                 config,
                 provider=self._router,
@@ -2491,6 +2506,70 @@ class SwarmManager:
         if self._decision_log is None:
             return []
         return self._decision_log.list_decisions(limit=limit)
+
+    # --- Auto-evolution (stagnation detection + triggered evolution) ---
+
+    def _detect_fitness_stagnation(self) -> bool:
+        """Return True if fitness has stagnated over the last two windows.
+
+        Compares the mean fitness of the recent window against the previous
+        window.  If improvement is below ``_stagnation_threshold``, the system
+        is stagnant.  Returns False when insufficient data.
+        """
+        w = self._stagnation_window
+        if len(self._fitness_history) < w * 2:
+            return False
+        recent = self._fitness_history[-w:]
+        previous = self._fitness_history[-2 * w:-w]
+        recent_mean = sum(recent) / len(recent)
+        previous_mean = sum(previous) / len(previous)
+        return (recent_mean - previous_mean) < self._stagnation_threshold
+
+    async def _maybe_auto_evolve(self, *, gnani_holds: bool) -> dict:
+        """Conditionally trigger a Darwin Engine evolution cycle.
+
+        Guards:
+        1. gnani_holds — organism said HOLD, skip.
+        2. daily limit — max N per day.
+        3. stagnation — only evolve when fitness plateaus.
+        """
+        if gnani_holds:
+            return {"skipped": "gnani_hold"}
+
+        # Reset daily counter at midnight UTC
+        today = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+        if self._auto_evolve_day != today:
+            self._auto_evolves_today = 0
+            self._auto_evolve_day = today
+
+        if self._auto_evolves_today >= self._max_auto_evolves_per_day:
+            return {"skipped": "daily_limit"}
+
+        # Collect current agent fitness into history
+        if self._agent_pool is not None:
+            try:
+                agents = await self._agent_pool.list_agents()
+                for a in agents:
+                    fitness = getattr(a, "fitness", None)
+                    if fitness is not None:
+                        self._fitness_history.append(float(fitness))
+            except Exception:
+                pass
+
+        if not self._detect_fitness_stagnation():
+            return {"skipped": "no_stagnation"}
+
+        # Trigger evolution
+        result = await self.evolve(
+            component="swarm",
+            change_type="auto_evolution",
+            description="Auto-triggered by fitness stagnation detection",
+        )
+        self._auto_evolves_today += 1
+        return {
+            "triggered": True,
+            **result,
+        }
 
     # --- Evolution (v0.2.0) ---
 

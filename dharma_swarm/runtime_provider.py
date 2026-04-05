@@ -80,52 +80,41 @@ DEFAULT_CHUTES_MODEL = DEFAULT_MODELS.get(ProviderType.CHUTES, "deepseek-ai/Deep
 DEFAULT_PROVIDER_TIMEOUT_SECONDS = 300
 
 # Provider ordering sourced from model_hierarchy.py — the single source of truth.
-# Power-first: paid (strongest) → cheap → free (fallback).
+# All free providers first, then cheap, then paid.
 DEFAULT_RUNTIME_PROVIDERS: tuple[ProviderType, ...] = CANONICAL_SEED_ORDER
 
-# Power-first provider chain: strongest models first, degrade gracefully.
-# Try paid/powerful → cheap/fast → free/fallback.
-# Only falls back when the upstream provider fails (rate limit, key missing,
-# circuit broken). EWMA learning will reorder after ~100 events.
-PREFERRED_RUNTIME_PROVIDERS: tuple[ProviderType, ...] = (
-    ProviderType.ANTHROPIC,       # PAID: Opus 4.6 (strongest reasoning)
-    ProviderType.OPENAI,          # PAID: GPT-5
-    ProviderType.OPENROUTER,      # PAID: xiaomi/mimo-v2-pro + full catalog
-    ProviderType.CODEX,           # PAID: Codex CLI (tool access)
-    ProviderType.CLAUDE_CODE,     # PAID: Claude Code CLI (tool access)
-    ProviderType.GOOGLE_AI,       # CHEAP: Gemini 2.5 Flash (1M ctx)
-    ProviderType.MISTRAL,         # CHEAP: mistral-small (fast)
-    ProviderType.CHUTES,          # CHEAP: DeepSeek-R1
-    ProviderType.OLLAMA,          # FREE: GLM-5 744B, DeepSeek-v3.2
+# Canonical low-cost provider chain.  Matches CANONICAL_SEED_ORDER from
+# model_hierarchy.py: Ollama Cloud frontier FIRST, then free tiers by
+# capability, then cheap, then paid.
+PREFERRED_LOW_COST_RUNTIME_PROVIDERS: tuple[ProviderType, ...] = (
+    ProviderType.OLLAMA,          # FREE frontier: GLM-5 744B, DeepSeek-v3.2, Kimi-K2.5
+    ProviderType.NVIDIA_NIM,      # FREE: Llama 3.3 70B (50 req/day)
     ProviderType.GROQ,            # FREE: Qwen3-32B (3000 tok/s)
-    ProviderType.CEREBRAS,        # FREE: Qwen3 235B
-    ProviderType.NVIDIA_NIM,      # FREE: Llama 3.3 70B
+    ProviderType.CEREBRAS,        # FREE: Qwen3 235B (3000 tok/s)
     ProviderType.SILICONFLOW,     # FREE: Qwen3-Coder 480B
+    ProviderType.SAMBANOVA,       # FREE: Llama 3.3 70B
     ProviderType.TOGETHER,        # FREE: Qwen3-Coder 480B
     ProviderType.FIREWORKS,       # FREE: Qwen3-Coder 480B
-    ProviderType.SAMBANOVA,       # FREE: Llama 3.3 70B
     ProviderType.OPENROUTER_FREE, # FREE: auto-discovered
+    ProviderType.MISTRAL,         # CHEAP
+    ProviderType.GOOGLE_AI,       # CHEAP
+    ProviderType.CHUTES,          # CHEAP
+    ProviderType.OPENROUTER,      # PAID (default: xiaomi/mimo-v2-pro)
+    ProviderType.CLAUDE_CODE,     # FALLBACK: always available if claude binary installed
 )
 
-# Legacy alias — code that imported the old name still works
-PREFERRED_LOW_COST_RUNTIME_PROVIDERS = PREFERRED_RUNTIME_PROVIDERS
-
-PREFERRED_WITH_ANTHROPIC_RUNTIME_PROVIDERS: tuple[ProviderType, ...] = (
-    ProviderType.ANTHROPIC,       # Opus 4.6 first
-    ProviderType.OPENAI,          # GPT-5
-    ProviderType.OPENROUTER,      # Full catalog
-    ProviderType.GOOGLE_AI,       # Gemini
-    ProviderType.MISTRAL,         # Fast
-    ProviderType.OLLAMA,          # Free frontier
-    ProviderType.GROQ,            # Free fast
-    ProviderType.CEREBRAS,        # Free large
-    ProviderType.OPENROUTER_FREE, # Free auto
+PREFERRED_LOW_COST_WITH_ANTHROPIC_RUNTIME_PROVIDERS: tuple[ProviderType, ...] = (
+    ProviderType.OLLAMA,          # FREE frontier first
+    ProviderType.NVIDIA_NIM,
+    ProviderType.GROQ,
+    ProviderType.CEREBRAS,
+    ProviderType.OPENROUTER_FREE,
     ProviderType.TOGETHER,
     ProviderType.FIREWORKS,
+    ProviderType.OPENROUTER,      # PAID (xiaomi/mimo-v2-pro)
+    ProviderType.ANTHROPIC,
+    ProviderType.CLAUDE_CODE,     # FALLBACK: always available if claude binary installed
 )
-
-# Legacy alias
-PREFERRED_LOW_COST_WITH_ANTHROPIC_RUNTIME_PROVIDERS = PREFERRED_WITH_ANTHROPIC_RUNTIME_PROVIDERS
 
 
 @dataclass(frozen=True, slots=True)
