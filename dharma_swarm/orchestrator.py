@@ -1997,6 +1997,21 @@ class Orchestrator:
                 self._yoga.record_completion(td.agent_id)
             logger.info("Task %s completed by agent %s", td.task_id, td.agent_id)
             duration_sec = max(0.0, time.monotonic() - run_started)
+
+            # Emit to signal_bus so organism heartbeat, evolution loop,
+            # and consolidation loop can sense completed work.
+            try:
+                from dharma_swarm.signal_bus import SignalBus, SIGNAL_LIFECYCLE_COMPLETED
+                SignalBus.get().emit({
+                    "type": SIGNAL_LIFECYCLE_COMPLETED,
+                    "task_id": td.task_id,
+                    "agent_id": td.agent_id,
+                    "duration_sec": round(duration_sec, 4),
+                    "result_chars": len(result or ""),
+                })
+            except Exception:
+                pass  # signal_bus emission is non-critical
+
             self._record_progress_event(
                 "task_completed",
                     task_id=td.task_id,
@@ -2061,13 +2076,17 @@ class Orchestrator:
         model_name: str,
         provider_name: str,
         task: Task,
-        result: str,
+        result: str | None,
     ) -> None:
         """Write agent result to shared notes and stigmergy marks.
 
         This is the critical persistence step that makes agent output
         visible to future sessions. Without it, the colony has no memory.
         """
+        if result is None:
+            logger.debug("_persist_result: result is None for task %s, skipping", task.id)
+            return
+
         from datetime import datetime, timezone
 
         shared_dir = self._shared_dir

@@ -1027,10 +1027,12 @@ def _build_prompt(
             for evt in fitness_events:
                 etype = evt.get("type", "")
                 if etype == "AGENT_FITNESS":
+                    _sw = evt.get('swabhaav_ratio')
+                    _en = evt.get('entropy')
                     fitness_lines.append(
                         f"- Task {evt.get('task_id', '?')}: "
-                        f"swabhaav={evt.get('swabhaav_ratio', '?'):.2f}, "
-                        f"entropy={evt.get('entropy', '?'):.2f}, "
+                        f"swabhaav={_sw:.2f if isinstance(_sw, (int, float)) else '?'}, "
+                        f"entropy={_en:.2f if isinstance(_en, (int, float)) else '?'}, "
                         f"recognition={evt.get('recognition_type', '?')}"
                     )
                 elif etype == "WORKER_FITNESS":
@@ -1669,7 +1671,8 @@ class AgentRunner:
             for index, tool_call in enumerate(response.tool_calls, start=1):
                 params = _tool_call_parameters(tool_call)
                 tool_name = str(tool_call.get("name") or "")
-                tool_id = str(tool_call.get("id") or f"tool-call-{round_index}-{index}")
+                # MUST match the ID in _normalized_tool_call_payload (ordinal=index)
+                tool_id = str(tool_call.get("id") or f"tool-call-{index}")
                 tool_result = await self._execute_local_tool(
                     tool_name,
                     params,
