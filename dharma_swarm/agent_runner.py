@@ -77,6 +77,87 @@ _PRIORITY_SALIENCE = {
     TaskPriority.HIGH: 0.70,
     TaskPriority.URGENT: 0.90,
 }
+
+
+def _parse_tool_calls_from_text(
+    text: str,
+    known_tools: set[str] | None = None,
+) -> list[dict[str, Any]]:
+    """Extract tool invocations from plain text when provider doesn't return structured tool_calls.
+
+    Supports three patterns:
+    1. <tool_call>{"name": "...", "arguments": {...}}</tool_call>
+    2. Action: tool_name / Action Input: {...}  (ReAct style)
+    3. Bare JSON blocks with "name" and "arguments" keys
+
+    Only matches against known_tools to avoid false positives.
+    Returns list in same shape as LLMResponse.tool_calls.
+    """
+    import json as _json
+    import re as _re
+    import uuid as _uuid
+
+    if not text or not text.strip():
+        return []
+
+    results: list[dict[str, Any]] = []
+
+    # Pattern 1: <tool_call>JSON</tool_call>
+    for match in _re.finditer(r"<tool_call>\s*(\{.*?\})\s*</tool_call>", text, _re.DOTALL):
+        try:
+            obj = _json.loads(match.group(1))
+            name = obj.get("name", "")
+            if known_tools and name not in known_tools:
+                continue
+            results.append({
+                "id": f"text_{_uuid.uuid4().hex[:8]}",
+                "name": name,
+                "arguments": _json.dumps(obj.get("arguments", obj.get("input", {}))),
+            })
+        except _json.JSONDecodeError:
+            continue
+
+    if results:
+        return results
+
+    # Pattern 2: Action: tool_name\nAction Input: JSON
+    for match in _re.finditer(
+        r"Action:\s*(\w+)\s*\n\s*Action Input:\s*(\{.*?\})",
+        text,
+        _re.DOTALL,
+    ):
+        name = match.group(1)
+        if known_tools and name not in known_tools:
+            continue
+        try:
+            args = _json.loads(match.group(2))
+            results.append({
+                "id": f"text_{_uuid.uuid4().hex[:8]}",
+                "name": name,
+                "arguments": _json.dumps(args),
+            })
+        except _json.JSONDecodeError:
+            continue
+
+    if results:
+        return results
+
+    # Pattern 3: Bare JSON blocks with "name" + "arguments"
+    for match in _re.finditer(r"\{[^{}]*\"name\"\s*:\s*\"[^\"]+\"[^{}]*\"arguments\"\s*:[^{}]*\{[^{}]*\}[^{}]*\}", text):
+        try:
+            obj = _json.loads(match.group(0))
+            name = obj.get("name", "")
+            if known_tools and name not in known_tools:
+                continue
+            results.append({
+                "id": f"text_{_uuid.uuid4().hex[:8]}",
+                "name": name,
+                "arguments": _json.dumps(obj.get("arguments", {})) if isinstance(obj.get("arguments"), dict) else str(obj.get("arguments", "{}")),
+            })
+        except _json.JSONDecodeError:
+            continue
+
+    return results
 _TRUE_VALUES = {"1", "true", "yes", "on"}
 _FALSE_VALUES = {"0", "false", "no", "off"}
 _TOOLING_HINTS = (
@@ -1671,7 +1752,21 @@ class AgentRunner:
                 last_route_decision = route_decision
 
             if not response.tool_calls:
-                return last_route_request, last_route_decision, response, response.content
+                # Fallback: try to parse tool calls from plain text
+                known = {
+                    t["function"]["name"]
+                    for t in _LOCAL_OPENAI_TOOL_DEFINITIONS
+                    if "function" in t
+                }
+                parsed = _parse_tool_calls_from_text(response.content, known)
+                if parsed:
+                    logger.info(
+                        "Text fallback parsed %d tool call(s) from plain text",
+                        len(parsed),
+                    )
+                    response = response.model_copy(update={"tool_calls": parsed})
+                else:
+                    return last_route_request, last_route_decision, response, response.content
 
             updated_messages = list(current_request.messages)
             updated_messages.append(

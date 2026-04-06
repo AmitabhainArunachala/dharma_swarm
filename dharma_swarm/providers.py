@@ -891,7 +891,7 @@ class OllamaProvider(LLMProvider):
     """Provider for Ollama local or cloud inference via the native REST API."""
 
     capabilities = ProviderCapabilities(
-        supports_streaming=True, supports_tools=False,
+        supports_streaming=True, supports_tools=True,
         max_context_tokens=32_000, provider_family="ollama",
         requires_api_key=False, can_close=True,
     )
@@ -980,13 +980,15 @@ class OllamaProvider(LLMProvider):
         last_error: str | None = None
 
         for candidate in attempts:
-            payload = {
+            payload: dict[str, Any] = {
                 "model": candidate,
                 "messages": messages,
                 "max_tokens": _ollama_cloud_completion_limit(candidate, request.max_tokens),
                 "temperature": request.temperature,
                 "stream": False,
             }
+            if request.tools:
+                payload["tools"] = request.tools
             try:
                 resp = await client.post(
                     f"{self._base_url}/v1/chat/completions",
@@ -1004,6 +1006,15 @@ class OllamaProvider(LLMProvider):
             msg = choice.get("message") or {}
             content = _extract_openai_compatible_message_text(msg)
             usage_data = data.get("usage") or {}
+            # Parse structured tool_calls from response
+            tool_calls: list[dict[str, Any]] = []
+            for tc in msg.get("tool_calls") or []:
+                fn = tc.get("function") or {}
+                tool_calls.append({
+                    "id": tc.get("id", ""),
+                    "name": fn.get("name", ""),
+                    "arguments": fn.get("arguments", "{}"),
+                })
             return LLMResponse(
                 content=content,
                 model=data.get("model") or candidate,
@@ -1012,7 +1023,7 @@ class OllamaProvider(LLMProvider):
                     "completion_tokens": int(usage_data.get("completion_tokens") or 0),
                     "total_tokens": int(usage_data.get("total_tokens") or 0),
                 },
-                tool_calls=[],
+                tool_calls=tool_calls,
                 stop_reason=str(choice.get("finish_reason") or "stop"),
             )
 
@@ -1024,7 +1035,7 @@ class OllamaProvider(LLMProvider):
         self, model: str, messages: list[dict[str, str]], request: LLMRequest,
     ) -> LLMResponse:
         """Local path: native Ollama /api/chat endpoint."""
-        payload = {
+        payload: dict[str, Any] = {
             "model": model,
             "messages": messages,
             "stream": False,
@@ -1033,6 +1044,8 @@ class OllamaProvider(LLMProvider):
                 "num_predict": request.max_tokens,
             },
         }
+        if request.tools:
+            payload["tools"] = request.tools
         client = self._get_client()
         request_kwargs: dict[str, Any] = {"json": payload}
         headers = self._headers_or_raise()
@@ -1071,11 +1084,22 @@ class OllamaProvider(LLMProvider):
             "total_tokens": int(data.get("prompt_eval_count") or 0)
             + int(data.get("eval_count") or 0),
         }
+        # Parse tool_calls from native Ollama response
+        native_tool_calls: list[dict[str, Any]] = []
+        if "message" in data:
+            msg_data = data.get("message") or {}
+            for tc in msg_data.get("tool_calls") or []:
+                fn = tc.get("function") or {}
+                native_tool_calls.append({
+                    "id": tc.get("id", ""),
+                    "name": fn.get("name", ""),
+                    "arguments": fn.get("arguments", "{}"),
+                })
         return LLMResponse(
             content=content,
             model=model,
             usage=usage,
-            tool_calls=[],
+            tool_calls=native_tool_calls,
             stop_reason=str(data.get("done_reason") or "stop"),
         )
 
