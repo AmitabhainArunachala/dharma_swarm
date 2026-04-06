@@ -67,7 +67,7 @@ class DaemonConfig:
     heartbeat_interval: float = 21600.0  # 6 hours in seconds
     max_daily_contributions: int = 40
     min_between_contributions: float = 1800.0  # 30 minutes
-    quiet_hours: list[int] = field(default_factory=lambda: [2, 3, 4, 5])
+    quiet_hours: list[int] = field(default_factory=list)  # No quiet hours — swarm runs 24/7
 
     # LLM defaults
     model: str = "anthropic/claude-sonnet-4"
@@ -221,7 +221,7 @@ class AdaptiveQuietHours:
         self.window_days = max(1, int(window_days))
         self.activity_threshold = max(1, int(activity_threshold))
         self.static_floor: frozenset[int] = frozenset(
-            static_floor if static_floor is not None else [2, 3, 4, 5]
+            static_floor if static_floor is not None else []
         )
         self._log_path = self.state_dir / "activity_log.jsonl"
 
