@@ -125,6 +125,15 @@ export default function AgentChatPage() {
                 </div>
                 {msg.role === "assistant" &&
                   isStreaming &&
+                  msg.id === messages[messages.length - 1]?.id &&
+                  (msg.toolEvents?.length ?? 0) > 0 &&
+                  !msg.content && (
+                    <p className="text-[10px] text-kitsurubami animate-pulse mt-1">
+                      Running tools...
+                    </p>
+                  )}
+                {msg.role === "assistant" &&
+                  isStreaming &&
                   msg === messages[messages.length - 1] &&
                   !msg.content && (
                     <div className="flex gap-1 py-1">
