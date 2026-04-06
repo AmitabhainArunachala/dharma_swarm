@@ -309,7 +309,7 @@ class SandboxResult(BaseModel):
 class LLMRequest(BaseModel):
     """A request to an LLM provider."""
     model: str
-    messages: list[dict[str, str]]
+    messages: list[dict[str, Any]]
     system: str = ""
     max_tokens: int = 4096
     temperature: float = 0.7
