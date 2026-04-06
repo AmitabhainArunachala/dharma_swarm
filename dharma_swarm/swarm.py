@@ -2262,7 +2262,22 @@ class SwarmManager:
             logger.warning("_task_queue_snapshot timed out after 5s")
 
         reopened: list[Any] = []
-        if allow_autonomous_generation:
+        # Suppress synthetic task generation when operator-created tasks are pending
+        _has_real_tasks = False
+        if self._task_board is not None:
+            try:
+                _pending = await self._task_board.list_tasks(
+                    status=TaskStatus.PENDING, limit=20
+                )
+                _has_real_tasks = any(
+                    isinstance(t.metadata, dict)
+                    and t.metadata.get("created_via") in ("manual_seed", "swarm.create_task")
+                    or t.created_by == "operator"
+                    for t in _pending
+                )
+            except Exception:
+                pass
+        if allow_autonomous_generation and not _has_real_tasks:
             import time as _t; _t0 = _t.monotonic()
             try:
                 reopened = await asyncio.wait_for(
@@ -2301,10 +2316,14 @@ class SwarmManager:
             coordination = await asyncio.wait_for(
                 self.coordination_status(refresh=False), timeout=10.0
             )
-            synthesized = await asyncio.wait_for(
-                self.spawn_coordination_tasks(coordination=coordination),
-                timeout=15.0,
-            )
+            # Skip coordination busywork when real tasks exist
+            if _has_real_tasks:
+                synthesized = []
+            else:
+                synthesized = await asyncio.wait_for(
+                    self.spawn_coordination_tasks(coordination=coordination),
+                    timeout=15.0,
+                )
         except asyncio.TimeoutError:
             coordination = SwarmCoordinationState()
             synthesized = []

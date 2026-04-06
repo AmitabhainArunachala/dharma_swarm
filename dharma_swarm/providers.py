@@ -179,10 +179,10 @@ def _ollama_cloud_wire_model(model: str) -> str:
 def _ollama_cloud_completion_limit(model: str, max_tokens: int) -> int:
     normalized = _ollama_cloud_wire_model(model).lower()
     if normalized.startswith("glm-5"):
-        return max(max_tokens, 384)
+        return max(max_tokens, 4096)
     if normalized.startswith("kimi-k2.5") or normalized.startswith("minimax-m2.7"):
-        return max(max_tokens, 256)
-    return max_tokens
+        return max(max_tokens, 4096)
+    return max(max_tokens, 2048)
 
 
 def _ollama_cloud_model_candidates(model: str) -> tuple[str, ...]:

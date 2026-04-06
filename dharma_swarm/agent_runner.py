@@ -252,8 +252,14 @@ _LOCAL_TOOL_RUNTIME_DIRECTIVE = (
     "You have real local tool access for this task. "
     "Use `read_file`, `edit_file`, `write_file`, `glob_files`, `grep_search`, "
     "`shell_exec`, `web_search`, and `fetch_url` to inspect, modify, verify the workspace, "
-    "and search the web for information. "
-    "Do not roleplay tool use. Call tools directly when you need evidence or side effects."
+    "and search the web for information.\n\n"
+    "CRITICAL RULES:\n"
+    "1. ALWAYS use the `write_file` tool to save output. NEVER use cat/heredoc/echo in text. "
+    "Call write_file with the exact path and content.\n"
+    "2. Break large tasks into steps. First call web_search to gather data. "
+    "Then call write_file to save your synthesis. Do NOT try to produce a full report in one response.\n"
+    "3. When a task says 'write to <path>', you MUST call write_file(path=<path>, content=<your output>).\n"
+    "4. Do not roleplay or describe tool use. Call tools directly."
 )
 _LOCAL_OPENAI_TOOL_DEFINITIONS: list[dict[str, Any]] = [
     {
@@ -1182,6 +1188,7 @@ def _build_prompt(
         model=config.model,
         messages=[{"role": "user", "content": "\n".join(user_parts)}],
         system=system,
+        max_tokens=8192,
     )
 
 
