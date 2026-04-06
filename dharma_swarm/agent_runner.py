@@ -243,6 +243,7 @@ _OPENAI_TOOL_PROVIDER_TYPES = {
     ProviderType.TOGETHER,
     ProviderType.FIREWORKS,
     ProviderType.GOOGLE_AI,
+    ProviderType.OLLAMA,
     ProviderType.SAMBANOVA,
     ProviderType.MISTRAL,
     ProviderType.CHUTES,
@@ -1334,10 +1335,15 @@ def _provider_supports_local_tool_loop(
 ) -> bool:
     if config.provider in {ProviderType.CLAUDE_CODE, ProviderType.CODEX}:
         return False
+    # Direct provider: check its capabilities
     capabilities = getattr(provider, "capabilities", None)
     supports_tools = getattr(capabilities, "supports_tools", None)
     if isinstance(supports_tools, bool):
         return supports_tools
+    # Routed provider (ModelRouter): check the agent's config provider type
+    # The ModelRouter wraps all providers and doesn't have capabilities itself
+    if _is_routed_provider(provider):
+        return config.provider in _OPENAI_TOOL_PROVIDER_TYPES
     return config.provider in _OPENAI_TOOL_PROVIDER_TYPES
 
 
