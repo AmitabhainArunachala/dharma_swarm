@@ -2087,7 +2087,7 @@ class Orchestrator:
                 import re as _re_extract
                 desc = task.description or ""
                 path_match = _re_extract.search(
-                    r"[Ww]rite (?:to|the (?:final |capstone )?(?:report|results|output|findings) to) (~/[^\s,\"]+\.md)",
+                    r"[Ww]rite [\w\s]*?(?:to |report to |results to |output to |findings to )(~/[^\s,\"]+\.md)",
                     desc,
                 )
                 if path_match and result and len(result) > 200:
