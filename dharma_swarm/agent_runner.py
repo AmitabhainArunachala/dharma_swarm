@@ -165,15 +165,21 @@ _TOOLING_HINTS = (
     "bug",
     "code",
     "edit",
+    "fetch_url",
     "file",
     "fix",
     "implement",
     "module",
     "patch",
     "pytest",
+    "read",
     "refactor",
+    "research",
     "script",
+    "search",
     "test",
+    "web_search",
+    "write",
 )
 _FRONTIER_HINTS = (
     "analyze",
@@ -244,7 +250,8 @@ _OPENAI_TOOL_PROVIDER_TYPES = {
 _LOCAL_TOOL_RUNTIME_DIRECTIVE = (
     "You have real local tool access for this task. "
     "Use `read_file`, `edit_file`, `write_file`, `glob_files`, `grep_search`, "
-    "and `shell_exec` to inspect, modify, and verify the workspace. "
+    "`shell_exec`, `web_search`, and `fetch_url` to inspect, modify, verify the workspace, "
+    "and search the web for information. "
     "Do not roleplay tool use. Call tools directly when you need evidence or side effects."
 )
 _LOCAL_OPENAI_TOOL_DEFINITIONS: list[dict[str, Any]] = [
@@ -339,6 +346,36 @@ _LOCAL_OPENAI_TOOL_DEFINITIONS: list[dict[str, Any]] = [
                     "max_results": {"type": "integer", "default": 30},
                 },
                 "required": ["pattern"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "web_search",
+            "description": "Search the web for information. Returns results from multiple backends (arXiv, DuckDuckGo, Perplexity, Exa, Brave, Jina).",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "query": {"type": "string", "description": "The search query"},
+                    "max_results": {"type": "integer", "default": 5},
+                    "backend": {"type": "string", "description": "Optional: arxiv, duckduckgo, perplexity, exa, brave, jina. Default: auto (tries all)."},
+                },
+                "required": ["query"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "fetch_url",
+            "description": "Fetch a URL and return its content as clean markdown text.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "url": {"type": "string", "description": "The URL to fetch"},
+                },
+                "required": ["url"],
             },
         },
     },
@@ -1719,6 +1756,30 @@ class AgentRunner:
                 except Exception:
                     continue
             return "\n".join(results) if results else f"No matches for {pattern!r}"
+
+        if tool_name == "web_search":
+            query = str(parameters.get("query", "")).strip()
+            if not query:
+                return "ERROR: query required"
+            max_results = int(parameters.get("max_results", 5) or 5)
+            backend = str(parameters.get("backend", "") or "").strip() or None
+            try:
+                from dharma_swarm.web_search import search_web
+                results = await search_web(query, max_results=max_results, backend=backend)
+                return results
+            except Exception as exc:
+                return f"ERROR: web_search failed: {exc}"
+
+        if tool_name == "fetch_url":
+            url = str(parameters.get("url", "")).strip()
+            if not url:
+                return "ERROR: url required"
+            try:
+                from dharma_swarm.web_search import fetch_url
+                content = await fetch_url(url)
+                return content[:16000]
+            except Exception as exc:
+                return f"ERROR: fetch_url failed: {exc}"
 
         return f"ERROR: unknown tool {tool_name}"
 
