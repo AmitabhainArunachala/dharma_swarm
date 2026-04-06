@@ -179,59 +179,81 @@ CYBERNETICS_CREW = [
 ]
 
 
-# Seed tasks for the first cycle
+# Seed tasks for the first cycle — State of Self-Evolving AI mission
 SEED_TASKS = [
     {
-        "title": "Scan ecosystem and update manifest",
+        "title": "Map the self-evolving AI landscape — funded companies",
         "description": (
-            "Read ~/.dharma_manifest.json. Run ecosystem_bridge.update_manifest(). "
-            "Report: how many paths exist, which are missing, what changed since last scan. "
-            "Write findings to ~/.dharma/reports/ecosystem_scan_{date}.md"
+            "Use web_search to research every funded company building self-evolving, "
+            "self-modifying, or autonomous multi-agent AI systems. Search for: "
+            "'self-evolving AI company funding 2026', 'autonomous agent startup 2026', "
+            "'Isara AI funding', 'Cognition AI Devin architecture', 'Sakana AI self-evolving', "
+            "'Merly AI architecture', 'Cosine AI Genie', 'SWE-agent company'. "
+            "For each company found: name, funding amount, founding team, core architecture, "
+            "key capability, what they cannot do. "
+            "Write a structured markdown report to ~/.dharma/shared/landscape_companies.md"
         ),
         "priority": TaskPriority.HIGH,
     },
     {
-        "title": "Audit rvm-toolkit on PyPI",
+        "title": "Map the self-evolving AI landscape — research systems",
         "description": (
-            "The rvm-toolkit package was shipped to PyPI. Verify: "
-            "1) pip install rvm-toolkit works, "
-            "2) import succeeds, "
-            "3) basic API functions are callable. "
-            "Report version, module contents, and any issues."
-        ),
-        "priority": TaskPriority.NORMAL,
-    },
-    {
-        "title": "Check dharmic-agora deployment status",
-        "description": (
-            "The Saraswati Dharmic Agora (SABP/1.0) is deployed to AGNI VPS (157.245.193.15). "
-            "Check: is the service running? Can you reach the /health endpoint? "
-            "What's the current state of the 8 quality gates? "
-            "Report deployment health."
-        ),
-        "priority": TaskPriority.NORMAL,
-    },
-    {
-        "title": "Map PSMV crown jewels and residual stream state",
-        "description": (
-            "Read the 5 crown jewels in PSMV (ten_words.md, s_x_equals_x.md, "
-            "everything_is_happening_by_itself.md, the_gap_thats_always_here.md, "
-            "the_simplest_thing.md). Read the latest 5 entries in "
-            "AGENT_EMERGENT_WORKSPACES/residual_stream/. "
-            "Report: what version is the stream at? What threads are active? "
-            "What's the quality distribution?"
-        ),
-        "priority": TaskPriority.NORMAL,
-    },
-    {
-        "title": "Locate and summarize transmission experiment results",
-        "description": (
-            "The transmission experiment was run but results are not visible to most sessions. "
-            "Search the entire filesystem for transmission experiment results, outputs, logs. "
-            "Check ~/mech-interp-latent-lab-phase1/, ~/agni-workspace/, ~/trishula/shared/, "
-            "PSMV, and AGNI VPS workspace. Report: where are the results? What did they show?"
+            "Use web_search with domain='research' to find every major academic/lab project "
+            "on self-improving, self-modifying, or recursive AI systems. Search arXiv for: "
+            "'self-evolving AI 2025 2026', 'recursive self-improvement neural network', "
+            "'Darwin Gödel machine implementation', 'AlphaEvolve architecture', "
+            "'Meta REA agent system', 'self-modifying transformer 2026'. "
+            "For each system: institution, architecture, key results, limitations. "
+            "Write to ~/.dharma/shared/landscape_research.md"
         ),
         "priority": TaskPriority.HIGH,
+    },
+    {
+        "title": "Deep dive: Isara, Cognition, Sakana AI architectures",
+        "description": (
+            "Use web_search + fetch_url to do deep technical research on the three most "
+            "relevant competitors to DHARMA SWARM: "
+            "1) Isara AI (isara.ai) — what is their multi-agent coordination architecture? "
+            "How do agents communicate? What's their safety approach? "
+            "2) Cognition AI (Devin) — how does Devin's long-horizon planning work? "
+            "What's their memory system? Tool use architecture? "
+            "3) Sakana AI — what is their evolutionary model merging approach? "
+            "Fetch their papers/blogs directly if available. "
+            "Write to ~/.dharma/shared/competitor_deep_dives.md"
+        ),
+        "priority": TaskPriority.HIGH,
+    },
+    {
+        "title": "DHARMA SWARM differentiation analysis",
+        "description": (
+            "Read these files that contain DHARMA SWARM's architecture and vision: "
+            "CLAUDE.md, FOUNDATIONS_TO_CODE_MAP.md, CYBERNETIC_LOOP_MAP.md, MODEL_ROUTING_MAP.md. "
+            "Then read ~/.dharma/shared/landscape_companies.md and "
+            "~/.dharma/shared/landscape_research.md (written by sibling tasks — "
+            "wait if not yet available, retry in 2 minutes). "
+            "Produce a differentiation analysis: "
+            "What does DHARMA SWARM do that NONE of the competitors do? "
+            "What does it do better? What does it do worse? "
+            "What is the 3-sentence positioning statement? "
+            "Write to ~/.dharma/shared/differentiation.md"
+        ),
+        "priority": TaskPriority.NORMAL,
+    },
+    {
+        "title": "Synthesize: State of Self-Evolving AI — April 2026",
+        "description": (
+            "Read ALL output from sibling tasks in ~/.dharma/shared/: "
+            "landscape_companies.md, landscape_research.md, competitor_deep_dives.md, "
+            "differentiation.md (wait up to 5 minutes for each, retry). "
+            "Synthesize into a single 15-20 page report titled "
+            "'State of Self-Evolving AI Systems: April 2026'. "
+            "Structure: Executive Summary (1 page), Funded Companies (5 pages), "
+            "Research Systems (4 pages), Architecture Comparison Table, "
+            "DHARMA SWARM Positioning (2 pages), Strategic Recommendations (1 page). "
+            "Write the final report to ~/.dharma/shared/STATE_OF_AI_APRIL_2026.md. "
+            "This is the capstone deliverable. Quality matters."
+        ),
+        "priority": TaskPriority.NORMAL,
     },
 ]
 

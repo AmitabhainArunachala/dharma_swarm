@@ -64,6 +64,12 @@ _ERROR_PREFIXES = (
     "not logged in · please run /login",
     "openrouter error:",
     "no openrouter_api_key set",
+    "credit balance is too low",
+    "credit balance",
+    "insufficient_quota",
+    "rate_limit_exceeded",
+    "you exceeded your current quota",
+    "billing hard limit",
 )
 _PRIORITY_SALIENCE = {
     TaskPriority.LOW: 0.30,
@@ -1119,6 +1125,11 @@ def _looks_like_provider_failure(content: str) -> bool:
     normalized = (content or "").strip().lower()
     if not normalized:
         return True
+    # Short responses that are just error messages
+    if len(normalized) < 200:
+        if any(prefix in normalized for prefix in _ERROR_PREFIXES):
+            return True
+    # Always check startswith for longer content too
     return any(normalized.startswith(prefix) for prefix in _ERROR_PREFIXES)
 
 

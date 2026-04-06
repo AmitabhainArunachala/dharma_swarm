@@ -1998,6 +1998,20 @@ class ModelRouter:
             return "provider_timeout"
         if body.startswith("error:") or body.startswith("error (rc="):
             return "provider_error"
+        # Detect billing/credit failures returned as content (not exceptions)
+        _BILLING_MARKERS = (
+            "credit balance is too low",
+            "credit balance",
+            "insufficient_quota",
+            "you exceeded your current quota",
+            "billing hard limit",
+            "rate_limit_exceeded",
+            "your api key has been disabled",
+        )
+        if len(body) < 300:
+            for marker in _BILLING_MARKERS:
+                if marker in body:
+                    return "billing_exhausted"
         return None
 
     def _provider_chain(
