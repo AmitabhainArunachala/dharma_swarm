@@ -7,6 +7,7 @@
  */
 
 import { useState } from "react";
+import { useRouter } from "next/navigation";
 import { motion, AnimatePresence } from "framer-motion";
 import { Bot, Plus, X, StopCircle, Clock, Zap } from "lucide-react";
 import { useAgents } from "@/hooks/useAgents";
@@ -35,6 +36,7 @@ function agentHPPercent(agent: AgentOut): number {
 }
 
 export default function AgentsPage() {
+  const router = useRouter();
   const { agents, isLoading } = useAgents();
   const [selectedAgent, setSelectedAgent] = useState<AgentOut | null>(null);
   const [showSpawnDialog, setShowSpawnDialog] = useState(false);
@@ -92,7 +94,7 @@ export default function AgentsPage() {
                     initial={{ opacity: 0, x: -8 }}
                     animate={{ opacity: 1, x: 0 }}
                     transition={{ duration: 0.3, delay: i * 0.04 }}
-                    onClick={() => setSelectedAgent(agent)}
+                    onClick={() => router.push(`/dashboard/agents/${agent.agent_slug || agent.name}`)}
                     className="cursor-pointer border-b transition-colors hover:bg-white/[0.02]"
                     style={{
                       borderColor: `color-mix(in srgb, ${colors.sumi[700]} 30%, transparent)`,
