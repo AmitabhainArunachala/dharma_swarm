@@ -177,6 +177,49 @@ TOOL_DEFINITIONS: list[dict[str, Any]] = [
             },
         },
     },
+    # ── Web search tools ────────────────────────────────────────────────────
+    {
+        "name": "web_search",
+        "description": (
+            "Search the live web for current information. "
+            "Tries Perplexity → Exa → Brave → Jina → DuckDuckGo in order. "
+            "Use for: current events, research papers, competitor intel, market news, "
+            "anything that needs real-time or external information."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "query": {"type": "string", "description": "Search query"},
+                "max_results": {"type": "integer", "description": "Max results (1-10)", "default": 5},
+                "backend": {
+                    "type": "string",
+                    "description": "Force a specific backend: perplexity, exa, brave, jina, arxiv, finnhub",
+                    "enum": ["perplexity", "exa", "brave", "jina", "arxiv", "finnhub"],
+                },
+                "domain": {
+                    "type": "string",
+                    "description": "Domain hint: 'research' routes to arXiv, 'finance' routes to Finnhub",
+                    "enum": ["research", "finance", "general"],
+                },
+            },
+            "required": ["query"],
+        },
+    },
+    {
+        "name": "fetch_url",
+        "description": (
+            "Fetch clean text content from any URL using Jina Reader. "
+            "Returns markdown-formatted page content stripped of ads and navigation. "
+            "Use for: reading full papers, documentation, news articles, competitor pages."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "url": {"type": "string", "description": "URL to fetch (must start with https://)"},
+            },
+            "required": ["url"],
+        },
+    },
 ]
 
 
@@ -219,7 +262,7 @@ class AgentIdentity:
     max_turns: int = 25
     allowed_tools: list[str] = field(default_factory=lambda: [
         "read_file", "write_file", "bash", "search_files", "search_content",
-        "remember", "recall", "stigmergy_mark", "stigmergy_read",
+        "remember", "recall", "stigmergy_mark", "stigmergy_read", "web_search", "fetch_url",
     ])
     working_directory: str = field(default_factory=lambda: str(Path.home()))
 
@@ -673,6 +716,8 @@ class AutonomousAgent:
             "recall": self._tool_recall,
             "stigmergy_mark": self._tool_stigmergy_mark,
             "stigmergy_read": self._tool_stigmergy_read,
+            "web_search": self._tool_web_search,
+            "fetch_url": self._tool_fetch_url,
         }.get(name)
 
         if handler is None:
@@ -850,6 +895,40 @@ class AutonomousAgent:
             logger.warning("Stigmergy read failed: %s", e)
         return "Stigmergy store unavailable"
 
+    # -- Web search tools ----------------------------------------------------
+
+    async def _tool_web_search(self, inputs: dict) -> str:
+        from dharma_swarm.web_search import search_web
+        query = inputs.get("query", "")
+        if not query:
+            return "Error: 'query' is required"
+        max_results = min(int(inputs.get("max_results", 5)), 10)
+        backend = inputs.get("backend") or None
+        domain = inputs.get("domain") or None
+        try:
+            result = await search_web(
+                query,
+                max_results=max_results,
+                backend=backend,
+                domain=domain,
+                format_output=True,
+            )
+            return str(result) if result else f"No results found for: {query}"
+        except Exception as e:
+            return f"Search error: {e}"
+
+    async def _tool_fetch_url(self, inputs: dict) -> str:
+        from dharma_swarm.web_search import fetch_url
+        url = inputs.get("url", "")
+        if not url:
+            return "Error: 'url' is required"
+        if not url.startswith(("http://", "https://")):
+            return "Error: URL must start with http:// or https://"
+        try:
+            return await fetch_url(url)
+        except Exception as e:
+            return f"Fetch error: {e}"
+
     # -- System prompt -------------------------------------------------------
 
     def _build_system_prompt(self, memory_context: str, inbox: list[str]) -> str:
@@ -1001,7 +1080,7 @@ PRESET_AGENTS: dict[str, AgentIdentity] = {
         model="claude-sonnet-4-20250514",
         allowed_tools=[
             "read_file", "search_files", "search_content", "bash",
-            "remember", "recall", "stigmergy_mark", "stigmergy_read",
+            "remember", "recall", "stigmergy_mark", "stigmergy_read", "web_search", "fetch_url",
         ],
         working_directory=str(Path.home() / "mech-interp-latent-lab-phase1"),
     ),
@@ -1016,7 +1095,7 @@ PRESET_AGENTS: dict[str, AgentIdentity] = {
         model="claude-sonnet-4-20250514",
         allowed_tools=[
             "read_file", "write_file", "bash", "search_files", "search_content",
-            "remember", "recall", "stigmergy_mark", "stigmergy_read",
+            "remember", "recall", "stigmergy_mark", "stigmergy_read", "web_search", "fetch_url",
         ],
         working_directory=str(Path.home() / "dharma_swarm"),
     ),
@@ -1031,7 +1110,7 @@ PRESET_AGENTS: dict[str, AgentIdentity] = {
         model="claude-sonnet-4-20250514",
         allowed_tools=[
             "read_file", "write_file", "bash", "search_files", "search_content",
-            "remember", "recall", "stigmergy_mark", "stigmergy_read",
+            "remember", "recall", "stigmergy_mark", "stigmergy_read", "web_search", "fetch_url",
         ],
         working_directory=str(Path.home() / "jagat_kalyan"),
     ),
@@ -1046,7 +1125,7 @@ PRESET_AGENTS: dict[str, AgentIdentity] = {
         model="claude-sonnet-4-20250514",
         allowed_tools=[
             "read_file", "search_files", "search_content", "bash",
-            "remember", "recall", "stigmergy_mark", "stigmergy_read",
+            "remember", "recall", "stigmergy_mark", "stigmergy_read", "web_search", "fetch_url",
         ],
         working_directory=str(Path.home()),
     ),
@@ -1063,7 +1142,7 @@ PRESET_AGENTS: dict[str, AgentIdentity] = {
         model="claude-sonnet-4-20250514",
         allowed_tools=[
             "read_file", "search_files", "search_content",
-            "remember", "recall", "stigmergy_mark", "stigmergy_read",
+            "remember", "recall", "stigmergy_mark", "stigmergy_read", "web_search", "fetch_url",
         ],
         working_directory=str(Path.home()),
     ),
