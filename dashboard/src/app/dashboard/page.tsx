@@ -14,7 +14,7 @@ import { FitnessTrend } from "@/components/dashboard/FitnessTrend";
 import { AgentCard } from "@/components/dashboard/AgentCard";
 import { ActivityTable } from "@/components/dashboard/ActivityTable";
 import { HealthBadge } from "@/components/dashboard/HealthBadge";
-import { colors } from "@/lib/theme";
+import { colors, statusColor } from "@/lib/theme";
 
 const container = {
   hidden: { opacity: 0 },
@@ -79,6 +79,19 @@ export default function DashboardOverview() {
           trendLabel={`${agents.filter((a) => a.status === "busy").length} active`}
           accentColor={colors.aozora}
           index={0}
+          expandable
+          href="/dashboard/agents"
+          expandContent={
+            <div className="space-y-1.5">
+              {agents.slice(0, 8).map((a) => (
+                <div key={a.id} className="flex items-center gap-2">
+                  <span className="inline-block h-1.5 w-1.5 rounded-full" style={{ backgroundColor: statusColor(a.status) }} />
+                  <span className="truncate text-xs text-torinoko">{a.display_name || a.name}</span>
+                  <span className="ml-auto text-[9px] text-sumi-600">{a.role}</span>
+                </div>
+              ))}
+            </div>
+          }
         />
         <MetricCard
           label="Tasks"
@@ -97,6 +110,9 @@ export default function DashboardOverview() {
           }
           accentColor={colors.botan}
           index={1}
+          expandable
+          href="/dashboard/tasks"
+          expandContent={<p className="text-xs text-sumi-600">Click to manage tasks</p>}
         />
         <MetricCard
           label="Fitness"
@@ -105,6 +121,9 @@ export default function DashboardOverview() {
           trendLabel={`${overview?.evolution_entries ?? 0} entries`}
           accentColor={colors.kinpaku}
           index={2}
+          expandable
+          href="/dashboard/evolution"
+          expandContent={<p className="text-xs text-sumi-600">{overview?.evolution_entries ?? 0} evolution entries recorded</p>}
         />
         <MetricCard
           label="Health"
@@ -113,6 +132,9 @@ export default function DashboardOverview() {
           trendLabel={`${health?.anomalies?.length ?? 0} anomalies`}
           accentColor={healthStatus === "healthy" ? colors.rokusho : healthStatus === "critical" ? colors.bengara : colors.kinpaku}
           index={3}
+          expandable
+          href="/dashboard/audit"
+          expandContent={<p className="text-xs text-sumi-600">{health?.anomalies?.length ?? 0} anomalies detected</p>}
         />
       </motion.div>
 

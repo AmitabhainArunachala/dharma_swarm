@@ -385,6 +385,200 @@ async def sync_agents(
         return ApiResponse(status="error", error=str(e))
 
 
+##############################################################################
+# Agent-scoped endpoints: chat, history, memory, profile, notes
+##############################################################################
+
+from pydantic import BaseModel as _BaseModel
+
+
+class _AgentChatMessage(_BaseModel):
+    role: str
+    content: str
+
+
+class _AgentChatRequest(_BaseModel):
+    messages: list[_AgentChatMessage] = []
+
+
+@router.post("/agents/{agent_id}/chat")
+async def chat_with_agent(agent_id: str, req: _AgentChatRequest):
+    """SSE streaming chat scoped to a specific agent."""
+    import json as _json
+    from fastapi.responses import StreamingResponse
+
+    payload = await _resolve_agent_payload(agent_id)
+    if not payload:
+        from fastapi import HTTPException
+        raise HTTPException(status_code=404, detail=f"Agent not found: {agent_id}")
+
+    agent_out = payload.get("agent", {})
+    agent_config = payload.get("config", {})
+    agent_name = agent_config.get("display_name") or agent_out.get("display_name") or agent_out.get("name") or agent_id
+    agent_role = agent_config.get("role") or agent_out.get("role") or "general"
+    agent_model = agent_config.get("model") or agent_out.get("model") or "unknown"
+    agent_provider = agent_config.get("provider") or agent_out.get("provider") or "unknown"
+    agent_status = agent_out.get("status", "unknown")
+    current_task = agent_out.get("current_task") or "none"
+
+    from api.routers.chat import (
+        _get_chat_settings,
+        _new_session_id,
+        _sse_data,
+        _agentic_stream,
+        _gather_brief_context,
+    )
+
+    settings = _get_chat_settings()
+    if not settings.available:
+        return StreamingResponse(
+            iter([f'data: {_json.dumps({"error": "Chat backend not available"})}\n\n']),
+            media_type="text/event-stream",
+        )
+
+    session_id = _new_session_id()
+    brief = await _gather_brief_context()
+    system_prompt = (
+        f"You are {agent_name}, a {agent_role} agent in the DHARMA swarm.\n"
+        f"Model: {agent_model} | Provider: {agent_provider} | Status: {agent_status}\n"
+        f"Current task: {current_task}\n\n"
+        f"The operator is communicating with you directly through the DHARMA COMMAND console. "
+        f"Respond concisely and in character as this agent. "
+        f"You have full access to swarm tools.\n\n"
+        f"[Live: {brief}]"
+    )
+
+    api_messages: list[dict] = [{"role": "system", "content": system_prompt}]
+    for m in req.messages:
+        api_messages.append({"role": m.role, "content": m.content})
+
+    try:
+        from dharma_swarm.conversation_log import log_exchange
+        for m in req.messages:
+            if m.role == "user":
+                log_exchange(
+                    "user", m.content, interface="agent_chat",
+                    session_id=session_id,
+                    metadata={"agent_id": agent_id, "agent_name": agent_name},
+                )
+    except Exception:
+        logger.debug("Failed to log agent chat user messages", exc_info=True)
+
+    async def stream():
+        yield _sse_data({"session_id": session_id})
+        collected: list[str] = []
+        async for chunk in _agentic_stream(
+            api_messages, settings, session_id=session_id, profile_id="agent-chat",
+        ):
+            if chunk.startswith("data: "):
+                try:
+                    data = _json.loads(chunk[6:].strip())
+                    if data.get("content"):
+                        collected.append(data["content"])
+                except Exception:
+                    pass
+            yield chunk
+        if collected:
+            try:
+                from dharma_swarm.conversation_log import log_exchange
+                log_exchange(
+                    "assistant", "".join(collected), interface="agent_chat",
+                    session_id=session_id,
+                    metadata={"agent_id": agent_id, "agent_name": agent_name},
+                )
+            except Exception:
+                logger.debug("Failed to log agent chat response", exc_info=True)
+
+    return StreamingResponse(
+        stream(),
+        media_type="text/event-stream",
+        headers={"Cache-Control": "no-cache", "Connection": "keep-alive", "X-Accel-Buffering": "no"},
+    )
+
+
+@router.get("/agents/{agent_id}/chat/history")
+async def get_agent_chat_history(agent_id: str, limit: int = Query(50, ge=1, le=200)) -> ApiResponse:
+    """Load persisted chat history for an agent."""
+    try:
+        from dharma_swarm.conversation_log import load_recent
+        all_entries = load_recent(hours=168, role=None)
+        agent_entries = [
+            e for e in all_entries
+            if e.get("metadata", {}).get("agent_id") == agent_id
+            and e.get("interface") == "agent_chat"
+        ]
+        messages = [
+            {"role": e.get("role", "user"), "content": e.get("content", ""), "timestamp": e.get("timestamp", ""), "session_id": e.get("session_id", "")}
+            for e in agent_entries[-limit:]
+        ]
+        return ApiResponse(data={"messages": messages, "total": len(agent_entries)})
+    except Exception as e:
+        logger.warning("Failed to load agent chat history: %s", e)
+        return ApiResponse(data={"messages": [], "total": 0})
+
+
+@router.get("/agents/{agent_id}/memory")
+async def get_agent_memory(agent_id: str) -> ApiResponse:
+    """Load the 3-tier Letta memory for an agent."""
+    import json as _json
+    from pathlib import Path
+    payload = await _resolve_agent_payload(agent_id)
+    if not payload:
+        return ApiResponse(status="error", error=f"Agent not found: {agent_id}")
+    agent_name = payload.get("agent", {}).get("name") or agent_id
+    base = Path.home() / ".dharma" / "agent_memory" / agent_name
+    tiers = {}
+    for tier in ("working", "archival", "persona"):
+        path = base / f"{tier}.json"
+        try:
+            tiers[tier] = _json.loads(path.read_text()) if path.exists() else []
+        except Exception:
+            tiers[tier] = []
+    return ApiResponse(data=tiers)
+
+
+@router.get("/agents/{agent_id}/profile")
+async def get_agent_profile(agent_id: str) -> ApiResponse:
+    """Load agent performance profile."""
+    import json as _json
+    from pathlib import Path
+    payload = await _resolve_agent_payload(agent_id)
+    if not payload:
+        return ApiResponse(status="error", error=f"Agent not found: {agent_id}")
+    agent_name = payload.get("agent", {}).get("name") or agent_id
+    path = Path.home() / ".dharma" / "profiles" / f"{agent_name}.json"
+    if path.exists():
+        try:
+            return ApiResponse(data=_json.loads(path.read_text()))
+        except Exception as e:
+            return ApiResponse(data={}, error=str(e))
+    return ApiResponse(data={})
+
+
+@router.get("/agents/{agent_id}/notes")
+async def get_agent_notes(agent_id: str) -> ApiResponse:
+    """Load shared notes for an agent."""
+    from pathlib import Path
+    payload = await _resolve_agent_payload(agent_id)
+    if not payload:
+        return ApiResponse(status="error", error=f"Agent not found: {agent_id}")
+    agent_name = payload.get("agent", {}).get("name") or agent_id
+    shared_dir = Path.home() / ".dharma" / "shared"
+    candidates = [
+        shared_dir / f"{agent_name}_notes.md",
+        shared_dir / f"{agent_name.replace('-', '_')}_notes.md",
+        shared_dir / f"{agent_name}_handoff.md",
+    ]
+    notes = []
+    for p in candidates:
+        if p.exists():
+            try:
+                notes.append({"filename": p.name, "content": p.read_text()[:50000], "size": p.stat().st_size, "modified": p.stat().st_mtime})
+            except Exception:
+                pass
+    return ApiResponse(data={"notes": notes})
+
+
 @router.websocket("/ws/agents")
 async def ws_agents(websocket: WebSocket):
     await manager.connect(websocket, "agents")
