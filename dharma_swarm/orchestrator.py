@@ -2037,6 +2037,23 @@ class Orchestrator:
             except Exception:
                 pass  # signal_bus emission is non-critical
 
+            # Record edge in catalytic graph: agent → task_type
+            try:
+                from dharma_swarm.catalytic_graph import CatalyticGraph
+                cg = CatalyticGraph()
+                cg.load()
+                quality = min(1.0, len(result or "") / 2000.0)
+                cg.add_edge(
+                    source=f"agent:{agent_name}",
+                    target=f"task:{task.title[:40]}",
+                    edge_type="enables",
+                    strength=round(max(0.1, quality), 2),
+                    evidence=f"Completed in {duration_sec:.0f}s",
+                )
+                cg.save()
+            except Exception:
+                pass
+
             self._record_progress_event(
                 "task_completed",
                     task_id=td.task_id,

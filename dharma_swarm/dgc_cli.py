@@ -1605,11 +1605,13 @@ def cmd_invariants() -> None:
     try:
         from dharma_swarm.catalytic_graph import CatalyticGraph
         graph = CatalyticGraph()
-        try:
-            from dharma_swarm.catalytic_graph import seed_ecosystem
-            seed_ecosystem(graph)
-        except ImportError:
-            pass
+        if not graph.load():
+            # No persisted graph — fall back to hardcoded seed
+            try:
+                from dharma_swarm.catalytic_graph import seed_ecosystem
+                seed_ecosystem(graph)
+            except ImportError:
+                pass
         mat, nodes = graph.adjacency_matrix()
         total_nodes = graph.node_count
         ac_sets = graph.detect_autocatalytic_sets()
@@ -4875,10 +4877,18 @@ def cmd_cross(
                     print(f"  ❌ {r.source} → {r.target} — {r.evidence[:60]}")
         case "status":
             print(engine.format_status())
+        case "fly":
+            import asyncio as _asyncio_fly
+            print("  八咫烏 YATAGARASU — full murder flight")
+            print("  GLM-5-Turbo → 5 KARASU on MiniMax M2.7 → TOMBI on coding models")
+            print()
+            result = _asyncio_fly.run(engine.fly_murder())
+            print(f"\n  Flight complete: {result['accepted_edges']}/{result['total_candidates']} edges accepted")
         case _:
-            print("Usage: dgc cross {run|status}")
+            print("Usage: dgc cross {run|status|fly}")
             print("  run [--max-edges N] [--dry-run]  Run cross-pollination session")
             print("  status                           Show catalytic graph health")
+            print("  fly                              Full murder flight")
 
 
 def cmd_custodians(
@@ -6145,6 +6155,7 @@ def _build_parser() -> argparse.ArgumentParser:
     p_cross_run.add_argument("--max-edges", type=int, default=5, help="Max missing edges to investigate (default: 5)")
     p_cross_run.add_argument("--dry-run", dest="dry_run", action="store_true", default=False, help="Show candidates without calling LLM")
     cross_sub.add_parser("status", help="Catalytic graph health + last run")
+    cross_sub.add_parser("fly", help="Full murder flight — YATAGARASU + 5 KARASU + TOMBI")
 
     return parser
 

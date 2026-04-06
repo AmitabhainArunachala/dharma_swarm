@@ -719,6 +719,40 @@ async def run_living_layers(
                 if decayed:
                     summary.append(f"decayed={decayed}")
 
+            # Sync stigmergy marks → catalytic graph edges
+            try:
+                from dharma_swarm.catalytic_graph import CatalyticGraph
+                cg = CatalyticGraph()
+                cg.load()
+                pre_edges = len(cg._edges)
+                recent = await store.read_marks(limit=50)
+                agent_topics: dict[str, set[str]] = {}
+                for mark in recent:
+                    agent = mark.agent or "unknown"
+                    topic = (mark.observation or mark.action or "")[:40]
+                    if agent and topic:
+                        agent_topics.setdefault(agent, set()).add(topic)
+                        cg.add_node(f"agent:{agent}", type="agent")
+                        cg.add_node(f"obs:{topic}", type="observation")
+                # Connect agents that share topics (mutual catalysis)
+                agents = list(agent_topics.keys())
+                for i, a1 in enumerate(agents):
+                    for a2 in agents[i+1:]:
+                        shared = agent_topics[a1] & agent_topics[a2]
+                        if shared:
+                            cg.add_edge(f"agent:{a1}", f"agent:{a2}", "validates",
+                                        strength=min(1.0, len(shared) * 0.2),
+                                        evidence=f"Shared topics: {len(shared)}")
+                            cg.add_edge(f"agent:{a2}", f"agent:{a1}", "validates",
+                                        strength=min(1.0, len(shared) * 0.2),
+                                        evidence=f"Shared topics: {len(shared)}")
+                new_edges = len(cg._edges) - pre_edges
+                if new_edges > 0:
+                    cg.save()
+                    summary.append(f"graph_edges=+{new_edges}")
+            except Exception as e:
+                logger.debug("Stigmergy→graph sync failed: %s", e)
+
             # Subconscious dreams (trigger on density threshold)
             if await stream.should_wake():
                 associations = await stream.dream()
@@ -1155,7 +1189,7 @@ async def run_free_evolution_grind(shutdown_event: asyncio.Event) -> None:
                             provider=_free_provider,
                             source_files=_llm_files,
                             model=_model,
-                            shadow=True,  # Shadow mode — evaluate but don't apply
+                            shadow=False,  # Real mode — apply diffs, run tests, roll back on failure
                             timeout=30.0,
                             context=f"Grind cycle {cycle_count}, hunger={hunger:.2f}",
                         )
