@@ -1400,6 +1400,12 @@ async def run_conductor_loop(shutdown_event: asyncio.Event) -> None:
 
 async def orchestrate(background: bool = False) -> None:
     """Main entry point — run all systems concurrently."""
+    # Ensure Python logging is configured so module-level logger.info() calls
+    # (from orchestrator.py, swarm.py, agent_runner.py etc.) are visible.
+    logging.basicConfig(
+        level=logging.INFO,
+        format="%(asctime)s %(name)s [%(levelname)s] %(message)s",
+    )
     STATE_DIR.mkdir(parents=True, exist_ok=True)
     LOG_DIR.mkdir(parents=True, exist_ok=True)
 

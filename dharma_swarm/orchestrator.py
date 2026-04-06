@@ -2105,7 +2105,11 @@ class Orchestrator:
                 source="execution_error",
             )
         finally:
-            self._running_tasks.pop(td.task_id, None)
+            # NOTE: Do NOT pop from _running_tasks here.
+            # _collect_completed() is the sole cleanup mechanism — it checks
+            # atask.done() and counts settled tasks. If we pop here, the task
+            # vanishes before _collect_completed can see it, causing settled=0.
+            pass
 
     async def _persist_result(
         self,
