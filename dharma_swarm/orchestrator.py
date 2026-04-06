@@ -2082,6 +2082,26 @@ class Orchestrator:
                     except Exception:
                         logger.debug("Lifecycle event emit failed (non-critical)", exc_info=True)
 
+            # Auto-extract: if task says "write to <path>", save result there
+            try:
+                import re as _re_extract
+                desc = task.description or ""
+                path_match = _re_extract.search(
+                    r"[Ww]rite (?:to|the (?:final |capstone )?(?:report|results|output|findings) to) (~/[^\s,\"]+\.md)",
+                    desc,
+                )
+                if path_match and result and len(result) > 200:
+                    from pathlib import Path as _P
+                    target = _P(path_match.group(1)).expanduser()
+                    target.parent.mkdir(parents=True, exist_ok=True)
+                    target.write_text(result, encoding="utf-8")
+                    logger.info(
+                        "Auto-extracted %d chars to %s",
+                        len(result), target,
+                    )
+            except Exception:
+                logger.debug("Auto-extract failed", exc_info=True)
+
             # Persist result to shared notes and stigmergy
             runner_cfg = getattr(runner, "_config", None)
             agent_name = runner_cfg.name if runner_cfg else td.agent_id[:8]
