@@ -378,11 +378,11 @@ class ArxivSearchBackend(SearchBackend):
             "search_query": f"all:{query}",
             "start": 0,
             "max_results": max_results,
-            "sortBy": "submittedDate",
+            "sortBy": "relevance",  # was submittedDate — relevance gives topic-matched results
             "sortOrder": "descending",
         }
         try:
-            async with httpx.AsyncClient(timeout=20, follow_redirects=True) as client:
+            async with httpx.AsyncClient(timeout=45, follow_redirects=True) as client:
                 resp = await client.get(
                     "https://export.arxiv.org/api/query",
                     params=params,
