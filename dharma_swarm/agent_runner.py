@@ -1401,10 +1401,16 @@ def _local_tool_workdir(task: Task, config: AgentConfig) -> Path:
 def _resolve_local_tool_path(raw_path: str, *, workdir: Path) -> Path:
     # Normalize ~ and ~/ to the actual home directory
     raw = raw_path.strip()
+    home = str(Path.home())
     if raw.startswith("~/"):
         candidate = Path.home() / raw[2:]
     elif raw.startswith("~"):
         candidate = Path.home() / raw[1:]
+    # LLMs often hallucinate /home/user/ on macOS — redirect to real home
+    elif raw.startswith("/home/user/"):
+        candidate = Path.home() / raw[len("/home/user/"):]
+    elif raw.startswith("/home/dhyana/"):
+        candidate = Path.home() / raw[len("/home/dhyana/"):]
     else:
         candidate = Path(raw)
     if not candidate.is_absolute():
