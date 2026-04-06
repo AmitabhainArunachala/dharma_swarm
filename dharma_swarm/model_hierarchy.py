@@ -78,25 +78,37 @@ TIER_CHEAP: tuple[ProviderType, ...] = (
     ProviderType.OPENROUTER_FREE,  # Nemotron 120B, GLM-4.5-Air, etc.
 )
 
-TIER_PAID: tuple[ProviderType, ...] = (
-    ProviderType.CODEX,          # Subprocess
-    ProviderType.CLAUDE_CODE,    # Opus subprocess
-    ProviderType.ANTHROPIC,      # Opus 4.6 API
-    ProviderType.OPENAI,         # GPT-5
-    ProviderType.OPENROUTER,     # Paid OR models
+TIER_SUBSCRIPTION: tuple[ProviderType, ...] = (
+    ProviderType.CLAUDE_CODE,    # Claude Max/Pro subscription (unlimited, via `claude -p`)
+    ProviderType.CODEX,          # OpenAI subscription (via `codex exec`)
 )
+
+TIER_PAID_API: tuple[ProviderType, ...] = (
+    ProviderType.ANTHROPIC,      # Opus 4.6 API (credit-limited — last resort)
+    ProviderType.OPENAI,         # GPT-5 API (credit-limited — last resort)
+    ProviderType.OPENROUTER,     # Paid OR models (credit-limited)
+)
+
+# Legacy alias
+TIER_PAID: tuple[ProviderType, ...] = TIER_SUBSCRIPTION + TIER_PAID_API
 
 ALL_TIERS: dict[str, tuple[ProviderType, ...]] = {
     "free": TIER_FREE,
     "cheap": TIER_CHEAP,
+    "subscription": TIER_SUBSCRIPTION,
+    "paid_api": TIER_PAID_API,
     "paid": TIER_PAID,
 }
 
-# The canonical seed ordering: PAID (most powerful) → cheap → free.
-# Power-first: always try the strongest model first. Fall back to cheaper
-# models only when the powerful ones fail (rate limit, key missing, etc.).
+# The canonical seed ordering: SUSTAINABLE FIRST.
+# 1. Free frontier (Ollama Cloud, Groq, Cerebras, etc.) — $0, high quality
+# 2. Cheap (Mistral, Google AI, etc.) — ~$0
+# 3. Subscription (Claude Max, Codex) — unlimited via active plans
+# 4. Paid API (Anthropic, OpenAI credits) — LAST RESORT, runs dry
 # After ~100 routing events, EWMA scores override this seed order.
-CANONICAL_SEED_ORDER: tuple[ProviderType, ...] = TIER_PAID + TIER_CHEAP + TIER_FREE
+CANONICAL_SEED_ORDER: tuple[ProviderType, ...] = (
+    TIER_FREE + TIER_CHEAP + TIER_SUBSCRIPTION + TIER_PAID_API
+)
 
 
 # ─── Canonical Lane Roles ────────────────────────────────────────────────
@@ -104,9 +116,10 @@ CANONICAL_SEED_ORDER: tuple[ProviderType, ...] = TIER_PAID + TIER_CHEAP + TIER_F
 # delegated search, challenge, and implementation work.
 
 PRIMARY_DRIVER_LANES: tuple[ProviderType, ...] = (
-    ProviderType.CODEX,
-    ProviderType.CLAUDE_CODE,
-    ProviderType.ANTHROPIC,
+    ProviderType.CLAUDE_CODE,    # Subscription-backed (unlimited)
+    ProviderType.CODEX,          # Subscription-backed (unlimited)
+    ProviderType.OLLAMA,         # Free frontier (GLM-5, DeepSeek-v3.2)
+    ProviderType.ANTHROPIC,      # API credits (last resort)
 )
 
 DELEGATED_RESEARCH_PRIORITY: tuple[ProviderType, ...] = (
@@ -159,19 +172,23 @@ VALIDATOR_PRIORITY: tuple[ProviderType, ...] = (
 )
 
 PRIMARY_TOOLING_PRIORITY: tuple[ProviderType, ...] = (
-    ProviderType.CODEX,
-    ProviderType.CLAUDE_CODE,
-    ProviderType.ANTHROPIC,
-    ProviderType.OPENAI,
-    ProviderType.OPENROUTER,
+    ProviderType.CLAUDE_CODE,    # Subscription (unlimited)
+    ProviderType.CODEX,          # Subscription (unlimited)
+    ProviderType.OLLAMA,         # Free frontier
+    ProviderType.CEREBRAS,       # Free (Qwen3 235B)
+    ProviderType.ANTHROPIC,      # API credits (last resort)
+    ProviderType.OPENAI,         # API credits (last resort)
+    ProviderType.OPENROUTER,     # API credits (last resort)
 )
 
 PRIMARY_REASONING_PRIORITY: tuple[ProviderType, ...] = (
-    ProviderType.ANTHROPIC,
-    ProviderType.CLAUDE_CODE,
-    ProviderType.CODEX,
-    ProviderType.OPENAI,
-    ProviderType.OPENROUTER,
+    ProviderType.CLAUDE_CODE,    # Subscription (unlimited, Opus-class)
+    ProviderType.OLLAMA,         # Free frontier (GLM-5 744B, DeepSeek-v3.2)
+    ProviderType.CODEX,          # Subscription (unlimited)
+    ProviderType.CEREBRAS,       # Free (Qwen3 235B)
+    ProviderType.ANTHROPIC,      # API credits (last resort)
+    ProviderType.OPENAI,         # API credits (last resort)
+    ProviderType.OPENROUTER,     # API credits (last resort)
 )
 
 DELIBERATIVE_REASONING_PRIORITY: tuple[ProviderType, ...] = _ordered_unique(

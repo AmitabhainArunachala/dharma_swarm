@@ -1460,6 +1460,13 @@ async def orchestrate(background: bool = False) -> None:
     signal.signal(signal.SIGINT, _signal_handler)
     signal.signal(signal.SIGTERM, _signal_handler)
 
+    # Enable subscription auth for Claude when not nested inside Claude Code
+    if "CLAUDECODE" not in os.environ:
+        os.environ.setdefault("DHARMA_CLAUDE_AUTH_MODE", "subscription")
+        _log("orchestrator", "Claude auth: subscription (Max/Pro plan)")
+    else:
+        _log("orchestrator", "Claude auth: skipped (nested in Claude Code)")
+
     # Phase 2: Create shared signal bus for inter-loop temporal coherence
     from dharma_swarm.signal_bus import SignalBus
     bus = SignalBus.get()
