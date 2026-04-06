@@ -1399,7 +1399,14 @@ def _local_tool_workdir(task: Task, config: AgentConfig) -> Path:
 
 
 def _resolve_local_tool_path(raw_path: str, *, workdir: Path) -> Path:
-    candidate = Path(raw_path).expanduser()
+    # Normalize ~ and ~/ to the actual home directory
+    raw = raw_path.strip()
+    if raw.startswith("~/"):
+        candidate = Path.home() / raw[2:]
+    elif raw.startswith("~"):
+        candidate = Path.home() / raw[1:]
+    else:
+        candidate = Path(raw)
     if not candidate.is_absolute():
         candidate = workdir / candidate
     return candidate.resolve(strict=False)
