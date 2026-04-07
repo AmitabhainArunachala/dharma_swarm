@@ -45,7 +45,14 @@ WHERE t.status = ?
   AND NOT EXISTS (
       SELECT 1 FROM task_dependencies d
       JOIN tasks dep ON dep.id = d.depends_on_id
-      WHERE d.task_id = t.id AND dep.status != ?)
+      WHERE d.task_id = t.id
+        AND dep.status NOT IN (?, 'failed', 'dead_letter')
+        AND NOT (
+            -- Treat RUNNING tasks stuck >15min as satisfied (timed-out dependency)
+            dep.status = 'running'
+            AND dep.updated_at < datetime('now', '-15 minutes')
+        )
+  )
 ORDER BY CASE t.priority
     WHEN 'urgent' THEN 0 WHEN 'high' THEN 1
     WHEN 'normal' THEN 2 WHEN 'low' THEN 3 END,

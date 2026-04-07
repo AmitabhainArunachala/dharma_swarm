@@ -2069,28 +2069,54 @@ class Orchestrator:
                 class _MinimalLLMClient:
                     """Thin adapter matching KnowledgeExtractor._call_llm interface.
 
-                    KnowledgeExtractor calls: await self._llm_client.complete(LLMRequest)
-                    and expects: response.content (str) or response.text (str).
+                    Targets cheap/free models only — knowledge extraction doesn't
+                    need frontier intelligence, just reliable JSON output.
+                    Provider order: Ollama Cloud → Groq → NVIDIA NIM → fallback.
+                    Avoids claude_code (billing issues) and respects circuit breakers.
                     """
                     async def complete(self, request_or_prompt, **kwargs):
+                        from dharma_swarm.models import ProviderType
                         # Accept both LLMRequest objects and raw prompt strings
                         if isinstance(request_or_prompt, str):
                             req = LLMRequest(
                                 model="",
                                 messages=[{"role": "user", "content": request_or_prompt}],
-                                system="Extract factual propositions and recommendations. Return valid JSON.",
-                                max_tokens=kwargs.get("max_tokens", 1024),
-                                temperature=0.2,
+                                system=(
+                                    "Extract factual claims and recommendations from text. "
+                                    "Return valid JSON array only."
+                                ),
+                                max_tokens=kwargs.get("max_tokens", 512),
+                                temperature=0.1,
                             )
                         else:
-                            # Already an LLMRequest — use as-is but clear model for auto-routing
                             req = request_or_prompt
                             req.model = req.model or ""
+                            req.max_tokens = min(getattr(req, 'max_tokens', 512) or 512, 512)
+
+                        # Try cheap providers in order, skip dead ones
+                        cheap_providers = [
+                            ProviderType.OLLAMA,
+                            ProviderType.GROQ,
+                            ProviderType.NVIDIA_NIM,
+                            ProviderType.CEREBRAS,
+                        ]
+                        for ptype in cheap_providers:
+                            try:
+                                from dharma_swarm.runtime_provider import create_default_provider_map
+                                provider_map = create_default_provider_map()
+                                provider = provider_map.get(ptype)
+                                if provider and getattr(provider, 'available', False):
+                                    response = await provider.complete(req)
+                                    if response and getattr(response, 'content', None):
+                                        return response
+                            except Exception:
+                                continue  # Try next provider
+
+                        # Final fallback via full router
                         try:
                             return await complete_via_preferred_runtime_providers(req)
                         except Exception as exc:
-                            logger.debug("_MinimalLLMClient failed: %s", exc)
-                            # Return object with .content attr that KnowledgeExtractor expects
+                            logger.debug("_MinimalLLMClient: all providers failed: %s", exc)
                             class _EmptyResponse:
                                 content = "[]"
                                 text = "[]"
