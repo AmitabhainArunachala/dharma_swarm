@@ -436,21 +436,27 @@ async def create_seed_tasks(swarm) -> list:
     """
     from dharma_swarm.models import TaskStatus
 
-    existing = await swarm.list_tasks(status=TaskStatus.PENDING)
-    # Only skip seeding if there are real operator tasks pending.
-    # Do NOT skip if only busywork (coordination/eval) tasks are pending —
-    # those should be displaced by real work, not block it.
-    real_pending = [
-        t for t in existing
-        if isinstance(getattr(t, 'created_by', None), str)
-        and t.created_by == "operator"
-        or (
-            isinstance(getattr(t, 'metadata', None), dict)
-            and t.metadata.get("created_via") == "operator"
+    # Check if any of the SEED_TASK titles are currently active (PENDING or RUNNING).
+    # We look by title to avoid re-seeding tasks that are mid-flight.
+    # We do NOT check COMPLETED/FAILED — those are done and we should re-seed.
+    seed_titles = {spec["title"] for spec in SEED_TASKS}
+    active_seeds: list = []
+    for status in (TaskStatus.PENDING, TaskStatus.RUNNING):
+        try:
+            active = await swarm.list_tasks(status=status)
+            active_seeds.extend(
+                t for t in active
+                if getattr(t, 'title', '') in seed_titles
+            )
+        except Exception:
+            pass
+
+    if active_seeds:
+        logger.info(
+            "Seed tasks already active (%d in-flight), skipping re-seed: %s",
+            len(active_seeds),
+            [getattr(t, 'title', '')[:40] for t in active_seeds[:3]],
         )
-    ]
-    if real_pending:
-        logger.info("Board has %d real operator tasks pending, skipping seed", len(real_pending))
         return []
 
     date_str = datetime.now(timezone.utc).strftime("%Y%m%d")
