@@ -2050,14 +2050,38 @@ class Orchestrator:
                     )
                 )
                 _t1.add_done_callback(
-                    lambda t: t.exception() if not t.cancelled() else None
+                    lambda t: (
+                        logger.debug("telos_tracker failed: %s", t.exception())
+                        if not t.cancelled() and t.exception() else None
+                    )
                 )
             except Exception:
                 pass  # Never block task completion
 
-            # P4: Non-fatal knowledge consolidation into LanceDB via SleepTimeAgent
+            # P4: Knowledge consolidation → KnowledgeStore via SleepTimeAgent.
+            # REQUIRES llm_client — without it, KnowledgeExtractor returns []
+            # and nothing is stored. Pass a lightweight provider wrapper.
             try:
                 from dharma_swarm.sleep_time_agent import SleepTimeAgent
+                from dharma_swarm.runtime_provider import complete_via_preferred_runtime_providers
+                from dharma_swarm.models import LLMRequest
+
+                class _MinimalLLMClient:
+                    """Thin adapter so SleepTimeAgent can call the runtime provider."""
+                    async def complete(self, prompt: str, max_tokens: int = 512) -> str:
+                        req = LLMRequest(
+                            model="",
+                            messages=[{"role": "user", "content": prompt}],
+                            system="Extract factual propositions and recommendations.",
+                            max_tokens=max_tokens,
+                            temperature=0.1,
+                        )
+                        try:
+                            response = await complete_via_preferred_runtime_providers(req)
+                            return response.content or ""
+                        except Exception:
+                            return ""
+
                 _sta = SleepTimeAgent()
                 _t4 = asyncio.create_task(
                     _sta.consolidate_knowledge(
@@ -2067,10 +2091,14 @@ class Orchestrator:
                             "task_title": getattr(task, 'title', ''),
                             "source": "task_completion",
                         },
+                        llm_client=_MinimalLLMClient(),
                     )
                 )
                 _t4.add_done_callback(
-                    lambda t: t.exception() if not t.cancelled() else None
+                    lambda t: (
+                        logger.warning("SleepTimeAgent consolidation failed: %s", t.exception())
+                        if not t.cancelled() and t.exception() else None
+                    )
                 )
             except Exception:
                 pass  # Never block task completion
@@ -2283,6 +2311,29 @@ class Orchestrator:
             logger.debug("Shared artifact written: %s", shared_artifact.name)
         except Exception as exc:
             logger.debug("Shared artifact write failed (non-fatal): %s", exc)
+
+        # Fix 2: Feed result into MemoryPalace for cross-session semantic recall.
+        # Even with TF-IDF only (sqlite-vec not installed), this builds the corpus
+        # that future vector/hybrid search will query.
+        try:
+            from dharma_swarm.memory_palace import MemoryPalace
+            palace = MemoryPalace(state_dir=self._runtime_root())
+            _t_palace = asyncio.create_task(
+                palace.ingest(
+                    content=result,
+                    source=f"task:{task.id[:8]}:{task.title[:60]}",
+                    layer="working",
+                    tags=["task_output"],
+                )
+            )
+            _t_palace.add_done_callback(
+                lambda t: (
+                    logger.debug("MemoryPalace ingest failed: %s", t.exception())
+                    if not t.cancelled() and t.exception() else None
+                )
+            )
+        except Exception as exc:
+            logger.debug("MemoryPalace ingest failed (non-fatal): %s", exc)
 
         # Leave stigmergic mark
         try:
