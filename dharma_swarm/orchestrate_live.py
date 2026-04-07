@@ -167,6 +167,41 @@ async def run_swarm_loop(
     )
     _log("swarm", f"Ready: {len(agents)} agents, thread={swarm.current_thread}")
 
+    # Auto-seed missions from ThinkodynamicDirector if task board is empty.
+    # The director derives missions from TelosGraph + recognition_seed + ecosystem.
+    # This replaces static SEED_TASKS with telos-derived, philosophically grounded work.
+    try:
+        _board = swarm._orchestrator._board
+        _board_stats = await _board.stats()
+        _pending = _board_stats.get("pending", 0) + _board_stats.get("running", 0)
+        if _pending == 0:
+            from dharma_swarm.mission_contract import load_latest_mission
+            from pathlib import Path
+            _handoff = STATE_DIR / "shared" / "thinkodynamic_director_handoff.md"
+            _contract_path = STATE_DIR / "logs" / "thinkodynamic_director" / "latest.json"
+            if _contract_path.exists():
+                try:
+                    mission = load_latest_mission(_contract_path)
+                    if mission and hasattr(mission, 'task_titles') and mission.task_titles:
+                        _log("swarm", f"Seeding {len(mission.task_titles)} tasks from director: '{mission.mission_title}'")
+                        for title in mission.task_titles[:10]:  # cap at 10 per mission
+                            await _board.create(
+                                title=title,
+                                description=(
+                                    f"Mission: {mission.mission_title}.\n"
+                                    f"Use web_search, fetch_url, read_file, and write_file "
+                                    f"to complete this task. Write results to "
+                                    f"~/.dharma/shared/ with a descriptive filename."
+                                ),
+                                priority="high",
+                            )
+                except Exception as e:
+                    _log("swarm", f"Director mission seeding failed (non-fatal): {e}")
+            else:
+                _log("swarm", "No director mission found — using default SEED_TASKS")
+    except Exception as e:
+        _log("swarm", f"Mission auto-seed check failed (non-fatal): {e}")
+
     try:
         while not shutdown_event.is_set():
             try:
@@ -836,7 +871,47 @@ async def _run_recognition_loop(shutdown_event: asyncio.Event) -> None:
 
     Every 2 hours, synthesizes signals from all subsystems into a recognition
     seed that feeds back into agent context via L9 META layer.
+
+    On first run: generates an immediate seed so agents have self-model context
+    from the very first task, not after 2 hours of blind operation.
     """
+    from dharma_swarm.meta_daemon import RecognitionEngine
+    engine = RecognitionEngine()
+
+    # First-run: generate seed immediately if it doesn't exist or is stale (>12h)
+    _seed_path = STATE_DIR / "meta" / "recognition_seed.md"
+    _seed_stale = (
+        not _seed_path.exists() or
+        (time.time() - _seed_path.stat().st_mtime) > 43200  # 12 hours
+    )
+    if _seed_stale:
+        _log("recognition", "Generating first-run recognition seed...")
+        await asyncio.sleep(30)  # Let other systems init first
+        try:
+            seed = await asyncio.wait_for(engine.synthesize("light"), timeout=60)
+            _log("recognition", f"First-run seed generated ({len(seed)} chars)")
+        except Exception as e:
+            _log("recognition", f"First-run synthesis failed (non-fatal): {e}")
+    else:
+        _log("recognition", f"Existing seed is fresh ({_seed_path.stat().st_size}b)")
+
+    # Then run on the normal 2-hour cycle
+    while not shutdown_event.is_set():
+        await asyncio.sleep(RECOGNITION_INTERVAL)
+        if shutdown_event.is_set():
+            break
+        try:
+            seed = await asyncio.wait_for(engine.synthesize("light"), timeout=120)
+            _log("recognition", f"Seed updated ({len(seed)} chars)")
+        except Exception as e:
+            _log("recognition", f"Synthesis failed: {e}")
+
+    # Exit the loop cleanly (original code had the wait at the bottom)
+    return
+
+
+async def _run_recognition_loop_UNUSED(shutdown_event: asyncio.Event) -> None:
+    # Keep for reference — original simple loop
     from dharma_swarm.meta_daemon import RecognitionEngine
     engine = RecognitionEngine()
 
@@ -846,15 +921,7 @@ async def _run_recognition_loop(shutdown_event: asyncio.Event) -> None:
             _log("recognition", f"Seed updated ({len(seed)} chars)")
         except Exception as e:
             _log("recognition", f"Synthesis failed: {e}")
-
-        # Wait for next cycle or shutdown
-        try:
-            await asyncio.wait_for(
-                shutdown_event.wait(), timeout=RECOGNITION_INTERVAL
-            )
-            break
-        except asyncio.TimeoutError:
-            pass
+    return  # pragma: no cover
 
 
 async def _run_witness_loop(shutdown_event: asyncio.Event) -> None:

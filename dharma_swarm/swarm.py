@@ -564,6 +564,30 @@ class SwarmManager:
             except OSError:
                 pass
 
+        # ── Telos Substrate: seed ConceptGraph + TelosGraph from 10 pillars ──
+        # This MUST run early. Without it ThinkodynamicDirector operates on
+        # empty graphs and falls back to generic operational tasks.
+        # The substrate is idempotent — skips already-seeded objectives.
+        _telos_flag = self.state_dir / "meta" / "telos_seeded"
+        if not _telos_flag.exists():
+            try:
+                from dharma_swarm.telos_substrate import TelosSubstrate
+                substrate = TelosSubstrate(state_dir=self.state_dir)
+                _seed_result = await asyncio.wait_for(
+                    substrate.seed_all(), timeout=120.0
+                )
+                _telos_flag.parent.mkdir(parents=True, exist_ok=True)
+                _telos_flag.write_text(
+                    f"seeded: {_seed_result}\n", encoding="utf-8"
+                )
+                logger.info("TelosSubstrate seeded on init: %s", _seed_result)
+            except asyncio.TimeoutError:
+                logger.warning("TelosSubstrate seeding timed out (120s) — continuing")
+            except Exception as exc:
+                logger.warning("TelosSubstrate seeding failed (non-fatal): %s", exc)
+        else:
+            logger.info("TelosSubstrate already seeded (flag: %s)", _telos_flag)
+
         from dharma_swarm.agent_constitution import bootstrap_dynamic_roster
 
         from dharma_swarm.agent_runner import AgentPool

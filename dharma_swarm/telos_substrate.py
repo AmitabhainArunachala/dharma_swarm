@@ -2749,6 +2749,94 @@ TELOS_OBJECTIVES: list[dict[str, Any]] = [
         "target_date": "2026-09-01",
         "metadata": {"domain": "dharmic_alignment"},
     },
+
+    # ===================================================================
+    # COMPETITIVE INTELLIGENCE (April 2026 landscape update)
+    # Seeded from: State of Self-Evolving AI Systems report, April 2026
+    # These objectives encode WHERE DHARMA SWARM must differentiate
+    # ===================================================================
+    {
+        "name": "Surpass Sakana DGM on multi-domain self-improvement",
+        "perspective": "process",
+        "priority": 9,
+        "progress": 0.15,
+        "description": (
+            "Sakana's Darwin Gödel Machine improved SWE-bench 20%→50% in 80 iterations "
+            "(ICLR 2026). DHARMA SWARM must demonstrate equivalent self-improvement "
+            "across MULTIPLE domains (research synthesis, trading signals, code quality) "
+            "not just coding benchmarks. The DarwinEngine with real diffs + multi-domain "
+            "fitness scoring is the implementation path. Publish as companion paper to COLM."
+        ),
+        "target_date": "2026-12-01",
+        "metadata": {"domain": "darwin_godel", "competitor": "sakana_dgm"},
+    },
+    {
+        "name": "Differentiate from Isara via alignment-first swarm coordination",
+        "perspective": "stakeholder",
+        "priority": 9,
+        "progress": 0.1,
+        "description": (
+            "Isara ($94M, $650M valuation) coordinates 2,000+ agents but has NO "
+            "alignment architecture, NO dharmic governance, NO self-improvement loop. "
+            "DHARMA SWARM's moat: VSM governance + Telos gates + DarwinEngine in a "
+            "single coordinated system. Build the demo that shows alignment-constrained "
+            "coordination produces better long-run outcomes than raw coordination. "
+            "Target: enterprise compliance teams who need auditable AI governance."
+        ),
+        "target_date": "2026-09-01",
+        "metadata": {"domain": "vsm_governance", "competitor": "isara"},
+    },
+    {
+        "name": "Wire Ginko as metabolic proof-of-concept",
+        "perspective": "financial",
+        "priority": 10,
+        "progress": 0.05,
+        "description": (
+            "The only system in the April 2026 landscape attempting financial "
+            "self-sufficiency through integrated trading intelligence. Ginko (standalone "
+            "repo) must be wired to DHARMA SWARM: Cartographer scans macro signals, "
+            "feeds Ginko regime detection, Ginko PnL flows into EconomicSpine. "
+            "Stage 1: paper trading with Brier scoring (30 days). "
+            "Stage 2: $100-500 real capital if Brier > 0.6. "
+            "Stage 3: system self-funds API costs from trading. "
+            "This closes the energy loop: the organism metabolizes."
+        ),
+        "target_date": "2026-07-01",
+        "metadata": {"domain": "revenue", "competitor": "none"},
+    },
+    {
+        "name": "Publish dharmic alignment architecture as research contribution",
+        "perspective": "stakeholder",
+        "priority": 8,
+        "progress": 0.05,
+        "description": (
+            "No competitor (Isara, Cognition, Sakana, Imbue, TheBotCompany) has published "
+            "a dharmic or principled alignment architecture. DHARMA SWARM's telos gates, "
+            "Gnani witness, VSM governance, and samvara constraints are a novel "
+            "contribution to the alignment literature. Publish as: "
+            "'Architectural Alignment: VSM-based Principled Constraints for Self-Evolving "
+            "Multi-Agent Systems.' Target venue: NeurIPS 2026 safety track or arXiv preprint."
+        ),
+        "target_date": "2026-10-01",
+        "metadata": {"domain": "ai_safety", "competitor": "none"},
+    },
+    {
+        "name": "Achieve 24-hour autonomous operation with measurable improvement",
+        "perspective": "process",
+        "priority": 9,
+        "progress": 0.2,
+        "description": (
+            "Current best: 30-minute run, 18 tasks completed, 16/18 success rate. "
+            "Target: 24-hour autonomous run with: "
+            "(1) DarwinEngine generating real code diffs (not empty strings) "
+            "(2) Memory Palace accumulating knowledge across the run "
+            "(3) Organism invariants showing measurable improvement over 24h "
+            "(4) At least 1 external deliverable produced (research brief, Ginko signal) "
+            "This is the proof-of-concept that the organism can sustain itself."
+        ),
+        "target_date": "2026-05-01",
+        "metadata": {"domain": "autonomous_ops"},
+    },
 ]
 
 # ---------------------------------------------------------------------------
