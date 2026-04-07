@@ -220,6 +220,32 @@ TOOL_DEFINITIONS: list[dict[str, Any]] = [
             "required": ["url"],
         },
     },
+    # ── Ginko trading bridge tools ─────────────────────────────────────────
+    {
+        "name": "ginko_signals",
+        "description": (
+            "Get current market signals and regime from the Ginko trading system. "
+            "Returns regime (bull/bear/neutral), signal values, and Brier scores. "
+            "Use for: market intelligence, trading decisions, macro regime analysis."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "symbol": {"type": "string", "description": "Trading symbol (BTC, ETH, SPY, etc.)", "default": "BTC"},
+                "lookback_days": {"type": "integer", "description": "Days of data to analyze", "default": 7},
+            },
+        },
+    },
+    {
+        "name": "ginko_regime",
+        "description": "Get the current market regime from Ginko (bull/bear/neutral/unknown). Quick single-value answer.",
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "symbol": {"type": "string", "description": "Trading symbol", "default": "BTC"},
+            },
+        },
+    },
 ]
 
 
@@ -263,6 +289,7 @@ class AgentIdentity:
     allowed_tools: list[str] = field(default_factory=lambda: [
         "read_file", "write_file", "bash", "search_files", "search_content",
         "remember", "recall", "stigmergy_mark", "stigmergy_read", "web_search", "fetch_url",
+        "ginko_signals", "ginko_regime",
     ])
     working_directory: str = field(default_factory=lambda: str(Path.home()))
 
@@ -718,6 +745,8 @@ class AutonomousAgent:
             "stigmergy_read": self._tool_stigmergy_read,
             "web_search": self._tool_web_search,
             "fetch_url": self._tool_fetch_url,
+            "ginko_signals": self._tool_ginko_signals,
+            "ginko_regime": self._tool_ginko_regime,
         }.get(name)
 
         if handler is None:
@@ -929,6 +958,27 @@ class AutonomousAgent:
         except Exception as e:
             return f"Fetch error: {e}"
 
+    # -- Ginko trading bridge tools ------------------------------------------
+
+    async def _tool_ginko_signals(self, inputs: dict) -> str:
+        from dharma_swarm.ginko_bridge import ginko_get_signals, format_signals
+        symbol = inputs.get("symbol", "BTC")
+        lookback_days = int(inputs.get("lookback_days", 7))
+        try:
+            signals = await ginko_get_signals(symbol=symbol, lookback_days=lookback_days)
+            return format_signals(signals)
+        except Exception as e:
+            return f"Ginko signals error: {e}"
+
+    async def _tool_ginko_regime(self, inputs: dict) -> str:
+        from dharma_swarm.ginko_bridge import ginko_get_regime
+        symbol = inputs.get("symbol", "BTC")
+        try:
+            regime = await ginko_get_regime(symbol=symbol)
+            return f"Current Ginko regime for {symbol}: {regime}"
+        except Exception as e:
+            return f"Ginko regime error: {e}"
+
     # -- System prompt -------------------------------------------------------
 
     def _build_system_prompt(self, memory_context: str, inbox: list[str]) -> str:
@@ -1081,6 +1131,7 @@ PRESET_AGENTS: dict[str, AgentIdentity] = {
         allowed_tools=[
             "read_file", "search_files", "search_content", "bash",
             "remember", "recall", "stigmergy_mark", "stigmergy_read", "web_search", "fetch_url",
+            "ginko_signals", "ginko_regime",
         ],
         working_directory=str(Path.home() / "mech-interp-latent-lab-phase1"),
     ),
@@ -1096,6 +1147,7 @@ PRESET_AGENTS: dict[str, AgentIdentity] = {
         allowed_tools=[
             "read_file", "write_file", "bash", "search_files", "search_content",
             "remember", "recall", "stigmergy_mark", "stigmergy_read", "web_search", "fetch_url",
+            "ginko_signals", "ginko_regime",
         ],
         working_directory=str(Path.home() / "dharma_swarm"),
     ),
@@ -1111,6 +1163,7 @@ PRESET_AGENTS: dict[str, AgentIdentity] = {
         allowed_tools=[
             "read_file", "write_file", "bash", "search_files", "search_content",
             "remember", "recall", "stigmergy_mark", "stigmergy_read", "web_search", "fetch_url",
+            "ginko_signals", "ginko_regime",
         ],
         working_directory=str(Path.home() / "jagat_kalyan"),
     ),
@@ -1126,6 +1179,7 @@ PRESET_AGENTS: dict[str, AgentIdentity] = {
         allowed_tools=[
             "read_file", "search_files", "search_content", "bash",
             "remember", "recall", "stigmergy_mark", "stigmergy_read", "web_search", "fetch_url",
+            "ginko_signals", "ginko_regime",
         ],
         working_directory=str(Path.home()),
     ),
@@ -1143,6 +1197,7 @@ PRESET_AGENTS: dict[str, AgentIdentity] = {
         allowed_tools=[
             "read_file", "search_files", "search_content",
             "remember", "recall", "stigmergy_mark", "stigmergy_read", "web_search", "fetch_url",
+            "ginko_signals", "ginko_regime",
         ],
         working_directory=str(Path.home()),
     ),

@@ -2037,6 +2037,44 @@ class Orchestrator:
             except Exception:
                 pass  # signal_bus emission is non-critical
 
+            # P1: Perception loop — task completion → TelosGraph progress
+            # Uses supervised task tracking to prevent silent GC before completion
+            try:
+                from dharma_swarm.telos_tracker import record_task_completion
+                _t1 = asyncio.create_task(
+                    record_task_completion(
+                        task_title=getattr(task, 'title', ''),
+                        task_description=getattr(task, 'description', ''),
+                        result=result,
+                        state_dir=self._runtime_root(),
+                    )
+                )
+                _t1.add_done_callback(
+                    lambda t: t.exception() if not t.cancelled() else None
+                )
+            except Exception:
+                pass  # Never block task completion
+
+            # P4: Non-fatal knowledge consolidation into LanceDB via SleepTimeAgent
+            try:
+                from dharma_swarm.sleep_time_agent import SleepTimeAgent
+                _sta = SleepTimeAgent()
+                _t4 = asyncio.create_task(
+                    _sta.consolidate_knowledge(
+                        task_context=result or "",
+                        task_outcome={
+                            "success": True,
+                            "task_title": getattr(task, 'title', ''),
+                            "source": "task_completion",
+                        },
+                    )
+                )
+                _t4.add_done_callback(
+                    lambda t: t.exception() if not t.cancelled() else None
+                )
+            except Exception:
+                pass  # Never block task completion
+
             # Record edge in catalytic graph: agent → task_type
             try:
                 from dharma_swarm.catalytic_graph import CatalyticGraph
@@ -2227,6 +2265,24 @@ class Orchestrator:
                 trace_id=trace_id,
                 error=str(exc),
             )
+
+        # Write a shared artifact with task-specific path so dependent tasks can find it
+        try:
+            # Create a slug from task title for predictable cross-task path
+            slug = re.sub(r'[^a-z0-9]+', '_', (task.title or 'task').lower()).strip('_')[:40]
+            shared_artifact = shared_dir / f"{task.id[:8]}_{slug}.md"
+            shared_artifact.write_text(
+                f"# {task.title}\n\n"
+                f"**Task ID:** {task.id}\n"
+                f"**Agent:** {agent_name}\n"
+                f"**Completed:** {datetime.now(timezone.utc).isoformat()}\n\n"
+                f"---\n\n"
+                f"{result}",
+                encoding="utf-8",
+            )
+            logger.debug("Shared artifact written: %s", shared_artifact.name)
+        except Exception as exc:
+            logger.debug("Shared artifact write failed (non-fatal): %s", exc)
 
         # Leave stigmergic mark
         try:

@@ -27,6 +27,7 @@ Ground: Beer (S4 intelligence needs access to S1 operational memory),
 
 from __future__ import annotations
 
+import hashlib
 import logging
 import time
 from dataclasses import dataclass, field
@@ -35,6 +36,136 @@ from pathlib import Path
 from typing import Any
 
 logger = logging.getLogger(__name__)
+
+# ---------------------------------------------------------------------------
+# LanceDB adapter — Phase 4 persistent vector memory
+# ---------------------------------------------------------------------------
+
+_LANCE_DIM = 128  # Default embedding dimension for LanceDB table
+
+
+class _LanceDBAdapter:
+    """Thin wrapper around LanceDB for persistent vector memory.
+
+    Provides a simple upsert/search interface that complements the existing
+    VectorStore (sqlite-vec).  LanceDB is used as the *persistent* cross-session
+    memory backend; VectorStore remains the intra-session hybrid retrieval engine.
+
+    Graceful degradation: if lancedb is not installed or connection fails,
+    all methods silently return empty results / no-ops.
+    """
+
+    def __init__(self, db_path: Path, dim: int = _LANCE_DIM) -> None:
+        self._db_path = db_path
+        self._dim = dim
+        self._db: Any = None
+        self._table: Any = None
+        self._connect()
+
+    # ---- lifecycle --------------------------------------------------------
+
+    def _connect(self) -> None:
+        try:
+            import lancedb as _lancedb
+            self._db_path.mkdir(parents=True, exist_ok=True)
+            self._db = _lancedb.connect(str(self._db_path))
+            # Open existing table or defer creation until first upsert
+            try:
+                _resp = self._db.list_tables() if hasattr(self._db, 'list_tables') else self._db.table_names()
+                # list_tables() returns ListTablesResponse with .tables attr;
+                # table_names() returns a plain list. Normalize to list[str].
+                tables = getattr(_resp, 'tables', _resp) or []
+                if "palace_docs" in tables:
+                    self._table = self._db.open_table("palace_docs")
+            except Exception:
+                pass
+            logger.info("LanceDB connected at %s", self._db_path)
+        except ImportError:
+            logger.warning("lancedb not installed — run: pip install lancedb")
+            self._db = None
+        except Exception as exc:
+            logger.warning("LanceDB connection failed, falling back to memory: %s", exc)
+            self._db = None
+
+    @property
+    def connected(self) -> bool:
+        return self._db is not None
+
+    # ---- write ------------------------------------------------------------
+
+    def upsert(self, content: str, source: str, vector: list[float] | None = None,
+               metadata: dict[str, Any] | None = None) -> bool:
+        """Insert a document into LanceDB.  Returns True on success."""
+        if self._db is None or not content or not content.strip():
+            return False
+        try:
+            vec = vector or self._default_vector(content)
+            row = {
+                "text": content[:8000],
+                "source": source or "",
+                "vector": vec,
+                "content_hash": hashlib.md5(content.encode("utf-8", errors="replace")).hexdigest(),
+                "ingested_at": datetime.now(timezone.utc).isoformat(),
+                "metadata_str": str(metadata or {}),
+            }
+            if self._table is None:
+                self._table = self._db.create_table("palace_docs", [row])
+            else:
+                self._table.add([row])
+            return True
+        except Exception as exc:
+            logger.debug("LanceDB upsert failed (non-fatal): %s", exc)
+            return False
+
+    # ---- read -------------------------------------------------------------
+
+    def search(self, query: str, top_k: int = 10,
+               query_vector: list[float] | None = None) -> list[dict[str, Any]]:
+        """Search LanceDB by vector similarity.  Returns list of result dicts."""
+        if self._db is None or self._table is None:
+            return []
+        try:
+            vec = query_vector or self._default_vector(query)
+            rows = self._table.search(vec).limit(top_k).to_list()
+            results: list[dict[str, Any]] = []
+            for r in rows:
+                results.append({
+                    "content": r.get("text", ""),
+                    "source": r.get("source", ""),
+                    "score": max(0.0, 1.0 - r.get("_distance", 1.0)),
+                    "metadata_str": r.get("metadata_str", ""),
+                    "ingested_at": r.get("ingested_at", ""),
+                })
+            return results
+        except Exception as exc:
+            logger.debug("LanceDB search failed (non-fatal): %s", exc)
+            return []
+
+    def count(self) -> int:
+        """Return the number of documents in LanceDB."""
+        if self._table is None:
+            return 0
+        try:
+            return self._table.count_rows()
+        except Exception:
+            return 0
+
+    # ---- helpers ----------------------------------------------------------
+
+    def _default_vector(self, text: str) -> list[float]:
+        """Deterministic hash-based vector for when no embedder is available.
+
+        This is NOT semantic — it's a fallback so LanceDB always has a vector
+        column.  For real semantic search, callers should provide embeddings.
+        """
+        h = hashlib.sha256(text.encode("utf-8", errors="replace")).digest()
+        vec: list[float] = []
+        for i in range(self._dim):
+            byte_val = h[i % len(h)]
+            vec.append((byte_val / 255.0) * 2.0 - 1.0)  # [-1, 1]
+        # L2-normalize
+        norm = (sum(v * v for v in vec) ** 0.5) or 1.0
+        return [v / norm for v in vec]
 
 
 @dataclass
@@ -107,6 +238,7 @@ class MemoryPalace:
         # and short-lived instances). When state_dir is provided (production use),
         # data persists across restarts.
         self._vector_store: Any = None  # VectorStore | None
+        self._lance: _LanceDBAdapter | None = None  # Phase 4: persistent LanceDB
         if state_dir is not None:
             self._state_dir = state_dir
             try:
@@ -114,6 +246,15 @@ class MemoryPalace:
                 self._vector_store = VectorStore(state_dir=self._state_dir)
             except Exception as exc:
                 logger.debug("VectorStore init failed (non-fatal): %s", exc)
+            # Phase 4: LanceDB persistent memory
+            try:
+                lance_path = self._state_dir / "lancedb"
+                self._lance = _LanceDBAdapter(db_path=lance_path)
+                if not self._lance.connected:
+                    self._lance = None
+            except Exception as exc:
+                logger.debug("LanceDB init failed (non-fatal): %s", exc)
+                self._lance = None
         else:
             # No state_dir provided — use a temp dir that is unique per instance.
             # This preserves the pre-Phase-6 behavior for callers that didn't
@@ -126,6 +267,15 @@ class MemoryPalace:
                 self._vector_store = VectorStore(state_dir=self._state_dir)
             except Exception as exc:
                 logger.debug("VectorStore (ephemeral) init failed (non-fatal): %s", exc)
+            # Phase 4: ephemeral LanceDB for testing
+            try:
+                lance_path = self._state_dir / "lancedb"
+                self._lance = _LanceDBAdapter(db_path=lance_path)
+                if not self._lance.connected:
+                    self._lance = None
+            except Exception as exc:
+                logger.debug("LanceDB ephemeral init failed (non-fatal): %s", exc)
+                self._lance = None
 
     async def recall(self, query: PalaceQuery) -> PalaceResponse:
         """Query the Memory Palace using hybrid fusion scoring.
@@ -250,6 +400,24 @@ class MemoryPalace:
                 results.append(gr)
                 existing_contents.add(gr.content[:200])
 
+        # Phase 4: LanceDB cross-session results
+        if self._lance is not None:
+            try:
+                lance_hits = self._lance.search(query.text, top_k=query.max_results)
+                for lh in lance_hits:
+                    content = lh.get("content", "")[:2000]
+                    if content[:200] not in existing_contents:
+                        results.append(PalaceResult(
+                            content=content,
+                            source=lh.get("source", "lancedb"),
+                            score=lh.get("score", 0.3),
+                            layer="lancedb",
+                            metadata={"origin": "lancedb"},
+                        ))
+                        existing_contents.add(content[:200])
+            except Exception as exc:
+                logger.debug("LanceDB recall failed (non-fatal): %s", exc)
+
         # Phase 3: Re-rank using fusion scoring with real vector scores
         results = self._fusion_rerank(results, query, vector_score_map)
 
@@ -347,6 +515,17 @@ class MemoryPalace:
                     doc_id = f"vec:{vec_id}"
             except Exception as exc:
                 logger.debug("VectorStore upsert failed (non-fatal): %s", exc)
+
+        # Phase 4: Also upsert into LanceDB for persistent cross-session memory.
+        if self._lance is not None and content and content.strip():
+            try:
+                meta = dict(metadata or {})
+                if tags:
+                    meta["tags"] = tags
+                meta["layer"] = layer
+                self._lance.upsert(content=content, source=source, metadata=meta)
+            except Exception as exc:
+                logger.debug("LanceDB upsert failed (non-fatal): %s", exc)
 
         return doc_id
 
@@ -579,6 +758,16 @@ class MemoryPalace:
                 base["vector_store"] = self._vector_store.stats()
             except Exception:
                 base["vector_store"] = {}
+        # Phase 4: add LanceDB stats
+        if self._lance is not None:
+            try:
+                base["lancedb"] = {
+                    "connected": self._lance.connected,
+                    "document_count": self._lance.count(),
+                    "db_path": str(self._lance._db_path),
+                }
+            except Exception:
+                base["lancedb"] = {"connected": False}
         return base
 
 

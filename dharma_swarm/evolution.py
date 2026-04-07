@@ -2681,6 +2681,121 @@ class DarwinEngine:
         fields["diff"] = diff_match.group(1).strip() if diff_match else ""
         return fields
 
+    async def _generate_real_diff(
+        self,
+        provider: Any,
+        component: str,
+        description: str,
+        improvement_direction: str = "",
+        model: str = "",
+    ) -> str:
+        """Generate an actual code diff via LLM.
+
+        Returns unified diff format string, or "" if no safe change possible.
+        This is the second LLM call in the proposal pipeline — the first call
+        generates the proposal description; this one produces the code change.
+
+        Args:
+            provider: An LLM provider with async ``complete(LLMRequest)`` method.
+            component: The module or file path being changed.
+            description: Human-readable description of the proposed change.
+            improvement_direction: Optional hint about what direction to improve.
+            model: Model identifier for the provider.
+
+        Returns:
+            A unified diff string, or ``""`` if generation fails or is skipped.
+        """
+        if not component or not description:
+            return ""
+
+        from dharma_swarm.models import LLMRequest
+
+        if not model:
+            from dharma_swarm.model_hierarchy import default_model as _dm
+            from dharma_swarm.models import ProviderType as _PT
+            model = _dm(_PT.OPENROUTER)
+
+        # Read the target file to give the LLM context
+        src_root = Path(__file__).parent
+        target_path = (
+            src_root / component
+            if not component.startswith("/")
+            else Path(component)
+        )
+        context_lines = ""
+        if target_path.exists() and target_path.suffix == ".py":
+            content = target_path.read_text(encoding="utf-8")
+            # Give first 200 lines as context (enough for diff targeting)
+            context_lines = "\n".join(content.split("\n")[:200])
+
+        prompt = (
+            "You are a Python expert generating a minimal, safe code improvement.\n\n"
+            f"File: {component}\n"
+            f"Issue: {description}\n"
+            f"Direction: {improvement_direction or 'Improve quality, readability, or performance'}\n\n"
+            f"Current code (first 200 lines):\n```python\n{context_lines[:3000]}\n```\n\n"
+            "Generate a minimal unified diff (--- a/ +++ b/ format) for ONE targeted improvement.\n"
+            "Rules:\n"
+            "- Touch the minimum lines necessary (ideally 1-10 lines changed)\n"
+            "- The change must be safe and reversible\n"
+            "- Add a comment explaining the improvement\n"
+            "- If no safe improvement is possible, output exactly: SKIP\n\n"
+            "Output ONLY the diff or SKIP, nothing else:"
+        )
+
+        try:
+            request = LLMRequest(
+                model=model,
+                messages=[{"role": "user", "content": prompt}],
+                system=(
+                    "You are a precise Python code reviewer generating "
+                    "minimal, safe improvements."
+                ),
+                max_tokens=800,
+                temperature=0.2,
+            )
+
+            response = await provider.complete(request)
+            diff_text = (response.content or "").strip()
+
+            # Strip markdown code fences that LLMs wrap diffs in
+            for _fence in ("```diff", "```patch", "```"):
+                if diff_text.startswith(_fence):
+                    diff_text = diff_text[len(_fence):].lstrip()
+                    if diff_text.endswith("```"):
+                        diff_text = diff_text[:-3].rstrip()
+                    break
+
+            if diff_text.startswith("SKIP") or not diff_text.startswith("---"):
+                logger.debug(
+                    "DarwinEngine: diff generation returned SKIP or invalid format"
+                )
+                return ""
+
+            # Track token usage from the diff generation call
+            tokens_used = int(
+                response.usage.get("total_tokens")
+                or (
+                    response.usage.get("prompt_tokens", 0)
+                    + response.usage.get("completion_tokens", 0)
+                    + response.usage.get("input_tokens", 0)
+                    + response.usage.get("output_tokens", 0)
+                )
+                or 0
+            )
+            self._session_tokens_used += tokens_used
+
+            logger.info(
+                "DarwinEngine: generated real diff for %s (%d lines)",
+                component,
+                len(diff_text.splitlines()),
+            )
+            return diff_text
+
+        except Exception as exc:
+            logger.warning("DarwinEngine: diff generation failed: %s", exc)
+            return ""
+
     async def generate_proposal(
         self,
         provider: Any,
@@ -2829,6 +2944,17 @@ class DarwinEngine:
             think_notes=think,
         )
 
+        # Phase 2: if the first LLM call didn't produce a diff, generate one
+        # via a dedicated second LLM call focused on code change generation.
+        if not proposal.diff:
+            proposal.diff = await self._generate_real_diff(
+                provider=provider,
+                component=proposal.component or "",
+                description=proposal.description or "",
+                improvement_direction=think,
+                model=model,
+            )
+
         self._trace_bg(
             TraceEntry(
                 agent="darwin_engine",
@@ -2840,17 +2966,19 @@ class DarwinEngine:
                     "execution_profile": target.profile_name,
                     "model": model,
                     "description": desc[:200],
-                    "diff_lines": len(diff.splitlines()),
+                    "diff_lines": len(proposal.diff.splitlines()) if proposal.diff else 0,
                     "mutation_rate": mutation_rate,
                     "mutation_budget": mutation_budget,
                     "adaptive_strategy": strategy,
+                    "diff_source": "llm_first_pass" if diff else ("llm_second_pass" if proposal.diff else "none"),
                 },
             )
         )
 
         logger.info(
-            "LLM generated proposal %s for %s: %s",
+            "LLM generated proposal %s for %s: %s (diff=%s)",
             proposal.id[:8], source_file.name, desc[:100],
+            f"{len(proposal.diff.splitlines())} lines" if proposal.diff else "none",
         )
         return proposal
 
