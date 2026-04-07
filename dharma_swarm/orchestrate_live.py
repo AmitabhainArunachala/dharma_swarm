@@ -875,6 +875,7 @@ async def _run_recognition_loop(shutdown_event: asyncio.Event) -> None:
     On first run: generates an immediate seed so agents have self-model context
     from the very first task, not after 2 hours of blind operation.
     """
+    import time  # required for _seed_stale calculation below
     from dharma_swarm.meta_daemon import RecognitionEngine
     engine = RecognitionEngine()
 
