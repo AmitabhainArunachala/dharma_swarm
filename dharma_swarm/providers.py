@@ -2032,10 +2032,20 @@ class ModelRouter:
             "rate_limit_exceeded",
             "your api key has been disabled",
         )
+        _ACCESS_DENIED_MARKERS = (
+            "access denied",
+            "please check your network settings",
+            "403",
+            "forbidden",
+            "unauthorized",
+        )
         if len(body) < 300:
             for marker in _BILLING_MARKERS:
                 if marker in body:
                     return "billing_exhausted"
+            for marker in _ACCESS_DENIED_MARKERS:
+                if marker in body:
+                    return "access_denied"
         return None
 
     def _provider_chain(
@@ -2750,7 +2760,22 @@ class ModelRouter:
                 latency_ms = (time.monotonic() - attempt_started) * 1000.0
                 response_error = self._response_indicates_failure(response)
                 if response_error:
-                    breaker.record_failure()
+                    # Fast-trip circuit for billing exhaustion and permanent 403s.
+                    # Don't waste 8 retries on a dead provider — trip immediately
+                    # so the router falls through to the next working provider.
+                    _is_permanent = response_error in (
+                        "billing_exhausted", "access_denied", "quota_exceeded"
+                    )
+                    if _is_permanent:
+                        # Force circuit open by recording enough failures at once
+                        for _ in range(breaker._config.min_samples):
+                            breaker.record_failure()
+                        logger.warning(
+                            "Fast-tripped circuit breaker for %s: %s",
+                            provider_type.value, response_error,
+                        )
+                    else:
+                        breaker.record_failure()
                     self._update_reward(provider_type, reward_model, -0.50)
                     self._record_routing_memory_outcome(
                         provider=provider_type,

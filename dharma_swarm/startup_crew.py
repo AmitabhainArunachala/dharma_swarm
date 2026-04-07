@@ -437,18 +437,38 @@ async def create_seed_tasks(swarm) -> list:
     from dharma_swarm.models import TaskStatus
 
     existing = await swarm.list_tasks(status=TaskStatus.PENDING)
-    if existing:
-        logger.info("Board has %d pending tasks, skipping seed", len(existing))
+    # Only skip seeding if there are real operator tasks pending.
+    # Do NOT skip if only busywork (coordination/eval) tasks are pending —
+    # those should be displaced by real work, not block it.
+    real_pending = [
+        t for t in existing
+        if isinstance(getattr(t, 'created_by', None), str)
+        and t.created_by == "operator"
+        or (
+            isinstance(getattr(t, 'metadata', None), dict)
+            and t.metadata.get("created_via") == "operator"
+        )
+    ]
+    if real_pending:
+        logger.info("Board has %d real operator tasks pending, skipping seed", len(real_pending))
         return []
 
     date_str = datetime.now(timezone.utc).strftime("%Y%m%d")
 
     # Prepare task specs for batch creation
+    # created_by="operator" prevents busywork (coordination/eval tasks) from
+    # filling the queue while these real external-intelligence tasks are present.
     task_specs = [
         {
             "title": spec["title"],
             "description": spec["description"].replace("{date}", date_str),
             "priority": spec["priority"],
+            "created_by": "operator",
+            "metadata": {
+                **spec.get("metadata", {}),
+                "created_via": "operator",
+                "seed_type": "real_external_work",
+            },
         }
         for spec in SEED_TASKS
     ]
