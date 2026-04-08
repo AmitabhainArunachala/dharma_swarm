@@ -246,6 +246,137 @@ TOOL_DEFINITIONS: list[dict[str, Any]] = [
             },
         },
     },
+    # ── World action tools (external manifestation layer) ─────────────────────
+    {
+        "name": "github_clone_repo",
+        "description": (
+            "Clone a GitHub repository into the local workspace. "
+            "Use to pull in open-source projects, competitor code, or external libraries. "
+            "Example: clone chauncygu/collection-claude-code-source-code to analyze its architecture."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "repo_url": {"type": "string", "description": "Full git/https URL of repo to clone"},
+                "dest_dir": {"type": "string", "description": "Absolute destination path"},
+            },
+            "required": ["repo_url", "dest_dir"],
+        },
+    },
+    {
+        "name": "github_commit_push",
+        "description": (
+            "Stage all changes, commit with a message, and push to origin. "
+            "Use to publish evolved code, research outputs, or world-artifact changes "
+            "from any local git repo (not just dharma_swarm itself)."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "repo_dir": {"type": "string", "description": "Absolute path of git repo directory"},
+                "commit_message": {"type": "string", "description": "Git commit message"},
+                "branch": {"type": "string", "description": "Branch name (creates if needed)"},
+            },
+            "required": ["repo_dir", "commit_message"],
+        },
+    },
+    {
+        "name": "github_create_issue",
+        "description": (
+            "Open a GitHub issue in any repo (requires gh CLI auth). "
+            "Use to contribute findings back to upstream projects, "
+            "report discovered bugs, or create tracked work items externally."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "repo": {"type": "string", "description": "OWNER/REPO format e.g. 'chauncygu/collection-claude-code-source-code'"},
+                "title": {"type": "string", "description": "Issue title"},
+                "body": {"type": "string", "description": "Issue body in markdown"},
+            },
+            "required": ["repo", "title", "body"],
+        },
+    },
+    {
+        "name": "github_create_pr",
+        "description": (
+            "Create a pull request from a branch in a local git repo. "
+            "Use after committing evolved changes to propose them upstream "
+            "or formalize a world-artifact for review."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "repo_dir": {"type": "string", "description": "Absolute path of git repo"},
+                "title": {"type": "string", "description": "PR title"},
+                "body": {"type": "string", "description": "PR description in markdown"},
+                "base": {"type": "string", "description": "Target branch (default: main)", "default": "main"},
+                "head": {"type": "string", "description": "Source branch (default: current)"},
+            },
+            "required": ["repo_dir", "title", "body"],
+        },
+    },
+    {
+        "name": "create_website_scaffold",
+        "description": (
+            "Generate a minimal public-facing website skeleton from swarm cognition. "
+            "Creates index.html + styles.css in the given directory. "
+            "Use to externalize research reports, mission outputs, or system capabilities "
+            "into a form that can be deployed or shared outside the swarm."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "output_dir": {"type": "string", "description": "Directory to write site files"},
+                "site_name": {"type": "string", "description": "Site title"},
+                "purpose": {"type": "string", "description": "One-paragraph description of what this site is for"},
+                "theme": {"type": "string", "description": "Visual theme hint: minimal, dark, research", "default": "minimal"},
+            },
+            "required": ["output_dir", "site_name", "purpose"],
+        },
+    },
+    {
+        "name": "publish_markdown_artifact",
+        "description": (
+            "Promote an internal markdown file to a public-artifact directory "
+            "with a manifest record. Use to formalize completed research, evolved specs, "
+            "or strategic documents into externalized artifacts that other systems can discover."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "source_path": {"type": "string", "description": "Absolute path of source .md file"},
+                "output_dir": {"type": "string", "description": "Artifact output directory"},
+                "artifact_name": {"type": "string", "description": "Output filename (optional, defaults to source name)"},
+            },
+            "required": ["source_path", "output_dir"],
+        },
+    },
+    {
+        "name": "spawn_sub_swarm_spec",
+        "description": (
+            "Materialize a new sub-swarm mission spec file on disk. "
+            "The spec is a machine-readable JSON that the swarm can ingest to "
+            "boot a focused sub-swarm on a new mission. "
+            "Use when research reveals a domain large enough to warrant its own swarm "
+            "(e.g. 'Spin up a welfare-ton MRV sub-swarm', "
+            "'Spawn a Sakana-style evolutionary architecture sub-swarm')."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "output_dir": {"type": "string", "description": "Directory to write spec (e.g. ~/.dharma/sub_swarms/)"},
+                "mission_name": {"type": "string", "description": "Name of the sub-swarm mission"},
+                "mission_thesis": {"type": "string", "description": "One-paragraph thesis for the sub-swarm"},
+                "roles": {
+                    "type": "array",
+                    "items": {"type": "string"},
+                    "description": "Agent roles to instantiate (cartographer, architect, surgeon, validator)",
+                },
+            },
+            "required": ["output_dir", "mission_name", "mission_thesis"],
+        },
+    },
 ]
 
 
@@ -290,6 +421,10 @@ class AgentIdentity:
         "read_file", "write_file", "bash", "search_files", "search_content",
         "remember", "recall", "stigmergy_mark", "stigmergy_read", "web_search", "fetch_url",
         "ginko_signals", "ginko_regime",
+        # world action tools — external manifestation layer
+        "github_clone_repo", "github_commit_push", "github_create_issue",
+        "github_create_pr", "create_website_scaffold",
+        "publish_markdown_artifact", "spawn_sub_swarm_spec",
     ])
     working_directory: str = field(default_factory=lambda: str(Path.home()))
 
@@ -747,6 +882,14 @@ class AutonomousAgent:
             "fetch_url": self._tool_fetch_url,
             "ginko_signals": self._tool_ginko_signals,
             "ginko_regime": self._tool_ginko_regime,
+            # world action tools
+            "github_clone_repo": self._tool_github_clone_repo,
+            "github_commit_push": self._tool_github_commit_push,
+            "github_create_issue": self._tool_github_create_issue,
+            "github_create_pr": self._tool_github_create_pr,
+            "create_website_scaffold": self._tool_create_website_scaffold,
+            "publish_markdown_artifact": self._tool_publish_markdown_artifact,
+            "spawn_sub_swarm_spec": self._tool_spawn_sub_swarm_spec,
         }.get(name)
 
         if handler is None:
@@ -979,6 +1122,111 @@ class AutonomousAgent:
         except Exception as e:
             return f"Ginko regime error: {e}"
 
+    # -- World action tool handlers ------------------------------------------
+    # These give agents the ability to manifest world artifacts:
+    # repos, websites, PRs, sub-swarm specs.
+
+    async def _tool_github_clone_repo(self, inputs: dict) -> str:
+        import asyncio
+        from dharma_swarm.world_actions import github_clone_repo
+        loop = asyncio.get_event_loop()
+        result = await loop.run_in_executor(
+            None,
+            lambda: github_clone_repo(
+                inputs.get("repo_url", ""),
+                inputs.get("dest_dir", ""),
+            )
+        )
+        return result.to_json()
+
+    async def _tool_github_commit_push(self, inputs: dict) -> str:
+        import asyncio
+        from dharma_swarm.world_actions import github_commit_push
+        loop = asyncio.get_event_loop()
+        result = await loop.run_in_executor(
+            None,
+            lambda: github_commit_push(
+                inputs.get("repo_dir", ""),
+                inputs.get("commit_message", "swarm: world action commit"),
+                inputs.get("branch"),
+            )
+        )
+        return result.to_json()
+
+    async def _tool_github_create_issue(self, inputs: dict) -> str:
+        import asyncio
+        from dharma_swarm.world_actions import github_create_issue
+        loop = asyncio.get_event_loop()
+        result = await loop.run_in_executor(
+            None,
+            lambda: github_create_issue(
+                inputs.get("repo", ""),
+                inputs.get("title", ""),
+                inputs.get("body", ""),
+            )
+        )
+        return result.to_json()
+
+    async def _tool_github_create_pr(self, inputs: dict) -> str:
+        import asyncio
+        from dharma_swarm.world_actions import github_create_pr
+        loop = asyncio.get_event_loop()
+        result = await loop.run_in_executor(
+            None,
+            lambda: github_create_pr(
+                inputs.get("repo_dir", ""),
+                inputs.get("title", ""),
+                inputs.get("body", ""),
+                inputs.get("base", "main"),
+                inputs.get("head"),
+            )
+        )
+        return result.to_json()
+
+    async def _tool_create_website_scaffold(self, inputs: dict) -> str:
+        import asyncio
+        from dharma_swarm.world_actions import create_website_scaffold
+        loop = asyncio.get_event_loop()
+        result = await loop.run_in_executor(
+            None,
+            lambda: create_website_scaffold(
+                inputs.get("output_dir", ""),
+                inputs.get("site_name", "DHARMA SWARM"),
+                inputs.get("purpose", ""),
+                inputs.get("theme", "minimal"),
+            )
+        )
+        return result.to_json()
+
+    async def _tool_publish_markdown_artifact(self, inputs: dict) -> str:
+        import asyncio
+        from dharma_swarm.world_actions import publish_markdown_artifact
+        loop = asyncio.get_event_loop()
+        result = await loop.run_in_executor(
+            None,
+            lambda: publish_markdown_artifact(
+                inputs.get("source_path", ""),
+                inputs.get("output_dir", ""),
+                inputs.get("artifact_name"),
+            )
+        )
+        return result.to_json()
+
+    async def _tool_spawn_sub_swarm_spec(self, inputs: dict) -> str:
+        import asyncio
+        from dharma_swarm.world_actions import spawn_sub_swarm_spec
+        loop = asyncio.get_event_loop()
+        result = await loop.run_in_executor(
+            None,
+            lambda: spawn_sub_swarm_spec(
+                inputs.get("output_dir", str(Path.home() / ".dharma" / "sub_swarms")),
+                inputs.get("mission_name", ""),
+                inputs.get("mission_thesis", ""),
+                inputs.get("roles"),
+            )
+        )
+        return result.to_json()
+
     # -- System prompt -------------------------------------------------------
 
     def _build_system_prompt(self, memory_context: str, inbox: list[str]) -> str:
@@ -1148,6 +1396,9 @@ PRESET_AGENTS: dict[str, AgentIdentity] = {
             "read_file", "write_file", "bash", "search_files", "search_content",
             "remember", "recall", "stigmergy_mark", "stigmergy_read", "web_search", "fetch_url",
             "ginko_signals", "ginko_regime",
+            "github_clone_repo", "github_commit_push", "github_create_issue",
+            "github_create_pr", "create_website_scaffold",
+            "publish_markdown_artifact", "spawn_sub_swarm_spec",
         ],
         working_directory=str(Path.home() / "dharma_swarm"),
     ),
@@ -1164,6 +1415,9 @@ PRESET_AGENTS: dict[str, AgentIdentity] = {
             "read_file", "write_file", "bash", "search_files", "search_content",
             "remember", "recall", "stigmergy_mark", "stigmergy_read", "web_search", "fetch_url",
             "ginko_signals", "ginko_regime",
+            "github_clone_repo", "github_commit_push", "github_create_issue",
+            "github_create_pr", "create_website_scaffold",
+            "publish_markdown_artifact", "spawn_sub_swarm_spec",
         ],
         working_directory=str(Path.home() / "jagat_kalyan"),
     ),

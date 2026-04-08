@@ -179,79 +179,95 @@ CYBERNETICS_CREW = [
 ]
 
 
-# Seed tasks for the first cycle — State of Self-Evolving AI mission
+# Seed tasks — world-creating missions that produce external artifacts,
+# not just internal files. Each task ends with a world-facing output:
+# a published artifact, a website scaffold, a sub-swarm spec, a GitHub commit.
 SEED_TASKS = [
     {
-        "title": "Map the self-evolving AI landscape — funded companies",
+        "title": "Clone + analyze: chauncygu claude-code source — extract architecture insights",
         "description": (
-            "Use web_search to research every funded company building self-evolving, "
-            "self-modifying, or autonomous multi-agent AI systems. Search for: "
-            "'self-evolving AI company funding 2026', 'autonomous agent startup 2026', "
-            "'Isara AI funding', 'Cognition AI Devin architecture', 'Sakana AI self-evolving', "
-            "'Merly AI architecture', 'Cosine AI Genie', 'SWE-agent company'. "
-            "For each company found: name, funding amount, founding team, core architecture, "
-            "key capability, what they cannot do. "
-            "Write a structured markdown report to ~/.dharma/shared/landscape_companies.md"
+            "The Claude Code source code is public at:"
+            " https://github.com/chauncygu/collection-claude-code-source-code "
+            "It has already been cloned to ~/workspace/collection-claude-code-source-code. "
+            "Read the key files: look for the tool execution loop, subagent spawning pattern, "
+            "the bash/computer use tools, the way tasks are decomposed into subtasks. "
+            "Your mission: extract 5 architectural patterns that DHARMA SWARM is missing. "
+            "Produce a structured analysis: for each pattern, show the Claude Code implementation "
+            "(with file + line reference), explain why DHARMA SWARM needs it, "
+            "and write a concrete implementation spec. "
+            "Write to ~/.dharma/shared/claude_code_architecture_gaps.md. "
+            "Then use publish_markdown_artifact to promote it to "
+            "~/.dharma/artifacts/ — making it a world-facing artifact, not just a note."
         ),
         "priority": TaskPriority.HIGH,
     },
     {
-        "title": "Map the self-evolving AI landscape — research systems",
+        "title": "Research + spawn sub-swarm spec: Sakana AI evolutionary architecture",
         "description": (
-            "Use web_search with domain='research' to find every major academic/lab project "
-            "on self-improving, self-modifying, or recursive AI systems. Search arXiv for: "
-            "'self-evolving AI 2025 2026', 'recursive self-improvement neural network', "
-            "'Darwin Gödel machine implementation', 'AlphaEvolve architecture', "
-            "'Meta REA agent system', 'self-modifying transformer 2026'. "
-            "For each system: institution, architecture, key results, limitations. "
-            "Write to ~/.dharma/shared/landscape_research.md"
+            "Use web_search + fetch_url to deeply research Sakana AI's architecture: "
+            "fetch https://sakana.ai, search arXiv for 'Sakana AI evolutionary model merging', "
+            "search for 'Darwin Gödel machine Sakana 2026', 'SWE-bench Sakana DGM 2026'. "
+            "Extract: how their evolutionary loop works, fitness evaluation, how they improved "
+            "SWE-bench from 20% to 50% in 80 iterations. "
+            "Write a 1500-word technical report to ~/.dharma/shared/sakana_architecture.md. "
+            "THEN: assess whether DHARMA SWARM should implement the same evolutionary loop. "
+            "If yes, use spawn_sub_swarm_spec to materialize a sub-swarm mission spec at "
+            "~/.dharma/sub_swarms/ named 'Sakana-DGM-Evolutionary-Loop' with a concrete thesis "
+            "and roles: cartographer, architect, surgeon, validator. "
+            "The spec is the real deliverable — it makes the next mission actionable."
         ),
         "priority": TaskPriority.HIGH,
     },
     {
-        "title": "Deep dive: Isara, Cognition, Sakana AI architectures",
+        "title": "Build + commit: DHARMA SWARM public-facing research site scaffold",
         "description": (
-            "Use web_search + fetch_url to do deep technical research on the three most "
-            "relevant competitors to DHARMA SWARM: "
-            "1) Isara AI (isara.ai) — what is their multi-agent coordination architecture? "
-            "How do agents communicate? What's their safety approach? "
-            "2) Cognition AI (Devin) — how does Devin's long-horizon planning work? "
-            "What's their memory system? Tool use architecture? "
-            "3) Sakana AI — what is their evolutionary model merging approach? "
-            "Fetch their papers/blogs directly if available. "
-            "Write to ~/.dharma/shared/competitor_deep_dives.md"
+            "DHARMA SWARM has produced research (STATE_OF_AI, competitive analysis, "
+            "GNANI_LODESTONE) that nobody outside the machine can see. "
+            "Your mission: create a minimal public-facing website scaffold. "
+            "Step 1: Use create_website_scaffold with output_dir=~/dharma_swarm/docs/site, "
+            "site_name='DHARMA SWARM Research', purpose='Autonomous research and competitive "
+            "intelligence from a self-evolving AI swarm. Updated continuously.'. "
+            "Step 2: Write a real index page summarizing DHARMA SWARM's mission, "
+            "the telos (Jagat Kalyan + Moksha), and the three key research outputs so far. "
+            "Use read_file on ~/.dharma/shared/ to get actual research content. "
+            "Step 3: Use github_commit_push to commit and push the site to origin. "
+            "This is not a prototype. It is the first world-facing surface of the swarm."
         ),
         "priority": TaskPriority.HIGH,
     },
     {
-        "title": "DHARMA SWARM differentiation analysis",
+        "title": "Anthropic Economic Futures: research + draft grant application",
         "description": (
-            "Read these files that contain DHARMA SWARM's architecture and vision: "
-            "CLAUDE.md, FOUNDATIONS_TO_CODE_MAP.md, CYBERNETIC_LOOP_MAP.md, MODEL_ROUTING_MAP.md. "
-            "Then read ~/.dharma/shared/landscape_companies.md and "
-            "~/.dharma/shared/landscape_research.md (written by sibling tasks — "
-            "wait if not yet available, retry in 2 minutes). "
-            "Produce a differentiation analysis: "
-            "What does DHARMA SWARM do that NONE of the competitors do? "
-            "What does it do better? What does it do worse? "
-            "What is the 3-sentence positioning statement? "
-            "Write to ~/.dharma/shared/differentiation.md"
+            "Use web_search to find: 'Anthropic Economic Futures grant 2026 application', "
+            "'Anthropic economic impact fund requirements', fetch https://anthropic.com if needed. "
+            "DHARMA SWARM's telos includes Jagat Kalyan: AI-coordinated ecological restoration "
+            "for displaced workers using carbon markets. This is directly aligned with the "
+            "Anthropic Economic Futures mandate. "
+            "Draft a 600-word grant application framing: "
+            "Problem (AI displacement + ecological crisis), Approach (welfare-ton metric, "
+            "agent-coordinated MRV, carbon market loop), Why DHARMA SWARM is uniquely positioned "
+            "(telos-gated agents, Jagat Kalyan mission, existing welfare-ton calculator). "
+            "Write to ~/.dharma/shared/anthropic_grant_draft.md. "
+            "Then use publish_markdown_artifact to move it to ~/.dharma/artifacts/. "
+            "Quality of argument matters — this is a real application, not a placeholder."
         ),
         "priority": TaskPriority.NORMAL,
     },
     {
-        "title": "Synthesize: State of Self-Evolving AI — April 2026",
+        "title": "Open-source probe: find + analyze top 3 swarm repos to fork-and-evolve",
         "description": (
-            "Read ALL output from sibling tasks in ~/.dharma/shared/: "
-            "landscape_companies.md, landscape_research.md, competitor_deep_dives.md, "
-            "differentiation.md (wait up to 5 minutes for each, retry). "
-            "Synthesize into a single 15-20 page report titled "
-            "'State of Self-Evolving AI Systems: April 2026'. "
-            "Structure: Executive Summary (1 page), Funded Companies (5 pages), "
-            "Research Systems (4 pages), Architecture Comparison Table, "
-            "DHARMA SWARM Positioning (2 pages), Strategic Recommendations (1 page). "
-            "Write the final report to ~/.dharma/shared/STATE_OF_AI_APRIL_2026.md. "
-            "This is the capstone deliverable. Quality matters."
+            "Use web_search to find the top open-source multi-agent / swarm repos on GitHub: "
+            "search 'github multi agent swarm open source 2026 stars', "
+            "'github autonomous agent orchestration 2026', 'github self-improving agent'. "
+            "For each candidate: use fetch_url to read their README and architecture. "
+            "Pick the 3 most architecturally complementary to DHARMA SWARM. "
+            "For each of the top 3: write a 300-word technical comparison showing what they do "
+            "that DHARMA SWARM does not, and vice versa. "
+            "Produce the analysis at ~/.dharma/shared/fork_candidates.md. "
+            "THEN for the single highest-value candidate: use github_clone_repo to clone it "
+            "into ~/workspace/<repo_name>. Read its core loop. "
+            "Use spawn_sub_swarm_spec to create a 'Fork-and-Evolve: <repo_name>' mission spec "
+            "in ~/.dharma/sub_swarms/ so a future swarm can integrate the best patterns."
         ),
         "priority": TaskPriority.NORMAL,
     },
