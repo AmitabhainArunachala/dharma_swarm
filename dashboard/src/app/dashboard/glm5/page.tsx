@@ -1606,7 +1606,7 @@ function GLM5TasksTab() {
     setIsDispatching(true);
 
     try {
-      const res = await fetch(apiPath(`/api/agents/${AGENT_ID}/dispatch`), {
+      const res = await fetch(apiPath("/api/commands/task"), {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ title, description: taskDesc.trim() }),
