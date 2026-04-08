@@ -353,6 +353,52 @@ TOOL_DEFINITIONS: list[dict[str, Any]] = [
         },
     },
     {
+        "name": "query_archaeology",
+        "description": (
+            "Query the swarm's institutional archaeology memory. "
+            "Ask what the system has tried before, what worked, what failed, "
+            "what research has already been completed, or what the current "
+            "strategic constraints are. This prevents duplicating work and "
+            "allows agents to build on prior accomplishments. "
+            "Examples: 'What fixes have been tried for provider timeouts?', "
+            "'What research on Sakana AI has already been done?', "
+            "'What are the highest-fitness evolution entries for agent_runner.py?'"
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "question": {"type": "string", "description": "Natural language question about the swarm's history"},
+                "top_k": {"type": "integer", "description": "Max results to return (default: 5)", "default": 5},
+            },
+            "required": ["question"],
+        },
+    },
+    {
+        "name": "run_dgm_evolution",
+        "description": (
+            "Trigger a real Darwin Gödel Machine evolution cycle. "
+            "Samples a parent from the archive using quality-diversity selection "
+            "(open-ended, not hill-climbing — mirrors Sakana AI DGM architecture), "
+            "proposes a modification to the specified source file, applies it in a "
+            "sandbox, benchmarks against the swarm's fitness function, and archives "
+            "the result with full lineage. "
+            "Every proposed diff passes through the 11 Telos Gates before application. "
+            "Use when: you have identified a specific performance problem in a module "
+            "and want to evolve a fix autonomously. "
+            "Example: run_dgm_evolution with source_file='agent_runner.py', "
+            "fitness_context='provider timeouts causing 30% task failure rate'."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "source_file": {"type": "string", "description": "Python file to evolve (e.g. 'agent_runner.py'). None = auto-select from archive."},
+                "fitness_context": {"type": "string", "description": "What operational problem to solve (e.g. 'provider timeouts cause 30% failure rate')"},
+                "n_generations": {"type": "integer", "description": "How many generations to run (1=quick, 80=full DGM). Default: 1.", "default": 1},
+            },
+            "required": [],
+        },
+    },
+    {
         "name": "spawn_sub_swarm_spec",
         "description": (
             "Materialize a new sub-swarm mission spec file on disk. "
@@ -425,6 +471,7 @@ class AgentIdentity:
         "github_clone_repo", "github_commit_push", "github_create_issue",
         "github_create_pr", "create_website_scaffold",
         "publish_markdown_artifact", "spawn_sub_swarm_spec",
+            "query_archaeology", "run_dgm_evolution",
     ])
     working_directory: str = field(default_factory=lambda: str(Path.home()))
 
@@ -882,6 +929,9 @@ class AutonomousAgent:
             "fetch_url": self._tool_fetch_url,
             "ginko_signals": self._tool_ginko_signals,
             "ginko_regime": self._tool_ginko_regime,
+            # archaeology + DGM tools
+            "query_archaeology": self._tool_query_archaeology,
+            "run_dgm_evolution": self._tool_run_dgm_evolution,
             # world action tools
             "github_clone_repo": self._tool_github_clone_repo,
             "github_commit_push": self._tool_github_commit_push,
@@ -1121,6 +1171,39 @@ class AutonomousAgent:
             return f"Current Ginko regime for {symbol}: {regime}"
         except Exception as e:
             return f"Ginko regime error: {e}"
+
+    # -- Archaeology + DGM tool handlers -------------------------------------
+
+    async def _tool_query_archaeology(self, inputs: dict) -> str:
+        from dharma_swarm.archaeology_ingestion import query_archaeology
+        question = inputs.get("question", "")
+        top_k = int(inputs.get("top_k", 5))
+        if not question:
+            return "No question provided to query_archaeology"
+        try:
+            hits = await query_archaeology(question=question, top_k=top_k)
+            if not hits:
+                return "No archaeology results found for that question."
+            lines = [f"[{i+1}] ({h.source}) {h.content[:300]}" for i, h in enumerate(hits)]
+            return "\n\n".join(lines)
+        except Exception as exc:
+            return f"query_archaeology error: {exc}"
+
+    async def _tool_run_dgm_evolution(self, inputs: dict) -> str:
+        import json as _json
+        from dharma_swarm.dgm_loop import run_dgm_evolution_task
+        source_file = inputs.get("source_file") or None
+        fitness_context = inputs.get("fitness_context", "")
+        n_generations = int(inputs.get("n_generations", 1))
+        try:
+            result = await run_dgm_evolution_task(
+                source_file=source_file,
+                fitness_context=fitness_context,
+                n_generations=n_generations,
+            )
+            return _json.dumps(result, indent=2, default=str)
+        except Exception as exc:
+            return f"run_dgm_evolution error: {exc}"
 
     # -- World action tool handlers ------------------------------------------
     # These give agents the ability to manifest world artifacts:
@@ -1399,6 +1482,7 @@ PRESET_AGENTS: dict[str, AgentIdentity] = {
             "github_clone_repo", "github_commit_push", "github_create_issue",
             "github_create_pr", "create_website_scaffold",
             "publish_markdown_artifact", "spawn_sub_swarm_spec",
+            "query_archaeology", "run_dgm_evolution",
         ],
         working_directory=str(Path.home() / "dharma_swarm"),
     ),
@@ -1418,6 +1502,7 @@ PRESET_AGENTS: dict[str, AgentIdentity] = {
             "github_clone_repo", "github_commit_push", "github_create_issue",
             "github_create_pr", "create_website_scaffold",
             "publish_markdown_artifact", "spawn_sub_swarm_spec",
+            "query_archaeology", "run_dgm_evolution",
         ],
         working_directory=str(Path.home() / "jagat_kalyan"),
     ),

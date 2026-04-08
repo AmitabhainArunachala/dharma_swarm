@@ -1500,6 +1500,49 @@ async def run_conductor_loop(shutdown_event: asyncio.Event) -> None:
     )
 
 
+async def _run_archaeology_loop(shutdown_event: asyncio.Event) -> None:
+    """Fang 7: Self-Reading Archaeology loop.
+
+    Runs ArchaeologyIngestionDaemon on a 30-minute cycle.
+    Ingests: evolution archive, shared research, stigmergy marks, task completions.
+    Produces: ~/.dharma/meta/lessons_learned.md (anti-amnesia context prefix).
+    Agents gain query_archaeology tool access to all ingested institutional memory.
+    """
+    _log("archaeology", "Starting archaeology ingestion loop (interval=1800s)")
+    try:
+        from dharma_swarm.archaeology_ingestion import ArchaeologyIngestionDaemon
+        daemon = ArchaeologyIngestionDaemon(state_dir=STATE_DIR, interval_seconds=1800)
+
+        # Run once immediately at boot
+        try:
+            counts = await asyncio.wait_for(daemon.run_once(), timeout=120.0)
+            _log("archaeology", f"Boot ingestion complete: {counts}")
+        except asyncio.TimeoutError:
+            _log("archaeology", "Boot ingestion timed out (120s) — continuing")
+        except Exception as exc:
+            _log("archaeology", f"Boot ingestion failed (non-fatal): {exc}")
+
+        # Then loop every 30 minutes
+        while not shutdown_event.is_set():
+            try:
+                await asyncio.wait_for(shutdown_event.wait(), timeout=1800)
+                break  # shutdown
+            except asyncio.TimeoutError:
+                pass  # interval elapsed, run ingestion
+            if shutdown_event.is_set():
+                break
+            try:
+                counts = await asyncio.wait_for(daemon.run_once(), timeout=120.0)
+                _log("archaeology", f"Ingestion cycle complete: {counts}")
+            except asyncio.TimeoutError:
+                _log("archaeology", "Ingestion cycle timed out (120s) — continuing")
+            except Exception as exc:
+                _log("archaeology", f"Ingestion cycle error: {exc}")
+
+    except Exception as exc:
+        _log("archaeology", f"Archaeology loop crashed: {exc}")
+
+
 async def orchestrate(background: bool = False) -> None:
     """Main entry point — run all systems concurrently."""
     # Ensure Python logging is configured so module-level logger.info() calls
@@ -1599,6 +1642,11 @@ async def orchestrate(background: bool = False) -> None:
         "health": lambda: run_health_loop(shutdown_event),
         "self-improve": lambda: run_self_improvement_loop(shutdown_event, interval=3600),
         "free-grind": lambda: run_free_evolution_grind(shutdown_event),
+        # ── Fang 7: Self-Reading Archaeology ──
+        # Ingests evolution archive, shared research, stigmergy marks, task
+        # completions into MemoryPalace every 30 minutes. Produces
+        # lessons_learned.md at ~/.dharma/meta/ — the anti-amnesia mechanism.
+        "archaeology": lambda: _run_archaeology_loop(shutdown_event),
     }
     optional_clean_exit = {"pulse"}
     tasks = {
