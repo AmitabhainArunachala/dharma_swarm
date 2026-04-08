@@ -1182,6 +1182,22 @@ def _build_prompt(
     except Exception:
         logger.debug("Fitness injection failed", exc_info=True)
 
+    # Inject shared output instruction for mission-linked tasks so agents
+    # write artifacts that downstream tasks can discover.
+    if metadata.get("mission_id") or metadata.get("coordination_preferred_roles"):
+        _slug = re.sub(
+            r'[^a-z0-9]+', '_', (task.title or 'task').lower()
+        ).strip('_')[:40]
+        _shared_path = f"~/.dharma/shared/{task.id[:8]}_{_slug}.md"
+        user_parts.append(
+            f"\n\n## Output Instructions\n"
+            f"Write your primary output to your agent notes (standard).\n"
+            f"Also write key findings to ~/.dharma/shared/ with a descriptive name "
+            f"so other agents can find and build on your work.\n"
+            f"If this task says 'write to' a specific path, use write_file to create it.\n"
+            f"Your shared artifact path: `{_shared_path}`\n"
+        )
+
     if plan_context:
         user_parts.append(f"\n\n{plan_context}")
     return LLMRequest(
