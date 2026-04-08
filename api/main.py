@@ -68,10 +68,16 @@ def _log_auth_mode() -> None:
 
 
 def get_swarm():
-    """Get or create SwarmManager singleton."""
+    """Get or create SwarmManager singleton.
+
+    Uses the absolute ~/.dharma state directory so that SQLite databases
+    (tasks.db, messages.db, etc.) are reachable regardless of the process
+    working directory.  Without this, launching uvicorn from a different
+    CWD would produce "unable to open database file".
+    """
     if "swarm" not in _state:
         from dharma_swarm.swarm import SwarmManager
-        _state["swarm"] = SwarmManager()
+        _state["swarm"] = SwarmManager(state_dir=_OPERATOR_STATE_DIR)
     return _state["swarm"]
 
 
