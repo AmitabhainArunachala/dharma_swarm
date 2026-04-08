@@ -357,11 +357,9 @@ class DGMLoop:
             provider = None
             if _os.environ.get("OPENROUTER_API_KEY"):
                 provider = OpenRouterProvider()
-            elif hasattr(self._engine, '_provider'):
-                provider = self._engine._provider
 
             if provider is None:
-                result.error = "No LLM provider available for proposal generation"
+                result.error = "No LLM provider available (set OPENROUTER_API_KEY)"
                 result.duration_seconds = time.monotonic() - start
                 return result
 

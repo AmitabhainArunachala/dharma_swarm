@@ -1500,6 +1500,28 @@ async def run_conductor_loop(shutdown_event: asyncio.Event) -> None:
     )
 
 
+async def _run_guardian_loop(shutdown_event: asyncio.Event) -> None:
+    """Guardian Crew: continuous interface + loop + router health checking.
+
+    Three specialist agents running every 4 hours:
+      AUDITOR        — import chains, method existence, syntax errors
+      LOOP_WATCHER   — cybernetic loop health, evolution archive freshness
+      ROUTER_PROBE   — circuit breaker state, dead providers, missing keys
+
+    Writes GUARDIAN_REPORT.md to repo root and ~/.dharma/guardian/.
+    Creates GitHub issues for BLOCKER-severity findings.
+    """
+    try:
+        from dharma_swarm.guardian_crew import start_guardian_loop
+        await start_guardian_loop(
+            state_dir=STATE_DIR,
+            github_repo="AmitabhainArunachala/dharma_swarm",
+            shutdown_event=shutdown_event,
+        )
+    except Exception as exc:
+        _log("guardian", f"Guardian loop crashed: {exc}")
+
+
 async def _run_archaeology_loop(shutdown_event: asyncio.Event) -> None:
     """Fang 7: Self-Reading Archaeology loop.
 
@@ -1647,6 +1669,10 @@ async def orchestrate(background: bool = False) -> None:
         # completions into MemoryPalace every 30 minutes. Produces
         # lessons_learned.md at ~/.dharma/meta/ — the anti-amnesia mechanism.
         "archaeology": lambda: _run_archaeology_loop(shutdown_event),
+        # ── Guardian Crew: continuous interface + loop + router health checks ──
+        # Runs at boot + every 4 hours. Writes GUARDIAN_REPORT.md.
+        # Creates GitHub issues for BLOCKER-severity findings.
+        "guardian": lambda: _run_guardian_loop(shutdown_event),
     }
     optional_clean_exit = {"pulse"}
     tasks = {

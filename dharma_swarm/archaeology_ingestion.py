@@ -429,7 +429,7 @@ async def synthesize_lessons_learned(
 
     # Query 1: What evolution strategies worked?
     try:
-        result = await palace.query(query_text="evolution applied fitness improvement success", top_k=5)
+        result = await palace.recall(PalaceQuery(text="evolution applied fitness improvement success", max_results=5))
         if result.results:
             sections.append("## Evolution: What Worked\n")
             for hit in result.results[:5]:
@@ -440,7 +440,7 @@ async def synthesize_lessons_learned(
 
     # Query 2: What failed or was rolled back?
     try:
-        result = await palace.query(query_text="evolution rolled_back failed rejected error", top_k=5)
+        result = await palace.recall(PalaceQuery(text="evolution rolled_back failed rejected error", max_results=5))
         if result.results:
             sections.append("\n## Evolution: What Failed\n")
             for hit in result.results[:5]:
@@ -451,7 +451,7 @@ async def synthesize_lessons_learned(
 
     # Query 3: Research already completed
     try:
-        result = await palace.query(query_text="research completed analysis landscape competitive", top_k=5)
+        result = await palace.recall(PalaceQuery(text="research completed analysis landscape competitive", max_results=5))
         if result.results:
             sections.append("\n## Research: Already Completed\n")
             for hit in result.results[:5]:
@@ -463,7 +463,7 @@ async def synthesize_lessons_learned(
 
     # Query 4: Gnani / strategic constraints
     try:
-        result = await palace.query(query_text="gnani witness telos dharmic architecture constraint", top_k=5)
+        result = await palace.recall(PalaceQuery(text="gnani witness telos dharmic architecture constraint", max_results=5))
         if result.results:
             sections.append("\n## Strategic Constraints (Gnani Layer)\n")
             for hit in result.results[:5]:
@@ -474,7 +474,7 @@ async def synthesize_lessons_learned(
 
     # Query 5: Provider issues
     try:
-        result = await palace.query(query_text="provider error timeout groq billing access denied", top_k=3)
+        result = await palace.recall(PalaceQuery(text="provider error timeout groq billing access denied", max_results=3))
         if result.results:
             sections.append("\n## Known Provider Issues\n")
             for hit in result.results[:3]:
@@ -527,17 +527,17 @@ async def query_archaeology(
     state_dir = state_dir or Path.home() / ".dharma"
 
     try:
-        from dharma_swarm.memory_palace import MemoryPalace
+        from dharma_swarm.memory_palace import MemoryPalace, PalaceQuery
 
         palace = MemoryPalace(state_dir=state_dir)
-        result = await palace.query(query_text=question, top_k=top_k)
+        result = await palace.recall(PalaceQuery(text=question, max_results=top_k))
 
         hits: list[MemoryHit] = []
         for r in result.results:
             content = getattr(r, 'content', '') or str(r)
             source = getattr(r, 'source', 'unknown')
             layer = getattr(r, 'layer', 'unknown')
-            score = getattr(r, 'relevance_score', 0.0)
+            score = getattr(r, 'score', 0.0)
             metadata = getattr(r, 'metadata', {})
             hits.append(MemoryHit(
                 content=content,
@@ -606,7 +606,7 @@ class ArchaeologyIngestionDaemon:
     async def run_once(self) -> dict[str, int]:
         """Run one full ingestion cycle. Returns counts per stream."""
         try:
-            from dharma_swarm.memory_palace import MemoryPalace
+            from dharma_swarm.memory_palace import MemoryPalace, PalaceQuery
             palace = MemoryPalace(state_dir=self._state_dir)
         except Exception as exc:
             logger.error("ArchaeologyIngestionDaemon: MemoryPalace unavailable: %s", exc)
