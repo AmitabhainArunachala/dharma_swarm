@@ -32,6 +32,12 @@
     <key>WorkingDirectory</key>
     <string>__REPO_ROOT__/dashboard</string>
 
+    <key>SoftResourceLimits</key>
+    <dict>
+        <key>NumberOfFiles</key>
+        <integer>10240</integer>
+    </dict>
+
     <key>EnvironmentVariables</key>
     <dict>
         <key>PATH</key>

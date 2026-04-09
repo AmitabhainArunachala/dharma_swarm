@@ -86,6 +86,13 @@ ensure_dashboard_build() {
     else
         echo "Dashboard build missing; running npm run build..."
     fi
+
+    # Remove stale .next output (preserve cache for faster rebuilds)
+    rm -rf "${DASHBOARD_DIR}/.next/static" \
+           "${DASHBOARD_DIR}/.next/server" \
+           "${DASHBOARD_DIR}/.next/BUILD_ID" \
+           "${DASHBOARD_DIR}/.next/build-manifest.json"
+
     (
         cd "${DASHBOARD_DIR}"
         "${NPM_BIN}" run build
