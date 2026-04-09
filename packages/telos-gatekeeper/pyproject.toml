@@ -1,0 +1,27 @@
+[build-system]
+requires = ["setuptools>=68.0", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "telos-gatekeeper"
+version = "0.1.0"
+description = "Dharmic constraint enforcement for autonomous AI agents — telos-gated actions with reflective rerouting"
+readme = "README.md"
+requires-python = ">=3.11"
+license = {text = "MIT"}
+authors = [{ name = "John Shrader", email = "johnvincentshrader@gmail.com" }]
+keywords = ["ai", "agents", "safety", "ethics", "telos", "dharma", "autonomous"]
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Intended Audience :: Developers",
+    "Topic :: Scientific/Engineering :: Artificial Intelligence",
+    "License :: OSI Approved :: MIT License",
+]
+dependencies = ["pydantic>=2.0"]
+
+[project.urls]
+Homepage = "https://github.com/AmitabhainArunachala/dharma_swarm"
+Repository = "https://github.com/AmitabhainArunachala/dharma_swarm"
+
+[project.optional-dependencies]
+dev = ["pytest>=7.0", "pytest-asyncio"]

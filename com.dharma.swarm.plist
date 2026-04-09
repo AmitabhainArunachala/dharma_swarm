@@ -1,0 +1,43 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN"
+  "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>Label</key>
+  <string>com.dharma.swarm</string>
+
+  <key>ProgramArguments</key>
+  <array>
+    <string>/bin/bash</string>
+    <string>-c</string>
+    <string>cd /Users/dhyana/dharma_swarm &amp;&amp; source .env &amp;&amp; TINY_ROUTER_BACKEND=heuristic dgc orchestrate-live</string>
+  </array>
+
+  <key>WorkingDirectory</key>
+  <string>/Users/dhyana/dharma_swarm</string>
+
+  <key>EnvironmentVariables</key>
+  <dict>
+    <key>PATH</key>
+    <string>/usr/local/bin:/usr/bin:/bin:/opt/homebrew/bin</string>
+  </dict>
+
+  <!-- Restart automatically if it exits for any reason -->
+  <key>KeepAlive</key>
+  <true/>
+
+  <!-- Wait 30 seconds before restarting after a crash -->
+  <key>ThrottleInterval</key>
+  <integer>30</integer>
+
+  <!-- Start on login -->
+  <key>RunAtLoad</key>
+  <true/>
+
+  <!-- Log stdout and stderr -->
+  <key>StandardOutPath</key>
+  <string>/Users/dhyana/.dharma/logs/swarm.log</string>
+  <key>StandardErrorPath</key>
+  <string>/Users/dhyana/.dharma/logs/swarm.err</string>
+</dict>
+</plist>

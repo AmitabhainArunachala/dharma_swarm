@@ -2099,6 +2099,8 @@ class Orchestrator:
                             ProviderType.GROQ,
                             ProviderType.NVIDIA_NIM,
                             ProviderType.CEREBRAS,
+                            ProviderType.OPENROUTER,   # fallback: always available if key set
+                            ProviderType.OPENROUTER_FREE,  # final free tier fallback
                         ]
                         for ptype in cheap_providers:
                             try:
