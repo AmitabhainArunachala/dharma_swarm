@@ -144,3 +144,47 @@ jobs:
 
       - name: Build dashboard
         run: npm run build
+
+  gauntlet-tier1:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install deps
+        run: pip install -e ".[dev]"
+
+      - name: Run Gauntlet Tier 1 (correctness checks — no network, no LLM)
+        env:
+          TINY_ROUTER_BACKEND: heuristic
+          DHARMA_EVOLUTION_SHADOW: "1"
+          DGC_AUTONOMY_LEVEL: "0"
+        run: |
+          # Only run deterministic telos gate + internal correctness checks
+          python3 -c "
+import asyncio, json, sys
+sys.path.insert(0, '.')
+sys.path.insert(0, 'benchmarks')
+
+async def main():
+    from gauntlet import _t1_telos_gate_enforced, _t1_stigmergy_roundtrip
+    results = await asyncio.gather(_t1_telos_gate_enforced(), _t1_stigmergy_roundtrip())
+    failed = [r for r in results if not r.passed]
+    for r in results:
+        status = 'PASS' if r.passed else 'FAIL'
+        print(f'  [{status}] {r.name}: {r.composite:.2f}')
+        if r.failure_mode:
+            print(f'    Failure: {r.failure_mode}')
+    if failed:
+        print(f'GAUNTLET TIER 1 FAILED: {len(failed)}/{len(results)} tasks')
+        sys.exit(1)
+    else:
+        print(f'GAUNTLET TIER 1 PASSED: {len(results)}/{len(results)} tasks')
+
+asyncio.run(main())
+"

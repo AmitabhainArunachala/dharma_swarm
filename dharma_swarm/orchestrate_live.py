@@ -1500,6 +1500,57 @@ async def run_conductor_loop(shutdown_event: asyncio.Event) -> None:
     )
 
 
+async def _run_gauntlet_loop(shutdown_event: asyncio.Event) -> None:
+    """Gauntlet: run adversarial eval pressure on a schedule, feed scores into DGM.
+
+    Tier 1+2 (correctness + research): every 2 hours.
+    Tier 3 (self-modification): every 6 hours.
+    Tier 4+5 (adversarial + emergent): every 12 hours.
+    Scores written to ~/.dharma/gauntlet/ and fed back to BenchmarkRegistry.
+    """
+    import random as _random
+    _log("gauntlet", "Gauntlet loop starting")
+    _cycle = 0
+    while not shutdown_event.is_set():
+        try:
+            await asyncio.wait_for(shutdown_event.wait(), timeout=7200)
+            break
+        except asyncio.TimeoutError:
+            pass
+        if shutdown_event.is_set():
+            break
+
+        _cycle += 1
+        tiers = [1, 2]
+        if _cycle % 3 == 0:
+            tiers.append(3)
+        if _cycle % 6 == 0:
+            tiers += [4, 5]
+
+        try:
+            from benchmarks.gauntlet import run_gauntlet
+            _log("gauntlet", f"Running tiers {tiers} (cycle {_cycle})")
+            report = await asyncio.wait_for(run_gauntlet(tiers=tiers), timeout=1800)
+            _log("gauntlet",
+                 f"Score: {report.gauntlet_score:.3f} (Δ{report.delta:+.3f}) | "
+                 f"DGM targets: {report.dgm_targets}")
+            # Feed DGM targets into evolution loop via signal bus
+            if report.dgm_targets and report.delta < 0:
+                try:
+                    from dharma_swarm.signal_bus import SignalBus
+                    SignalBus.get().emit("GAUNTLET_REGRESSION", {
+                        "score": report.gauntlet_score,
+                        "delta": report.delta,
+                        "dgm_targets": report.dgm_targets,
+                    })
+                except Exception:
+                    pass
+        except asyncio.TimeoutError:
+            _log("gauntlet", "Gauntlet cycle timed out (1800s)")
+        except Exception as exc:
+            _log("gauntlet", f"Gauntlet cycle failed: {exc}")
+
+
 async def _run_health_api(shutdown_event: asyncio.Event) -> None:
     """Health API: serves http://localhost:7433/health|metrics|loops|providers|telos"""
     try:
@@ -1694,6 +1745,8 @@ async def orchestrate(background: bool = False) -> None:
         "guardian": lambda: _run_guardian_loop(shutdown_event),
         # ── Health API: curl http://localhost:7433/health ──
         "health-api": lambda: _run_health_api(shutdown_event),
+        # ── Gauntlet: adversarial eval pressure + DGM feedback loop ──
+        "gauntlet": lambda: _run_gauntlet_loop(shutdown_event),
     }
     optional_clean_exit = {"pulse"}
     tasks = {
