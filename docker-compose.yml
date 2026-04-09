@@ -20,6 +20,34 @@ services:
       timeout: 5s
       retries: 3
 
+
+  swarm:
+    build:
+      context: .
+      dockerfile: Dockerfile.swarm
+    container_name: dharma-swarm
+    ports:
+      - "7433:7433"   # health API: curl http://localhost:7433/health
+    volumes:
+      - dharma-state:/root/.dharma
+      - ./dharma_swarm:/app/dharma_swarm:ro  # hot-reload source
+    environment:
+      - OPENROUTER_API_KEY=${OPENROUTER_API_KEY:-}
+      - ANTHROPIC_API_KEY=${ANTHROPIC_API_KEY:-}
+      - GROQ_API_KEY=${GROQ_API_KEY:-}
+      - TINY_ROUTER_BACKEND=heuristic
+      - DHARMA_EVOLUTION_SHADOW=${DHARMA_EVOLUTION_SHADOW:-0}
+      - DGC_AUTONOMY_LEVEL=${DGC_AUTONOMY_LEVEL:-2}
+      - DHARMA_STATE_DIR=/root/.dharma
+      - GUARDIAN_INTERVAL_SECONDS=14400
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:7433/health"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 60s
+
   cron:
     build: .
     container_name: dharmic-quant-cron
@@ -46,5 +74,7 @@ while True:
     restart: unless-stopped
 
 volumes:
+  dharma-state:
+    driver: local
   ginko-data:
     driver: local

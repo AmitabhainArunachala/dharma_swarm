@@ -1,0 +1,37 @@
+FROM python:3.12-slim
+
+WORKDIR /app
+
+# System deps
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    curl git build-essential \
+    && rm -rf /var/lib/apt/lists/*
+
+# Python deps first (cache layer)
+COPY pyproject.toml setup.py README.md ./
+COPY dharma_swarm/__init__.py dharma_swarm/
+RUN pip install --no-cache-dir -e ".[dev]" 2>/dev/null || pip install --no-cache-dir -e . || true
+
+# Full source
+COPY dharma_swarm/ /app/dharma_swarm/
+
+# State directory
+RUN mkdir -p /root/.dharma/logs \
+             /root/.dharma/evolution \
+             /root/.dharma/stigmergy \
+             /root/.dharma/telos \
+             /root/.dharma/memory \
+             /root/.dharma/meta \
+             /root/.dharma/guardian \
+             /root/.dharma/sub_swarms \
+             /root/.dharma/shared \
+             /root/.dharma/artifacts
+
+# Health API port
+EXPOSE 7433
+
+HEALTHCHECK --interval=30s --timeout=5s --retries=3 --start-period=60s \
+    CMD curl -f http://localhost:7433/health || exit 1
+
+# Boot the swarm
+CMD ["python", "-m", "dharma_swarm.orchestrate_live"]

@@ -1500,6 +1500,15 @@ async def run_conductor_loop(shutdown_event: asyncio.Event) -> None:
     )
 
 
+async def _run_health_api(shutdown_event: asyncio.Event) -> None:
+    """Health API: serves http://localhost:7433/health|metrics|loops|providers|telos"""
+    try:
+        from dharma_swarm.swarm_health_api import run_health_api
+        await run_health_api(shutdown_event)
+    except Exception as exc:
+        _log("health-api", f"Health API crashed: {exc}")
+
+
 async def _run_guardian_loop(shutdown_event: asyncio.Event) -> None:
     """Guardian Crew: continuous interface + loop + router health checking.
 
@@ -1569,10 +1578,20 @@ async def orchestrate(background: bool = False) -> None:
     """Main entry point — run all systems concurrently."""
     # Ensure Python logging is configured so module-level logger.info() calls
     # (from orchestrator.py, swarm.py, agent_runner.py etc.) are visible.
-    logging.basicConfig(
-        level=logging.INFO,
-        format="%(asctime)s %(name)s [%(levelname)s] %(message)s",
-    )
+    # Rotating file logs: 10MB × 5 files → ~/.dharma/logs/swarm.log
+    _log_dir = STATE_DIR / "logs"
+    _log_dir.mkdir(parents=True, exist_ok=True)
+    _root = logging.getLogger()
+    if not _root.handlers:
+        _root.setLevel(logging.INFO)
+        _fmt = logging.Formatter("%(asctime)s [%(levelname)s] %(name)s: %(message)s")
+        _ch = logging.StreamHandler()
+        _ch.setFormatter(_fmt)
+        _root.addHandler(_ch)
+        from logging.handlers import RotatingFileHandler as _RFH
+        _fh = _RFH(_log_dir / "swarm.log", maxBytes=10 * 1024 * 1024, backupCount=5)
+        _fh.setFormatter(_fmt)
+        _root.addHandler(_fh)
     STATE_DIR.mkdir(parents=True, exist_ok=True)
     LOG_DIR.mkdir(parents=True, exist_ok=True)
 
@@ -1673,6 +1692,8 @@ async def orchestrate(background: bool = False) -> None:
         # Runs at boot + every 4 hours. Writes GUARDIAN_REPORT.md.
         # Creates GitHub issues for BLOCKER-severity findings.
         "guardian": lambda: _run_guardian_loop(shutdown_event),
+        # ── Health API: curl http://localhost:7433/health ──
+        "health-api": lambda: _run_health_api(shutdown_event),
     }
     optional_clean_exit = {"pulse"}
     tasks = {
