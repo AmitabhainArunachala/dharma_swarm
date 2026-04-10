@@ -364,12 +364,16 @@ class YogaScheduler:
         # 1. Quiet hours
         now_hour = datetime.now(timezone.utc).hour
         if now_hour in self.quiet_hours:
-            # Allow urgent tasks even in quiet hours
-            if task.priority != TaskPriority.URGENT:
+            metadata = task.metadata if isinstance(task.metadata, dict) else {}
+            explicit_operator_task = (
+                task.created_by == "operator"
+                or metadata.get("created_via") in {"operator", "manual_seed", "swarm.create_task"}
+            )
+            if task.priority != TaskPriority.URGENT and not explicit_operator_task:
                 checks.append(ConstraintCheck(
                     verdict=ConstraintVerdict.HOLD,
                     reason=f"Quiet hour ({now_hour}:00 UTC). "
-                           f"Task priority={task.priority.value}, needs URGENT to override.",
+                           f"Task priority={task.priority.value}, needs URGENT or operator origin to override.",
                     constraint_name="quiet_hours",
                 ))
 

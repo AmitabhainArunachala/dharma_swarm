@@ -67,7 +67,7 @@ class DaemonConfig:
     heartbeat_interval: float = 21600.0  # 6 hours in seconds
     max_daily_contributions: int = 40
     min_between_contributions: float = 1800.0  # 30 minutes
-    quiet_hours: list[int] = field(default_factory=list)  # No quiet hours — swarm runs 24/7
+    quiet_hours: list[int] = field(default_factory=lambda: [2, 3, 4, 5])
 
     # LLM defaults
     model: str = "anthropic/claude-sonnet-4"

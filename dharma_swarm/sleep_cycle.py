@@ -296,7 +296,15 @@ class SleepCycle:
         from dharma_swarm.semantic_memory_bridge import run_semantic_sleep_phase
 
         state_root = self._memory_dir.parent
-        project_root = Path(__file__).resolve().parent.parent
+        project_root = state_root
+        default_project_root = Path(__file__).resolve().parent.parent
+        if not (project_root / "dharma_swarm").is_dir():
+            if state_root == Path.home() / ".dharma" and (
+                default_project_root / "dharma_swarm"
+            ).is_dir():
+                project_root = default_project_root
+            else:
+                return {"phase": "semantic", "skipped": True, "reason": "no_project_root"}
         try:
             result = await run_semantic_sleep_phase(
                 project_root=project_root,
@@ -333,7 +341,11 @@ class SleepCycle:
         try:
             from dharma_swarm.bridge_coordinator import BridgeCoordinator
 
-            coordinator = BridgeCoordinator(state_dir=self._memory_dir.parent)
+            state_root = self._memory_dir.parent
+            if not (state_root / "semantic" / "concept_graph.json").exists():
+                return {"bridges_discovered": 0, "errors": [], "skipped": True}
+
+            coordinator = BridgeCoordinator(state_dir=state_root)
             discovery = await coordinator.discover_all()
             result["bridges_discovered"] = discovery.discovered
             result["duration_seconds"] = discovery.duration_seconds

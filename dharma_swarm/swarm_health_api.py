@@ -25,6 +25,7 @@ import asyncio
 import json
 import logging
 import os
+import socket
 import time
 from datetime import datetime, timezone
 from pathlib import Path
@@ -32,6 +33,7 @@ from pathlib import Path
 logger = logging.getLogger(__name__)
 
 _PORT = int(os.environ.get("DHARMA_API_PORT", "7433"))
+_HOST = os.environ.get("DHARMA_API_HOST", "127.0.0.1")
 _STATE_DIR = Path(os.environ.get("DHARMA_STATE_DIR", Path.home() / ".dharma"))
 _START_TIME = time.monotonic()
 
@@ -66,7 +68,7 @@ def _loop_status() -> list[dict]:
         ("evolution", _STATE_DIR / "evolution" / "archive.jsonl"),
         ("stigmergy", _STATE_DIR / "stigmergy" / "marks.jsonl"),
         ("telos", _STATE_DIR / "telos" / "objectives.jsonl"),
-        ("memory-palace", _STATE_DIR / "memory" / "palace.db"),
+        ("memory-palace", _STATE_DIR / "lancedb" / "palace_docs.lance"),
         ("knowledge-store", _STATE_DIR / "db" / "knowledge_store.db"),
         ("archaeology", _STATE_DIR / "meta" / "lessons_learned.md"),
         ("guardian", _STATE_DIR / "guardian" / "GUARDIAN_REPORT.md"),
@@ -144,72 +146,69 @@ def _evolution_summary() -> dict:
         return {"status": "error", "detail": str(exc)}
 
 
+def _route(path: str) -> tuple[str, str]:
+    if path == "/health" or path == "/":
+        return "200 OK", json.dumps({
+            "status": "ok",
+            "uptime": _uptime(),
+            "timestamp": _utc_now(),
+            "version": "dharma_swarm",
+        })
+
+    if path == "/metrics":
+        return "200 OK", json.dumps({
+            "uptime": _uptime(),
+            "timestamp": _utc_now(),
+            "loops": _loop_status(),
+            "evolution": _evolution_summary(),
+            "providers": _provider_status(),
+            "telos": _telos_summary(),
+        }, indent=2)
+
+    if path == "/loops":
+        return "200 OK", json.dumps(_loop_status(), indent=2)
+
+    if path == "/providers":
+        return "200 OK", json.dumps(_provider_status(), indent=2)
+
+    if path == "/telos":
+        return "200 OK", json.dumps(_telos_summary(), indent=2)
+
+    if path == "/archaeology":
+        lessons = _STATE_DIR / "meta" / "lessons_learned.md"
+        excerpt = "\n".join(_read_lines(lessons, 30)) if lessons.exists() else "No lessons yet."
+        return "200 OK", json.dumps({"lessons_excerpt": excerpt, "timestamp": _utc_now()})
+
+    if path == "/guardian":
+        report = _STATE_DIR / "guardian" / "GUARDIAN_REPORT.md"
+        content = report.read_text(encoding="utf-8", errors="ignore") if report.exists() else "No report yet."
+        return "200 OK", json.dumps({"report": content[:5000], "timestamp": _utc_now()})
+
+    return "404 Not Found", json.dumps({"error": "not found", "path": path})
+
+
+def _http_response(status: str, body: str) -> bytes:
+    response = (
+        f"HTTP/1.1 {status}\r\n"
+        f"Content-Type: application/json\r\n"
+        f"Content-Length: {len(body.encode())}\r\n"
+        f"Connection: close\r\n"
+        f"\r\n"
+        f"{body}"
+    )
+    return response.encode()
+
+
 async def _handle(reader: asyncio.StreamReader, writer: asyncio.StreamWriter) -> None:
     """Handle one HTTP request — minimal HTTP/1.1 server without dependencies."""
     try:
-        raw = await asyncio.wait_for(reader.read(4096), timeout=5.0)
+        raw = await asyncio.wait_for(reader.readuntil(b"\r\n\r\n"), timeout=5.0)
         request = raw.decode(errors="ignore")
         first_line = request.splitlines()[0] if request.splitlines() else ""
         method, path_qs, *_ = (first_line.split() + ["", ""])[:3]
         path = path_qs.split("?")[0]
-
-        if path == "/health" or path == "/":
-            body = json.dumps({
-                "status": "ok",
-                "uptime": _uptime(),
-                "timestamp": _utc_now(),
-                "version": "dharma_swarm",
-            })
-            status = "200 OK"
-
-        elif path == "/metrics":
-            body = json.dumps({
-                "uptime": _uptime(),
-                "timestamp": _utc_now(),
-                "loops": _loop_status(),
-                "evolution": _evolution_summary(),
-                "providers": _provider_status(),
-                "telos": _telos_summary(),
-            }, indent=2)
-            status = "200 OK"
-
-        elif path == "/loops":
-            body = json.dumps(_loop_status(), indent=2)
-            status = "200 OK"
-
-        elif path == "/providers":
-            body = json.dumps(_provider_status(), indent=2)
-            status = "200 OK"
-
-        elif path == "/telos":
-            body = json.dumps(_telos_summary(), indent=2)
-            status = "200 OK"
-
-        elif path == "/archaeology":
-            lessons = _STATE_DIR / "meta" / "lessons_learned.md"
-            excerpt = "\n".join(_read_lines(lessons, 30)) if lessons.exists() else "No lessons yet."
-            body = json.dumps({"lessons_excerpt": excerpt, "timestamp": _utc_now()})
-            status = "200 OK"
-
-        elif path == "/guardian":
-            report = _STATE_DIR / "guardian" / "GUARDIAN_REPORT.md"
-            content = report.read_text(encoding="utf-8", errors="ignore") if report.exists() else "No report yet."
-            body = json.dumps({"report": content[:5000], "timestamp": _utc_now()})
-            status = "200 OK"
-
-        else:
-            body = json.dumps({"error": "not found", "path": path})
-            status = "404 Not Found"
-
-        response = (
-            f"HTTP/1.1 {status}\r\n"
-            f"Content-Type: application/json\r\n"
-            f"Content-Length: {len(body.encode())}\r\n"
-            f"Connection: close\r\n"
-            f"\r\n"
-            f"{body}"
-        )
-        writer.write(response.encode())
+        status, body = _route(path)
+        writer.write(_http_response(status, body))
         await writer.drain()
     except Exception as exc:
         logger.debug("Health API request failed: %s", exc)
@@ -217,14 +216,42 @@ async def _handle(reader: asyncio.StreamReader, writer: asyncio.StreamWriter) ->
         writer.close()
 
 
+def _serve_health_sync(shutdown_event: asyncio.Event) -> None:
+    sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    try:
+        sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+        sock.bind((_HOST, _PORT))
+        sock.listen(128)
+        sock.settimeout(1.0)
+        logger.info("Swarm health API listening on http://%s:%d", _HOST, _PORT)
+        while not shutdown_event.is_set():
+            try:
+                conn, _addr = sock.accept()
+            except socket.timeout:
+                continue
+            except OSError:
+                break
+            with conn:
+                conn.settimeout(2.0)
+                try:
+                    raw = conn.recv(4096)
+                    request = raw.decode(errors="ignore")
+                    first_line = request.splitlines()[0] if request.splitlines() else ""
+                    _method, path_qs, *_ = (first_line.split() + ["", ""])[:3]
+                    path = path_qs.split("?")[0]
+                    status, body = _route(path)
+                    conn.sendall(_http_response(status, body))
+                except Exception as exc:
+                    logger.debug("Health API request failed: %s", exc)
+        logger.info("Swarm health API stopped")
+    finally:
+        sock.close()
+
+
 async def run_health_api(shutdown_event: asyncio.Event) -> None:
     """Run the health API server until shutdown."""
     try:
-        server = await asyncio.start_server(_handle, "0.0.0.0", _PORT)
-        logger.info("Swarm health API listening on http://0.0.0.0:%d", _PORT)
-        async with server:
-            await shutdown_event.wait()
-        logger.info("Swarm health API stopped")
+        await asyncio.to_thread(_serve_health_sync, shutdown_event)
     except OSError as exc:
         logger.warning("Health API failed to start on port %d: %s", _PORT, exc)
     except Exception as exc:

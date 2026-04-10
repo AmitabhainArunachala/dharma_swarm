@@ -45,6 +45,13 @@ def _dedupe_keep_order(items: Iterable[ProviderType]) -> list[ProviderType]:
     return out
 
 
+def _prefer_codex_for_tooling(items: list[ProviderType]) -> list[ProviderType]:
+    """Promote CODEX to the front for tooling-heavy execution lanes."""
+    if ProviderType.CODEX not in items:
+        return items
+    return [ProviderType.CODEX] + [item for item in items if item != ProviderType.CODEX]
+
+
 @dataclass(frozen=True)
 class ProviderRouteRequest:
     action_name: str
@@ -432,7 +439,7 @@ class ProviderPolicyRouter:
                 if provider in candidates
             ]
             non_tooling = [provider for provider in candidates if provider not in tooling]
-            candidates = tooling + non_tooling
+            candidates = _prefer_codex_for_tooling(tooling) + non_tooling
 
         return _dedupe_keep_order(candidates)
 

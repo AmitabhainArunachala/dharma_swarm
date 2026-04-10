@@ -170,6 +170,19 @@ class TestYogaScheduler:
         blocked = [c for c in checks if c.verdict != ConstraintVerdict.ALLOW]
         assert len(blocked) == 0
 
+    def test_quiet_hours_operator_bypass(self):
+        now_hour = datetime.now(timezone.utc).hour
+        yoga = YogaScheduler(quiet_hours=[now_hour])
+        task = _task(
+            priority=TaskPriority.NORMAL,
+            metadata={"created_via": "operator"},
+        )
+        task.created_by = "operator"
+        agent = _agent()
+        checks = yoga.can_dispatch(task, agent)
+        blocked = [c for c in checks if c.verdict != ConstraintVerdict.ALLOW]
+        assert len(blocked) == 0
+
     def test_token_budget_exceeded(self):
         yoga = YogaScheduler(quiet_hours=[], global_token_budget=500_000)
         yoga.usage.tokens_used_today = 499_000

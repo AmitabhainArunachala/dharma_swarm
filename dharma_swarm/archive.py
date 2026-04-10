@@ -121,6 +121,25 @@ class FitnessScore(BaseModel):
     efficiency: float = 0.0        # Diff size penalty (0-1)
     safety: float = 0.0            # Gate pass/fail (0-1)
 
+    def _default_weight_view(self) -> dict[str, float]:
+        """Return canonical weights normalized over explicitly provided dimensions.
+
+        Older archive/test payloads predate newly added fitness dimensions. When a
+        field was never provided, treat it as absent rather than as an implicit
+        zero-valued penalty. Explicit zeros still count against the weighted score.
+        """
+        active = {
+            key: weight
+            for key, weight in _DEFAULT_WEIGHTS.items()
+            if key in self.model_fields_set
+        }
+        if not active:
+            return dict(_DEFAULT_WEIGHTS)
+        total = sum(active.values())
+        if total <= 0.0:
+            return dict(_DEFAULT_WEIGHTS)
+        return {key: value / total for key, value in active.items()}
+
     def weighted(self, weights: dict[str, float] | None = None) -> float:
         """Return weighted total fitness.
 
@@ -128,7 +147,7 @@ class FitnessScore(BaseModel):
             weights: Optional mapping of dimension name to weight.
                      Defaults to the canonical fitness weighting.
         """
-        w = weights or _DEFAULT_WEIGHTS
+        w = self._default_weight_view() if weights is None else weights
         return sum(getattr(self, k, 0.0) * v for k, v in w.items())
 
 
@@ -331,7 +350,9 @@ class EvolutionArchive:
 
         self.path.parent.mkdir(parents=True, exist_ok=True)
         async with aiofiles.open(self.path, "a") as f:
-            await f.write(entry.model_dump_json() + "\n")
+            payload = entry.model_dump(mode="json")
+            payload["fitness"] = entry.fitness.model_dump(mode="json", exclude_unset=True)
+            await f.write(json.dumps(payload) + "\n")
 
     async def _rewrite(self) -> None:
         """Rewrite the full archive (needed after in-place mutations)."""
@@ -340,11 +361,13 @@ class EvolutionArchive:
         self.path.parent.mkdir(parents=True, exist_ok=True)
         async with aiofiles.open(self.path, "w") as f:
             for entry in self._entries.values():
-                await f.write(entry.model_dump_json() + "\n")
+                payload = entry.model_dump(mode="json")
+                payload["fitness"] = entry.fitness.model_dump(mode="json", exclude_unset=True)
+                await f.write(json.dumps(payload) + "\n")
 
     # -- public API ----------------------------------------------------------
 
-    async def add_entry(self, entry: ArchiveEntry) -> str:
+    async def add_entry(self, entry: ArchiveEntry | dict[str, Any]) -> str:
         """Add a new entry and persist it.
 
         Also appends to Merkle log for cryptographic tamper-evidence.
@@ -352,6 +375,9 @@ class EvolutionArchive:
         Returns:
             The entry id.
         """
+        if isinstance(entry, dict):
+            entry = ArchiveEntry(**entry)
+
         # Get parent's merkle root if this has a parent
         if entry.parent_id:
             parent = self._entries.get(entry.parent_id)

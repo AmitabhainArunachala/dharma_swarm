@@ -308,6 +308,13 @@ class PromptTournament:
             The mutated prompt text.  On error, returns the original
             prompt unchanged (safe fallback).
         """
+        from dharma_swarm.api_keys import env_value, provider_api_key_env
+
+        openrouter_key = env_value(provider_api_key_env("openrouter") or "")
+        if not openrouter_key:
+            logger.warning("Prompt mutation skipped: OPENROUTER_API_KEY not configured")
+            return current_prompt
+
         fitness_summary = (
             f"success_rate={fitness_scores.get('success_rate', 'N/A')}, "
             f"avg_quality={fitness_scores.get('avg_quality', 'N/A')}, "

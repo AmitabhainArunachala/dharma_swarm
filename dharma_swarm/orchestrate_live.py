@@ -1554,6 +1554,7 @@ async def _run_gauntlet_loop(shutdown_event: asyncio.Event) -> None:
 async def _run_health_api(shutdown_event: asyncio.Event) -> None:
     """Health API: serves http://localhost:7433/health|metrics|loops|providers|telos"""
     try:
+        _log("health-api", "Starting health API server")
         from dharma_swarm.swarm_health_api import run_health_api
         await run_health_api(shutdown_event)
     except Exception as exc:
@@ -1592,6 +1593,7 @@ async def _run_archaeology_loop(shutdown_event: asyncio.Event) -> None:
     """
     _log("archaeology", "Starting archaeology ingestion loop (interval=1800s)")
     try:
+        await asyncio.sleep(2)
         from dharma_swarm.archaeology_ingestion import ArchaeologyIngestionDaemon
         daemon = ArchaeologyIngestionDaemon(state_dir=STATE_DIR, interval_seconds=1800)
 
@@ -1721,6 +1723,8 @@ async def orchestrate(background: bool = False) -> None:
         _supervisor.register_loop(loop_name, expected_interval=float(interval))
 
     task_factories: dict[str, Any] = {
+        # ── Health API: curl http://localhost:7433/health ──
+        "health-api": lambda: _run_health_api(shutdown_event),
         "swarm": lambda: run_swarm_loop(shutdown_event, signal_bus=bus, supervisor=_supervisor),
         "pulse": lambda: run_pulse_loop(shutdown_event),
         "recognition": lambda: _run_recognition_loop(shutdown_event),
@@ -1743,8 +1747,6 @@ async def orchestrate(background: bool = False) -> None:
         # Runs at boot + every 4 hours. Writes GUARDIAN_REPORT.md.
         # Creates GitHub issues for BLOCKER-severity findings.
         "guardian": lambda: _run_guardian_loop(shutdown_event),
-        # ── Health API: curl http://localhost:7433/health ──
-        "health-api": lambda: _run_health_api(shutdown_event),
         # ── Gauntlet: adversarial eval pressure + DGM feedback loop ──
         "gauntlet": lambda: _run_gauntlet_loop(shutdown_event),
     }
@@ -1755,6 +1757,7 @@ async def orchestrate(background: bool = False) -> None:
     }
 
     _log("orchestrator", f"All {len(tasks)} systems launched ({len(tasks)} loops incl. free-grind)")
+    await asyncio.sleep(0)
 
     try:
         # Resilient loop: restart failed tasks instead of dying on first error.

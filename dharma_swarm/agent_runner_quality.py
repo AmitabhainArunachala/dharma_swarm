@@ -48,6 +48,7 @@ _ERROR_PREFIXES = (
     "failed:",
     "unable to",
     "task execution timed out",
+    "there was an issue with the selected model",
 )
 
 
@@ -616,6 +617,22 @@ async def assess_completion_semantics(
     requires_local_side_effects: bool,
 ) -> CompletionAssessment:
     normalized = (content or "").strip()
+
+    if any(marker in normalized.lower() for marker in _REASONING_LEAK_MARKERS):
+        normalized = re.sub(
+            r"<(?:think|analysis)>.*?</(?:think|analysis)>",
+            "",
+            normalized,
+            flags=re.DOTALL | re.IGNORECASE,
+        ).strip()
+        normalized = re.sub(r"</?(?:think|analysis)>", "", normalized, flags=re.IGNORECASE).strip()
+        if not normalized:
+            return CompletionAssessment(
+                accepted=False,
+                quality_score=0.0,
+                reason="Semantic acceptance failed: response was entirely reasoning tags with no content",
+            )
+
     if _looks_like_provider_failure(normalized):
         return CompletionAssessment(
             accepted=False,
@@ -647,26 +664,6 @@ async def assess_completion_semantics(
         quality_score = _clamp01(quality_score + 0.07)
     if any(marker in lowered for marker in ("next actions:", "next steps:", "action items:", "\n- ", "\n1.")):
         quality_score = _clamp01(quality_score + 0.05)
-
-    # Strip reasoning tags instead of rejecting.
-    # Many models (GLM-5, DeepSeek, Qwen) include <think>...</think> blocks
-    # as part of their chain-of-thought. The content after stripping is
-    # usually valid. Penalize quality slightly but don't reject.
-    if any(marker in lowered for marker in _REASONING_LEAK_MARKERS):
-        import re
-        normalized = re.sub(
-            r"<(?:think|analysis)>.*?</(?:think|analysis)>",
-            "", normalized, flags=re.DOTALL | re.IGNORECASE,
-        ).strip()
-        lowered = normalized.lower()
-        quality_score = _clamp01(quality_score * 0.85)  # 15% penalty, not rejection
-        if not normalized:
-            # Nothing left after stripping — THEN reject
-            return CompletionAssessment(
-                accepted=False,
-                quality_score=0.0,
-                reason="Semantic acceptance failed: response was entirely reasoning tags with no content",
-            )
 
     if (
         normalized

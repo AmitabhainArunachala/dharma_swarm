@@ -43,6 +43,24 @@ PERFORMATIVE_WORDS: list[str] = [
     "amazing",
     "extraordinary",
     "magnificent",
+    "outstanding",
+    "perfectly",
+    "excellent",
+    "exceptional",
+]
+
+HOLLOW_SUCCESS_PHRASES: list[str] = [
+    "successfully completed",
+    "achieved outstanding results",
+    "working perfectly",
+    "all objectives have been met",
+    "demonstrates excellent capabilities",
+    "everything is proceeding as planned",
+    "no issues were encountered",
+    "delivered exceptional value",
+    "exceeded all expectations",
+    "fully operational",
+    "highest standard",
 ]
 
 # Self-referential language patterns.
@@ -211,12 +229,15 @@ class MetricsAnalyzer:
         perf_count = sum(
             1 for w in words if w.strip(".,;:!?\"'()[]{}") in PERFORMATIVE_WORDS
         )
+        hollow_count = sum(1 for phrase in HOLLOW_SUCCESS_PHRASES if phrase in text_lower)
+        concrete_count = len(re.findall(r"\b(?:\d{2,}|\d+\.\d+|utc|http|https|arxiv|p50|403|200)\b", text_lower))
 
         density = perf_count / word_count
 
         return (
             density >= _MIMICRY_DENSITY_THRESHOLD
             or perf_count >= _MIMICRY_MIN_PERFORMATIVE_COUNT
+            or (hollow_count >= 3 and concrete_count < 3)
         )
 
     # --- Internal metrics ---

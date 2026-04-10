@@ -106,6 +106,9 @@ class Orchestrator:
         self._bus = message_bus
         self._event_memory = event_memory
         self._yoga = yoga
+        self._organism: Any | None = None
+        self._sleep_time_agent: Any | None = None
+        self._knowledge_store: Any | None = None
         self._ledger = ledger or SessionLedger(
             base_dir=resolved_ledger_dir,
             session_id=session_id,
@@ -134,6 +137,55 @@ class Orchestrator:
         self._last_coordination_signature = ""
         self._last_coordination_refresh_at: float = 0.0  # monotonic timestamp
         self._coordination_refresh_interval_s: float = 120.0  # skip if refreshed within this window
+
+    def _get_sleep_time_agent(self) -> Any | None:
+        direct = getattr(self, "_sleep_time_agent", None)
+        if direct is not None:
+            return direct
+        organism = getattr(self, "_organism", None)
+        if organism is not None:
+            return getattr(organism, "sleep_time_agent", None)
+        return None
+
+    def set_organism(self, organism: Any) -> None:
+        self._organism = organism
+
+    def set_knowledge_store(self, store: Any) -> None:
+        self._knowledge_store = store
+
+    def _build_consolidation_context(
+        self,
+        task: Task | Any,
+        dispatch: TaskDispatch | Any,
+        result: str,
+    ) -> str:
+        title = str(getattr(task, "title", "") or "").strip()
+        description = str(getattr(task, "description", "") or "").strip()
+        agent_id = str(getattr(dispatch, "agent_id", "") or "").strip()
+        status = str(getattr(dispatch, "status", "") or "").strip()
+        return (
+            f"Task: {title}\n"
+            f"Description: {description}\n"
+            f"Agent: {agent_id}\n"
+            f"Dispatch status: {status}\n"
+            f"Result:\n{result}"
+        )
+
+    async def _safe_consolidate(
+        self,
+        sleep_agent: Any,
+        task_context: str,
+        task_outcome: dict[str, Any],
+        **kwargs: Any,
+    ) -> None:
+        try:
+            await sleep_agent.consolidate_knowledge(
+                task_context=task_context,
+                task_outcome=task_outcome,
+                **kwargs,
+            )
+        except Exception as exc:
+            logger.warning("SleepTimeAgent consolidation failed: %s", exc)
 
     def _runtime_root(self) -> Path:
         base_dir = self._ledger.base_dir
@@ -529,10 +581,12 @@ class Orchestrator:
         agent_id: str,
         extra: dict[str, Any] | None = None,
     ) -> None:
-        """Fire-and-forget lifecycle event — non-blocking to avoid stalling dispatch."""
-        asyncio.create_task(
-            self._emit_lifecycle_event_impl(event, task_id=task_id, agent_id=agent_id, extra=extra),
-            name=f"lifecycle-{event}-{task_id[:8]}",
+        """Emit lifecycle events durably before returning to the caller."""
+        await self._emit_lifecycle_event_impl(
+            event,
+            task_id=task_id,
+            agent_id=agent_id,
+            extra=extra,
         )
 
     async def _emit_lifecycle_event_impl(
@@ -1890,10 +1944,16 @@ class Orchestrator:
         pool_get = getattr(self._pool, "get", None)
         runner = await pool_get(td.agent_id) if pool_get else None
         task = task_for_gate or await self._safe_get_task(td.task_id)
+        pool_list_agents = getattr(self._pool, "list_agents", None)
+        pool_agents = (
+            list((await pool_list_agents()) if pool_list_agents else [])[:3]
+            if self._pool
+            else []
+        )
         logger.info(
             "_assign_dispatch(%s): runner=%s task=%s pool_agents=%s",
             td.task_id[:8], bool(runner), bool(task),
-            list((await self._pool.list_agents()) if self._pool else [])[:3],
+            pool_agents,
         )
         if runner and task:
             run_meta = self._task_meta(task)

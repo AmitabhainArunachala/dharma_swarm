@@ -47,7 +47,7 @@ class FitnessLandscapeMapper:
         self,
         darwin: DarwinEngine,
         n_samples: int = 10,
-        gradient_threshold: float = 0.1,
+        gradient_threshold: float = 0.05,
         variance_threshold: float = 0.01,
         seed: int | None = None,
     ) -> None:

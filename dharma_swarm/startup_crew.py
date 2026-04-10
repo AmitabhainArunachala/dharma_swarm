@@ -452,26 +452,20 @@ async def create_seed_tasks(swarm) -> list:
     """
     from dharma_swarm.models import TaskStatus
 
-    # Check if any of the SEED_TASK titles are currently active (PENDING or RUNNING).
-    # We look by title to avoid re-seeding tasks that are mid-flight.
-    # We do NOT check COMPLETED/FAILED — those are done and we should re-seed.
-    seed_titles = {spec["title"] for spec in SEED_TASKS}
-    active_seeds: list = []
+    # Any active work means startup should not flood the queue with seed tasks.
+    # A fresh empty board receives seeds; a live board keeps its operator focus.
+    active_tasks: list = []
     for status in (TaskStatus.PENDING, TaskStatus.RUNNING):
         try:
             active = await swarm.list_tasks(status=status)
-            active_seeds.extend(
-                t for t in active
-                if getattr(t, 'title', '') in seed_titles
-            )
+            active_tasks.extend(active)
         except Exception:
             pass
 
-    if active_seeds:
+    if active_tasks:
         logger.info(
-            "Seed tasks already active (%d in-flight), skipping re-seed: %s",
-            len(active_seeds),
-            [getattr(t, 'title', '')[:40] for t in active_seeds[:3]],
+            "Task queue already active (%d in-flight), skipping seed creation",
+            len(active_tasks),
         )
         return []
 
@@ -483,7 +477,10 @@ async def create_seed_tasks(swarm) -> list:
     task_specs = [
         {
             "title": spec["title"],
-            "description": spec["description"].replace("{date}", date_str),
+            "description": (
+                spec["description"].replace("{date}", date_str)
+                + f"\n\nSeed date: {date_str}"
+            ),
             "priority": spec["priority"],
             "created_by": "operator",
             "metadata": {

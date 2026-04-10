@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import math
+import json
 import random
 from pathlib import Path
 from statistics import mean, pvariance
@@ -236,7 +237,21 @@ class MetaEvolutionEngine:
                 stripped = line.strip()
                 if not stripped:
                     continue
-                self.meta_archive.append(MetaArchiveEntry.model_validate_json(stripped))
+                try:
+                    self.meta_archive.append(MetaArchiveEntry.model_validate_json(stripped))
+                except ValueError:
+                    payload = json.loads(stripped)
+                    params = payload.get("meta_parameters")
+                    if not isinstance(params, dict):
+                        continue
+                    weights = params.get("fitness_weights")
+                    if isinstance(weights, dict):
+                        params["fitness_weights"] = {
+                            key: value
+                            for key, value in weights.items()
+                            if key in FITNESS_DIMENSIONS
+                        }
+                    self.meta_archive.append(MetaArchiveEntry.model_validate(payload))
 
     def _archive_meta_entry(self, entry: MetaArchiveEntry) -> None:
         """Append a meta result to the JSONL archive."""

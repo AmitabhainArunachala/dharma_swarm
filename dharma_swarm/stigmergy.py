@@ -257,7 +257,7 @@ class StigmergyStore:
 
     async def query_relevant(
         self,
-        task_keywords: list[str],
+        task_keywords: list[str] | str,
         limit: int = 10,
         channel: str | None = None,
     ) -> list[StigmergicMark]:
@@ -266,6 +266,8 @@ class StigmergyStore:
         When *channel* is specified, results are scoped to that channel
         (plus cross-channel high-salience marks).
         """
+        if isinstance(task_keywords, str):
+            task_keywords = [task_keywords]
         if not task_keywords:
             return await self.high_salience(limit=limit)
         marks = await self._load_marks()
@@ -279,7 +281,7 @@ class StigmergyStore:
         if not keywords_lower:
             return await self.high_salience(limit=limit)
         relevant = [m for m in marks if any(kw in (m.observation + " " + m.file_path).lower() for kw in keywords_lower)]
-        relevant.sort(key=lambda m: m.salience, reverse=True)
+        relevant.sort(key=lambda m: (m.salience, m.timestamp), reverse=True)
         result = relevant[:limit]
         await self._record_access(result)
         return result

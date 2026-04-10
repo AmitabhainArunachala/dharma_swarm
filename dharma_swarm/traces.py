@@ -99,7 +99,9 @@ class TraceStore:
     async def log_entry(self, entry: TraceEntry) -> str:
         """Persist *entry* to ``history/{entry.id}.json`` and return the id."""
         dest = self.history_path / f"{entry.id}.json"
-        data = json.loads(entry.model_dump_json())
+        data = entry.model_dump(mode="json")
+        if entry.fitness is not None:
+            data["fitness"] = entry.fitness.model_dump(mode="json", exclude_unset=True)
         await asyncio.to_thread(atomic_write_json, dest, data)
         return entry.id
 

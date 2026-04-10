@@ -213,7 +213,10 @@ def test_probe_qwen_dashboard_collects_tool_calls_and_content(
     )
 
     monkeypatch.setenv("TOGETHER_API_KEY", "together-key")
-    monkeypatch.setattr(chat_router, "_get_chat_settings", lambda profile_id=None: settings)
+    monkeypatch.setattr(
+        "api.routers.chat._get_chat_settings",
+        lambda profile_id=None: settings,
+    )
 
     async def _fake_agentic_stream(messages, runtime_settings, *, session_id="", profile_id=""):
         del messages
@@ -225,7 +228,7 @@ def test_probe_qwen_dashboard_collects_tool_calls_and_content(
         yield 'data: {"content":"Resolved provider and tool path confirmed."}\n\n'
         yield "data: [DONE]\n\n"
 
-    monkeypatch.setattr(chat_router, "_agentic_stream", _fake_agentic_stream)
+    monkeypatch.setattr("api.routers.chat._agentic_stream", _fake_agentic_stream)
 
     result = asyncio.run(_probe_qwen_dashboard("together", "inspect wiring"))
 

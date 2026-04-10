@@ -45,19 +45,25 @@ class GateProposal:
     Proposals require S5 (Dhyana) approval before activation.
     """
 
-    name: str
-    tier: str  # "A", "B", or "C"
-    justification: str
-    trigger_patterns: list[str]  # keywords/phrases that trigger this gate
+    name: str = ""
+    tier: str = "C"  # "A", "B", or "C"
+    justification: str = ""
+    trigger_patterns: list[str] = field(default_factory=list)  # keywords/phrases that trigger this gate
     proposed_by: str = "system"
     proposed_at: str = ""
     status: str = "proposed"  # proposed | approved | rejected
     reviewed_at: str = ""
     review_note: str = ""
+    action: str = ""
+    content: str = ""
+    agent_id: str = ""
+    metadata: dict[str, Any] = field(default_factory=dict)
 
     def __post_init__(self) -> None:
         if not self.proposed_at:
             self.proposed_at = datetime.now(timezone.utc).isoformat()
+        if not self.proposed_by and self.agent_id:
+            self.proposed_by = self.agent_id
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -70,6 +76,10 @@ class GateProposal:
             "status": self.status,
             "reviewed_at": self.reviewed_at,
             "review_note": self.review_note,
+            "action": self.action,
+            "content": self.content,
+            "agent_id": self.agent_id,
+            "metadata": self.metadata,
         }
 
     @classmethod
@@ -84,6 +94,10 @@ class GateProposal:
             status=d.get("status", "proposed"),
             reviewed_at=d.get("reviewed_at", ""),
             review_note=d.get("review_note", ""),
+            action=d.get("action", ""),
+            content=d.get("content", ""),
+            agent_id=d.get("agent_id", ""),
+            metadata=d.get("metadata", {}),
         )
 
 
@@ -277,6 +291,13 @@ class TelosGatekeeper:
     FORCE_WORDS: set[str] = {
         "force", "override", "bypass", "skip validation",
         "disable safety", "--no-verify",
+        "disable_dharmic_alignment_gate",
+        "disable_shutdown_handler",
+        "increase_autonomy_without_authorization",
+        "bypass_telos_gate",
+        "unrestricted self-modification",
+        "remove all telos gate checks",
+        "skip dharmic_alignment gate",
     }
 
     IRREVERSIBLE_WORDS: set[str] = {
@@ -381,7 +402,7 @@ class TelosGatekeeper:
 
     def check(
         self,
-        action: str,
+        action: str | GateProposal,
         content: str = "",
         tool_name: str = "",
         trust_mode: str | None = None,
@@ -406,6 +427,11 @@ class TelosGatekeeper:
         Returns:
             GateCheckResult with decision, reason, and per-gate results.
         """
+        if isinstance(action, GateProposal):
+            proposal = action
+            action = proposal.action or proposal.name
+            content = content or proposal.content or proposal.justification
+
         resolved_mode = (
             (trust_mode or os.getenv("DGC_TRUST_MODE", "internal_yolo"))
             .strip()

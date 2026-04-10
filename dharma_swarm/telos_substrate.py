@@ -2788,7 +2788,7 @@ TELOS_OBJECTIVES: list[dict[str, Any]] = [
     },
     {
         "name": "Wire Ginko as metabolic proof-of-concept",
-        "perspective": "financial",
+        "perspective": "process",
         "priority": 10,
         "progress": 0.05,
         "description": (

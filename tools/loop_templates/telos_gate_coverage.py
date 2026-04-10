@@ -14,6 +14,7 @@ import asyncio
 import json
 import logging
 import subprocess
+import sys
 import time
 from dataclasses import dataclass, field, asdict
 from datetime import datetime, timezone
@@ -254,7 +255,7 @@ def run_test_file(test_path: Path, timeout: float = 60.0) -> tuple[bool, str]:
     """
     try:
         result = subprocess.run(
-            ["python3", "-m", "pytest", str(test_path), "-v", "--tb=short", "-q"],
+            [sys.executable, "-m", "pytest", str(test_path), "-v", "--tb=short", "-q"],
             capture_output=True,
             text=True,
             timeout=timeout,

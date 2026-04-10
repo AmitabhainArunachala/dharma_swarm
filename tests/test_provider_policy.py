@@ -31,15 +31,16 @@ from dharma_swarm.telemetry_plane import (
 
 def test_model_hierarchy_exposes_primary_driver_and_support_lane_contract() -> None:
     assert PRIMARY_DRIVER_LANES == (
-        ProviderType.CODEX,
         ProviderType.CLAUDE_CODE,
+        ProviderType.CODEX,
+        ProviderType.OLLAMA,
         ProviderType.ANTHROPIC,
     )
     assert PRIMARY_TOOLING_PRIORITY[:2] == (
-        ProviderType.CODEX,
         ProviderType.CLAUDE_CODE,
+        ProviderType.CODEX,
     )
-    assert PRIMARY_REASONING_PRIORITY[0] == ProviderType.ANTHROPIC
+    assert PRIMARY_REASONING_PRIORITY[0] == ProviderType.CLAUDE_CODE
     assert ProviderType.OPENROUTER in DELEGATED_RESEARCH_PRIORITY
     assert ProviderType.OLLAMA in DELEGATED_RESEARCH_PRIORITY
     assert ProviderType.NVIDIA_NIM in DELEGATED_RESEARCH_PRIORITY

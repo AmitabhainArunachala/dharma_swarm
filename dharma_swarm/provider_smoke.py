@@ -529,8 +529,9 @@ async def _probe_qwen_dashboard(provider_name: str, task: str) -> dict[str, Any]
             "error": str(exc),
         }
 
+    has_evidence = bool(content_parts or tool_calls or tool_results)
     status = "ok"
-    if errors:
+    if not has_evidence and errors:
         status = "error"
     elif not content_parts and not tool_calls:
         status = "empty"

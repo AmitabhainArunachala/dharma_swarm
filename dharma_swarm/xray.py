@@ -294,12 +294,13 @@ def _extract_functions(tree: ast.Module, file_path: str) -> list[FunctionInfo]:
     return functions
 
 
-def _extract_imports(source: str) -> list[str]:
+def _extract_imports(source: str = "", tree: ast.Module | None = None) -> list[str]:
     """Extract imported module names (top-level package only)."""
-    try:
-        tree = ast.parse(source)
-    except SyntaxError:
-        return []
+    if tree is None:
+        try:
+            tree = ast.parse(source)
+        except SyntaxError:
+            return []
     modules: list[str] = []
     for node in ast.walk(tree):
         if isinstance(node, ast.Import):
@@ -338,6 +339,7 @@ def analyze_python_file(path: Path, repo_root: Path) -> tuple[FileInfo | None, l
     rel_path = str(path.relative_to(repo_root))
     lines = content.splitlines()
     non_blank = sum(1 for l in lines if l.strip())
+    is_test = "test" in path.name.lower()
 
     try:
         tree = ast.parse(content)
@@ -351,7 +353,7 @@ def analyze_python_file(path: Path, repo_root: Path) -> tuple[FileInfo | None, l
 
     num_funcs = sum(1 for n in ast.walk(tree) if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef)))
     num_classes = sum(1 for n in ast.walk(tree) if isinstance(n, ast.ClassDef))
-    imports = _extract_imports(content)
+    imports = _extract_imports(tree=tree)
 
     info = FileInfo(
         path=rel_path,
@@ -365,11 +367,11 @@ def analyze_python_file(path: Path, repo_root: Path) -> tuple[FileInfo | None, l
         num_functions=num_funcs,
         num_classes=num_classes,
         imports=imports,
-        is_test="test" in path.name.lower(),
+        is_test=is_test,
         has_docstring=bool(ast.get_docstring(tree)),
     )
 
-    functions = _extract_functions(tree, rel_path)
+    functions = [] if is_test else _extract_functions(tree, rel_path)
     return info, functions
 
 
@@ -571,25 +573,16 @@ def analyze_repo(
         if _classify_import(mod, repo_packages) == "external"
     ])
 
-    # Internal coupling: count detailed from X.Y import Z style imports
+    # Internal coupling: reuse imports already extracted during file analysis.
     coupling: list[dict[str, Any]] = []
     for f in python_files:
-        try:
-            content = (repo_path / f.path).read_text(encoding="utf-8", errors="replace")
-            detailed = _extract_imports_detailed(content)
-            # Count imports that reference any repo package at any depth
-            internal = [
-                imp for imp in detailed
-                if imp.split(".")[0] in repo_packages
-            ]
-            if internal:
-                coupling.append({
-                    "file": f.path,
-                    "internal_imports": len(internal),
-                    "imports": internal,
-                })
-        except OSError:
-            pass
+        internal = [imp for imp in f.imports if imp.split(".")[0] in repo_packages]
+        if internal:
+            coupling.append({
+                "file": f.path,
+                "internal_imports": len(internal),
+                "imports": internal,
+            })
     coupling.sort(key=lambda c: c["internal_imports"], reverse=True)
 
     # ── Risk Flags ──

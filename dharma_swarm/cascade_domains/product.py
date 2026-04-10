@@ -213,12 +213,19 @@ def score(artifact: dict[str, Any], context: dict[str, Any]) -> dict[str, Any]:
             if not p.is_absolute():
                 p = _PROJECT_ROOT / p
             if p.is_dir():
-                entry = ProjectEntry(
-                    name=p.name,
-                    path=str(p),
-                    test_command=f"python3 -m pytest {p / 'tests'} -q --tb=line -x" if (p / "tests").is_dir() else None,
-                )
-                foreman_dims = score_all_dimensions(entry, skip_tests=True)
+                cache = context.setdefault("_product_foreman_cache", {})
+                cache_key = str(p.resolve())
+                cached_dims = cache.get(cache_key)
+                if isinstance(cached_dims, dict):
+                    foreman_dims = dict(cached_dims)
+                else:
+                    entry = ProjectEntry(
+                        name=p.name,
+                        path=str(p),
+                        test_command=f"python3 -m pytest {p / 'tests'} -q --tb=line -x" if (p / "tests").is_dir() else None,
+                    )
+                    foreman_dims = score_all_dimensions(entry, skip_tests=True)
+                    cache[cache_key] = dict(foreman_dims)
                 foreman_quality = sum(foreman_dims.values()) / max(1, len(foreman_dims))
     except Exception as exc:
         logger.debug("Foreman scoring unavailable: %s", exc)

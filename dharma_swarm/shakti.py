@@ -18,7 +18,7 @@ from datetime import datetime
 from enum import Enum
 from typing import Any
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, model_validator
 
 from dharma_swarm.models import _new_id, _utc_now
 from dharma_swarm.stigmergy import StigmergyStore
@@ -35,6 +35,12 @@ class ShaktiEnergy(str, Enum):
     MAHAKALI = "mahakali"
     MAHALAKSHMI = "mahalakshmi"
     MAHASARASWATI = "mahasaraswati"
+    KRIYA = "kriya"
+    JNANA = "jnana"
+    ICCHA = "iccha"
+
+    def __str__(self) -> str:
+        return self.value
 
 
 _ENERGY_KEYWORDS: dict[ShaktiEnergy, frozenset[str]] = {
@@ -73,6 +79,39 @@ class ShaktiPerception(BaseModel):
     impact_level: str = "local"  # "local" | "module" | "system"
     salience: float = 0.5
     timestamp: datetime = Field(default_factory=_utc_now)
+
+    def __init__(self, *args: Any, **data: Any) -> None:
+        if args:
+            names = ("energy", "observation", "file_path", "impact", "salience", "connections")
+            if len(args) > len(names):
+                raise TypeError(
+                    f"ShaktiPerception accepts at most {len(names)} positional arguments"
+                )
+            for name, value in zip(names, args, strict=False):
+                data.setdefault(name, value)
+        super().__init__(**data)
+
+    @model_validator(mode="before")
+    @classmethod
+    def _normalize_legacy_fields(cls, data: Any) -> Any:
+        if not isinstance(data, dict):
+            return data
+        normalized = dict(data)
+        if not normalized.get("connection") and normalized.get("file_path"):
+            normalized["connection"] = normalized["file_path"]
+        if not normalized.get("connection"):
+            normalized["connection"] = "system"
+        if "impact" in normalized and "impact_level" not in normalized:
+            normalized["impact_level"] = normalized["impact"]
+        return normalized
+
+    @property
+    def file_path(self) -> str:
+        return self.connection
+
+    @property
+    def impact(self) -> str:
+        return self.impact_level
 
 
 # ---------------------------------------------------------------------------

@@ -168,6 +168,14 @@ class SwarmManager:
         self._director: ThinkodynamicDirector | None = None
         self._tick_count: int = 0
 
+        # Legacy Ginko fleet wiring compatibility
+        self._ginko_enabled: bool = False
+        self._ginko_fleet: Any = None
+        self._ginko_interval_ticks: int = 720
+        self._ginko_tick_counter: int = 0
+        self._ginko_last_result: dict[str, Any] | None = None
+        self._ginko_running: bool = False
+
         # v0.7.0: Organism brain — Gnani/Samvara wired into the heartbeat
         self._organism: OrganismRuntime | None = None
         self._organism_interval_ticks: int = 4  # heartbeat every ~2 min (4 × 30s)
@@ -263,6 +271,38 @@ class SwarmManager:
     def is_ready(self, subsystem_name: str) -> bool:
         """Check if a subsystem has been initialized."""
         return getattr(self, f"_{subsystem_name}", None) is not None
+
+    async def _run_ginko_cycle(self) -> None:
+        if not self._ginko_enabled or self._ginko_running or self._ginko_fleet is None:
+            return
+        self._ginko_running = True
+        try:
+            from dharma_swarm.ginko_orchestrator import action_full_cycle
+
+            self._ginko_last_result = await action_full_cycle()
+        except Exception:
+            logger.warning("Ginko cycle failed", exc_info=True)
+            self._ginko_last_result = None
+        finally:
+            self._ginko_running = False
+
+    def get_ginko_status(self) -> dict[str, Any]:
+        if not self._ginko_enabled:
+            return {"enabled": False}
+        fleet_size = 0
+        if self._ginko_fleet is not None:
+            list_agents = getattr(self._ginko_fleet, "list_agents", None)
+            if callable(list_agents):
+                try:
+                    fleet_size = len(list_agents())
+                except Exception:
+                    fleet_size = 0
+        return {
+            "enabled": True,
+            "fleet_size": fleet_size,
+            "running": self._ginko_running,
+            "last_result": self._ginko_last_result is not None,
+        }
 
     def _refresh_initialized_registry(self) -> None:
         """Refresh the initialized subsystem ledger from current attributes."""
@@ -1920,8 +1960,46 @@ class SwarmManager:
             }
 
         stats = await self._task_board.stats()
-        ready_count = len(await self._task_board.get_ready_tasks())
         pending_count = int(stats.get("pending", 0))
+        ready_count = 0
+
+        pending_tasks = await self._task_board.list_tasks(
+            status=TaskStatus.PENDING,
+            limit=max(500, pending_count or 0),
+        )
+        now = datetime.now(timezone.utc)
+        for task in pending_tasks:
+            if not task.depends_on:
+                ready_count += 1
+                continue
+
+            is_ready = True
+            for dep_id in task.depends_on:
+                dep = await self._task_board.get(dep_id)
+                if dep is None:
+                    continue
+                if dep.status == TaskStatus.COMPLETED:
+                    continue
+                if dep.status == TaskStatus.RUNNING and (
+                    now - dep.updated_at > timedelta(minutes=15)
+                ):
+                    continue
+                if dep.status == TaskStatus.FAILED and self._failed_dependency_is_terminal(
+                    dep_meta=dict(dep.metadata or {}),
+                    dep_result=dep.result,
+                    dep_updated_at_raw=dep.updated_at.isoformat(),
+                    now=now,
+                ):
+                    is_ready = False
+                    break
+                if dep.status == TaskStatus.FAILED:
+                    continue
+                is_ready = False
+                break
+
+            if is_ready:
+                ready_count += 1
+
         return {
             "pending": pending_count,
             "ready": ready_count,

@@ -96,9 +96,20 @@ class SmartSeedSelector:
 
         # Fallback: random selection from hardcoded dirs
         if not results:
-            return self._fallback_random(count, max_chars)
+            return self._enforce_max_chars(
+                self._fallback_random(count, max_chars),
+                max_chars,
+            )
 
-        return results
+        return self._enforce_max_chars(results, max_chars)
+
+    @staticmethod
+    def _enforce_max_chars(
+        results: list[tuple[str, str, float]],
+        max_chars: int,
+    ) -> list[tuple[str, str, float]]:
+        limit = max(0, int(max_chars))
+        return [(text[:limit], path, score) for text, path, score in results]
 
     # ── Context extraction ──────────────────────────────────────
 

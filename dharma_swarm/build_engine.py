@@ -244,9 +244,12 @@ def _git_commit(project_path: str, message: str) -> bool:
 def validate_result(project_path: str, test_command: str | None = None) -> bool:
     """Run project tests. Returns True if they pass."""
     cmd = test_command or "python3 -m pytest"
+    args = cmd.split()
+    if len(args) >= 3 and args[1:3] == ["-m", "pytest"] and args[0] in {"python", "python3"}:
+        args[0] = sys.executable
     try:
         result = subprocess.run(
-            cmd.split(),
+            args,
             capture_output=True, text=True,
             cwd=project_path, timeout=300,
         )

@@ -243,7 +243,6 @@ _OPENAI_TOOL_PROVIDER_TYPES = {
     ProviderType.TOGETHER,
     ProviderType.FIREWORKS,
     ProviderType.GOOGLE_AI,
-    ProviderType.OLLAMA,
     ProviderType.SAMBANOVA,
     ProviderType.MISTRAL,
     ProviderType.CHUTES,
@@ -631,13 +630,7 @@ def _available_provider_types(
         return explicit
     if _allow_provider_routing(task, config):
         return None
-    # Pin to agent's configured provider but add CLAUDE_CODE as a last-resort
-    # fallback so tasks degrade gracefully when the primary provider is down.
-    pinned = [config.provider]
-    from dharma_swarm.models import ProviderType as _PT
-    if config.provider != _PT.CLAUDE_CODE:
-        pinned.append(_PT.CLAUDE_CODE)
-    return pinned
+    return [config.provider]
 
 
 def _resolved_routing_metadata(task: Task, config: AgentConfig) -> dict[str, Any]:

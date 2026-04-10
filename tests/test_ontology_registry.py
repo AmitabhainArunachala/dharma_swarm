@@ -78,7 +78,7 @@ def populated_registry(registry: OntologyRegistry) -> OntologyRegistry:
 class TestRegistryFactory:
     def test_create_dharma_registry(self, registry: OntologyRegistry) -> None:
         stats = registry.stats()
-        assert stats["registered_types"] == 15  # 8 original + 6 metabolic + 1 custodian type
+        assert stats["registered_types"] == 16  # 8 original + 7 metabolic + 1 custodian type
         assert stats["registered_links"] >= 40  # 12+8 defs, each with inverse
         assert stats["registered_actions"] >= 16
 
@@ -86,7 +86,7 @@ class TestRegistryFactory:
         names = registry.type_names()
         expected = [
             "ActionProposal", "AgentIdentity", "Contribution",
-            "CustodianRole", "EvolutionEntry", "Experiment", "GateDecisionRecord",
+            "CustodianRole", "EvolutionEntry", "ExecutionLease", "Experiment", "GateDecisionRecord",
             "KnowledgeArtifact", "Outcome", "Paper", "ResearchThread",
             "TypedTask", "ValueEvent", "VentureCell", "WitnessLog",
         ]

@@ -1,0 +1,126 @@
+{
+  "bundle_id": "agentic_autonomy_2026-03-27",
+  "generated_at": "2026-03-27",
+  "sources": [
+    {
+      "id": "meta-rea-2026",
+      "title": "Meta REA",
+      "local_path": "docs/reports/AGENTIC_AUTONOMY_BUNDLE_2026-03-27.md"
+    },
+    {
+      "id": "minimax-m27",
+      "title": "MiniMax M2.7",
+      "local_path": "docs/reports/AGENTIC_AUTONOMY_BUNDLE_2026-03-27.md"
+    },
+    {
+      "id": "plugmem",
+      "title": "PlugMem",
+      "local_path": "dharma_swarm/knowledge_extractor.py"
+    },
+    {
+      "id": "mempo",
+      "title": "MemPO",
+      "local_path": "dharma_swarm/mem_action.py"
+    },
+    {
+      "id": "langchain-deepagents",
+      "title": "LangChain Deep Agents",
+      "local_path": "docs/reports/AGENTIC_AUTONOMY_BUNDLE_2026-03-27.md"
+    },
+    {
+      "id": "langchain-deepagents-context",
+      "title": "LangChain Deep Agents Context Management",
+      "local_path": "docs/reports/AGENTIC_AUTONOMY_BUNDLE_2026-03-27.md"
+    },
+    {
+      "id": "ouroboros-identity-loop",
+      "title": "Ouroboros",
+      "local_path": "docs/reports/AGENTIC_AUTONOMY_BUNDLE_2026-03-27.md"
+    },
+    {
+      "id": "ouroboros-desktop",
+      "title": "Ouroboros Desktop",
+      "local_path": "docs/reports/AGENTIC_AUTONOMY_BUNDLE_2026-03-27.md"
+    },
+    {
+      "id": "cashclaw-hyrve",
+      "title": "CashClaw and HYRVE",
+      "local_path": "docs/reports/AGENTIC_AUTONOMY_BUNDLE_2026-03-27.md"
+    },
+    {
+      "id": "hyrve-agent-marketplace",
+      "title": "HYRVE Agent Marketplace",
+      "local_path": "docs/reports/AGENTIC_AUTONOMY_BUNDLE_2026-03-27.md"
+    },
+    {
+      "id": "paybot-mcp",
+      "title": "PayBot MCP",
+      "local_path": "docs/reports/AGENTIC_AUTONOMY_BUNDLE_2026-03-27.md"
+    },
+    {
+      "id": "openroom",
+      "title": "OpenRoom",
+      "local_path": "docs/reports/AGENTIC_AUTONOMY_BUNDLE_2026-03-27.md"
+    },
+    {
+      "id": "agentic-autonomy-bundle-report",
+      "title": "Agentic Autonomy Bundle Report",
+      "local_path": "docs/reports/AGENTIC_AUTONOMY_BUNDLE_2026-03-27.md"
+    },
+    {
+      "id": "field-knowledge-base-agentic-entries",
+      "title": "Field Knowledge Base Entries",
+      "local_path": "dharma_swarm/field_knowledge_base.py"
+    },
+    {
+      "id": "seed-agentic-autonomy-citations",
+      "title": "Agentic Autonomy Citation Seeding Script",
+      "local_path": "scripts/seed_agentic_autonomy_citations.py"
+    },
+    {
+      "id": "sleep-time-agent-plugmem",
+      "title": "Sleep Time Agent PlugMem Integration",
+      "local_path": "dharma_swarm/sleep_time_agent.py"
+    },
+    {
+      "id": "knowledge-units-plugmem",
+      "title": "Knowledge Units PlugMem Mapping",
+      "local_path": "dharma_swarm/knowledge_units.py"
+    },
+    {
+      "id": "context-compiler-mempo",
+      "title": "Context Compiler MemPO Truncation",
+      "local_path": "dharma_swarm/context_compiler.py"
+    },
+    {
+      "id": "agent-runner-mempo-instructions",
+      "title": "Agent Runner MemPO Instructions",
+      "local_path": "dharma_swarm/agent_runner.py"
+    },
+    {
+      "id": "phase4-report-plugmem",
+      "title": "Phase 4 Report PlugMem Note",
+      "local_path": "PHASE4_REPORT.md"
+    },
+    {
+      "id": "mem-action-tests",
+      "title": "Mem Action Tests",
+      "local_path": "tests/test_mem_action.py"
+    },
+    {
+      "id": "agentic-autonomy-bundle-tests",
+      "title": "Agentic Autonomy Bundle Tests",
+      "local_path": "tests/test_agentic_autonomy_bundle.py"
+    },
+    {
+      "id": "agent-runner-audit-mempo",
+      "title": "Agent Runner Audit MemPO Notes",
+      "local_path": "agent_runner_audit.md"
+    },
+    {
+      "id": "bundle-summary",
+      "title": "Bundle Summary",
+      "local_path": "docs/reports/AGENTIC_AUTONOMY_BUNDLE_2026-03-27.md"
+    }
+  ]
+}

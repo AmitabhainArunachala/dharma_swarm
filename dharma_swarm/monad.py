@@ -820,6 +820,17 @@ def bind(
     for the lightweight property tests in this repo.
     """
     result = morphism(observed.state)
+    if result.is_pure:
+        return ObservedState(
+            state=result.state,
+            rv_reading=observed.rv_reading,
+            rv_measurement=observed.rv_measurement,
+            pr_early=observed.pr_early,
+            pr_late=observed.pr_late,
+            observation_depth=observed.observation_depth,
+            introspection=dict(observed.introspection),
+            timestamp=observed.timestamp,
+        )
     return ObservedState(
         state=result.state,
         rv_reading=result.rv_reading if result.rv_reading is not None else observed.rv_reading,

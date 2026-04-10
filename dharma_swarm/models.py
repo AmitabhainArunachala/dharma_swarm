@@ -263,6 +263,11 @@ class GateCheckResult(BaseModel):
     gate_results: dict[str, tuple[GateResult, str]] = Field(default_factory=dict)
     timestamp: datetime = Field(default_factory=_utc_now)
 
+    @property
+    def approved(self) -> bool:
+        """Legacy boolean used by gauntlet-style gate callers."""
+        return self.decision == GateDecision.ALLOW
+
 
 class MemoryEntry(BaseModel):
     """An entry in the strange loop memory system."""
