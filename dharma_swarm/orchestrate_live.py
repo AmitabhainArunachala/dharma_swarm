@@ -1500,6 +1500,40 @@ async def run_conductor_loop(shutdown_event: asyncio.Event) -> None:
     )
 
 
+async def _run_world_model_loop(shutdown_event: asyncio.Event) -> None:
+    """World Model: living Forrester-style world state, updated every 6h by research agents.
+
+    Seeded with 15 stocks (CO2, biodiversity, AI capability, institutional trust...),
+    8 flows, 6 feedback loops. Each cycle: update stocks via web_search, assess
+    telos pressure, emit algedonic signal if any stock crosses critical threshold.
+    """
+    try:
+        from dharma_swarm.world_model import WorldModelAgent
+        agent = WorldModelAgent(state_dir=STATE_DIR)
+        # Seed on first boot
+        try:
+            await asyncio.wait_for(agent.initialize(), timeout=60.0)
+            _log("world-model", "World model initialized and seeded")
+        except Exception as exc:
+            _log("world-model", f"World model init failed (non-fatal): {exc}")
+        # Run update loop every 6 hours
+        while not shutdown_event.is_set():
+            try:
+                await asyncio.wait_for(shutdown_event.wait(), timeout=21600)
+                break
+            except asyncio.TimeoutError:
+                pass
+            if shutdown_event.is_set():
+                break
+            try:
+                await asyncio.wait_for(agent.run_cycle(), timeout=300.0)
+                _log("world-model", "World model cycle complete")
+            except Exception as exc:
+                _log("world-model", f"World model cycle error: {exc}")
+    except Exception as exc:
+        _log("world-model", f"World model loop crashed: {exc}")
+
+
 async def _run_gauntlet_loop(shutdown_event: asyncio.Event) -> None:
     """Gauntlet: run adversarial eval pressure on a schedule, feed scores into DGM.
 
@@ -1747,6 +1781,8 @@ async def orchestrate(background: bool = False) -> None:
         "health-api": lambda: _run_health_api(shutdown_event),
         # ── Gauntlet: adversarial eval pressure + DGM feedback loop ──
         "gauntlet": lambda: _run_gauntlet_loop(shutdown_event),
+        # ── World Model: living Forrester-style world state updated by research ──
+        "world-model": lambda: _run_world_model_loop(shutdown_event),
     }
     optional_clean_exit = {"pulse"}
     tasks = {
